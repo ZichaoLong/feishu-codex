@@ -30,6 +30,15 @@ bash install.sh
 nano ~/.config/feishu-codex/system.yaml
 ```
 
+可选地调整飞书 API 请求超时：
+
+```yaml
+# ~/.config/feishu-codex/system.yaml
+app_id: "..."
+app_secret: "..."
+# request_timeout_seconds: 10
+```
+
 按需调整 Codex 参数：
 
 ```bash

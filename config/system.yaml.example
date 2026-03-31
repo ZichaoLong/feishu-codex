@@ -1,2 +1,5 @@
 app_id: "your_cc_bot_app_id"
 app_secret: "your_cc_bot_app_secret"
+
+# 飞书 HTTP API 请求超时（秒）；默认值：10
+# request_timeout_seconds: 10

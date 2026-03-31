@@ -36,7 +36,11 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
-    bot = CodexBot(cfg["app_id"], cfg["app_secret"])
+    bot = CodexBot(
+        cfg["app_id"],
+        cfg["app_secret"],
+        request_timeout_seconds=float(cfg.get("request_timeout_seconds", 10)),
+    )
     bot.start()
 
 

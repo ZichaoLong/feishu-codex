@@ -14,8 +14,8 @@ from bot.feishu_bot import FeishuBot
 class CodexBot(FeishuBot):
     """Codex 飞书机器人。"""
 
-    def __init__(self, app_id: str, app_secret: str):
-        super().__init__(app_id, app_secret)
+    def __init__(self, app_id: str, app_secret: str, request_timeout_seconds: float = 10.0):
+        super().__init__(app_id, app_secret, request_timeout_seconds=request_timeout_seconds)
         config_dir = Path(os.environ["FC_CONFIG_DIR"]) if "FC_CONFIG_DIR" in os.environ else None
         data_dir = Path(os.environ["FC_DATA_DIR"]) if "FC_DATA_DIR" in os.environ else None
         self._handler = CodexHandler(data_dir=data_dir, config_dir=config_dir)

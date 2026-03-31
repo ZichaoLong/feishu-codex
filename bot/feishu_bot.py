@@ -120,9 +120,10 @@ class FeishuBot(ABC):
     _WAKE_MODE_ALL = "all"
     _WAKE_MODE_MENTION = "mention_only"
 
-    def __init__(self, app_id: str, app_secret: str):
+    def __init__(self, app_id: str, app_secret: str, request_timeout_seconds: float = 10.0):
         self.app_id = app_id
         self.app_secret = app_secret
+        self.request_timeout_seconds = float(request_timeout_seconds)
         self._seen_messages: OrderedDict[str, float] = OrderedDict()
         self._dedup_lock = threading.Lock()
         # 唤醒模式：这些群聊中所有消息都直接处理，无需 @机器人
@@ -136,6 +137,7 @@ class FeishuBot(ABC):
         self.client = lark.Client.builder() \
             .app_id(app_id) \
             .app_secret(app_secret) \
+            .timeout(self.request_timeout_seconds) \
             .log_level(lark.LogLevel.INFO) \
             .build()
 
@@ -676,13 +678,26 @@ class FeishuBot(ABC):
                 .content(content)
                 .build()) \
             .build()
+        logger.info(
+            "发送消息: receive_id=%s, receive_id_type=%s, msg_type=%s, timeout=%.1fs",
+            chat_id,
+            id_type,
+            msg_type,
+            self.request_timeout_seconds,
+        )
         try:
             response = self.client.im.v1.message.create(request)
         except Exception as e:
-            logger.error("发送消息失败(SDK异常): %s", e)
+            logger.exception("发送消息失败(SDK异常): %s", e)
             return
         if not response.success():
             logger.error("发送失败: code=%s, msg=%s", response.code, response.msg)
+            return
+        try:
+            message_id = response.data.message_id
+        except AttributeError:
+            message_id = ""
+        logger.info("发送消息成功: receive_id=%s, message_id=%s, msg_type=%s", chat_id, message_id, msg_type)
 
     def send_message_get_id(self, chat_id: str, msg_type: str, content: str) -> Optional[str]:
         """发送消息并返回 message_id，失败时返回 None"""
@@ -695,18 +710,27 @@ class FeishuBot(ABC):
                 .content(content)
                 .build()) \
             .build()
+        logger.info(
+            "发送消息(取ID): receive_id=%s, receive_id_type=%s, msg_type=%s, timeout=%.1fs",
+            chat_id,
+            id_type,
+            msg_type,
+            self.request_timeout_seconds,
+        )
         try:
             response = self.client.im.v1.message.create(request)
         except Exception as e:
-            logger.error("发送消息失败(SDK异常): %s", e)
+            logger.exception("发送消息失败(SDK异常): %s", e)
             return None
         if not response.success():
             logger.error("发送失败: code=%s, msg=%s", response.code, response.msg)
             return None
         try:
-            return response.data.message_id
+            message_id = response.data.message_id
         except AttributeError:
             return None
+        logger.info("发送消息成功: receive_id=%s, message_id=%s, msg_type=%s", chat_id, message_id, msg_type)
+        return message_id
 
     def patch_message(self, message_id: str, content: str) -> bool:
         """更新已发送消息的文本内容
