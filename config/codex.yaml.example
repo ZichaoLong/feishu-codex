@@ -1,0 +1,71 @@
+# 默认工作目录；默认值：进程当前目录
+# default_working_dir: /path/to/workspace
+
+# Codex 可执行命令；默认值：codex
+# codex_command: codex
+
+# app-server 连接超时（秒）；默认值：15
+# connect_timeout_seconds: 15
+
+# app-server 请求超时（秒）；默认值：30
+# request_timeout_seconds: 30
+
+# 线程创建时声明的服务名；默认值：feishu-codex
+# service_name: feishu-codex
+
+# 默认沙箱模式；默认值：workspace-write
+# sandbox: workspace-write
+
+# 默认审批策略；默认值：on-request
+# approval_policy: on-request
+
+# 审批审阅者；默认值：user
+# approvals_reviewer: user
+
+# 默认 personality；默认值：pragmatic
+# personality: pragmatic
+
+# 默认模型；默认值：空，表示沿用 Codex 默认
+# model: gpt-5.4
+
+# 默认 model provider；默认值：空
+# model_provider: openai
+
+# 默认 service tier；默认值：空
+# service_tier: fast
+
+# 默认 reasoning effort；默认值：空
+# reasoning_effort: high
+
+# /session 与 /resume 查询时显式纳入的线程来源；默认值：["cli", "vscode", "exec", "appServer"]
+# source_kinds:
+#   - cli
+#   - vscode
+#   - exec
+#   - appServer
+
+# /session 展示的未收藏线程数量上限；默认值：5
+# session_recent_limit: 5
+
+# /session 展示的收藏线程数量上限；默认值：20
+# 说明：这是同一目录下 /session 卡片最多展示多少个已收藏线程，不是全局收藏总数限制。
+# session_starred_limit: 20
+
+# 单次 thread/list 聚合查询的最大线程数；默认值：100
+# thread_list_query_limit: 100
+
+# /resume 后附带的历史预览轮数；默认值：3
+# history_preview_rounds: 3
+
+# /resume 成功后是否发送历史预览卡片；默认值：true
+# show_history_preview_on_resume: true
+
+# 运行中主卡片最小 patch 间隔（毫秒）；默认值：700
+# stream_patch_interval_ms: 700
+
+# 主卡片中回复区最大字符数；默认值：12000
+# 超出后卡片会截断，完整回复会额外以文本消息发送。
+# card_reply_limit: 12000
+
+# 主卡片中执行日志区最大字符数；默认值：8000
+# card_log_limit: 8000

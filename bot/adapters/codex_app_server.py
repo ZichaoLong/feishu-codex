@@ -1,0 +1,217 @@
+"""
+基于 Codex app-server 的适配层。
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from bot.adapters.base import AgentAdapter, ThreadSnapshot, ThreadSummary
+from bot.codex_protocol.client import CodexRpcClient
+from bot.constants import DEFAULT_SOURCE_KINDS
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class CodexAppServerConfig:
+    codex_command: str = "codex"
+    connect_timeout_seconds: float = 15.0
+    request_timeout_seconds: float = 30.0
+    service_name: str = "feishu-codex"
+    sandbox: str = "workspace-write"
+    approval_policy: str = "on-request"
+    approvals_reviewer: str = "user"
+    personality: str = "pragmatic"
+    model: str = ""
+    model_provider: str = ""
+    service_tier: str = ""
+    reasoning_effort: str = ""
+    source_kinds: list[str] = field(default_factory=lambda: DEFAULT_SOURCE_KINDS.copy())
+
+    @classmethod
+    def from_dict(cls, config: dict[str, Any]) -> "CodexAppServerConfig":
+        source_kinds = config.get("source_kinds") or DEFAULT_SOURCE_KINDS
+        return cls(
+            codex_command=str(config.get("codex_command", "codex")),
+            connect_timeout_seconds=float(config.get("connect_timeout_seconds", 15)),
+            request_timeout_seconds=float(config.get("request_timeout_seconds", 30)),
+            service_name=str(config.get("service_name", "feishu-codex")),
+            sandbox=str(config.get("sandbox", "workspace-write")),
+            approval_policy=str(config.get("approval_policy", "on-request")),
+            approvals_reviewer=str(config.get("approvals_reviewer", "user")),
+            personality=str(config.get("personality", "pragmatic")),
+            model=str(config.get("model", "")),
+            model_provider=str(config.get("model_provider", "")),
+            service_tier=str(config.get("service_tier", "")),
+            reasoning_effort=str(config.get("reasoning_effort", "")),
+            source_kinds=[str(item) for item in source_kinds],
+        )
+
+
+class CodexAppServerAdapter(AgentAdapter):
+    """通过 app-server 与 Codex 交互。"""
+
+    def __init__(
+        self,
+        config: CodexAppServerConfig,
+        *,
+        on_notification: Callable[[str, dict[str, Any]], None] | None = None,
+        on_request: Callable[[int | str, str, dict[str, Any]], None] | None = None,
+    ) -> None:
+        self._config = config
+        self._rpc = CodexRpcClient(
+            codex_command=config.codex_command,
+            connect_timeout_seconds=config.connect_timeout_seconds,
+            request_timeout_seconds=config.request_timeout_seconds,
+            on_notification=on_notification,
+            on_request=on_request,
+        )
+
+    def start(self) -> None:
+        self._rpc.start()
+
+    def stop(self) -> None:
+        self._rpc.stop()
+
+    def create_thread(self, *, cwd: str) -> ThreadSnapshot:
+        params = self._thread_params(cwd=cwd, include_service_name=True)
+        result = self._rpc.request("thread/start", params)
+        return self._snapshot_from_thread(result["thread"])
+
+    def resume_thread(self, thread_id: str) -> ThreadSnapshot:
+        params = {"threadId": thread_id}
+        result = self._rpc.request("thread/resume", params)
+        return self._snapshot_from_thread(result["thread"])
+
+    def list_threads(
+        self,
+        *,
+        cwd: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        search_term: str | None = None,
+        sort_key: str | None = None,
+        source_kinds: list[str] | None = None,
+    ) -> tuple[list[ThreadSummary], str | None]:
+        params: dict[str, Any] = {
+            "cwd": cwd,
+            "limit": limit,
+            "cursor": cursor,
+            "searchTerm": search_term,
+            "sortKey": sort_key,
+            "sourceKinds": source_kinds or self._config.source_kinds,
+        }
+        result = self._rpc.request("thread/list", _compact(params))
+        data = [self._summary_from_thread(item) for item in result.get("data", [])]
+        return data, result.get("nextCursor")
+
+    def read_thread(self, thread_id: str, *, include_turns: bool = False) -> ThreadSnapshot:
+        result = self._rpc.request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": include_turns},
+        )
+        return self._snapshot_from_thread(result["thread"])
+
+    def rename_thread(self, thread_id: str, name: str) -> None:
+        self._rpc.request("thread/name/set", {"threadId": thread_id, "name": name})
+
+    def start_turn(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        cwd: str | None = None,
+        model: str | None = None,
+        approval_policy: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": text}],
+            "cwd": cwd,
+            "model": model or self._config.model or None,
+            "approvalPolicy": approval_policy or self._config.approval_policy or None,
+            "approvalsReviewer": self._config.approvals_reviewer or None,
+            "effort": reasoning_effort or self._config.reasoning_effort or None,
+            "personality": self._config.personality or None,
+            "serviceTier": self._config.service_tier or None,
+        }
+        return self._rpc.request("turn/start", _compact(params))
+
+    def interrupt_turn(self, *, thread_id: str, turn_id: str) -> None:
+        self._rpc.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
+
+    def respond(self, request_id: int | str, *, result: dict | None = None, error: dict | None = None) -> None:
+        self._rpc.respond(request_id, result=result, error=error)
+
+    def list_threads_all(
+        self,
+        *,
+        cwd: str | None = None,
+        limit: int = 100,
+        search_term: str | None = None,
+        sort_key: str = "updated_at",
+        source_kinds: list[str] | None = None,
+    ) -> list[ThreadSummary]:
+        items: list[ThreadSummary] = []
+        cursor: str | None = None
+        while len(items) < limit:
+            page_size = min(50, limit - len(items))
+            page, cursor = self.list_threads(
+                cwd=cwd,
+                limit=page_size,
+                cursor=cursor,
+                search_term=search_term,
+                sort_key=sort_key,
+                source_kinds=source_kinds,
+            )
+            items.extend(page)
+            if not cursor:
+                break
+        return items
+
+    def _thread_params(self, *, cwd: str, include_service_name: bool) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "cwd": cwd,
+            "sandbox": self._config.sandbox or None,
+            "approvalPolicy": self._config.approval_policy or None,
+            "approvalsReviewer": self._config.approvals_reviewer or None,
+            "personality": self._config.personality or None,
+            "model": self._config.model or None,
+            "modelProvider": self._config.model_provider or None,
+            "serviceTier": self._config.service_tier or None,
+        }
+        if include_service_name:
+            params["serviceName"] = self._config.service_name or None
+        return _compact(params)
+
+    @staticmethod
+    def _snapshot_from_thread(thread: dict[str, Any]) -> ThreadSnapshot:
+        return ThreadSnapshot(
+            summary=CodexAppServerAdapter._summary_from_thread(thread),
+            turns=thread.get("turns") or [],
+        )
+
+    @staticmethod
+    def _summary_from_thread(thread: dict[str, Any]) -> ThreadSummary:
+        status = thread.get("status") or {}
+        return ThreadSummary(
+            thread_id=thread.get("id", ""),
+            cwd=thread.get("cwd", ""),
+            name=thread.get("name") or "",
+            preview=thread.get("preview") or "",
+            created_at=int(thread.get("createdAt") or 0),
+            updated_at=int(thread.get("updatedAt") or 0),
+            source=thread.get("source") or "unknown",
+            status=status.get("type", "unknown"),
+            active_flags=list(status.get("activeFlags") or []),
+            path=thread.get("path"),
+            model_provider=thread.get("modelProvider"),
+        )
+
+
+def _compact(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if value not in (None, "", [], {})}
