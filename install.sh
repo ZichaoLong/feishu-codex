@@ -18,6 +18,41 @@ _yellow() { echo -e "\033[33m$*\033[0m"; }
 _red()    { echo -e "\033[31m$*\033[0m"; }
 _bold()   { echo -e "\033[1m$*\033[0m"; }
 
+_is_transient_fnm_shim() {
+    [[ "${1:-}" == /run/user/*/fnm_multishells/*/bin/codex ]]
+}
+
+_normalize_codex_path() {
+    local path="${1:-}"
+    local resolved=""
+    local candidate=""
+
+    if [ -z "$path" ]; then
+        return 0
+    fi
+
+    if _is_transient_fnm_shim "$path"; then
+        resolved="$(readlink -f "$path" 2>/dev/null || true)"
+        if [[ "$resolved" == */lib/node_modules/@openai/codex/bin/codex.js ]]; then
+            candidate="${resolved%/lib/node_modules/@openai/codex/bin/codex.js}/bin/codex"
+            if [ -x "$candidate" ]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        fi
+    fi
+
+    printf '%s\n' "$path"
+}
+
+_read_configured_codex_path() {
+    local config_file="${1:-}"
+    if [ -z "$config_file" ] || [ ! -f "$config_file" ]; then
+        return 0
+    fi
+    sed -nE 's/^[[:space:]]*codex_command:[[:space:]]*"?([^"#]+)"?[[:space:]]*$/\1/p' "$config_file" | head -n 1
+}
+
 echo ""
 _bold "=== feishu-codex 安装程序 ==="
 echo "安装目录: $INSTALL_DIR"
@@ -44,8 +79,10 @@ fi
 _green "  ✓ Python: $($PYTHON --version)"
 
 CODEX_PATH=""
+RAW_CODEX_PATH=""
 if command -v codex &>/dev/null; then
-    CODEX_PATH="$(command -v codex)"
+    RAW_CODEX_PATH="$(command -v codex)"
+    CODEX_PATH="$(_normalize_codex_path "$RAW_CODEX_PATH")"
 fi
 if [ -z "$CODEX_PATH" ]; then
     _yellow "  [警告] 未找到 codex CLI，请确认已安装 Codex 并可在 PATH 中执行"
@@ -53,6 +90,9 @@ if [ -z "$CODEX_PATH" ]; then
     CODEX_PATH="codex"
 else
     _green "  ✓ Codex CLI: $CODEX_PATH"
+    if [ -n "$RAW_CODEX_PATH" ] && [ "$RAW_CODEX_PATH" != "$CODEX_PATH" ]; then
+        _yellow "    检测到临时 shell shim，已归一化为稳定路径"
+    fi
 fi
 
 if ! systemctl --user status &>/dev/null; then
@@ -91,7 +131,13 @@ else
 fi
 
 if [ -f "$CONFIG_DIR/codex.yaml" ]; then
-    _yellow "  ~/.config/feishu-codex/codex.yaml 已存在，跳过（保护现有配置）"
+    EXISTING_CODEX_PATH="$(_read_configured_codex_path "$CONFIG_DIR/codex.yaml")"
+    if _is_transient_fnm_shim "$EXISTING_CODEX_PATH" && [ "$CODEX_PATH" != "codex" ] && [ "$CODEX_PATH" != "$EXISTING_CODEX_PATH" ]; then
+        sed -i -E "s|^#?[[:space:]]*codex_command:.*|codex_command: \"$CODEX_PATH\"|" "$CONFIG_DIR/codex.yaml" 2>/dev/null || true
+        _green "  ✓ 已将 ~/.config/feishu-codex/codex.yaml 中的临时 shim 更新为稳定路径"
+    else
+        _yellow "  ~/.config/feishu-codex/codex.yaml 已存在，跳过（保护现有配置）"
+    fi
 else
     cp "$INSTALL_DIR/config/codex.yaml.example" "$CONFIG_DIR/codex.yaml"
     if [ "$CODEX_PATH" != "codex" ]; then

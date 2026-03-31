@@ -537,16 +537,16 @@ class CodexHandler(BotHandler):
         rpc_request_id = pending["rpc_request_id"]
 
         if action == "command_allow_once":
-            result = {"decision": "approved"}
+            result = {"decision": "accept"}
             decision_text = "允许本次"
         elif action == "command_allow_session":
-            result = {"decision": "approved_for_session"}
+            result = {"decision": "acceptForSession"}
             decision_text = "允许本会话"
         elif action == "command_deny":
-            result = {"decision": "denied"}
+            result = {"decision": "decline"}
             decision_text = "拒绝"
         elif action == "command_abort":
-            result = {"decision": "abort"}
+            result = {"decision": "cancel"}
             decision_text = "中止本轮"
         elif action == "file_change_accept":
             result = {"decision": "accept"}
@@ -572,6 +572,13 @@ class CodexHandler(BotHandler):
         else:
             return self.bot.make_card_response(toast="未知审批动作", toast_type="warning")
 
+        logger.info(
+            "响应审批请求: request_key=%s, rpc_request_id=%s, action=%s, result=%s",
+            request_key,
+            rpc_request_id,
+            action,
+            result,
+        )
         self._adapter.respond(rpc_request_id, result=result)
         with self._lock:
             self._pending_requests.pop(request_key, None)

@@ -2,6 +2,7 @@
 # default_working_dir: /path/to/workspace
 
 # Codex 可执行命令；默认值：codex
+# 如果通过 fnm 管理 Node，建议填写稳定安装路径，不要写 /run/user/.../fnm_multishells/... 这类临时 shim。
 # codex_command: codex
 
 # app-server 连接超时（秒）；默认值：15
