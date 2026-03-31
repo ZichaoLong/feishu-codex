@@ -337,7 +337,11 @@ class CodexHandler(BotHandler):
         )
         self.bot.reply(
             chat_id,
-            f"{header}\n执行中：{running}\n当前 turn：{turn_id}\n审批策略：`{state['approval_policy']}`",
+            (
+                f"{header}\n执行中：{running}\n当前 turn：{turn_id}\n"
+                f"审批策略：`{state['approval_policy']}`\n"
+                f"协作模式：`{self._adapter_config.collaboration_mode}`"
+            ),
         )
 
     def _handle_session_command(self, user_id: str, chat_id: str) -> None:

@@ -29,11 +29,15 @@ class CodexAppServerConfig:
     model_provider: str = ""
     service_tier: str = ""
     reasoning_effort: str = ""
+    collaboration_mode: str = "default"
     source_kinds: list[str] = field(default_factory=lambda: DEFAULT_SOURCE_KINDS.copy())
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "CodexAppServerConfig":
         source_kinds = config.get("source_kinds") or DEFAULT_SOURCE_KINDS
+        collaboration_mode = str(config.get("collaboration_mode", "default")).strip().lower() or "default"
+        if collaboration_mode not in {"default", "plan"}:
+            raise ValueError("collaboration_mode 仅支持 default 或 plan")
         return cls(
             codex_command=str(config.get("codex_command", "codex")),
             connect_timeout_seconds=float(config.get("connect_timeout_seconds", 15)),
@@ -47,6 +51,7 @@ class CodexAppServerConfig:
             model_provider=str(config.get("model_provider", "")),
             service_tier=str(config.get("service_tier", "")),
             reasoning_effort=str(config.get("reasoning_effort", "")),
+            collaboration_mode=collaboration_mode,
             source_kinds=[str(item) for item in source_kinds],
         )
 
@@ -62,6 +67,7 @@ class CodexAppServerAdapter(AgentAdapter):
         on_request: Callable[[int | str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._config = config
+        self._plan_mode_model: str | None = None
         self._rpc = CodexRpcClient(
             codex_command=config.codex_command,
             connect_timeout_seconds=config.connect_timeout_seconds,
@@ -128,17 +134,28 @@ class CodexAppServerAdapter(AgentAdapter):
         approval_policy: str | None = None,
         reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
+        effective_model = model or self._config.model or None
+        effective_reasoning = reasoning_effort or self._config.reasoning_effort or None
         params: dict[str, Any] = {
             "threadId": thread_id,
             "input": [{"type": "text", "text": text}],
             "cwd": cwd,
-            "model": model or self._config.model or None,
+            "model": effective_model,
             "approvalPolicy": approval_policy or self._config.approval_policy or None,
             "approvalsReviewer": self._config.approvals_reviewer or None,
-            "effort": reasoning_effort or self._config.reasoning_effort or None,
+            "effort": effective_reasoning,
             "personality": self._config.personality or None,
             "serviceTier": self._config.service_tier or None,
         }
+        if self._config.collaboration_mode == "plan":
+            params["collaborationMode"] = {
+                "mode": "plan",
+                "settings": {
+                    "model": self._resolve_plan_mode_model(effective_model),
+                    "reasoning_effort": effective_reasoning,
+                    "developer_instructions": None,
+                },
+            }
         return self._rpc.request("turn/start", _compact(params))
 
     def interrupt_turn(self, *, thread_id: str, turn_id: str) -> None:
@@ -187,6 +204,24 @@ class CodexAppServerAdapter(AgentAdapter):
         if include_service_name:
             params["serviceName"] = self._config.service_name or None
         return _compact(params)
+
+    def _resolve_plan_mode_model(self, configured_model: str | None) -> str:
+        if configured_model:
+            return configured_model
+        if self._plan_mode_model:
+            return self._plan_mode_model
+
+        result = self._rpc.request("model/list", {})
+        models = result.get("data") or []
+        for item in models:
+            if item.get("isDefault") and item.get("model"):
+                self._plan_mode_model = str(item["model"])
+                return self._plan_mode_model
+        for item in models:
+            if not item.get("hidden") and item.get("model"):
+                self._plan_mode_model = str(item["model"])
+                return self._plan_mode_model
+        raise RuntimeError("无法解析 Codex 默认模型，plan 模式不可用")
 
     @staticmethod
     def _snapshot_from_thread(thread: dict[str, Any]) -> ThreadSnapshot:

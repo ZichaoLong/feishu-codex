@@ -45,6 +45,12 @@ app_secret: "..."
 nano ~/.config/feishu-codex/codex.yaml
 ```
 
+如果你希望启用 Codex 原生 `requestUserInput` 卡片，而不是让模型退化成普通文本追问，需要在 `codex.yaml` 中显式开启：
+
+```yaml
+collaboration_mode: plan
+```
+
 ## 配置
 
 运行时环境变量：
@@ -80,6 +86,7 @@ python -m bot
 - 本地只持久化 Feishu 特有状态，例如收藏
 - `/session` 显示当前目录线程，收藏优先
 - `/resume` 先按 thread id 原生恢复，失败后再按 thread name 精确匹配
+- 原生 `requestUserInput` 依赖 `collaboration_mode: plan`，并通过 `initialize.capabilities.experimentalApi=true` 启用
 
 ## 当前功能
 
@@ -92,6 +99,11 @@ python -m bot
   - `item/fileChange/requestApproval`
   - `item/permissions/requestApproval`
   - `item/tool/requestUserInput`
+
+说明：
+
+- `collaboration_mode: default` 下，Codex 仍可能把“先问用户再继续”的需求退化成普通文本回复
+- `collaboration_mode: plan` 下，Feishu 才能接到真正的 `item/tool/requestUserInput` 并回传原生回答结果
 
 ## 与 feishu-cc 的现状差距
 

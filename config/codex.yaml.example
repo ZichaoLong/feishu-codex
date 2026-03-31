@@ -38,6 +38,10 @@
 # 默认 reasoning effort；默认值：空
 # reasoning_effort: high
 
+# 协作模式；默认值：default
+# 说明：设为 plan 时，会在 turn/start 中启用 Codex 原生 collaborationMode，并解锁原生 requestUserInput。
+# collaboration_mode: default
+
 # /session 与 /resume 查询时显式纳入的线程来源；默认值：["cli", "vscode", "exec", "appServer"]
 # source_kinds:
 #   - cli
