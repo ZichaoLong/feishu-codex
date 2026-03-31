@@ -23,10 +23,12 @@ from bot.cards import (
     build_approval_policy_card,
     build_ask_user_answered_card,
     build_ask_user_card,
+    build_collaboration_mode_card,
     build_command_approval_card,
     build_execution_card,
     build_file_change_approval_card,
     build_history_preview_card,
+    build_plan_card,
     build_permissions_approval_card,
     build_rename_card,
     build_sessions_card,
@@ -122,6 +124,16 @@ class CodexHandler(BotHandler):
         self, user_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
         action = action_value.get("action", "")
+        if not action:
+            fallback = self._handle_user_input_form_fallback(user_id, chat_id, message_id, action_value)
+            if fallback is not None:
+                return fallback
+            form_value = action_value.get("_form_value") or {}
+            if isinstance(form_value, dict) and form_value:
+                return self.bot.make_card_response(
+                    toast="表单已失效或未找到对应问题，请重新触发该请求。",
+                    toast_type="warning",
+                )
         if action == "cancel_turn":
             return self._handle_cancel_action(user_id, chat_id)
         if action == "resume_thread":
@@ -142,11 +154,57 @@ class CodexHandler(BotHandler):
             return self._handle_sessions_refresh_action(user_id, chat_id, toast="已取消")
         if action == "set_approval_policy":
             return self._handle_set_approval_policy(user_id, chat_id, action_value)
+        if action == "set_collaboration_mode":
+            return self._handle_set_collaboration_mode(user_id, chat_id, action_value)
         if action.startswith("command_") or action.startswith("file_change_") or action.startswith("permissions_"):
             return self._handle_approval_card_action(action_value)
         if action.startswith("answer_user_input_"):
             return self._handle_user_input_action(action_value)
         return P2CardActionTriggerResponse()
+
+    def _handle_user_input_form_fallback(
+        self,
+        user_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse | None:
+        form_value = action_value.get("_form_value") or {}
+        if not message_id or not isinstance(form_value, dict) or not form_value:
+            return None
+
+        pending_request: tuple[str, dict[str, Any]] | None = None
+        with self._lock:
+            for request_key, pending in self._pending_requests.items():
+                if pending.get("method") != "item/tool/requestUserInput":
+                    continue
+                if pending.get("message_id") != message_id:
+                    continue
+                pending_request = (request_key, pending)
+                break
+        if not pending_request:
+            return None
+
+        request_key, pending = pending_request
+        matched_question_id = ""
+        for question in pending.get("questions") or []:
+            qid = str(question.get("id", "")).strip()
+            if not qid:
+                continue
+            options = question.get("options") or []
+            allow_custom = bool(question.get("isOther", False)) or not options
+            field_name = f"user_input_{qid}"
+            if allow_custom and str(form_value.get(field_name, "")).strip():
+                matched_question_id = qid
+                break
+        if not matched_question_id:
+            return None
+
+        payload = dict(action_value)
+        payload["action"] = "answer_user_input_custom"
+        payload["request_id"] = request_key
+        payload["question_id"] = matched_question_id
+        return self._handle_user_input_action(payload)
 
     def is_user_active(self, user_id: str, chat_id: str = "") -> bool:
         return self._get_state(user_id, chat_id).get("active", False)
@@ -187,8 +245,14 @@ class CodexHandler(BotHandler):
                     "patch_timer": None,
                     "followup_sent": False,
                     "approval_policy": self._adapter_config.approval_policy,
+                    "collaboration_mode": self._adapter_config.collaboration_mode,
                     "model": self._adapter_config.model,
                     "reasoning_effort": self._adapter_config.reasoning_effort,
+                    "plan_message_id": "",
+                    "plan_turn_id": "",
+                    "plan_explanation": "",
+                    "plan_steps": [],
+                    "plan_text": "",
                 }
             return self._states[key]
 
@@ -230,6 +294,9 @@ class CodexHandler(BotHandler):
         if cmd == "/approval":
             self._handle_approval_command(user_id, chat_id, arg)
             return
+        if cmd == "/mode":
+            self._handle_mode_command(user_id, chat_id, arg)
+            return
 
         self.bot.reply(chat_id, f"未知命令：`{command}`\n发送 `/help` 查看可用命令。")
 
@@ -256,6 +323,7 @@ class CodexHandler(BotHandler):
             state["started_at"] = time.monotonic()
             state["followup_sent"] = False
             state["last_patch_at"] = 0.0
+            self._clear_plan_state(state)
 
         card_id = self._send_execution_card(chat_id, message_id)
         with self._lock:
@@ -269,6 +337,7 @@ class CodexHandler(BotHandler):
                 model=state["model"] or None,
                 approval_policy=state["approval_policy"] or None,
                 reasoning_effort=state["reasoning_effort"] or None,
+                collaboration_mode=state["collaboration_mode"] or None,
             )
         except Exception as exc:
             logger.exception("启动 turn 失败")
@@ -340,7 +409,7 @@ class CodexHandler(BotHandler):
             (
                 f"{header}\n执行中：{running}\n当前 turn：{turn_id}\n"
                 f"审批策略：`{state['approval_policy']}`\n"
-                f"协作模式：`{self._adapter_config.collaboration_mode}`"
+                f"协作模式：`{state['collaboration_mode']}`"
             ),
         )
 
@@ -417,6 +486,29 @@ class CodexHandler(BotHandler):
             self.bot.reply(chat_id, f"审批策略已切换为：`{arg}`")
             return
         self.bot.reply_card(chat_id, build_approval_policy_card(state["approval_policy"]))
+
+    def _handle_mode_command(self, user_id: str, chat_id: str, arg: str) -> None:
+        state = self._get_state(user_id, chat_id)
+        if arg:
+            mode = arg.strip().lower()
+            if mode not in {"default", "plan"}:
+                self.bot.reply(chat_id, "协作模式仅支持：`default`、`plan`")
+                return
+            with self._lock:
+                state["collaboration_mode"] = mode
+                running = state["running"]
+            if running:
+                self.bot.reply(chat_id, f"协作模式已切换为：`{mode}`，当前执行结束后的下一轮生效。")
+            else:
+                self.bot.reply(chat_id, f"协作模式已切换为：`{mode}`")
+            return
+        self.bot.reply_card(
+            chat_id,
+            build_collaboration_mode_card(
+                state["collaboration_mode"],
+                running=state["running"],
+            ),
+        )
 
     def _handle_cancel_action(self, user_id: str, chat_id: str) -> P2CardActionTriggerResponse:
         ok, message = self._cancel_current_turn(user_id, chat_id, from_card=True)
@@ -529,6 +621,25 @@ class CodexHandler(BotHandler):
             toast_type="success",
         )
 
+    def _handle_set_collaboration_mode(
+        self, user_id: str, chat_id: str, action_value: dict
+    ) -> P2CardActionTriggerResponse:
+        mode = str(action_value.get("mode", "")).strip().lower()
+        if mode not in {"default", "plan"}:
+            return self.bot.make_card_response(toast="非法协作模式", toast_type="warning")
+        state = self._get_state(user_id, chat_id)
+        with self._lock:
+            state["collaboration_mode"] = mode
+            running = state["running"]
+        toast = f"协作模式已切换为 {mode}"
+        if running:
+            toast += "，当前执行结束后的下一轮生效"
+        return self.bot.make_card_response(
+            card=build_collaboration_mode_card(mode, running=running),
+            toast=toast,
+            toast_type="success",
+        )
+
     def _handle_approval_card_action(self, action_value: dict) -> P2CardActionTriggerResponse:
         request_key = str(action_value.get("request_id", ""))
         with self._lock:
@@ -603,9 +714,17 @@ class CodexHandler(BotHandler):
         if not question_id:
             return self.bot.make_card_response(toast="缺少 question_id", toast_type="warning")
 
+        target_question = next((item for item in pending["questions"] if item.get("id", "") == question_id), None)
+        if not target_question:
+            return self.bot.make_card_response(toast="未找到对应问题", toast_type="warning")
+
         if action_value.get("action") == "answer_user_input_option":
             answer = str(action_value.get("answer", "")).strip()
         else:
+            options = target_question.get("options") or []
+            allow_custom = bool(target_question.get("isOther", False)) or not options
+            if not allow_custom:
+                return self.bot.make_card_response(toast="该问题仅支持选择预设选项", toast_type="warning")
             form_value = action_value.get("_form_value") or {}
             answer = str(form_value.get(f"user_input_{question_id}", "")).strip()
         if not answer:
@@ -695,6 +814,7 @@ class CodexHandler(BotHandler):
             state["current_thread_name"] = thread.name or thread.preview
             state["working_dir"] = thread.cwd or state["working_dir"]
             state["current_turn_id"] = ""
+            self._clear_plan_state(state)
             self._thread_bindings[thread.thread_id] = (user_id, chat_id)
 
     def _clear_thread_binding(self, user_id: str, chat_id: str) -> None:
@@ -706,6 +826,7 @@ class CodexHandler(BotHandler):
             state["current_thread_id"] = ""
             state["current_thread_name"] = ""
             state["current_turn_id"] = ""
+            self._clear_plan_state(state)
 
     def _build_session_rows(
         self,
@@ -803,6 +924,9 @@ class CodexHandler(BotHandler):
             return
         if method == "turn/started":
             self._handle_turn_started(params)
+            return
+        if method == "turn/plan/updated":
+            self._handle_turn_plan_updated(params)
             return
         if method == "item/started":
             self._handle_item_started(params)
@@ -940,7 +1064,30 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["current_turn_id"] = turn.get("id", "")
             state["running"] = True
+            self._clear_plan_state(state)
         self._schedule_execution_card_update(*binding)
+
+    def _handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
+        thread_id = params.get("threadId", "")
+        binding = self._thread_bindings.get(thread_id)
+        if not binding:
+            return
+        state = self._get_state(*binding)
+        turn_id = params.get("turnId", "")
+        plan = params.get("plan") or []
+        explanation = params.get("explanation") or ""
+        with self._lock:
+            current_turn_id = state["current_turn_id"]
+            if current_turn_id and turn_id and current_turn_id != turn_id:
+                return
+            state["plan_turn_id"] = turn_id or state["plan_turn_id"]
+            state["plan_explanation"] = explanation
+            state["plan_steps"] = [
+                {"step": str(item.get("step", "")).strip(), "status": str(item.get("status", "")).strip()}
+                for item in plan
+                if str(item.get("step", "")).strip()
+            ]
+        self._flush_plan_card(*binding)
 
     def _handle_item_started(self, params: dict[str, Any]) -> None:
         item = params.get("item") or {}
@@ -994,6 +1141,20 @@ class CodexHandler(BotHandler):
                 if len(item["text"]) > len(state["full_reply_text"]):
                     state["full_reply_text"] = item["text"]
             self._schedule_execution_card_update(*binding)
+        elif item_type == "plan" and item.get("text"):
+            binding = self._thread_bindings.get(thread_id)
+            if not binding:
+                return
+            state = self._get_state(*binding)
+            turn_id = params.get("turnId", "")
+            with self._lock:
+                current_turn_id = state["current_turn_id"]
+                if current_turn_id and turn_id and current_turn_id != turn_id:
+                    return
+                state["plan_turn_id"] = turn_id or state["plan_turn_id"]
+                if len(item["text"]) >= len(state["plan_text"]):
+                    state["plan_text"] = item["text"]
+            self._flush_plan_card(*binding)
 
     def _handle_turn_completed(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
@@ -1098,6 +1259,49 @@ class CodexHandler(BotHandler):
             state["followup_sent"] = True
         self.bot.reply(chat_id, reply_text)
 
+    def _clear_plan_state(self, state: dict[str, Any]) -> None:
+        state["plan_message_id"] = ""
+        state["plan_turn_id"] = ""
+        state["plan_explanation"] = ""
+        state["plan_steps"] = []
+        state["plan_text"] = ""
+
+    def _flush_plan_card(self, user_id: str, chat_id: str) -> None:
+        state = self._get_state(user_id, chat_id)
+        with self._lock:
+            plan_message_id = state.get("plan_message_id", "")
+            parent_message_id = state.get("current_message_id", "")
+            turn_id = state.get("plan_turn_id", "")
+            explanation = state.get("plan_explanation", "")
+            plan_steps = list(state.get("plan_steps") or [])
+            plan_text = state.get("plan_text", "")
+        if not explanation and not plan_steps and not plan_text:
+            return
+
+        card = build_plan_card(
+            turn_id,
+            explanation=explanation,
+            plan_steps=plan_steps,
+            plan_text=plan_text,
+        )
+        content = json.dumps(card, ensure_ascii=False)
+
+        if plan_message_id:
+            if self.bot.patch_message(plan_message_id, content):
+                return
+            with self._lock:
+                if state.get("plan_message_id") == plan_message_id:
+                    state["plan_message_id"] = ""
+
+        new_message_id: str | None = None
+        if parent_message_id:
+            new_message_id = self.bot.reply_to_message(parent_message_id, "interactive", content)
+        if not new_message_id:
+            new_message_id = self.bot.send_message_get_id(chat_id, "interactive", content)
+        if new_message_id:
+            with self._lock:
+                state["plan_message_id"] = new_message_id
+
     def _card_reply_text(self, text: str) -> str:
         if len(text) <= self._card_reply_limit:
             return text
@@ -1121,6 +1325,7 @@ class CodexHandler(BotHandler):
                 "/rename <title> 重命名当前线程\n"
                 "/star 收藏或取消收藏当前线程\n"
                 "/approval 查看或设置审批策略\n"
+                "/mode 查看或设置协作模式\n"
                 "/status 查看当前状态\n"
                 "/cancel 停止当前执行\n"
                 "/help 查看帮助\n\n"

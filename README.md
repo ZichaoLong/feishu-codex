@@ -93,12 +93,16 @@ python -m bot
 - 直接发送普通文本给当前线程；若未绑定线程，会在当前目录自动新建
 - `/new`、`/session`、`/resume <thread_id|thread_name>`、`/rename <title>`、`/star`
 - `/cd`、`/pwd`、`/status`、`/cancel`
+- `/mode` 查看或切换当前飞书会话后续 turn 的协作模式（`default` / `plan`）
 - `/approval` 查看或切换原生 Codex 审批策略
 - 原生 Codex 审批卡片：
   - `item/commandExecution/requestApproval`
   - `item/fileChange/requestApproval`
   - `item/permissions/requestApproval`
   - `item/tool/requestUserInput`
+- 第一版计划卡片：
+  - `turn/plan/updated` 会展示结构化计划步骤
+  - `item=plan` 完成时会展示计划正文
 
 说明：
 

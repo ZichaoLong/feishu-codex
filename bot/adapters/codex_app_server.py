@@ -133,9 +133,11 @@ class CodexAppServerAdapter(AgentAdapter):
         model: str | None = None,
         approval_policy: str | None = None,
         reasoning_effort: str | None = None,
+        collaboration_mode: str | None = None,
     ) -> dict[str, Any]:
         effective_model = model or self._config.model or None
         effective_reasoning = reasoning_effort or self._config.reasoning_effort or None
+        effective_collaboration_mode = collaboration_mode or self._config.collaboration_mode or "default"
         params: dict[str, Any] = {
             "threadId": thread_id,
             "input": [{"type": "text", "text": text}],
@@ -147,7 +149,7 @@ class CodexAppServerAdapter(AgentAdapter):
             "personality": self._config.personality or None,
             "serviceTier": self._config.service_tier or None,
         }
-        if self._config.collaboration_mode == "plan":
+        if effective_collaboration_mode == "plan":
             params["collaborationMode"] = {
                 "mode": "plan",
                 "settings": {

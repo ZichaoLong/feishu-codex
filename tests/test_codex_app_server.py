@@ -68,6 +68,23 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             "gpt-5.3-codex",
         )
 
+    def test_start_turn_allows_per_turn_collaboration_mode_override(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig(collaboration_mode="plan"))
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.start_turn(
+            thread_id="thread-1",
+            text="hello",
+            cwd="/tmp",
+            collaboration_mode="default",
+        )
+
+        self.assertEqual(len(fake_rpc.calls), 1)
+        method, params = fake_rpc.calls[0]
+        self.assertEqual(method, "turn/start")
+        self.assertNotIn("collaborationMode", params)
+
     def test_config_rejects_invalid_collaboration_mode(self) -> None:
         with self.assertRaises(ValueError):
             CodexAppServerConfig.from_dict({"collaboration_mode": "broken"})

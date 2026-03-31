@@ -82,6 +82,7 @@ class AgentAdapter(ABC):
         model: str | None = None,
         approval_policy: str | None = None,
         reasoning_effort: str | None = None,
+        collaboration_mode: str | None = None,
     ) -> dict[str, Any]:
         ...
 

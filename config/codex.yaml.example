@@ -40,6 +40,7 @@
 
 # 协作模式；默认值：default
 # 说明：设为 plan 时，会在 turn/start 中启用 Codex 原生 collaborationMode，并解锁原生 requestUserInput。
+# 说明：这只是当前飞书会话的默认值；运行中可用 /mode 临时切到 plan 或 default。
 # collaboration_mode: default
 
 # /session 与 /resume 查询时显式纳入的线程来源；默认值：["cli", "vscode", "exec", "appServer"]

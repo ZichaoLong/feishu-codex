@@ -374,6 +374,58 @@ def build_approval_policy_card(current_policy: str) -> dict:
     }
 
 
+def build_collaboration_mode_card(current_mode: str, *, running: bool = False) -> dict:
+    """构造协作模式选择卡片。"""
+    labels = {
+        "default": "default",
+        "plan": "plan",
+    }
+    descs = {
+        "default": "普通协作模式，更接近直接执行；不保证触发原生 requestUserInput 或计划通知。",
+        "plan": "规划式协作模式；可启用原生 requestUserInput，并可能产出计划通知。",
+    }
+
+    current_desc = descs[current_mode]
+    if running:
+        current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
+
+    elements = [
+        {
+            "tag": "markdown",
+            "content": f"当前协作模式：**{labels[current_mode]}**\n{current_desc}",
+        },
+        {"tag": "hr"},
+    ]
+    buttons = []
+    for mode, label in labels.items():
+        elements.append({"tag": "markdown", "content": f"**{label}**\n{descs[mode]}"})
+        buttons.append(
+            {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"{'✓ ' if mode == current_mode else ''}{label}",
+                },
+                "type": "primary" if mode == current_mode else "default",
+                "value": {
+                    "action": "set_collaboration_mode",
+                    "plugin": KEYWORD,
+                    "mode": mode,
+                },
+            }
+        )
+    elements.append({"tag": "action", "actions": buttons})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 协作模式"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
 def build_ask_user_card(
     request_id: str,
     questions: list[dict],
@@ -391,6 +443,7 @@ def build_ask_user_card(
         header = question.get("header") or f"问题 {index}"
         question_text = question.get("question", "")
         options = question.get("options") or []
+        allow_custom = bool(question.get("isOther", False)) or not options
         is_secret = bool(question.get("isSecret", False))
 
         if qid in answers:
@@ -445,37 +498,38 @@ def build_ask_user_card(
                 }
             )
 
-        elements.append(
-            {
-                "tag": "form",
-                "name": f"user_input_form_{qid}",
-                "elements": [
-                    {
-                        "tag": "input",
-                        "name": f"user_input_{qid}",
-                        "placeholder": {
-                            "tag": "plain_text",
-                            "content": "输入自定义回答…",
+        if allow_custom:
+            elements.append(
+                {
+                    "tag": "form",
+                    "name": f"user_input_form_{qid}",
+                    "elements": [
+                        {
+                            "tag": "input",
+                            "name": f"user_input_{qid}",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "输入自定义回答…",
+                            },
                         },
-                    },
-                    {
-                        "tag": "button",
-                        "name": f"submit_{qid}",
-                        "text": {"tag": "plain_text", "content": "提交"},
-                        "type": "default",
-                        "form_action_type": "submit",
-                        "value": {
-                            "action": "answer_user_input_custom",
-                            "plugin": KEYWORD,
-                            "request_id": request_id,
-                            "question_id": qid,
+                        {
+                            "tag": "button",
+                            "name": f"submit_{qid}",
+                            "text": {"tag": "plain_text", "content": "提交"},
+                            "type": "default",
+                            "form_action_type": "submit",
+                            "value": {
+                                "action": "answer_user_input_custom",
+                                "plugin": KEYWORD,
+                                "request_id": request_id,
+                                "question_id": qid,
+                            },
                         },
-                    },
-                ],
-            }
-        )
+                    ],
+                }
+            )
 
-        if is_secret:
+        if is_secret and allow_custom:
             elements.append(
                 {
                     "tag": "markdown",
@@ -711,4 +765,66 @@ def build_history_preview_card(thread_id: str, rounds: list[tuple[str, str]]) ->
             "template": "green",
         },
         "elements": elements or [{"tag": "markdown", "content": "*暂无可展示历史。*"}],
+    }
+
+
+def build_plan_card(
+    turn_id: str,
+    *,
+    explanation: str = "",
+    plan_steps: list[dict] | None = None,
+    plan_text: str = "",
+) -> dict:
+    """构造计划卡片。"""
+    plan_steps = plan_steps or []
+    elements: list[dict] = []
+
+    if explanation:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"**说明**\n{shorten(explanation, _PLAN_CONTENT_MAX)}",
+            }
+        )
+        elements.append({"tag": "hr"})
+
+    if plan_steps:
+        status_labels = {
+            "pending": "[ ]",
+            "inProgress": "[~]",
+            "completed": "[x]",
+        }
+        lines = [
+            f"{status_labels.get(step.get('status', ''), '[ ]')} {shorten(step.get('step', ''), 240)}"
+            for step in plan_steps
+            if step.get("step")
+        ]
+        if lines:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": "**计划步骤**\n" + "\n".join(lines),
+                }
+            )
+            elements.append({"tag": "hr"})
+
+    if plan_text:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"**计划正文**\n{shorten(plan_text, _PLAN_CONTENT_MAX)}",
+            }
+        )
+
+    if not elements:
+        elements.append({"tag": "markdown", "content": "*暂未收到可展示的计划内容。*"})
+
+    title = f"Codex 计划 {turn_id[:8]}…" if turn_id else "Codex 计划"
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "green",
+        },
+        "elements": elements,
     }
