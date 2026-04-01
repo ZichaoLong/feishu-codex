@@ -50,6 +50,13 @@ def build_execution_card(
         }
 
     elements: list[dict] = []
+    elements.append(
+        {
+            "tag": "markdown",
+            "content": "*提示：发送 `/help` 查看可用命令列表。*",
+        }
+    )
+    elements.append({"tag": "hr"})
     if log_text and reply_text:
         log_tables = count_card_tables(log_text)
         reply_tables = count_card_tables(reply_text)

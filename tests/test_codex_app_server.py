@@ -121,6 +121,24 @@ class CodexRpcClientTests(unittest.TestCase):
             ],
         )
 
+    def test_connect_ws_disables_default_frame_limit(self) -> None:
+        client = CodexRpcClient(connect_timeout_seconds=0.1)
+        client._listen_url = "ws://127.0.0.1:12345"
+
+        class _Proc:
+            def poll(self):
+                return None
+
+        client._process = _Proc()
+
+        with patch("bot.codex_protocol.client.connect", return_value="ws-obj") as mock_connect:
+            client._connect_ws_locked()
+
+        self.assertEqual(client._ws, "ws-obj")
+        _, kwargs = mock_connect.call_args
+        self.assertEqual(kwargs["open_timeout"], client._connect_timeout_seconds)
+        self.assertIsNone(kwargs["max_size"])
+
 
 if __name__ == "__main__":
     unittest.main()

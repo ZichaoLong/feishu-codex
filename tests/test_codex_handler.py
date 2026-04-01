@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bot.cards import build_ask_user_card
-from bot.adapters.base import ThreadSummary
+from bot.cards import build_ask_user_card, build_execution_card
+from bot.adapters.base import ThreadSnapshot, ThreadSummary
 from bot.codex_handler import CodexHandler
+from bot.codex_protocol.client import CodexRpcError
 
 
 class _FakeAdapter:
@@ -193,6 +194,145 @@ class CodexHandlerTests(unittest.TestCase):
         )
 
         self.assertFalse(any(element.get("tag") == "form" for element in card["elements"]))
+
+    def test_execution_card_shows_help_hint(self) -> None:
+        card = build_execution_card("", "", running=True)
+
+        self.assertIn("/help", card["body"]["elements"][0]["content"])
+
+    def test_resume_thread_id_disconnect_is_not_reported_as_not_found(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="019d2e94-a475-7bc1-b2f7-a3ce37628ede",
+            cwd="/tmp/project",
+            name="feishu-cc",
+            preview="分析本项目",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="notLoaded",
+        )
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+
+        def fake_resume_thread(thread_id: str):
+            raise CodexRpcError("thread/resume", {"code": -32000, "message": "Codex websocket disconnected"})
+
+        handler._adapter.resume_thread = fake_resume_thread
+
+        with self.assertRaisesRegex(RuntimeError, "无法通过 app-server 恢复这个 CLI 线程"):
+            handler._resume_snapshot(thread.thread_id)
+
+    def test_resume_thread_id_not_found_returns_value_error(self) -> None:
+        handler, _ = self._make_handler()
+        handler._adapter.list_threads_all = lambda **kwargs: []
+
+        def fake_resume_thread(thread_id: str):
+            raise CodexRpcError(
+                "thread/resume",
+                {"code": -32600, "message": f"no rollout found for thread id {thread_id}"},
+            )
+
+        handler._adapter.resume_thread = fake_resume_thread
+
+        with self.assertRaisesRegex(ValueError, "未找到匹配的线程"):
+            handler._resume_snapshot("00000000-0000-0000-0000-000000000000")
+
+    def test_resume_by_name_uses_exact_name_match(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="vscode",
+            status="notLoaded",
+        )
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+        resumed: list[str] = []
+
+        def fake_resume_thread(thread_id: str):
+            resumed.append(thread_id)
+            return ThreadSnapshot(summary=thread)
+
+        handler._adapter.resume_thread = fake_resume_thread
+
+        snapshot = handler._resume_snapshot("demo")
+
+        self.assertEqual(snapshot.summary.thread_id, "thread-1")
+        self.assertEqual(resumed, ["thread-1"])
+
+    def test_show_rename_form_registers_pending_message(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="vscode",
+            status="notLoaded",
+        )
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+
+        response = handler.handle_card_action(
+            "u1",
+            "c1",
+            "msg-rename",
+            {"action": "show_rename_form", "thread_id": "thread-1"},
+        )
+
+        self.assertEqual(handler._pending_rename_forms["msg-rename"]["thread_id"], "thread-1")
+        self.assertEqual(response["card"]["header"]["title"]["content"], "重命名线程")
+
+    def test_form_value_only_callback_submits_rename(self) -> None:
+        handler, _ = self._make_handler()
+        renamed = {}
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="old-title",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="vscode",
+            status="notLoaded",
+        )
+        handler._pending_rename_forms["msg-rename"] = {"thread_id": "thread-1"}
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+
+        def fake_rename_thread(thread_id: str, name: str) -> None:
+            renamed["thread_id"] = thread_id
+            renamed["name"] = name
+
+        handler._adapter.rename_thread = fake_rename_thread
+
+        response = handler.handle_card_action(
+            "u1",
+            "c1",
+            "msg-rename",
+            {"_form_value": {"rename_title": "new-title"}},
+        )
+
+        self.assertEqual(renamed, {"thread_id": "thread-1", "name": "new-title"})
+        self.assertNotIn("msg-rename", handler._pending_rename_forms)
+        self.assertEqual(response["toast_type"], "success")
+        self.assertEqual(response["toast"], "已重命名。")
+
+    def test_form_value_only_callback_without_pending_rename_returns_warning(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "u1",
+            "c1",
+            "msg-rename",
+            {"_form_value": {"rename_title": "new-title"}},
+        )
+
+        self.assertEqual(response["toast_type"], "warning")
+        self.assertEqual(response["toast"], "重命名表单已失效，请重新打开。")
 
     def test_custom_user_input_is_shown_when_other_is_allowed(self) -> None:
         card = build_ask_user_card(

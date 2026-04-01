@@ -179,7 +179,14 @@ class CodexRpcClient:
             if self._process.poll() is not None:
                 raise RuntimeError("codex app-server exited before websocket connected")
             try:
-                self._ws = connect(self._listen_url, open_timeout=self._connect_timeout_seconds)
+                # Codex can return multi-megabyte frames for thread/read(thread.turns)
+                # and thread/resume. The default websocket 1 MiB limit breaks valid
+                # resume flows for longer sessions, so disable the per-frame cap here.
+                self._ws = connect(
+                    self._listen_url,
+                    open_timeout=self._connect_timeout_seconds,
+                    max_size=None,
+                )
                 return
             except Exception as exc:
                 last_error = exc

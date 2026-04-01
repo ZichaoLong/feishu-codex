@@ -11,6 +11,7 @@ import pathlib
 import threading
 import time
 from typing import Any
+from uuid import UUID
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
@@ -46,6 +47,7 @@ from bot.constants import (
     resolve_working_dir,
 )
 from bot.handler import BotHandler
+from bot.codex_protocol.client import CodexRpcError
 from bot.stores.favorites_store import FavoritesStore
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,7 @@ class CodexHandler(BotHandler):
         self._states: dict[tuple[str, str], dict[str, Any]] = {}
         self._thread_bindings: dict[str, tuple[str, str]] = {}
         self._pending_requests: dict[str, dict[str, Any]] = {}
+        self._pending_rename_forms: dict[str, dict[str, str]] = {}
 
         self._default_working_dir = resolve_working_dir(
             str(cfg.get("default_working_dir", "")),
@@ -125,6 +128,9 @@ class CodexHandler(BotHandler):
     ) -> P2CardActionTriggerResponse:
         action = action_value.get("action", "")
         if not action:
+            rename_fallback = self._handle_rename_form_fallback(user_id, chat_id, message_id, action_value)
+            if rename_fallback is not None:
+                return rename_fallback
             fallback = self._handle_user_input_form_fallback(user_id, chat_id, message_id, action_value)
             if fallback is not None:
                 return fallback
@@ -147,10 +153,11 @@ class CodexHandler(BotHandler):
         if action == "toggle_star_thread":
             return self._handle_toggle_star_action(user_id, chat_id, action_value)
         if action == "show_rename_form":
-            return self._handle_show_rename_action(user_id, chat_id, action_value)
+            return self._handle_show_rename_action(user_id, chat_id, message_id, action_value)
         if action == "rename_thread":
-            return self._handle_rename_submit_action(user_id, chat_id, action_value)
+            return self._handle_rename_submit_action(user_id, chat_id, message_id, action_value)
         if action == "cancel_rename":
+            self._clear_pending_rename_form(message_id)
             return self._handle_sessions_refresh_action(user_id, chat_id, toast="已取消")
         if action == "set_approval_policy":
             return self._handle_set_approval_policy(user_id, chat_id, action_value)
@@ -205,6 +212,30 @@ class CodexHandler(BotHandler):
         payload["request_id"] = request_key
         payload["question_id"] = matched_question_id
         return self._handle_user_input_action(payload)
+
+    def _handle_rename_form_fallback(
+        self,
+        user_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse | None:
+        form_value = action_value.get("_form_value") or {}
+        if not message_id or not isinstance(form_value, dict) or "rename_title" not in form_value:
+            return None
+
+        with self._lock:
+            pending = self._pending_rename_forms.get(message_id)
+        if not pending:
+            return self.bot.make_card_response(
+                toast="重命名表单已失效，请重新打开。",
+                toast_type="warning",
+            )
+
+        payload = dict(action_value)
+        payload["action"] = "rename_thread"
+        payload["thread_id"] = pending["thread_id"]
+        return self._handle_rename_submit_action(user_id, chat_id, message_id, payload)
 
     def is_user_active(self, user_id: str, chat_id: str = "") -> bool:
         return self._get_state(user_id, chat_id).get("active", False)
@@ -389,7 +420,8 @@ class CodexHandler(BotHandler):
             chat_id,
             (
                 f"已新建线程：`{snapshot.summary.thread_id[:8]}…`\n"
-                f"目录：`{display_path(snapshot.summary.cwd)}`"
+                f"目录：`{display_path(snapshot.summary.cwd)}`\n"
+                "发送 `/help` 查看可用命令列表。"
             ),
         )
 
@@ -409,7 +441,8 @@ class CodexHandler(BotHandler):
             (
                 f"{header}\n执行中：{running}\n当前 turn：{turn_id}\n"
                 f"审批策略：`{state['approval_policy']}`\n"
-                f"协作模式：`{state['collaboration_mode']}`"
+                f"协作模式：`{state['collaboration_mode']}`\n"
+                "发送 `/help` 查看可用命令列表。"
             ),
         )
 
@@ -549,7 +582,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_show_rename_action(
-        self, user_id: str, chat_id: str, action_value: dict
+        self, user_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
         thread_id = str(action_value.get("thread_id", ""))
         try:
@@ -559,10 +592,12 @@ class CodexHandler(BotHandler):
             return self.bot.make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
         if not session:
             return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
+        with self._lock:
+            self._pending_rename_forms[message_id] = {"thread_id": thread_id}
         return self.bot.make_card_response(card=build_rename_card(session))
 
     def _handle_rename_submit_action(
-        self, user_id: str, chat_id: str, action_value: dict
+        self, user_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
         thread_id = str(action_value.get("thread_id", ""))
         form_value = action_value.get("_form_value") or {}
@@ -577,9 +612,16 @@ class CodexHandler(BotHandler):
 
         state = self._get_state(user_id, chat_id)
         with self._lock:
+            self._pending_rename_forms.pop(message_id, None)
             if state["current_thread_id"] == thread_id:
                 state["current_thread_name"] = new_title
         return self._handle_sessions_refresh_action(user_id, chat_id, toast="已重命名。")
+
+    def _clear_pending_rename_form(self, message_id: str) -> None:
+        if not message_id:
+            return
+        with self._lock:
+            self._pending_rename_forms.pop(message_id, None)
 
     def _handle_sessions_refresh_action(
         self, user_id: str, chat_id: str, *, toast: str
@@ -789,20 +831,74 @@ class CodexHandler(BotHandler):
                 self.bot.reply_card(chat_id, build_history_preview_card(snapshot.summary.thread_id, rounds))
 
     def _resume_snapshot(self, arg: str) -> ThreadSnapshot:
+        target = arg.strip()
+        if self._looks_like_thread_id(target):
+            return self._resume_snapshot_by_id(target, original_arg=target)
+
+        threads = self._adapter.list_threads_all(
+            limit=self._thread_list_query_limit,
+            sort_key="updated_at",
+        )
+        exact_name = [thread for thread in threads if thread.name == target]
+        if not exact_name:
+            raise ValueError(f"未找到匹配的线程：`{target}`")
+        if len(exact_name) > 1:
+            ids = ", ".join(item.thread_id[:8] + "…" for item in exact_name[:5])
+            raise ValueError(f"匹配到多个同名线程：{ids}")
+        return self._resume_snapshot_by_id(
+            exact_name[0].thread_id,
+            original_arg=target,
+            summary=exact_name[0],
+        )
+
+    def _resume_snapshot_by_id(
+        self,
+        thread_id: str,
+        *,
+        original_arg: str,
+        summary: ThreadSummary | None = None,
+    ) -> ThreadSnapshot:
+        thread = summary or self._find_thread_summary(thread_id)
         try:
-            return self._adapter.resume_thread(arg)
-        except Exception:
-            threads = self._adapter.list_threads_all(
-                limit=self._thread_list_query_limit,
-                sort_key="updated_at",
-            )
-            exact_name = [thread for thread in threads if thread.name == arg]
-            if not exact_name:
-                raise ValueError(f"未找到匹配的线程：`{arg}`")
-            if len(exact_name) > 1:
-                ids = ", ".join(item.thread_id[:8] + "…" for item in exact_name[:5])
-                raise ValueError(f"匹配到多个同名线程：{ids}")
-            return self._adapter.resume_thread(exact_name[0].thread_id)
+            return self._adapter.resume_thread(thread_id)
+        except Exception as exc:
+            if self._is_thread_not_found_error(exc):
+                raise ValueError(f"未找到匹配的线程：`{original_arg}`") from exc
+            if thread and thread.source == "cli" and self._is_transport_disconnect(exc):
+                raise RuntimeError(
+                    "Codex 当前无法通过 app-server 恢复这个 CLI 线程。"
+                    "这通常意味着该线程正被本地 TUI 使用，或当前版本暂不支持加载它的完整历史。"
+                ) from exc
+            raise
+
+    def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
+        threads = self._adapter.list_threads_all(
+            limit=self._thread_list_query_limit,
+            sort_key="updated_at",
+        )
+        for thread in threads:
+            if thread.thread_id == thread_id:
+                return thread
+        return None
+
+    @staticmethod
+    def _looks_like_thread_id(value: str) -> bool:
+        try:
+            UUID(value)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _is_thread_not_found_error(exc: Exception) -> bool:
+        if not isinstance(exc, CodexRpcError):
+            return False
+        message = str(exc.error.get("message", "")).lower()
+        return message.startswith("no rollout found for thread id ")
+
+    @staticmethod
+    def _is_transport_disconnect(exc: Exception) -> bool:
+        return isinstance(exc, CodexRpcError) and exc.error.get("message") == "Codex websocket disconnected"
 
     def _bind_thread(self, user_id: str, chat_id: str, thread: ThreadSummary) -> None:
         state = self._get_state(user_id, chat_id)
@@ -1329,6 +1425,7 @@ class CodexHandler(BotHandler):
                 "/status 查看当前状态\n"
                 "/cancel 停止当前执行\n"
                 "/help 查看帮助\n\n"
+                "说明：`/new` 只会先绑定一个新的空线程；发送第一条消息后，该线程才会在 Codex 侧 materialize。\n"
                 "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。"
             ),
         )
