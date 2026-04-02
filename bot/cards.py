@@ -798,7 +798,9 @@ def build_sessions_card(
                 f"收藏优先，其余按最近更新时间排序。\n"
                 f"当前显示：{'，'.join(summary_parts)}。\n"
                 "全局恢复请用 `/resume <thread_id|thread_name>`。\n"
-                "`fcodex` 内置 `/resume` 也是后端全局视角，不按当前目录过滤。"
+                "shell 级 `fcodex resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配；"
+                "本地若想先看线程，可用 `fcodex sessions`；"
+                "`fcodex` TUI 内置 `/resume` 仍保持 upstream 原样。"
             ),
         },
         {"tag": "hr"},

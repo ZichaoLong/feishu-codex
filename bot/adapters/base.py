@@ -58,11 +58,11 @@ class AgentAdapter(ABC):
         ...
 
     @abstractmethod
-    def create_thread(self, *, cwd: str) -> ThreadSnapshot:
+    def create_thread(self, *, cwd: str, profile: str | None = None) -> ThreadSnapshot:
         ...
 
     @abstractmethod
-    def resume_thread(self, thread_id: str) -> ThreadSnapshot:
+    def resume_thread(self, thread_id: str, profile: str | None = None) -> ThreadSnapshot:
         ...
 
     @abstractmethod
@@ -103,6 +103,7 @@ class AgentAdapter(ABC):
         text: str,
         cwd: str | None = None,
         model: str | None = None,
+        profile: str | None = None,
         approval_policy: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,

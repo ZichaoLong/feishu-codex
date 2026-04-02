@@ -18,12 +18,30 @@ class _FakeAdapter:
         self.start_calls = 0
         self.last_profile = "provider1"
         self.set_active_profile_calls: list[str] = []
+        self.create_thread_calls: list[dict] = []
+        self.resume_thread_calls: list[dict] = []
+        self.start_turn_calls: list[dict] = []
 
     def stop(self) -> None:
         return None
 
     def start(self) -> None:
         self.start_calls += 1
+
+    def create_thread(self, *, cwd: str, profile: str | None = None):
+        self.create_thread_calls.append({"cwd": cwd, "profile": profile})
+        return ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd=cwd,
+                name="",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            )
+        )
 
     def read_thread(self, thread_id: str, include_turns: bool = False):
         raise NotImplementedError
@@ -42,6 +60,47 @@ class _FakeAdapter:
         self.set_active_profile_calls.append(profile)
         self.last_profile = profile
         return self.read_runtime_config()
+
+    def resume_thread(self, thread_id: str, profile: str | None = None):
+        self.resume_thread_calls.append({"thread_id": thread_id, "profile": profile})
+        return ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id=thread_id,
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="cli",
+                status="idle",
+            )
+        )
+
+    def start_turn(
+        self,
+        *,
+        thread_id: str,
+        text: str,
+        cwd: str | None = None,
+        model: str | None = None,
+        profile: str | None = None,
+        approval_policy: str | None = None,
+        reasoning_effort: str | None = None,
+        collaboration_mode: str | None = None,
+    ):
+        self.start_turn_calls.append(
+            {
+                "thread_id": thread_id,
+                "text": text,
+                "cwd": cwd,
+                "model": model,
+                "profile": profile,
+                "approval_policy": approval_policy,
+                "reasoning_effort": reasoning_effort,
+                "collaboration_mode": collaboration_mode,
+            }
+        )
+        return {"turn": {"id": "turn-1"}}
 
 
 class _FakeBot:
@@ -308,11 +367,13 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("u1", "c1", "/status")
 
         self.assertIn("后端：`managed` `ws://127.0.0.1:8765`", bot.replies[-1][1])
-        self.assertIn("共享 profile：`provider1`", bot.replies[-1][1])
-        self.assertIn("共享 provider：`provider1_api`", bot.replies[-1][1])
+        self.assertIn("feishu-codex 默认 profile：`（未设置）`", bot.replies[-1][1])
+        self.assertIn("当前运行时 provider：`provider1_api`", bot.replies[-1][1])
         self.assertIn("fcodex", bot.replies[-1][1])
         self.assertIn("飞书 `/session` 仅列当前目录线程", bot.replies[-1][1])
         self.assertIn("飞书 `/resume` 按后端全局精确匹配（可跨 provider）", bot.replies[-1][1])
+        self.assertIn("shell 级 `fcodex resume <name>` 与飞书 `/resume` 使用同一套跨 provider 解析", bot.replies[-1][1])
+        self.assertIn("shell 级 `fcodex sessions` 可列当前目录跨 provider 线程", bot.replies[-1][1])
 
     def test_profile_command_without_arg_shows_runtime_profiles(self) -> None:
         handler, bot = self._make_handler()
@@ -320,19 +381,58 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("u1", "c1", "/profile")
 
         reply = bot.replies[-1][1]
-        self.assertIn("共享 profile：`provider1`", reply)
-        self.assertIn("`provider1` -> `provider1_api` <- 当前", reply)
+        self.assertIn("feishu-codex 默认 profile：`（未设置）`", reply)
+        self.assertIn("`provider1` -> `provider1_api`", reply)
         self.assertIn("`provider2` -> `provider2_api`", reply)
+        self.assertIn("不会改动裸 `codex` 全局配置", reply)
 
-    def test_profile_command_switches_shared_profile(self) -> None:
+    def test_profile_command_switches_local_default_profile(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("u1", "c1", "/profile provider2")
 
-        self.assertEqual(handler._adapter.set_active_profile_calls, ["provider2"])
+        self.assertEqual(handler._adapter.set_active_profile_calls, [])
         reply = bot.replies[-1][1]
-        self.assertIn("共享后端 profile 已切换为：`provider2`", reply)
-        self.assertIn("共享 provider：`provider2_api`", reply)
+        self.assertIn("feishu-codex 默认 profile 已切换为：`provider2`", reply)
+        self.assertIn("对应 provider：`provider2_api`", reply)
+        self.assertEqual(handler._profile_state.load_default_profile(), "provider2")
+
+    def test_profile_command_clears_stale_local_default_profile(self) -> None:
+        handler, bot = self._make_handler()
+        handler._profile_state.save_default_profile("provider9")
+
+        handler.handle_message("u1", "c1", "/profile")
+
+        reply = bot.replies[-1][1]
+        self.assertIn("已不存在，现已自动清空并回退到 Codex 原生默认", reply)
+        self.assertEqual(handler._profile_state.load_default_profile(), "")
+
+    def test_status_mentions_stale_local_default_profile_cleanup(self) -> None:
+        handler, bot = self._make_handler()
+        handler._profile_state.save_default_profile("provider9")
+
+        handler.handle_message("u1", "c1", "/status")
+
+        reply = bot.replies[-1][1]
+        self.assertIn("已自动回退到 Codex 原生默认", reply)
+        self.assertEqual(handler._profile_state.load_default_profile(), "")
+
+    def test_new_thread_uses_local_default_profile(self) -> None:
+        handler, _ = self._make_handler()
+        handler._profile_state.save_default_profile("provider2")
+
+        handler.handle_message("u1", "c1", "/new")
+
+        self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
+
+    def test_prompt_uses_local_default_profile(self) -> None:
+        handler, _ = self._make_handler()
+        handler._profile_state.save_default_profile("provider2")
+
+        handler.handle_message("u1", "c1", "hello")
+
+        self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["profile"], "provider2")
 
     def test_resume_thread_id_disconnect_is_not_reported_as_not_found(self) -> None:
         handler, _ = self._make_handler()
@@ -348,7 +448,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        def fake_resume_thread(thread_id: str):
+        def fake_resume_thread(thread_id: str, profile: str | None = None):
             raise CodexRpcError("thread/resume", {"code": -32000, "message": "Codex websocket disconnected"})
 
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
@@ -361,7 +461,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, _ = self._make_handler()
         handler._adapter.list_threads_all = lambda **kwargs: []
 
-        def fake_resume_thread(thread_id: str):
+        def fake_resume_thread(thread_id: str, profile: str | None = None):
             raise CodexRpcError(
                 "thread/resume",
                 {"code": -32600, "message": f"no rollout found for thread id {thread_id}"},
@@ -388,7 +488,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
         resumed: list[str] = []
 
-        def fake_resume_thread(thread_id: str):
+        def fake_resume_thread(thread_id: str, profile: str | None = None):
             resumed.append(thread_id)
             return ThreadSnapshot(summary=thread)
 
@@ -421,7 +521,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.list_threads_all = fake_list_threads_all
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
-        handler._adapter.resume_thread = lambda thread_id: ThreadSnapshot(summary=thread)
+        handler._adapter.resume_thread = lambda thread_id, profile=None: ThreadSnapshot(summary=thread)
 
         handler._resume_snapshot("demo")
 
@@ -494,7 +594,8 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[0]
         self.assertIn("跨 provider 汇总", card["elements"][0]["content"])
         self.assertIn("全局恢复请用 `/resume <thread_id|thread_name>`", card["elements"][0]["content"])
-        self.assertIn("`fcodex` 内置 `/resume` 也是后端全局视角", card["elements"][0]["content"])
+        self.assertIn("shell 级 `fcodex resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配", card["elements"][0]["content"])
+        self.assertIn("`fcodex` TUI 内置 `/resume` 仍保持 upstream 原样", card["elements"][0]["content"])
 
     def test_help_mentions_session_and_resume_scope_difference(self) -> None:
         handler, bot = self._make_handler()
@@ -504,7 +605,9 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("飞书 `/session` 只列当前目录线程，但会跨 provider 汇总", bot.replies[-1][1])
         self.assertIn("飞书 `/resume` 按后端全局精确匹配", bot.replies[-1][1])
         self.assertIn("/profile", bot.replies[-1][1])
-        self.assertIn("`fcodex` 的 TUI 内置 `/resume` 也是后端全局视角", bot.replies[-1][1])
+        self.assertIn("shell 级 `fcodex resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配", bot.replies[-1][1])
+        self.assertIn("`fcodex sessions` 或 `fcodex sessions global`", bot.replies[-1][1])
+        self.assertIn("运行中的 `fcodex` TUI 内置 `/resume` 仍保持 upstream 原样，不保证跨 provider", bot.replies[-1][1])
 
     def test_resume_card_action_for_not_loaded_thread_returns_guard_card(self) -> None:
         handler, _ = self._make_handler()

@@ -358,6 +358,7 @@ if [ -f "\$ENV_FILE" ]; then
     set +a
 fi
 export FC_CONFIG_DIR="$CONFIG_DIR"
+export FC_DATA_DIR="$DATA_DIR"
 exec "$VENV_DIR/bin/fcodex" "\$@"
 SCRIPT
 

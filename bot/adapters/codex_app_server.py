@@ -97,13 +97,15 @@ class CodexAppServerAdapter(AgentAdapter):
     def stop(self) -> None:
         self._rpc.stop()
 
-    def create_thread(self, *, cwd: str) -> ThreadSnapshot:
-        params = self._thread_params(cwd=cwd, include_service_name=True)
+    def create_thread(self, *, cwd: str, profile: str | None = None) -> ThreadSnapshot:
+        params = self._thread_params(cwd=cwd, include_service_name=True, profile=profile)
         result = self._rpc.request("thread/start", params)
         return self._snapshot_from_thread(result["thread"])
 
-    def resume_thread(self, thread_id: str) -> ThreadSnapshot:
-        params = {"threadId": thread_id}
+    def resume_thread(self, thread_id: str, profile: str | None = None) -> ThreadSnapshot:
+        params: dict[str, Any] = {"threadId": thread_id}
+        if profile:
+            params["config"] = {"profile": profile}
         result = self._rpc.request("thread/resume", params)
         return self._snapshot_from_thread(result["thread"])
 
@@ -172,6 +174,7 @@ class CodexAppServerAdapter(AgentAdapter):
         text: str,
         cwd: str | None = None,
         model: str | None = None,
+        profile: str | None = None,
         approval_policy: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
@@ -190,6 +193,8 @@ class CodexAppServerAdapter(AgentAdapter):
             "personality": self._config.personality or None,
             "serviceTier": self._config.service_tier or None,
         }
+        if profile:
+            params["config"] = {"profile": profile}
         if effective_collaboration_mode == "plan":
             params["collaborationMode"] = {
                 "mode": "plan",
@@ -235,7 +240,13 @@ class CodexAppServerAdapter(AgentAdapter):
                 break
         return items
 
-    def _thread_params(self, *, cwd: str, include_service_name: bool) -> dict[str, Any]:
+    def _thread_params(
+        self,
+        *,
+        cwd: str,
+        include_service_name: bool,
+        profile: str | None = None,
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "cwd": cwd,
             "sandbox": self._config.sandbox or None,
@@ -246,6 +257,8 @@ class CodexAppServerAdapter(AgentAdapter):
             "modelProvider": self._config.model_provider or None,
             "serviceTier": self._config.service_tier or None,
         }
+        if profile:
+            params["config"] = {"profile": profile}
         if include_service_name:
             params["serviceName"] = self._config.service_name or None
         return _compact(params)

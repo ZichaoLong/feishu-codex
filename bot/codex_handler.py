@@ -52,7 +52,16 @@ from bot.constants import (
 )
 from bot.handler import BotHandler
 from bot.codex_protocol.client import CodexRpcError
+from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
+from bot.session_resolution import (
+    format_thread_match,
+    list_current_dir_threads,
+    list_global_threads,
+    looks_like_thread_id,
+    resolve_resume_target_by_name,
+)
 from bot.stores.favorites_store import FavoritesStore
+from bot.stores.profile_state_store import ProfileStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +100,7 @@ class CodexHandler(BotHandler):
 
         self._adapter_config = CodexAppServerConfig.from_dict(cfg)
         self._favorites = FavoritesStore(self._data_dir)
+        self._profile_state = ProfileStateStore(self._data_dir)
         self._adapter = CodexAppServerAdapter(
             self._adapter_config,
             on_notification=self._handle_adapter_notification,
@@ -383,6 +393,7 @@ class CodexHandler(BotHandler):
                 text=text,
                 cwd=state["working_dir"],
                 model=state["model"] or None,
+                profile=self._effective_default_profile() or None,
                 approval_policy=state["approval_policy"] or None,
                 reasoning_effort=state["reasoning_effort"] or None,
                 collaboration_mode=state["collaboration_mode"] or None,
@@ -427,7 +438,10 @@ class CodexHandler(BotHandler):
                 self.bot.reply(chat_id, "执行中不能新建线程，请等待结束或先执行 `/cancel`。")
                 return
         try:
-            snapshot = self._adapter.create_thread(cwd=state["working_dir"])
+            snapshot = self._adapter.create_thread(
+                cwd=state["working_dir"],
+                profile=self._effective_default_profile() or None,
+            )
         except Exception as exc:
             logger.exception("新建线程失败")
             self.bot.reply(chat_id, f"新建线程失败：{exc}")
@@ -449,12 +463,14 @@ class CodexHandler(BotHandler):
         running = "是" if state["running"] else "否"
         turn_id = state["current_turn_id"][:8] + "…" if state["current_turn_id"] else "-"
         runtime_config = self._safe_read_runtime_config()
+        profile_resolution = self._current_default_profile_resolution(runtime_config)
+        local_profile = profile_resolution.effective_profile
         if runtime_config:
-            profile_line = f"共享 profile：`{runtime_config.current_profile or '（未设置）'}`"
-            provider_line = f"共享 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
+            profile_line = f"feishu-codex 默认 profile：`{local_profile or '（未设置）'}`"
+            provider_line = f"当前运行时 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
         else:
-            profile_line = "共享 profile：读取失败"
-            provider_line = "共享 provider：读取失败"
+            profile_line = f"feishu-codex 默认 profile：`{local_profile or '（未设置）'}`"
+            provider_line = "当前运行时 provider：读取失败"
         header = (
             f"目录：`{display_path(state['working_dir'])}`\n当前线程：`{thread_id[:8]}…` {title}"
             if thread_id
@@ -469,10 +485,19 @@ class CodexHandler(BotHandler):
                 f"审批策略：`{state['approval_policy']}`\n"
                 f"协作模式：`{state['collaboration_mode']}`\n"
                 "会话视角：飞书 `/session` 仅列当前目录线程；飞书 `/resume` 按后端全局精确匹配（可跨 provider）；"
-                "`fcodex` 内置 `/resume` 也是后端全局视角。\n"
-                "可用 `/profile` 查看或切换 shared app-server 当前 profile。\n"
+                "shell 级 `fcodex resume <name>` 与飞书 `/resume` 使用同一套跨 provider 解析；"
+                "shell 级 `fcodex sessions` 可列当前目录跨 provider 线程；"
+                "`fcodex` TUI 内置 `/resume` 仍保持 upstream 原样，不保证跨 provider。\n"
+                "可用 `/profile` 查看或切换 feishu-codex 默认 profile；这不会改动裸 `codex` 的全局配置。\n"
+                + (
+                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。\n"
+                    if profile_resolution.stale_profile
+                    else ""
+                )
+                + (
                 "如需在本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。\n"
                 "发送 `/help` 查看可用命令列表。"
+                )
             ),
         )
 
@@ -522,26 +547,32 @@ class CodexHandler(BotHandler):
         if runtime_config is None:
             self.bot.reply(chat_id, "读取 Codex 运行时配置失败，无法查看或切换 profile。")
             return
+        profile_resolution = self._current_default_profile_resolution(runtime_config)
+        local_profile = profile_resolution.effective_profile
 
         if not arg:
             lines = [
-                f"共享 profile：`{runtime_config.current_profile or '（未设置）'}`",
-                f"共享 provider：`{runtime_config.current_model_provider or '（未设置）'}`",
+                f"feishu-codex 默认 profile：`{local_profile or '（未设置）'}`",
+                f"当前运行时 provider：`{runtime_config.current_model_provider or '（未设置）'}`",
             ]
             if runtime_config.profiles:
                 lines.append("可用 profile：")
                 for profile in runtime_config.profiles:
                     provider = profile.model_provider or "（未显式设置 provider）"
-                    marker = " <- 当前" if profile.name == runtime_config.current_profile else ""
+                    marker = " <- 默认" if profile.name == local_profile else ""
                     lines.append(f"- `{profile.name}` -> `{provider}`{marker}")
             else:
                 lines.append("未在当前 Codex 配置中发现可用 profile。")
-            lines.append("说明：这是 shared app-server 的全局切换。")
-            lines.append("说明：`fcodex -p <profile>` 启动或恢复的线程会带线程级 profile 覆盖，不受这里影响。")
+            lines.append("说明：这里改的是 feishu-codex 与默认 fcodex 的本地默认 profile，不会改动裸 `codex` 全局配置。")
+            lines.append("说明：`fcodex -p <profile>` 启动或恢复的线程会带显式 profile 覆盖，不受这里影响。")
+            if profile_resolution.stale_profile:
+                lines.append(
+                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，现已自动清空并回退到 Codex 原生默认。"
+                )
             if self._adapter_config.model_provider:
                 lines.append(
                     "注意：feishu-codex 自身配置里写死了 "
-                    f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能覆盖 shared profile。"
+                    f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能覆盖本地默认 profile。"
                 )
             self.bot.reply(chat_id, "\n".join(lines))
             return
@@ -553,21 +584,22 @@ class CodexHandler(BotHandler):
             return
 
         try:
-            updated = self._adapter.set_active_profile(target_profile)
+            self._profile_state.save_default_profile(target_profile)
         except Exception as exc:
-            logger.exception("切换 profile 失败")
+            logger.exception("保存 feishu-codex 默认 profile 失败")
             self.bot.reply(chat_id, f"切换 profile 失败：{exc}")
             return
 
-        provider = updated.current_model_provider or profiles[target_profile].model_provider or "（未显式设置 provider）"
+        provider = profiles[target_profile].model_provider or "（未显式设置 provider）"
         state = self._get_state(user_id, chat_id)
         lines = [
-            f"共享后端 profile 已切换为：`{target_profile}`",
-            f"共享 provider：`{provider}`",
+            f"feishu-codex 默认 profile 已切换为：`{target_profile}`",
+            f"对应 provider：`{provider}`",
         ]
         if state["running"]:
             lines.append("当前执行中的 turn 不回滚；后续 turn 按新 profile 生效。")
         lines.append("注意：已打开的 `fcodex` 若是用 `-p` 固定 profile，不会被这次切换改掉。")
+        lines.append("注意：这不会改动裸 `codex` 的全局 profile。")
         if self._adapter_config.model_provider:
             lines.append(
                 "注意：feishu-codex 配置里仍写死了 "
@@ -960,7 +992,10 @@ class CodexHandler(BotHandler):
         state = self._get_state(user_id, chat_id)
         if state["current_thread_id"]:
             return state["current_thread_id"]
-        snapshot = self._adapter.create_thread(cwd=state["working_dir"])
+        snapshot = self._adapter.create_thread(
+            cwd=state["working_dir"],
+            profile=self._effective_default_profile() or None,
+        )
         self._bind_thread(user_id, chat_id, snapshot.summary)
         return snapshot.summary.thread_id
 
@@ -1026,17 +1061,14 @@ class CodexHandler(BotHandler):
 
     def _resolve_resume_target(self, arg: str) -> ThreadSummary:
         target = arg.strip()
-        if self._looks_like_thread_id(target):
+        if looks_like_thread_id(target):
             return self._read_thread_summary(target, original_arg=target)
-
-        threads = self._list_global_threads()
-        exact_name = [thread for thread in threads if thread.name == target]
-        if not exact_name:
-            raise ValueError(f"未找到匹配的线程：`{target}`")
-        if len(exact_name) > 1:
-            ids = ", ".join(self._format_thread_match(item) for item in exact_name[:5])
-            raise ValueError(f"匹配到多个同名线程：{ids}")
-        return self._read_thread_summary(exact_name[0].thread_id, original_arg=target)
+        thread = resolve_resume_target_by_name(
+            self._adapter,
+            name=target,
+            limit=self._thread_list_query_limit,
+        )
+        return self._read_thread_summary(thread.thread_id, original_arg=target)
 
     def _resume_snapshot(self, arg: str) -> ThreadSnapshot:
         thread = self._resolve_resume_target(arg)
@@ -1076,7 +1108,10 @@ class CodexHandler(BotHandler):
     ) -> ThreadSnapshot:
         thread = summary or self._find_thread_summary(thread_id)
         try:
-            return self._adapter.resume_thread(thread_id)
+            return self._adapter.resume_thread(
+                thread_id,
+                profile=self._effective_default_profile() or None,
+            )
         except Exception as exc:
             if self._is_thread_not_found_error(exc):
                 raise ValueError(f"未找到匹配的线程：`{original_arg}`") from exc
@@ -1113,14 +1148,6 @@ class CodexHandler(BotHandler):
             if thread.thread_id == thread_id:
                 return thread
         return None
-
-    @staticmethod
-    def _looks_like_thread_id(value: str) -> bool:
-        try:
-            UUID(value)
-            return True
-        except ValueError:
-            return False
 
     @staticmethod
     def _is_thread_not_found_error(exc: Exception) -> bool:
@@ -1243,24 +1270,21 @@ class CodexHandler(BotHandler):
         return []
 
     def _list_current_dir_threads(self, user_id: str, chat_id: str) -> list[ThreadSummary]:
-        return self._adapter.list_threads_all(
+        return list_current_dir_threads(
+            self._adapter,
             cwd=self._get_state(user_id, chat_id)["working_dir"],
             limit=self._thread_list_query_limit,
-            sort_key="updated_at",
-            model_providers=self._all_model_providers_filter(),
         )
 
     def _list_global_threads(self) -> list[ThreadSummary]:
-        return self._adapter.list_threads_all(
+        return list_global_threads(
+            self._adapter,
             limit=self._thread_list_query_limit,
-            sort_key="updated_at",
-            model_providers=self._all_model_providers_filter(),
         )
 
     @staticmethod
     def _format_thread_match(thread: ThreadSummary) -> str:
-        provider = thread.model_provider or "unknown"
-        return f"`{thread.thread_id[:8]}…`@`{provider}`"
+        return format_thread_match(thread)
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None:
         try:
@@ -1268,6 +1292,25 @@ class CodexHandler(BotHandler):
         except Exception:
             logger.exception("读取 Codex 运行时配置失败")
             return None
+
+    def _effective_default_profile(self) -> str:
+        resolution = self._current_default_profile_resolution(self._safe_read_runtime_config())
+        return resolution.effective_profile
+
+    def _current_default_profile_resolution(
+        self,
+        runtime_config: RuntimeConfigSummary | None,
+    ) -> DefaultProfileResolution:
+        stored_profile = self._profile_state.load_default_profile().strip()
+        resolution = resolve_local_default_profile(stored_profile, runtime_config)
+        if resolution.stale_profile:
+            self._profile_state.save_default_profile("")
+            return DefaultProfileResolution(
+                stored_profile=resolution.stale_profile,
+                stale_profile=resolution.stale_profile,
+                available_profiles=resolution.available_profiles,
+            )
+        return resolution
 
     def _extract_history_rounds(self, snapshot: ThreadSnapshot) -> list[tuple[str, str]]:
         rounds: list[tuple[str, str]] = []
@@ -1710,7 +1753,7 @@ class CodexHandler(BotHandler):
                 "/new 新建线程\n"
                 "/session 查看当前目录线程\n"
                 "/resume <thread_id|thread_name> 按后端全局精确恢复线程并切换目录\n"
-                "/profile 查看或切换 shared app-server 当前 profile\n"
+                "/profile 查看或切换 feishu-codex 默认 profile\n"
                 "/cd <path> 切换当前目录并清空当前线程绑定\n"
                 "/pwd 查看当前目录\n"
                 "/rename <title> 重命名当前线程\n"
@@ -1722,8 +1765,9 @@ class CodexHandler(BotHandler):
                 "/help 查看帮助\n\n"
                 "说明：`/new` 只会先绑定一个新的空线程；发送第一条消息后，该线程才会在 Codex 侧 materialize。\n"
                 "说明：飞书 `/session` 只列当前目录线程，但会跨 provider 汇总；飞书 `/resume` 按后端全局精确匹配，若有多个同名线程会直接报错。\n"
-                "说明：`/profile` 切的是 shared app-server 的全局 profile；`fcodex -p <profile>` 启动的线程会带线程级 profile 覆盖。\n"
-                "说明：`fcodex` 的 TUI 内置 `/resume` 也是后端全局视角，不按当前目录过滤。\n"
+                "说明：shell 级 `fcodex resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配；如需先查看线程，可在本地执行 `fcodex sessions` 或 `fcodex sessions global`。\n"
+                "说明：运行中的 `fcodex` TUI 内置 `/resume` 仍保持 upstream 原样，不保证跨 provider，也不保证与飞书 `/session` 的筛选范围一致。\n"
+                "说明：`/profile` 切的是 feishu-codex 与默认 `fcodex` 的本地默认 profile，不会改动裸 `codex` 全局配置；`fcodex -p <profile>` 仍以显式参数为准。\n"
                 "说明：如果希望本地与飞书安全共用同一线程，请使用 `fcodex`，不要让裸 `codex` 与飞书同时写同一线程。\n"
                 "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。"
             ),

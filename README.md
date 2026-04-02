@@ -62,6 +62,8 @@ provider2_api_key=...
 
 如果你希望本地 TUI 与飞书安全共用同一线程，推荐使用安装脚本生成的 `fcodex` wrapper。
 它会自动把本地 TUI 接到 `feishu-codex` 使用的 shared app-server endpoint，而不是再起一个独立 backend。
+默认情况下，`fcodex` 还会继承 `feishu-codex` 自己维护的本地默认 profile；显式 `fcodex -p <profile>` 仍以显式参数为准。
+如果你想在本地先查看线程，再决定恢复哪个，可执行 `fcodex sessions`（当前目录）或 `fcodex sessions global`（全局）。
 
 如果你希望启用 Codex 原生 `requestUserInput` 卡片，而不是让模型退化成普通文本追问，需要在 `codex.yaml` 中显式开启：
 
@@ -103,7 +105,10 @@ feishu-codex purge
 
 ```bash
 fcodex
+fcodex sessions
+fcodex sessions global
 fcodex resume <thread_id>
+fcodex resume <thread_name>
 ```
 
 如果你只是临时调试，也可以直接：
@@ -119,9 +124,34 @@ python -m bot
 - `/session` 显示当前目录线程，收藏优先
 - `/resume` 先按 thread id 原生恢复，失败后再按 thread name 精确匹配
 - `/session` 与名字匹配式 `/resume` 都显式跨 provider 检索
-- `/profile` 读写 shared app-server 当前 profile，并触发用户配置热重载
+- `/profile` 只维护 feishu-codex 与默认 `fcodex` 的本地默认 profile，不改动裸 `codex` 全局配置
 - 对未加载在当前 backend 中的外部线程，`/resume` 会先给出“查看快照 / 恢复并继续写入 / 取消”三选一保护卡片
 - 原生 `requestUserInput` 依赖 `collaboration_mode: plan`，并通过 `initialize.capabilities.experimentalApi=true` 启用
+
+## Session / Profile 语义
+
+- 飞书 `/session`
+  - 只显示当前目录线程
+  - 显式跨 provider 汇总
+- 飞书 `/resume <thread_id|thread_name>`
+  - 按后端全局精确匹配
+  - 可跨 provider
+  - 同名多匹配直接报错
+- shell 级 `fcodex resume <thread_name>`
+  - 先调用 feishu-codex 的共享发现逻辑做跨 provider 精确匹配
+  - 匹配到唯一线程后，转成 `thread_id` 调 upstream `codex --remote ... resume <id>`
+- shell 级 `fcodex sessions [cwd|global]`
+  - 使用 feishu-codex 的共享发现逻辑列线程
+  - `fcodex sessions` 默认列当前目录、跨 provider 线程
+  - `fcodex sessions global` 列后端全局、跨 provider 线程
+- `fcodex` TUI 内置 `/resume`
+  - 保持 upstream 原样
+  - 不复用 feishu-codex 的跨 provider 名字解析逻辑
+  - 在当前 backend 上，不应假定它会跨 provider，也不应假定它与飞书 `/session` 的筛选范围一致
+- `/profile`
+  - 只影响飞书侧默认 profile 与未显式 `-p/--profile` 的 `fcodex`
+  - 不影响裸 `codex`
+  - `fcodex -p <profile>` 永远优先
 
 补充设计文档：
 
@@ -132,7 +162,7 @@ python -m bot
 
 - 直接发送普通文本给当前线程；若未绑定线程，会在当前目录自动新建
 - `/new`、`/session`、`/resume <thread_id|thread_name>`、`/rename <title>`、`/star`
-- `/profile` 查看或切换 shared app-server 当前 profile
+- `/profile` 查看或切换 feishu-codex 默认 profile
 - `/cd`、`/pwd`、`/status`、`/cancel`
 - `/mode` 查看或切换当前飞书会话后续 turn 的协作模式（`default` / `plan`）
 - `/approval` 查看或切换原生 Codex 审批策略
