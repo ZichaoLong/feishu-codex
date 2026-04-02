@@ -45,6 +45,24 @@ app_secret: "..."
 nano ~/.config/feishu-codex/codex.yaml
 ```
 
+如果你的 Codex provider 通过环境变量取 key，推荐统一写到：
+
+```bash
+nano ~/.config/environment.d/90-codex.conf
+```
+
+例如：
+
+```ini
+provider1_api_key=...
+provider2_api_key=...
+```
+
+`install.sh` 会把这个文件接入 `feishu-codex.service`，并且 `feishu-codex run`、`fcodex` wrapper 也会一并加载它。
+
+如果你希望本地 TUI 与飞书安全共用同一线程，推荐使用安装脚本生成的 `fcodex` wrapper。
+它会自动把本地 TUI 接到 `feishu-codex` 使用的 shared app-server endpoint，而不是再起一个独立 backend。
+
 如果你希望启用 Codex 原生 `requestUserInput` 卡片，而不是让模型退化成普通文本追问，需要在 `codex.yaml` 中显式开启：
 
 ```yaml
@@ -60,6 +78,13 @@ collaboration_mode: plan
 
 未设置时，开发态默认读取项目内 `config/`，数据默认写到 `data/feishu_codex/`。
 
+与 shared backend 相关的常用配置项：
+
+```yaml
+# app_server_mode: managed
+# app_server_url: ws://127.0.0.1:8765
+```
+
 ## 使用
 
 ```bash
@@ -74,6 +99,13 @@ feishu-codex uninstall
 feishu-codex purge
 ```
 
+本地若要安全继续飞书侧同一线程，使用：
+
+```bash
+fcodex
+fcodex resume <thread_id>
+```
+
 如果你只是临时调试，也可以直接：
 
 ```bash
@@ -86,12 +118,21 @@ python -m bot
 - 本地只持久化 Feishu 特有状态，例如收藏
 - `/session` 显示当前目录线程，收藏优先
 - `/resume` 先按 thread id 原生恢复，失败后再按 thread name 精确匹配
+- `/session` 与名字匹配式 `/resume` 都显式跨 provider 检索
+- `/profile` 读写 shared app-server 当前 profile，并触发用户配置热重载
+- 对未加载在当前 backend 中的外部线程，`/resume` 会先给出“查看快照 / 恢复并继续写入 / 取消”三选一保护卡片
 - 原生 `requestUserInput` 依赖 `collaboration_mode: plan`，并通过 `initialize.capabilities.experimentalApi=true` 启用
+
+补充设计文档：
+
+- `docs/feishu-codex-design.md`
+- `docs/shared-backend-resume-safety.md`
 
 ## 当前功能
 
 - 直接发送普通文本给当前线程；若未绑定线程，会在当前目录自动新建
 - `/new`、`/session`、`/resume <thread_id|thread_name>`、`/rename <title>`、`/star`
+- `/profile` 查看或切换 shared app-server 当前 profile
 - `/cd`、`/pwd`、`/status`、`/cancel`
 - `/mode` 查看或切换当前飞书会话后续 turn 的协作模式（`default` / `plan`）
 - `/approval` 查看或切换原生 Codex 审批策略

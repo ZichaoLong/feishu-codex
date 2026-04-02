@@ -1,5 +1,9 @@
 # feishu-codex Technical Design
 
+See also:
+
+- `docs/shared-backend-resume-safety.md` for the backend-sharing and guarded-`/resume` model.
+
 ## 1. Background
 
 `feishu-cc` works because it wraps Claude Code CLI and fills several gaps with local conventions:

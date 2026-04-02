@@ -18,7 +18,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
-from bot.adapters.base import ThreadSnapshot, ThreadSummary
+from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummary
 from bot.cards import (
     build_approval_handled_card,
     build_approval_policy_card,
@@ -31,11 +31,15 @@ from bot.cards import (
     build_history_preview_card,
     build_plan_card,
     build_permissions_approval_card,
+    build_resume_guard_card,
     build_rename_card,
     build_sessions_card,
+    build_thread_snapshot_card,
 )
 from bot.config import load_config_file
 from bot.constants import (
+    DEFAULT_APP_SERVER_MODE,
+    DEFAULT_APP_SERVER_URL,
     DEFAULT_HISTORY_PREVIEW_ROUNDS,
     DEFAULT_SESSION_RECENT_LIMIT,
     DEFAULT_SESSION_STARRED_LIMIT,
@@ -106,6 +110,14 @@ class CodexHandler(BotHandler):
     def description(self) -> str:
         return "通过飞书与 Codex 交互"
 
+    def on_register(self, bot) -> None:
+        super().on_register(bot)
+        try:
+            self._adapter.start()
+        except Exception:
+            logger.exception("启动 Codex app-server 失败")
+            raise
+
     def handle_message(self, user_id: str, chat_id: str, text: str, message_id: str = "") -> None:
         state = self._get_state(user_id, chat_id)
         cleaned = (text or "").strip()
@@ -143,13 +155,13 @@ class CodexHandler(BotHandler):
         if action == "cancel_turn":
             return self._handle_cancel_action(user_id, chat_id)
         if action == "resume_thread":
-            thread_id = str(action_value.get("thread_id", ""))
-            threading.Thread(
-                target=self._resume_thread_in_background,
-                args=(user_id, chat_id, thread_id),
-                daemon=True,
-            ).start()
-            return self.bot.make_card_response(toast="正在恢复线程…")
+            return self._handle_resume_thread_action(user_id, chat_id, action_value)
+        if action == "preview_thread_snapshot":
+            return self._handle_preview_thread_snapshot_action(user_id, chat_id, action_value)
+        if action == "resume_thread_write":
+            return self._handle_resume_thread_write_action(user_id, chat_id, action_value)
+        if action == "cancel_resume_guard":
+            return self.bot.make_card_response(toast="已取消。")
         if action == "toggle_star_thread":
             return self._handle_toggle_star_action(user_id, chat_id, action_value)
         if action == "show_rename_form":
@@ -275,6 +287,7 @@ class CodexHandler(BotHandler):
                     "last_patch_at": 0.0,
                     "patch_timer": None,
                     "followup_sent": False,
+                    "pending_local_turn_card": False,
                     "approval_policy": self._adapter_config.approval_policy,
                     "collaboration_mode": self._adapter_config.collaboration_mode,
                     "model": self._adapter_config.model,
@@ -306,6 +319,9 @@ class CodexHandler(BotHandler):
             return
         if cmd == "/status":
             self._handle_status_command(user_id, chat_id)
+            return
+        if cmd == "/profile":
+            self._handle_profile_command(user_id, chat_id, arg)
             return
         if cmd == "/cancel":
             self._cancel_current_turn(user_id, chat_id)
@@ -354,6 +370,7 @@ class CodexHandler(BotHandler):
             state["started_at"] = time.monotonic()
             state["followup_sent"] = False
             state["last_patch_at"] = 0.0
+            state["pending_local_turn_card"] = True
             self._clear_plan_state(state)
 
         card_id = self._send_execution_card(chat_id, message_id)
@@ -431,6 +448,13 @@ class CodexHandler(BotHandler):
         title = state["current_thread_name"] or "（未绑定线程）"
         running = "是" if state["running"] else "否"
         turn_id = state["current_turn_id"][:8] + "…" if state["current_turn_id"] else "-"
+        runtime_config = self._safe_read_runtime_config()
+        if runtime_config:
+            profile_line = f"共享 profile：`{runtime_config.current_profile or '（未设置）'}`"
+            provider_line = f"共享 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
+        else:
+            profile_line = "共享 profile：读取失败"
+            provider_line = "共享 provider：读取失败"
         header = (
             f"目录：`{display_path(state['working_dir'])}`\n当前线程：`{thread_id[:8]}…` {title}"
             if thread_id
@@ -440,19 +464,21 @@ class CodexHandler(BotHandler):
             chat_id,
             (
                 f"{header}\n执行中：{running}\n当前 turn：{turn_id}\n"
+                f"后端：`{self._backend_mode_label()}` `{self._backend_url()}`\n"
+                f"{profile_line}\n{provider_line}\n"
                 f"审批策略：`{state['approval_policy']}`\n"
                 f"协作模式：`{state['collaboration_mode']}`\n"
+                "会话视角：飞书 `/session` 仅列当前目录线程；飞书 `/resume` 按后端全局精确匹配（可跨 provider）；"
+                "`fcodex` 内置 `/resume` 也是后端全局视角。\n"
+                "可用 `/profile` 查看或切换 shared app-server 当前 profile。\n"
+                "如需在本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。\n"
                 "发送 `/help` 查看可用命令列表。"
             ),
         )
 
     def _handle_session_command(self, user_id: str, chat_id: str) -> None:
         try:
-            threads = self._adapter.list_threads_all(
-                cwd=self._get_state(user_id, chat_id)["working_dir"],
-                limit=self._thread_list_query_limit,
-                sort_key="updated_at",
-            )
+            threads = self._list_current_dir_threads(user_id, chat_id)
         except Exception as exc:
             logger.exception("获取线程列表失败")
             self.bot.reply(chat_id, f"获取线程列表失败：{exc}")
@@ -478,9 +504,76 @@ class CodexHandler(BotHandler):
                 self.bot.reply(chat_id, "执行中不能切换线程，请等待结束或先执行 `/cancel`。")
                 return
         if not arg:
-            self.bot.reply(chat_id, "用法：`/resume <thread_id 或 thread_name>`")
+            self.bot.reply(chat_id, "用法：`/resume <thread_id 或 thread_name>`（按后端全局精确匹配，可跨 provider）")
             return
-        self._resume_thread_in_background(user_id, chat_id, arg)
+        try:
+            thread = self._resolve_resume_target(arg)
+        except Exception as exc:
+            logger.exception("解析恢复目标失败")
+            self.bot.reply(chat_id, f"恢复线程失败：{exc}")
+            return
+        if self._is_loaded_in_current_backend(thread):
+            self._resume_thread_in_background(user_id, chat_id, thread.thread_id, original_arg=arg, summary=thread)
+            return
+        self.bot.reply_card(chat_id, self._build_resume_guard(thread))
+
+    def _handle_profile_command(self, user_id: str, chat_id: str, arg: str) -> None:
+        runtime_config = self._safe_read_runtime_config()
+        if runtime_config is None:
+            self.bot.reply(chat_id, "读取 Codex 运行时配置失败，无法查看或切换 profile。")
+            return
+
+        if not arg:
+            lines = [
+                f"共享 profile：`{runtime_config.current_profile or '（未设置）'}`",
+                f"共享 provider：`{runtime_config.current_model_provider or '（未设置）'}`",
+            ]
+            if runtime_config.profiles:
+                lines.append("可用 profile：")
+                for profile in runtime_config.profiles:
+                    provider = profile.model_provider or "（未显式设置 provider）"
+                    marker = " <- 当前" if profile.name == runtime_config.current_profile else ""
+                    lines.append(f"- `{profile.name}` -> `{provider}`{marker}")
+            else:
+                lines.append("未在当前 Codex 配置中发现可用 profile。")
+            lines.append("说明：这是 shared app-server 的全局切换。")
+            lines.append("说明：`fcodex -p <profile>` 启动或恢复的线程会带线程级 profile 覆盖，不受这里影响。")
+            if self._adapter_config.model_provider:
+                lines.append(
+                    "注意：feishu-codex 自身配置里写死了 "
+                    f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能覆盖 shared profile。"
+                )
+            self.bot.reply(chat_id, "\n".join(lines))
+            return
+
+        target_profile = arg.strip()
+        profiles = {profile.name: profile for profile in runtime_config.profiles}
+        if target_profile not in profiles:
+            self.bot.reply(chat_id, f"未找到 profile：`{target_profile}`")
+            return
+
+        try:
+            updated = self._adapter.set_active_profile(target_profile)
+        except Exception as exc:
+            logger.exception("切换 profile 失败")
+            self.bot.reply(chat_id, f"切换 profile 失败：{exc}")
+            return
+
+        provider = updated.current_model_provider or profiles[target_profile].model_provider or "（未显式设置 provider）"
+        state = self._get_state(user_id, chat_id)
+        lines = [
+            f"共享后端 profile 已切换为：`{target_profile}`",
+            f"共享 provider：`{provider}`",
+        ]
+        if state["running"]:
+            lines.append("当前执行中的 turn 不回滚；后续 turn 按新 profile 生效。")
+        lines.append("注意：已打开的 `fcodex` 若是用 `-p` 固定 profile，不会被这次切换改掉。")
+        if self._adapter_config.model_provider:
+            lines.append(
+                "注意：feishu-codex 配置里仍写死了 "
+                f"`model_provider: {self._adapter_config.model_provider}`，新建线程可能继续使用该 provider。"
+            )
+        self.bot.reply(chat_id, "\n".join(lines))
 
     def _handle_rename_command(self, user_id: str, chat_id: str, arg: str) -> None:
         state = self._get_state(user_id, chat_id)
@@ -581,6 +674,77 @@ class CodexHandler(BotHandler):
             toast="已收藏线程。" if starred else "已取消收藏。",
         )
 
+    def _handle_resume_thread_action(
+        self,
+        user_id: str,
+        chat_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
+        state = self._get_state(user_id, chat_id)
+        with self._lock:
+            if state["running"]:
+                return self.bot.make_card_response(
+                    toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
+                    toast_type="warning",
+                )
+        thread_id = str(action_value.get("thread_id", "")).strip()
+        if not thread_id:
+            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+        try:
+            thread = self._read_thread_summary(thread_id, original_arg=thread_id)
+        except Exception as exc:
+            logger.exception("查询恢复目标失败")
+            return self.bot.make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
+        if self._is_loaded_in_current_backend(thread):
+            threading.Thread(
+                target=self._resume_thread_in_background,
+                args=(user_id, chat_id, thread_id),
+                kwargs={"original_arg": thread_id, "summary": thread},
+                daemon=True,
+            ).start()
+            return self.bot.make_card_response(toast="正在恢复线程…")
+        return self.bot.make_card_response(card=self._build_resume_guard(thread))
+
+    def _handle_preview_thread_snapshot_action(
+        self,
+        user_id: str,
+        chat_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
+        thread_id = str(action_value.get("thread_id", "")).strip()
+        if not thread_id:
+            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+        threading.Thread(
+            target=self._send_thread_snapshot_in_background,
+            args=(chat_id, thread_id),
+            daemon=True,
+        ).start()
+        return self.bot.make_card_response(toast="正在加载快照…")
+
+    def _handle_resume_thread_write_action(
+        self,
+        user_id: str,
+        chat_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
+        state = self._get_state(user_id, chat_id)
+        with self._lock:
+            if state["running"]:
+                return self.bot.make_card_response(
+                    toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
+                    toast_type="warning",
+                )
+        thread_id = str(action_value.get("thread_id", "")).strip()
+        if not thread_id:
+            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+        threading.Thread(
+            target=self._resume_thread_in_background,
+            args=(user_id, chat_id, thread_id),
+            kwargs={"original_arg": thread_id},
+            daemon=True,
+        ).start()
+        return self.bot.make_card_response(toast="正在恢复线程并继续写入…")
+
     def _handle_show_rename_action(
         self, user_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
@@ -627,11 +791,7 @@ class CodexHandler(BotHandler):
         self, user_id: str, chat_id: str, *, toast: str
     ) -> P2CardActionTriggerResponse:
         try:
-            threads = self._adapter.list_threads_all(
-                cwd=self._get_state(user_id, chat_id)["working_dir"],
-                limit=self._thread_list_query_limit,
-                sort_key="updated_at",
-            )
+            threads = self._list_current_dir_threads(user_id, chat_id)
         except Exception as exc:
             logger.exception("刷新线程列表失败")
             return self.bot.make_card_response(toast=f"刷新失败：{exc}", toast_type="warning")
@@ -804,10 +964,22 @@ class CodexHandler(BotHandler):
         self._bind_thread(user_id, chat_id, snapshot.summary)
         return snapshot.summary.thread_id
 
-    def _resume_thread_in_background(self, user_id: str, chat_id: str, arg: str) -> None:
+    def _resume_thread_in_background(
+        self,
+        user_id: str,
+        chat_id: str,
+        thread_id: str,
+        *,
+        original_arg: str | None = None,
+        summary: ThreadSummary | None = None,
+    ) -> None:
         state = self._get_state(user_id, chat_id)
         try:
-            snapshot = self._resume_snapshot(arg)
+            snapshot = self._resume_snapshot_by_id(
+                thread_id,
+                original_arg=original_arg or thread_id,
+                summary=summary,
+            )
         except Exception as exc:
             logger.exception("恢复线程失败")
             self.bot.reply(chat_id, f"恢复线程失败：{exc}")
@@ -822,7 +994,8 @@ class CodexHandler(BotHandler):
             (
                 f"已恢复线程：`{snapshot.summary.thread_id[:8]}…`\n"
                 f"标题：{snapshot.summary.title}\n"
-                f"目录：`{display_path(snapshot.summary.cwd)}`"
+                f"目录：`{display_path(snapshot.summary.cwd)}`\n"
+                "提示：如需本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。"
             ),
         )
         if self._show_history_preview_on_resume:
@@ -830,26 +1003,69 @@ class CodexHandler(BotHandler):
             if rounds:
                 self.bot.reply_card(chat_id, build_history_preview_card(snapshot.summary.thread_id, rounds))
 
-    def _resume_snapshot(self, arg: str) -> ThreadSnapshot:
+    def _send_thread_snapshot_in_background(self, chat_id: str, thread_id: str) -> None:
+        try:
+            snapshot = self._read_thread_snapshot(thread_id, original_arg=thread_id, include_turns=True)
+        except Exception as exc:
+            logger.exception("读取线程快照失败")
+            self.bot.reply(chat_id, f"读取线程快照失败：{exc}")
+            return
+        rounds = self._extract_history_rounds(snapshot)
+        self.bot.reply_card(
+            chat_id,
+            build_thread_snapshot_card(
+                snapshot.summary.thread_id,
+                title=snapshot.summary.title,
+                cwd=snapshot.summary.cwd,
+                updated_at=snapshot.summary.updated_at,
+                source=snapshot.summary.source,
+                service_name=snapshot.summary.service_name,
+                rounds=rounds,
+            ),
+        )
+
+    def _resolve_resume_target(self, arg: str) -> ThreadSummary:
         target = arg.strip()
         if self._looks_like_thread_id(target):
-            return self._resume_snapshot_by_id(target, original_arg=target)
+            return self._read_thread_summary(target, original_arg=target)
 
-        threads = self._adapter.list_threads_all(
-            limit=self._thread_list_query_limit,
-            sort_key="updated_at",
-        )
+        threads = self._list_global_threads()
         exact_name = [thread for thread in threads if thread.name == target]
         if not exact_name:
             raise ValueError(f"未找到匹配的线程：`{target}`")
         if len(exact_name) > 1:
-            ids = ", ".join(item.thread_id[:8] + "…" for item in exact_name[:5])
+            ids = ", ".join(self._format_thread_match(item) for item in exact_name[:5])
             raise ValueError(f"匹配到多个同名线程：{ids}")
+        return self._read_thread_summary(exact_name[0].thread_id, original_arg=target)
+
+    def _resume_snapshot(self, arg: str) -> ThreadSnapshot:
+        thread = self._resolve_resume_target(arg)
         return self._resume_snapshot_by_id(
-            exact_name[0].thread_id,
-            original_arg=target,
-            summary=exact_name[0],
+            thread.thread_id,
+            original_arg=arg.strip(),
+            summary=thread,
         )
+
+    def _read_thread_snapshot(
+        self,
+        thread_id: str,
+        *,
+        original_arg: str,
+        include_turns: bool,
+    ) -> ThreadSnapshot:
+        try:
+            return self._adapter.read_thread(thread_id, include_turns=include_turns)
+        except Exception as exc:
+            if self._is_thread_not_found_error(exc):
+                raise ValueError(f"未找到匹配的线程：`{original_arg}`") from exc
+            raise
+
+    def _read_thread_summary(self, thread_id: str, *, original_arg: str) -> ThreadSummary:
+        return self._read_thread_snapshot(
+            thread_id,
+            original_arg=original_arg,
+            include_turns=False,
+        ).summary
 
     def _resume_snapshot_by_id(
         self,
@@ -871,11 +1087,28 @@ class CodexHandler(BotHandler):
                 ) from exc
             raise
 
-    def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
-        threads = self._adapter.list_threads_all(
-            limit=self._thread_list_query_limit,
-            sort_key="updated_at",
+    @staticmethod
+    def _is_loaded_in_current_backend(thread: ThreadSummary) -> bool:
+        return thread.status not in {"", "notLoaded"}
+
+    def _build_resume_guard(self, thread: ThreadSummary) -> dict:
+        return build_resume_guard_card(
+            thread.thread_id,
+            title=thread.title,
+            cwd=thread.cwd,
+            updated_at=thread.updated_at,
+            source=thread.source,
+            service_name=thread.service_name,
         )
+
+    def _backend_mode_label(self) -> str:
+        return self._adapter_config.app_server_mode or DEFAULT_APP_SERVER_MODE
+
+    def _backend_url(self) -> str:
+        return self._adapter_config.app_server_url or DEFAULT_APP_SERVER_URL
+
+    def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
+        threads = self._list_global_threads()
         for thread in threads:
             if thread.thread_id == thread_id:
                 return thread
@@ -902,16 +1135,30 @@ class CodexHandler(BotHandler):
 
     def _bind_thread(self, user_id: str, chat_id: str, thread: ThreadSummary) -> None:
         state = self._get_state(user_id, chat_id)
+        takeover_binding: tuple[str, str] | None = None
         with self._lock:
             old_thread_id = state["current_thread_id"]
             if old_thread_id and self._thread_bindings.get(old_thread_id) == (user_id, chat_id):
                 self._thread_bindings.pop(old_thread_id, None)
+            existing_binding = self._thread_bindings.get(thread.thread_id)
+            if existing_binding and existing_binding != (user_id, chat_id):
+                takeover_binding = existing_binding
             state["current_thread_id"] = thread.thread_id
             state["current_thread_name"] = thread.name or thread.preview
             state["working_dir"] = thread.cwd or state["working_dir"]
             state["current_turn_id"] = ""
+            state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
             self._thread_bindings[thread.thread_id] = (user_id, chat_id)
+        if takeover_binding:
+            self.bot.reply(
+                takeover_binding[1],
+                (
+                    f"线程 `{thread.thread_id[:8]}…` 已被另一飞书会话接管。"
+                    "当前会话不再接收该线程的实时更新；如需重新接管，请再次执行 "
+                    f"`/resume {thread.thread_id}`。"
+                ),
+            )
 
     def _clear_thread_binding(self, user_id: str, chat_id: str) -> None:
         state = self._get_state(user_id, chat_id)
@@ -922,6 +1169,7 @@ class CodexHandler(BotHandler):
             state["current_thread_id"] = ""
             state["current_thread_name"] = ""
             state["current_turn_id"] = ""
+            state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
 
     def _build_session_rows(
@@ -937,6 +1185,7 @@ class CodexHandler(BotHandler):
                 "cwd": thread.cwd,
                 "title": thread.title,
                 "updated_at": thread.updated_at,
+                "model_provider": thread.model_provider or "",
                 "starred": thread.thread_id in starred_ids,
             }
             for thread in threads
@@ -953,6 +1202,7 @@ class CodexHandler(BotHandler):
                     "cwd": state["working_dir"],
                     "title": state["current_thread_name"] or "（当前未持久化线程）",
                     "updated_at": int(time.time()),
+                    "model_provider": "",
                     "starred": current_id in starred_ids,
                 },
             )
@@ -984,13 +1234,40 @@ class CodexHandler(BotHandler):
         return deduped, counts
 
     def _find_thread_session(self, user_id: str, chat_id: str, thread_id: str) -> dict[str, Any] | None:
-        threads = self._adapter.list_threads_all(
+        threads = self._list_current_dir_threads(user_id, chat_id)
+        rows, _ = self._build_session_rows(user_id, chat_id, threads)
+        return next((item for item in rows if item["thread_id"] == thread_id), None)
+
+    @staticmethod
+    def _all_model_providers_filter() -> list[str]:
+        return []
+
+    def _list_current_dir_threads(self, user_id: str, chat_id: str) -> list[ThreadSummary]:
+        return self._adapter.list_threads_all(
             cwd=self._get_state(user_id, chat_id)["working_dir"],
             limit=self._thread_list_query_limit,
             sort_key="updated_at",
+            model_providers=self._all_model_providers_filter(),
         )
-        rows, _ = self._build_session_rows(user_id, chat_id, threads)
-        return next((item for item in rows if item["thread_id"] == thread_id), None)
+
+    def _list_global_threads(self) -> list[ThreadSummary]:
+        return self._adapter.list_threads_all(
+            limit=self._thread_list_query_limit,
+            sort_key="updated_at",
+            model_providers=self._all_model_providers_filter(),
+        )
+
+    @staticmethod
+    def _format_thread_match(thread: ThreadSummary) -> str:
+        provider = thread.model_provider or "unknown"
+        return f"`{thread.thread_id[:8]}…`@`{provider}`"
+
+    def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None:
+        try:
+            return self._adapter.read_runtime_config()
+        except Exception:
+            logger.exception("读取 Codex 运行时配置失败")
+            return None
 
     def _extract_history_rounds(self, snapshot: ThreadSnapshot) -> list[tuple[str, str]]:
         rounds: list[tuple[str, str]] = []
@@ -1157,10 +1434,26 @@ class CodexHandler(BotHandler):
             return
         state = self._get_state(*binding)
         turn = params.get("turn") or {}
+        turn_id = turn.get("id", "")
         with self._lock:
-            state["current_turn_id"] = turn.get("id", "")
+            external_turn = not state.get("pending_local_turn_card", False)
+            state["current_turn_id"] = turn_id
+            if external_turn:
+                state["cancelled"] = False
+                state["current_message_id"] = ""
+                state["full_reply_text"] = ""
+                state["full_log_text"] = ""
+                state["started_at"] = time.monotonic()
+                state["last_patch_at"] = 0.0
+                state["followup_sent"] = False
             state["running"] = True
+            state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
+        if external_turn:
+            card_id = self._send_execution_card(binding[1], "")
+            with self._lock:
+                if state["current_turn_id"] == turn_id:
+                    state["current_message_id"] = card_id or ""
         self._schedule_execution_card_update(*binding)
 
     def _handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
@@ -1264,6 +1557,7 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["running"] = False
             state["current_turn_id"] = ""
+            state["pending_local_turn_card"] = False
             if status == "interrupted":
                 state["cancelled"] = True
             if error and not state["full_reply_text"]:
@@ -1415,7 +1709,8 @@ class CodexHandler(BotHandler):
                 "可用命令：\n"
                 "/new 新建线程\n"
                 "/session 查看当前目录线程\n"
-                "/resume <thread_id|thread_name> 恢复线程并切换目录\n"
+                "/resume <thread_id|thread_name> 按后端全局精确恢复线程并切换目录\n"
+                "/profile 查看或切换 shared app-server 当前 profile\n"
                 "/cd <path> 切换当前目录并清空当前线程绑定\n"
                 "/pwd 查看当前目录\n"
                 "/rename <title> 重命名当前线程\n"
@@ -1426,6 +1721,10 @@ class CodexHandler(BotHandler):
                 "/cancel 停止当前执行\n"
                 "/help 查看帮助\n\n"
                 "说明：`/new` 只会先绑定一个新的空线程；发送第一条消息后，该线程才会在 Codex 侧 materialize。\n"
+                "说明：飞书 `/session` 只列当前目录线程，但会跨 provider 汇总；飞书 `/resume` 按后端全局精确匹配，若有多个同名线程会直接报错。\n"
+                "说明：`/profile` 切的是 shared app-server 的全局 profile；`fcodex -p <profile>` 启动的线程会带线程级 profile 覆盖。\n"
+                "说明：`fcodex` 的 TUI 内置 `/resume` 也是后端全局视角，不按当前目录过滤。\n"
+                "说明：如果希望本地与飞书安全共用同一线程，请使用 `fcodex`，不要让裸 `codex` 与飞书同时写同一线程。\n"
                 "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。"
             ),
         )

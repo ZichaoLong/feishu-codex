@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 feishu-codex = "bot.__main__:main"
+fcodex = "bot.fcodex:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

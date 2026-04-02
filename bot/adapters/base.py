@@ -20,6 +20,7 @@ class ThreadSummary:
     active_flags: list[str] = field(default_factory=list)
     path: str | None = None
     model_provider: str | None = None
+    service_name: str | None = None
 
     @property
     def title(self) -> str:
@@ -30,6 +31,19 @@ class ThreadSummary:
 class ThreadSnapshot:
     summary: ThreadSummary
     turns: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuntimeProfileSummary:
+    name: str
+    model_provider: str | None = None
+
+
+@dataclass(slots=True)
+class RuntimeConfigSummary:
+    current_profile: str | None = None
+    current_model_provider: str | None = None
+    profiles: list[RuntimeProfileSummary] = field(default_factory=list)
 
 
 class AgentAdapter(ABC):
@@ -61,11 +75,20 @@ class AgentAdapter(ABC):
         search_term: str | None = None,
         sort_key: str | None = None,
         source_kinds: list[str] | None = None,
+        model_providers: list[str] | None = None,
     ) -> tuple[list[ThreadSummary], str | None]:
         ...
 
     @abstractmethod
     def read_thread(self, thread_id: str, *, include_turns: bool = False) -> ThreadSnapshot:
+        ...
+
+    @abstractmethod
+    def read_runtime_config(self, *, cwd: str | None = None) -> RuntimeConfigSummary:
+        ...
+
+    @abstractmethod
+    def set_active_profile(self, profile: str) -> RuntimeConfigSummary:
         ...
 
     @abstractmethod

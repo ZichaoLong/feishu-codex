@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from bot.cards import build_ask_user_card, build_execution_card
-from bot.adapters.base import ThreadSnapshot, ThreadSummary
+from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, ThreadSnapshot, ThreadSummary
 from bot.codex_handler import CodexHandler
 from bot.codex_protocol.client import CodexRpcError
 
@@ -15,9 +15,33 @@ class _FakeAdapter:
         self.config = config
         self.on_notification = on_notification
         self.on_request = on_request
+        self.start_calls = 0
+        self.last_profile = "provider1"
+        self.set_active_profile_calls: list[str] = []
 
     def stop(self) -> None:
         return None
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def read_thread(self, thread_id: str, include_turns: bool = False):
+        raise NotImplementedError
+
+    def read_runtime_config(self, *, cwd: str | None = None) -> RuntimeConfigSummary:
+        return RuntimeConfigSummary(
+            current_profile=self.last_profile,
+            current_model_provider=f"{self.last_profile}_api",
+            profiles=[
+                RuntimeProfileSummary(name="provider1", model_provider="provider1_api"),
+                RuntimeProfileSummary(name="provider2", model_provider="provider2_api"),
+            ],
+        )
+
+    def set_active_profile(self, profile: str) -> RuntimeConfigSummary:
+        self.set_active_profile_calls.append(profile)
+        self.last_profile = profile
+        return self.read_runtime_config()
 
 
 class _FakeBot:
@@ -74,6 +98,84 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_state("u1", "c1")
         self.assertEqual(state["collaboration_mode"], "plan")
         self.assertEqual(bot.replies[-1], ("c1", "协作模式已切换为：`plan`"))
+
+    def test_on_register_eagerly_starts_adapter(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.on_register(bot)
+
+        self.assertIs(handler.bot, bot)
+        self.assertEqual(handler._adapter.start_calls, 1)
+
+    def test_external_turn_started_opens_new_execution_card(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("u1", "c1", thread)
+        state = handler._get_state("u1", "c1")
+        with handler._lock:
+            state["current_message_id"] = "old-card"
+            state["full_reply_text"] = "收到"
+            state["full_log_text"] = "old log"
+            state["running"] = False
+
+        handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-2"}})
+        handler._handle_agent_message_delta({"threadId": "thread-1", "delta": "新的回复"})
+
+        self.assertEqual(len(bot.sent_messages), 1)
+        self.assertEqual(handler._get_state("u1", "c1")["current_message_id"], "plan-card-2")
+        self.assertEqual(handler._get_state("u1", "c1")["full_reply_text"], "新的回复")
+
+    def test_local_turn_started_reuses_existing_execution_card(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("u1", "c1", thread)
+        state = handler._get_state("u1", "c1")
+        with handler._lock:
+            state["current_message_id"] = "existing-card"
+            state["pending_local_turn_card"] = True
+            state["running"] = True
+
+        handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-1"}})
+
+        self.assertEqual(len(bot.sent_messages), 0)
+        self.assertEqual(handler._get_state("u1", "c1")["current_message_id"], "existing-card")
+
+    def test_takeover_notifies_previous_feishu_binding(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler._bind_thread("u1", "chat-a", thread)
+        handler._bind_thread("u1", "chat-b", thread)
+
+        self.assertEqual(bot.replies[-1][0], "chat-a")
+        self.assertIn("已被另一飞书会话接管", bot.replies[-1][1])
 
     def test_mode_command_without_arg_shows_mode_card(self) -> None:
         handler, bot = self._make_handler()
@@ -200,6 +302,38 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertIn("/help", card["body"]["elements"][0]["content"])
 
+    def test_status_includes_backend_hint(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/status")
+
+        self.assertIn("后端：`managed` `ws://127.0.0.1:8765`", bot.replies[-1][1])
+        self.assertIn("共享 profile：`provider1`", bot.replies[-1][1])
+        self.assertIn("共享 provider：`provider1_api`", bot.replies[-1][1])
+        self.assertIn("fcodex", bot.replies[-1][1])
+        self.assertIn("飞书 `/session` 仅列当前目录线程", bot.replies[-1][1])
+        self.assertIn("飞书 `/resume` 按后端全局精确匹配（可跨 provider）", bot.replies[-1][1])
+
+    def test_profile_command_without_arg_shows_runtime_profiles(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/profile")
+
+        reply = bot.replies[-1][1]
+        self.assertIn("共享 profile：`provider1`", reply)
+        self.assertIn("`provider1` -> `provider1_api` <- 当前", reply)
+        self.assertIn("`provider2` -> `provider2_api`", reply)
+
+    def test_profile_command_switches_shared_profile(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/profile provider2")
+
+        self.assertEqual(handler._adapter.set_active_profile_calls, ["provider2"])
+        reply = bot.replies[-1][1]
+        self.assertIn("共享后端 profile 已切换为：`provider2`", reply)
+        self.assertIn("共享 provider：`provider2_api`", reply)
+
     def test_resume_thread_id_disconnect_is_not_reported_as_not_found(self) -> None:
         handler, _ = self._make_handler()
         thread = ThreadSummary(
@@ -217,6 +351,7 @@ class CodexHandlerTests(unittest.TestCase):
         def fake_resume_thread(thread_id: str):
             raise CodexRpcError("thread/resume", {"code": -32000, "message": "Codex websocket disconnected"})
 
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
         handler._adapter.resume_thread = fake_resume_thread
 
         with self.assertRaisesRegex(RuntimeError, "无法通过 app-server 恢复这个 CLI 线程"):
@@ -232,6 +367,7 @@ class CodexHandlerTests(unittest.TestCase):
                 {"code": -32600, "message": f"no rollout found for thread id {thread_id}"},
             )
 
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: fake_resume_thread(thread_id)
         handler._adapter.resume_thread = fake_resume_thread
 
         with self.assertRaisesRegex(ValueError, "未找到匹配的线程"):
@@ -256,12 +392,143 @@ class CodexHandlerTests(unittest.TestCase):
             resumed.append(thread_id)
             return ThreadSnapshot(summary=thread)
 
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
         handler._adapter.resume_thread = fake_resume_thread
 
         snapshot = handler._resume_snapshot("demo")
 
         self.assertEqual(snapshot.summary.thread_id, "thread-1")
         self.assertEqual(resumed, ["thread-1"])
+
+    def test_resume_by_name_lists_threads_across_all_providers(self) -> None:
+        handler, _ = self._make_handler()
+        captured_kwargs = {}
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="vscode",
+            status="notLoaded",
+            model_provider="provider2_api",
+        )
+
+        def fake_list_threads_all(**kwargs):
+            captured_kwargs.update(kwargs)
+            return [thread]
+
+        handler._adapter.list_threads_all = fake_list_threads_all
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
+        handler._adapter.resume_thread = lambda thread_id: ThreadSnapshot(summary=thread)
+
+        handler._resume_snapshot("demo")
+
+        self.assertEqual(captured_kwargs["model_providers"], [])
+
+    def test_resume_by_name_multiple_matches_returns_error(self) -> None:
+        handler, _ = self._make_handler()
+        thread_1 = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project-a",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=2,
+            source="vscode",
+            status="notLoaded",
+        )
+        thread_2 = ThreadSummary(
+            thread_id="thread-2",
+            cwd="/tmp/project-b",
+            name="demo",
+            preview="world",
+            created_at=0,
+            updated_at=1,
+            source="cli",
+            status="notLoaded",
+        )
+        handler._adapter.list_threads_all = lambda **kwargs: [thread_1, thread_2]
+
+        with self.assertRaisesRegex(ValueError, "匹配到多个同名线程"):
+            handler._resume_snapshot("demo")
+
+    def test_resume_command_for_not_loaded_thread_shows_guard_card(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="notLoaded",
+            service_name="codex-tui",
+        )
+
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
+
+        handler.handle_message("u1", "c1", "/resume demo")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[0]
+        self.assertEqual(card["header"]["title"]["content"], "恢复线程前确认")
+
+    def test_session_card_mentions_global_resume_scope(self) -> None:
+        handler, bot = self._make_handler()
+        captured_kwargs = {}
+
+        def fake_list_threads_all(**kwargs):
+            captured_kwargs.update(kwargs)
+            return []
+
+        handler._adapter.list_threads_all = fake_list_threads_all
+
+        handler.handle_message("u1", "c1", "/session")
+
+        self.assertEqual(captured_kwargs["model_providers"], [])
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[0]
+        self.assertIn("跨 provider 汇总", card["elements"][0]["content"])
+        self.assertIn("全局恢复请用 `/resume <thread_id|thread_name>`", card["elements"][0]["content"])
+        self.assertIn("`fcodex` 内置 `/resume` 也是后端全局视角", card["elements"][0]["content"])
+
+    def test_help_mentions_session_and_resume_scope_difference(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/help")
+
+        self.assertIn("飞书 `/session` 只列当前目录线程，但会跨 provider 汇总", bot.replies[-1][1])
+        self.assertIn("飞书 `/resume` 按后端全局精确匹配", bot.replies[-1][1])
+        self.assertIn("/profile", bot.replies[-1][1])
+        self.assertIn("`fcodex` 的 TUI 内置 `/resume` 也是后端全局视角", bot.replies[-1][1])
+
+    def test_resume_card_action_for_not_loaded_thread_returns_guard_card(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="notLoaded",
+            service_name="codex-tui",
+        )
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
+
+        response = handler.handle_card_action(
+            "u1",
+            "c1",
+            "msg-1",
+            {"action": "resume_thread", "thread_id": "thread-1"},
+        )
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认")
 
     def test_show_rename_form_registers_pending_message(self) -> None:
         handler, _ = self._make_handler()

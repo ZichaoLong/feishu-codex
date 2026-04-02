@@ -8,9 +8,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from bot.adapters.base import AgentAdapter, ThreadSnapshot, ThreadSummary
+from bot.adapters.base import (
+    AgentAdapter,
+    RuntimeConfigSummary,
+    RuntimeProfileSummary,
+    ThreadSnapshot,
+    ThreadSummary,
+)
 from bot.codex_protocol.client import CodexRpcClient
-from bot.constants import DEFAULT_SOURCE_KINDS
+from bot.constants import DEFAULT_APP_SERVER_MODE, DEFAULT_APP_SERVER_URL, DEFAULT_SOURCE_KINDS
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +24,8 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class CodexAppServerConfig:
     codex_command: str = "codex"
+    app_server_mode: str = DEFAULT_APP_SERVER_MODE
+    app_server_url: str = DEFAULT_APP_SERVER_URL
     connect_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 30.0
     service_name: str = "feishu-codex"
@@ -36,10 +44,15 @@ class CodexAppServerConfig:
     def from_dict(cls, config: dict[str, Any]) -> "CodexAppServerConfig":
         source_kinds = config.get("source_kinds") or DEFAULT_SOURCE_KINDS
         collaboration_mode = str(config.get("collaboration_mode", "default")).strip().lower() or "default"
+        app_server_mode = str(config.get("app_server_mode", DEFAULT_APP_SERVER_MODE)).strip().lower() or DEFAULT_APP_SERVER_MODE
         if collaboration_mode not in {"default", "plan"}:
             raise ValueError("collaboration_mode 仅支持 default 或 plan")
+        if app_server_mode not in {"managed", "remote"}:
+            raise ValueError("app_server_mode 仅支持 managed 或 remote")
         return cls(
             codex_command=str(config.get("codex_command", "codex")),
+            app_server_mode=app_server_mode,
+            app_server_url=str(config.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL,
             connect_timeout_seconds=float(config.get("connect_timeout_seconds", 15)),
             request_timeout_seconds=float(config.get("request_timeout_seconds", 30)),
             service_name=str(config.get("service_name", "feishu-codex")),
@@ -70,6 +83,8 @@ class CodexAppServerAdapter(AgentAdapter):
         self._plan_mode_model: str | None = None
         self._rpc = CodexRpcClient(
             codex_command=config.codex_command,
+            app_server_mode=config.app_server_mode,
+            app_server_url=config.app_server_url,
             connect_timeout_seconds=config.connect_timeout_seconds,
             request_timeout_seconds=config.request_timeout_seconds,
             on_notification=on_notification,
@@ -101,16 +116,22 @@ class CodexAppServerAdapter(AgentAdapter):
         search_term: str | None = None,
         sort_key: str | None = None,
         source_kinds: list[str] | None = None,
+        model_providers: list[str] | None = None,
     ) -> tuple[list[ThreadSummary], str | None]:
-        params: dict[str, Any] = {
-            "cwd": cwd,
-            "limit": limit,
-            "cursor": cursor,
-            "searchTerm": search_term,
-            "sortKey": sort_key,
-            "sourceKinds": source_kinds or self._config.source_kinds,
-        }
-        result = self._rpc.request("thread/list", _compact(params))
+        params = _compact(
+            {
+                "cwd": cwd,
+                "limit": limit,
+                "cursor": cursor,
+                "searchTerm": search_term,
+                "sortKey": sort_key,
+                "sourceKinds": source_kinds or self._config.source_kinds,
+            }
+        )
+        if model_providers is not None:
+            # app-server 将显式空列表解释为“不按 provider 过滤”。
+            params["modelProviders"] = model_providers
+        result = self._rpc.request("thread/list", params)
         data = [self._summary_from_thread(item) for item in result.get("data", [])]
         return data, result.get("nextCursor")
 
@@ -120,6 +141,26 @@ class CodexAppServerAdapter(AgentAdapter):
             {"threadId": thread_id, "includeTurns": include_turns},
         )
         return self._snapshot_from_thread(result["thread"])
+
+    def read_runtime_config(self, *, cwd: str | None = None) -> RuntimeConfigSummary:
+        result = self._rpc.request("config/read", _compact({"includeLayers": False, "cwd": cwd}))
+        return self._runtime_config_from_result(result)
+
+    def set_active_profile(self, profile: str) -> RuntimeConfigSummary:
+        self._rpc.request(
+            "config/batchWrite",
+            {
+                "edits": [
+                    {
+                        "keyPath": "profile",
+                        "value": profile,
+                        "mergeStrategy": "replace",
+                    }
+                ],
+                "reloadUserConfig": True,
+            },
+        )
+        return self.read_runtime_config()
 
     def rename_thread(self, thread_id: str, name: str) -> None:
         self._rpc.request("thread/name/set", {"threadId": thread_id, "name": name})
@@ -174,6 +215,7 @@ class CodexAppServerAdapter(AgentAdapter):
         search_term: str | None = None,
         sort_key: str = "updated_at",
         source_kinds: list[str] | None = None,
+        model_providers: list[str] | None = None,
     ) -> list[ThreadSummary]:
         items: list[ThreadSummary] = []
         cursor: str | None = None
@@ -186,6 +228,7 @@ class CodexAppServerAdapter(AgentAdapter):
                 search_term=search_term,
                 sort_key=sort_key,
                 source_kinds=source_kinds,
+                model_providers=model_providers,
             )
             items.extend(page)
             if not cursor:
@@ -233,6 +276,29 @@ class CodexAppServerAdapter(AgentAdapter):
         )
 
     @staticmethod
+    def _runtime_config_from_result(result: dict[str, Any]) -> RuntimeConfigSummary:
+        config = result.get("config") or {}
+        profiles_raw = config.get("profiles") or {}
+        profiles: list[RuntimeProfileSummary] = []
+        if isinstance(profiles_raw, dict):
+            for name in sorted(profiles_raw):
+                if not str(name).strip():
+                    continue
+                item = profiles_raw.get(name)
+                item_dict = item if isinstance(item, dict) else {}
+                profiles.append(
+                    RuntimeProfileSummary(
+                        name=str(name),
+                        model_provider=_read_string(item_dict, "modelProvider", "model_provider"),
+                    )
+                )
+        return RuntimeConfigSummary(
+            current_profile=_read_string(config, "profile", "activeProfile", "active_profile"),
+            current_model_provider=_read_string(config, "modelProvider", "model_provider"),
+            profiles=profiles,
+        )
+
+    @staticmethod
     def _summary_from_thread(thread: dict[str, Any]) -> ThreadSummary:
         status = thread.get("status") or {}
         return ThreadSummary(
@@ -247,8 +313,17 @@ class CodexAppServerAdapter(AgentAdapter):
             active_flags=list(status.get("activeFlags") or []),
             path=thread.get("path"),
             model_provider=thread.get("modelProvider"),
+            service_name=thread.get("serviceName"),
         )
 
 
 def _compact(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if value not in (None, "", [], {})}
+
+
+def _read_string(data: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None

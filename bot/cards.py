@@ -583,6 +583,128 @@ def build_ask_user_answered_card(
     }
 
 
+def _thread_origin_text(source: str, service_name: str | None) -> str:
+    source_text = source or "unknown"
+    if service_name:
+        return f"`{source_text}` / `{service_name}`"
+    return f"`{source_text}`"
+
+
+def build_resume_guard_card(
+    thread_id: str,
+    *,
+    title: str,
+    cwd: str,
+    updated_at: int,
+    source: str,
+    service_name: str | None,
+) -> dict:
+    """构造外部线程恢复风险卡片。"""
+    origin_text = _thread_origin_text(source, service_name)
+    content = (
+        f"**{shorten(title, 160)}**\n"
+        f"thread: `{thread_id[:8]}…`\n"
+        f"目录：`{display_path(cwd)}`\n"
+        f"更新时间：`{format_timestamp(updated_at)}`\n"
+        f"来源：{origin_text}\n\n"
+        "该线程当前**未加载在 feishu-codex 的 backend 中**。\n"
+        "如果直接恢复并继续写入，feishu-codex 会在自己的 backend 里再恢复一份 live thread。\n"
+        "若本地裸 `codex` 也继续写同一线程，历史可能分叉或错乱。\n\n"
+        "如果只是想先看内容，请选“查看快照”；如果希望本地与飞书安全共用同一线程，请改用 `fcodex`。"
+    )
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "恢复线程前确认"},
+            "template": "orange",
+        },
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "查看快照"},
+                        "type": "primary",
+                        "value": {
+                            "action": "preview_thread_snapshot",
+                            "plugin": KEYWORD,
+                            "thread_id": thread_id,
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "恢复并继续写入"},
+                        "type": "danger",
+                        "value": {
+                            "action": "resume_thread_write",
+                            "plugin": KEYWORD,
+                            "thread_id": thread_id,
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "取消"},
+                        "type": "default",
+                        "value": {
+                            "action": "cancel_resume_guard",
+                            "plugin": KEYWORD,
+                            "thread_id": thread_id,
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def build_thread_snapshot_card(
+    thread_id: str,
+    *,
+    title: str,
+    cwd: str,
+    updated_at: int,
+    source: str,
+    service_name: str | None,
+    rounds: list[tuple[str, str]],
+) -> dict:
+    """构造线程快照卡片。"""
+    origin_text = _thread_origin_text(source, service_name)
+    elements: list[dict] = [
+        {
+            "tag": "markdown",
+            "content": (
+                f"**{shorten(title, 160)}**\n"
+                f"thread: `{thread_id[:8]}…`\n"
+                f"目录：`{display_path(cwd)}`\n"
+                f"更新时间：`{format_timestamp(updated_at)}`\n"
+                f"来源：{origin_text}\n\n"
+                "*当前仅查看快照，尚未在 feishu-codex backend 中恢复此线程。*"
+            ),
+        },
+        {"tag": "hr"},
+    ]
+
+    if rounds:
+        for user_text, assistant_text in rounds:
+            elements.append({"tag": "markdown", "content": f"👤 **你**\n{shorten(user_text, _HISTORY_TEXT_MAX)}"})
+            elements.append({"tag": "markdown", "content": f"🤖 **Codex**\n{shorten(assistant_text, _HISTORY_TEXT_MAX)}"})
+            elements.append({"tag": "hr"})
+    else:
+        elements.append({"tag": "markdown", "content": "*暂无可展示历史。*"})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"线程 {thread_id[:8]}… 快照"},
+            "template": "green",
+        },
+        "elements": elements,
+    }
+
+
 def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
     """构造单个线程行。"""
     thread_id = session["thread_id"]
@@ -591,11 +713,11 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
     if session.get("starred"):
         title = f"⭐ {title}"
 
-    line = (
-        f"**{thread_id[:8]}…** | `{display_path(session.get('cwd', ''))}` | "
-        f"{format_timestamp(session.get('updated_at'))}\n"
-        f"{shorten(title, 120)}"
-    )
+    summary_parts = [f"**{thread_id[:8]}…**", f"`{display_path(session.get('cwd', ''))}`"]
+    if session.get("model_provider"):
+        summary_parts.append(f"`{session['model_provider']}`")
+    summary_parts.append(format_timestamp(session.get("updated_at")))
+    line = " | ".join(summary_parts) + f"\n{shorten(title, 120)}"
 
     return [
         {"tag": "markdown", "content": line},
@@ -672,8 +794,11 @@ def build_sessions_card(
             "tag": "markdown",
             "content": (
                 f"当前目录：`{working_dir_display}`\n"
+                "已按当前目录跨 provider 汇总显示线程。\n"
                 f"收藏优先，其余按最近更新时间排序。\n"
-                f"当前显示：{'，'.join(summary_parts)}。"
+                f"当前显示：{'，'.join(summary_parts)}。\n"
+                "全局恢复请用 `/resume <thread_id|thread_name>`。\n"
+                "`fcodex` 内置 `/resume` 也是后端全局视角，不按当前目录过滤。"
             ),
         },
         {"tag": "hr"},

@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import shlex
-import socket
 import subprocess
 import threading
 import time
@@ -45,12 +44,16 @@ class CodexRpcClient:
         self,
         *,
         codex_command: str = "codex",
+        app_server_mode: str = "managed",
+        app_server_url: str = "ws://127.0.0.1:8765",
         connect_timeout_seconds: float = 15.0,
         request_timeout_seconds: float = 30.0,
         on_notification: Callable[[str, dict[str, Any]], None] | None = None,
         on_request: Callable[[int | str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._codex_command = codex_command
+        self._app_server_mode = app_server_mode
+        self._app_server_url = app_server_url
         self._connect_timeout_seconds = connect_timeout_seconds
         self._request_timeout_seconds = request_timeout_seconds
         self._on_notification = on_notification or (lambda _method, _params: None)
@@ -63,15 +66,14 @@ class CodexRpcClient:
 
         self._process: subprocess.Popen[str] | None = None
         self._ws = None
-        self._listen_url = ""
         self._reader_thread: threading.Thread | None = None
         self._closing = False
 
     def start(self) -> None:
-        """启动本地 app-server 并建立 websocket 连接。"""
+        """启动或连接 app-server 并建立 websocket 连接。"""
         need_initialize = False
         with self._lock:
-            if self._ws is not None and self._process is not None and self._process.poll() is None:
+            if self._is_connected_locked():
                 return
             self._start_locked()
             need_initialize = True
@@ -142,30 +144,35 @@ class CodexRpcClient:
 
     def _start_locked(self) -> None:
         self._closing = False
-        self._listen_url = f"ws://127.0.0.1:{self._allocate_port()}"
-        cmd = [*shlex.split(self._codex_command), "app-server", "--listen", self._listen_url]
-        logger.info("启动 Codex app-server: %s", cmd)
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            env=os.environ.copy(),
-        )
-        assert self._process.stdout is not None
-        assert self._process.stderr is not None
-        threading.Thread(
-            target=self._log_stream,
-            args=(self._process.stdout, logging.DEBUG, "stdout"),
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=self._log_stream,
-            args=(self._process.stderr, logging.INFO, "stderr"),
-            daemon=True,
-        ).start()
+        if self._app_server_mode == "managed":
+            if self._process is not None and self._process.poll() is not None:
+                self._process = None
+            if self._process is None:
+                cmd = [*shlex.split(self._codex_command), "app-server", "--listen", self._app_server_url]
+                logger.info("启动 Codex app-server: %s", cmd)
+                self._process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                    env=os.environ.copy(),
+                )
+                assert self._process.stdout is not None
+                assert self._process.stderr is not None
+                threading.Thread(
+                    target=self._log_stream,
+                    args=(self._process.stdout, logging.DEBUG, "stdout"),
+                    daemon=True,
+                ).start()
+                threading.Thread(
+                    target=self._log_stream,
+                    args=(self._process.stderr, logging.INFO, "stderr"),
+                    daemon=True,
+                ).start()
+            else:
+                logger.info("复用已运行的 Codex app-server: %s", self._app_server_url)
         self._connect_ws_locked()
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
@@ -174,16 +181,14 @@ class CodexRpcClient:
         deadline = time.time() + self._connect_timeout_seconds
         last_error: Exception | None = None
         while time.time() < deadline:
-            if self._process is None:
-                break
-            if self._process.poll() is not None:
+            if self._process is not None and self._process.poll() is not None:
                 raise RuntimeError("codex app-server exited before websocket connected")
             try:
                 # Codex can return multi-megabyte frames for thread/read(thread.turns)
                 # and thread/resume. The default websocket 1 MiB limit breaks valid
                 # resume flows for longer sessions, so disable the per-frame cap here.
                 self._ws = connect(
-                    self._listen_url,
+                    self._app_server_url,
                     open_timeout=self._connect_timeout_seconds,
                     max_size=None,
                 )
@@ -192,6 +197,13 @@ class CodexRpcClient:
                 last_error = exc
                 time.sleep(0.1)
         raise RuntimeError(f"failed to connect Codex websocket: {last_error}")
+
+    def _is_connected_locked(self) -> bool:
+        if self._ws is None:
+            return False
+        if self._app_server_mode == "managed":
+            return self._process is not None and self._process.poll() is None
+        return True
 
     def _register_pending(self) -> tuple[int, _PendingResponse]:
         with self._lock:
@@ -282,13 +294,6 @@ class CodexRpcClient:
             self._on_request(request_id, method, params)
         except Exception:
             logger.exception("处理 Codex server request 失败: method=%s", method)
-
-    @staticmethod
-    def _allocate_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            sock.listen(1)
-            return int(sock.getsockname()[1])
 
     @staticmethod
     def _log_stream(stream, level: int, name: str) -> None:

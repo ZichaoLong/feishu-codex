@@ -5,6 +5,16 @@
 # 如果通过 fnm 管理 Node，建议填写稳定安装路径，不要写 /run/user/.../fnm_multishells/... 这类临时 shim。
 # codex_command: codex
 
+# app-server 连接模式；默认值：managed
+# managed: feishu-codex 自己拉起并维护固定 endpoint 的 app-server
+# remote:  feishu-codex 连接到一个已存在的 app-server endpoint
+# app_server_mode: managed
+
+# app-server 地址；默认值：ws://127.0.0.1:8765
+# 说明：在 managed 模式下，这是 feishu-codex 维护的固定 endpoint；
+# 本地若希望与飞书安全共用同一线程，可使用 fcodex，它会自动连接到这个地址。
+# app_server_url: ws://127.0.0.1:8765
+
 # app-server 连接超时（秒）；默认值：15
 # connect_timeout_seconds: 15
 
@@ -30,6 +40,8 @@
 # model: gpt-5.4
 
 # 默认 model provider；默认值：空
+# 说明：如需让 shared backend 通过 `/profile` 在多个 profile/provider 之间切换，建议保持为空。
+# 说明：如果这里写死了 model_provider，feishu-codex 新建线程时会优先用这里的值，可能覆盖 shared profile 的作用。
 # model_provider: openai
 
 # 默认 service tier；默认值：空
