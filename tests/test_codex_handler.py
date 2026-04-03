@@ -29,8 +29,22 @@ class _FakeAdapter:
     def start(self) -> None:
         self.start_calls += 1
 
-    def create_thread(self, *, cwd: str, profile: str | None = None):
-        self.create_thread_calls.append({"cwd": cwd, "profile": profile})
+    def create_thread(
+        self,
+        *,
+        cwd: str,
+        profile: str | None = None,
+        approval_policy: str | None = None,
+        sandbox: str | None = None,
+    ):
+        self.create_thread_calls.append(
+            {
+                "cwd": cwd,
+                "profile": profile,
+                "approval_policy": approval_policy,
+                "sandbox": sandbox,
+            }
+        )
         return ThreadSnapshot(
             summary=ThreadSummary(
                 thread_id="thread-created",
@@ -89,6 +103,7 @@ class _FakeAdapter:
         model: str | None = None,
         profile: str | None = None,
         approval_policy: str | None = None,
+        sandbox: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
     ):
@@ -100,6 +115,7 @@ class _FakeAdapter:
                 "model": model,
                 "profile": profile,
                 "approval_policy": approval_policy,
+                "sandbox": sandbox,
                 "reasoning_effort": reasoning_effort,
                 "collaboration_mode": collaboration_mode,
             }
@@ -249,6 +265,44 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[0]
         self.assertEqual(card["header"]["title"]["content"], "Codex 协作模式")
 
+    def test_sandbox_command_updates_state(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/sandbox read-only")
+
+        state = handler._get_state("u1", "c1")
+        self.assertEqual(state["sandbox"], "read-only")
+        self.assertEqual(bot.replies[-1], ("c1", "沙箱策略已切换为：`read-only`"))
+
+    def test_sandbox_command_without_arg_shows_sandbox_card(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/sandbox")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[0]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 沙箱策略")
+
+    def test_permissions_command_updates_state(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/permissions full-access")
+
+        state = handler._get_state("u1", "c1")
+        self.assertEqual(state["approval_policy"], "never")
+        self.assertEqual(state["sandbox"], "danger-full-access")
+        self.assertIn("Full Access", bot.replies[-1][1])
+        self.assertIn("danger-full-access", bot.replies[-1][1])
+
+    def test_permissions_command_without_arg_shows_permissions_card(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/permissions")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[0]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 权限预设")
+
     def test_mode_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
 
@@ -263,6 +317,38 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("plan", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 协作模式")
+
+    def test_sandbox_card_action_updates_state(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "u1",
+            "c1",
+            "m1",
+            {"action": "set_sandbox_policy", "policy": "read-only"},
+        )
+
+        self.assertEqual(handler._get_state("u1", "c1")["sandbox"], "read-only")
+        self.assertEqual(response["toast_type"], "success")
+        self.assertIn("read-only", response["toast"])
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 沙箱策略")
+
+    def test_permissions_card_action_updates_state(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "u1",
+            "c1",
+            "m1",
+            {"action": "set_permissions_preset", "preset": "full-access"},
+        )
+
+        state = handler._get_state("u1", "c1")
+        self.assertEqual(state["approval_policy"], "never")
+        self.assertEqual(state["sandbox"], "danger-full-access")
+        self.assertEqual(response["toast_type"], "success")
+        self.assertIn("Full Access", response["toast"])
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 权限预设")
 
     def test_turn_plan_updated_sends_then_patches_plan_card(self) -> None:
         handler, bot = self._make_handler()
@@ -373,6 +459,9 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("后端：`managed` `ws://127.0.0.1:8765`", bot.replies[-1][1])
         self.assertIn("feishu-codex 默认 profile：`（未设置）`", bot.replies[-1][1])
         self.assertIn("当前运行时 provider：`provider1_api`", bot.replies[-1][1])
+        self.assertIn("权限预设：`Default`", bot.replies[-1][1])
+        self.assertIn("审批策略：`on-request`", bot.replies[-1][1])
+        self.assertIn("沙箱策略：`workspace-write`", bot.replies[-1][1])
         self.assertIn("fcodex", bot.replies[-1][1])
         self.assertIn("飞书 `/session` 仅列当前目录线程", bot.replies[-1][1])
         self.assertIn("飞书 `/resume` 按后端全局精确匹配（可跨 provider）", bot.replies[-1][1])
@@ -461,6 +550,17 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
         self.assertEqual(handler._adapter.start_turn_calls[-1]["profile"], "provider2")
+
+    def test_permissions_command_applies_to_thread_creation_and_turn_start(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/permissions full-access")
+        handler.handle_message("u1", "c1", "hello")
+
+        self.assertEqual(handler._adapter.create_thread_calls[-1]["approval_policy"], "never")
+        self.assertEqual(handler._adapter.create_thread_calls[-1]["sandbox"], "danger-full-access")
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["approval_policy"], "never")
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["sandbox"], "danger-full-access")
 
     def test_resume_thread_id_disconnect_is_not_reported_as_not_found(self) -> None:
         handler, _ = self._make_handler()

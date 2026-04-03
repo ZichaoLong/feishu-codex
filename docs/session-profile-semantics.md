@@ -57,6 +57,10 @@ They may share backend state, but they are not interchangeable.
 
 - Uses Codex public archive semantics
 - This is not hard deletion
+- Upstream Codex moves the persisted rollout JSONL from `sessions/` to `archived_sessions/`
+- The thread is also marked archived in persisted metadata
+- Archived threads are hidden from default `thread/list` results unless an archived filter is explicitly requested
+- Upstream Codex supports `thread/unarchive`, but `feishu-codex` does not expose a dedicated `/unarchive` command today
 
 ## 3. `fcodex` Shell-Wrapper Semantics
 
@@ -124,6 +128,8 @@ backend.
 
 - Uses Codex archive semantics
 - Not hard deletion
+- Uses the same underlying archive behavior as Feishu `/rm`
+- The persisted rollout JSONL is preserved under `archived_sessions/`, rather than deleted
 
 ## 4. TUI-Inside Semantics
 

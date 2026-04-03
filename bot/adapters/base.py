@@ -58,7 +58,14 @@ class AgentAdapter(ABC):
         ...
 
     @abstractmethod
-    def create_thread(self, *, cwd: str, profile: str | None = None) -> ThreadSnapshot:
+    def create_thread(
+        self,
+        *,
+        cwd: str,
+        profile: str | None = None,
+        approval_policy: str | None = None,
+        sandbox: str | None = None,
+    ) -> ThreadSnapshot:
         ...
 
     @abstractmethod
@@ -109,6 +116,7 @@ class AgentAdapter(ABC):
         model: str | None = None,
         profile: str | None = None,
         approval_policy: str | None = None,
+        sandbox: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
     ) -> dict[str, Any]:

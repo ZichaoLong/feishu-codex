@@ -89,6 +89,32 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             ),
         )
 
+    def test_create_thread_allows_permission_overrides(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.create_thread(
+            cwd="/tmp/project",
+            approval_policy="never",
+            sandbox="danger-full-access",
+        )
+
+        self.assertEqual(
+            fake_rpc.calls[0],
+            (
+                "thread/start",
+                {
+                    "cwd": "/tmp/project",
+                    "sandbox": "danger-full-access",
+                    "approvalPolicy": "never",
+                    "approvalsReviewer": "user",
+                    "personality": "pragmatic",
+                    "serviceName": "feishu-codex",
+                },
+            ),
+        )
+
     def test_resume_thread_can_attach_profile_override(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
         fake_rpc = _FakeRpc()
@@ -114,7 +140,30 @@ class CodexAppServerAdapterTests(unittest.TestCase):
 
         adapter.start_turn(thread_id="thread-1", text="hello", cwd="/tmp")
 
-        self.assertEqual(fake_rpc.calls, [("turn/start", {"threadId": "thread-1", "input": [{"type": "text", "text": "hello"}], "cwd": "/tmp", "approvalPolicy": "on-request", "approvalsReviewer": "user", "personality": "pragmatic"})])
+        self.assertEqual(
+            fake_rpc.calls,
+            [
+                (
+                    "turn/start",
+                    {
+                        "threadId": "thread-1",
+                        "input": [{"type": "text", "text": "hello"}],
+                        "cwd": "/tmp",
+                        "approvalPolicy": "on-request",
+                        "approvalsReviewer": "user",
+                        "sandboxPolicy": {
+                            "type": "workspaceWrite",
+                            "writableRoots": [],
+                            "readOnlyAccess": {"type": "fullAccess"},
+                            "networkAccess": False,
+                            "excludeTmpdirEnvVar": False,
+                            "excludeSlashTmp": False,
+                        },
+                        "personality": "pragmatic",
+                    },
+                )
+            ],
+        )
 
     def test_start_turn_plan_mode_uses_configured_model(self) -> None:
         adapter = CodexAppServerAdapter(
@@ -178,6 +227,24 @@ class CodexAppServerAdapterTests(unittest.TestCase):
 
         self.assertEqual(fake_rpc.calls[0][0], "turn/start")
         self.assertEqual(fake_rpc.calls[0][1]["config"], {"profile": "provider2"})
+
+    def test_start_turn_can_override_sandbox_policy(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.start_turn(
+            thread_id="thread-1",
+            text="hello",
+            cwd="/tmp",
+            sandbox="danger-full-access",
+        )
+
+        self.assertEqual(fake_rpc.calls[0][0], "turn/start")
+        self.assertEqual(
+            fake_rpc.calls[0][1]["sandboxPolicy"],
+            {"type": "dangerFullAccess"},
+        )
 
     def test_list_threads_can_explicitly_disable_provider_filter(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())

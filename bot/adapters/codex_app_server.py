@@ -20,6 +20,12 @@ from bot.constants import DEFAULT_APP_SERVER_MODE, DEFAULT_APP_SERVER_URL, DEFAU
 
 logger = logging.getLogger(__name__)
 
+_SUPPORTED_SANDBOX_MODES = {
+    "read-only",
+    "workspace-write",
+    "danger-full-access",
+}
+
 
 @dataclass(slots=True)
 class CodexAppServerConfig:
@@ -97,8 +103,21 @@ class CodexAppServerAdapter(AgentAdapter):
     def stop(self) -> None:
         self._rpc.stop()
 
-    def create_thread(self, *, cwd: str, profile: str | None = None) -> ThreadSnapshot:
-        params = self._thread_params(cwd=cwd, include_service_name=True, profile=profile)
+    def create_thread(
+        self,
+        *,
+        cwd: str,
+        profile: str | None = None,
+        approval_policy: str | None = None,
+        sandbox: str | None = None,
+    ) -> ThreadSnapshot:
+        params = self._thread_params(
+            cwd=cwd,
+            include_service_name=True,
+            profile=profile,
+            approval_policy=approval_policy,
+            sandbox=sandbox,
+        )
         result = self._rpc.request("thread/start", params)
         return self._snapshot_from_thread(result["thread"])
 
@@ -179,6 +198,7 @@ class CodexAppServerAdapter(AgentAdapter):
         model: str | None = None,
         profile: str | None = None,
         approval_policy: str | None = None,
+        sandbox: str | None = None,
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
     ) -> dict[str, Any]:
@@ -192,6 +212,7 @@ class CodexAppServerAdapter(AgentAdapter):
             "model": effective_model,
             "approvalPolicy": approval_policy or self._config.approval_policy or None,
             "approvalsReviewer": self._config.approvals_reviewer or None,
+            "sandboxPolicy": self._sandbox_policy_payload(sandbox or self._config.sandbox),
             "effort": effective_reasoning,
             "personality": self._config.personality or None,
             "serviceTier": self._config.service_tier or None,
@@ -249,11 +270,13 @@ class CodexAppServerAdapter(AgentAdapter):
         cwd: str,
         include_service_name: bool,
         profile: str | None = None,
+        approval_policy: str | None = None,
+        sandbox: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "cwd": cwd,
-            "sandbox": self._config.sandbox or None,
-            "approvalPolicy": self._config.approval_policy or None,
+            "sandbox": self._normalize_sandbox_mode(sandbox or self._config.sandbox),
+            "approvalPolicy": approval_policy or self._config.approval_policy or None,
             "approvalsReviewer": self._config.approvals_reviewer or None,
             "personality": self._config.personality or None,
             "model": self._config.model or None,
@@ -265,6 +288,39 @@ class CodexAppServerAdapter(AgentAdapter):
         if include_service_name:
             params["serviceName"] = self._config.service_name or None
         return _compact(params)
+
+    @staticmethod
+    def _normalize_sandbox_mode(mode: str | None) -> str | None:
+        if mode is None:
+            return None
+        value = str(mode).strip().lower()
+        if not value:
+            return None
+        if value not in _SUPPORTED_SANDBOX_MODES:
+            raise ValueError("sandbox 仅支持 read-only、workspace-write、danger-full-access")
+        return value
+
+    @classmethod
+    def _sandbox_policy_payload(cls, mode: str | None) -> dict[str, Any] | None:
+        normalized = cls._normalize_sandbox_mode(mode)
+        if normalized is None:
+            return None
+        if normalized == "danger-full-access":
+            return {"type": "dangerFullAccess"}
+        if normalized == "read-only":
+            return {
+                "type": "readOnly",
+                "access": {"type": "fullAccess"},
+                "networkAccess": False,
+            }
+        return {
+            "type": "workspaceWrite",
+            "writableRoots": [],
+            "readOnlyAccess": {"type": "fullAccess"},
+            "networkAccess": False,
+            "excludeTmpdirEnvVar": False,
+            "excludeSlashTmp": False,
+        }
 
     def _resolve_plan_mode_model(self, configured_model: str | None) -> str:
         if configured_model:

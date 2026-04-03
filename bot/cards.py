@@ -329,7 +329,7 @@ def build_approval_handled_card(title: str, decision: str, detail: str = "") -> 
     }
 
 
-def build_approval_policy_card(current_policy: str) -> dict:
+def build_approval_policy_card(current_policy: str, *, running: bool = False) -> dict:
     """构造原生审批策略选择卡片。"""
     labels = {
         "untrusted": "untrusted",
@@ -344,11 +344,16 @@ def build_approval_policy_card(current_policy: str) -> dict:
         "never": "不请求审批，自动执行。",
     }
 
+    current_label = labels.get(current_policy, current_policy or "（未设置）")
+    current_desc = descs.get(current_policy, "")
+    if running:
+        current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
+
     buttons = []
     elements = [
         {
             "tag": "markdown",
-            "content": f"当前审批策略：**{labels[current_policy]}**\n{descs[current_policy]}",
+            "content": f"当前审批策略：**{current_label}**\n{current_desc}",
         },
         {"tag": "hr"},
     ]
@@ -375,6 +380,149 @@ def build_approval_policy_card(current_policy: str) -> dict:
         "config": {"wide_screen_mode": True},
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 审批策略"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def build_sandbox_policy_card(current_sandbox: str, *, running: bool = False) -> dict:
+    """构造沙箱策略选择卡片。"""
+    labels = {
+        "read-only": "read-only",
+        "workspace-write": "workspace-write",
+        "danger-full-access": "danger-full-access",
+    }
+    descs = {
+        "read-only": "只读模式；可读当前工作区，编辑文件或访问网络通常需要更高权限组合。",
+        "workspace-write": "默认 Agent 模式；可读写当前工作区，工作区外写入仍受限。",
+        "danger-full-access": "完全访问；可编辑工作区外文件并直接联网，风险最高。",
+    }
+
+    current_label = labels.get(current_sandbox, current_sandbox or "（未设置）")
+    current_desc = descs.get(current_sandbox, "")
+    if running:
+        current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
+
+    buttons = []
+    elements = [
+        {
+            "tag": "markdown",
+            "content": f"当前沙箱策略：**{current_label}**\n{current_desc}",
+        },
+        {"tag": "hr"},
+    ]
+    for policy, label in labels.items():
+        elements.append({"tag": "markdown", "content": f"**{label}**\n{descs[policy]}"})
+        buttons.append(
+            {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"{'✓ ' if policy == current_sandbox else ''}{label}",
+                },
+                "type": "primary" if policy == current_sandbox else "default",
+                "value": {
+                    "action": "set_sandbox_policy",
+                    "plugin": KEYWORD,
+                    "policy": policy,
+                },
+            }
+        )
+    elements.append({"tag": "action", "actions": buttons})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 沙箱策略"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def build_permissions_preset_card(
+    current_approval: str,
+    current_sandbox: str,
+    *,
+    running: bool = False,
+) -> dict:
+    """构造权限预设选择卡片。"""
+    presets = [
+        {
+            "id": "read-only",
+            "label": "Read Only",
+            "description": "Codex 可读取当前工作区；编辑文件或访问网络需要审批。",
+            "approval": "on-request",
+            "sandbox": "read-only",
+        },
+        {
+            "id": "default",
+            "label": "Default",
+            "description": "Codex 可读写当前工作区并执行命令；访问网络或工作区外写入需要审批。",
+            "approval": "on-request",
+            "sandbox": "workspace-write",
+        },
+        {
+            "id": "full-access",
+            "label": "Full Access",
+            "description": "Codex 可直接访问互联网并编辑工作区外文件，不再请求审批。",
+            "approval": "never",
+            "sandbox": "danger-full-access",
+        },
+    ]
+    current_preset = next(
+        (
+            preset["id"]
+            for preset in presets
+            if preset["approval"] == current_approval and preset["sandbox"] == current_sandbox
+        ),
+        "",
+    )
+    current_label = next(
+        (preset["label"] for preset in presets if preset["id"] == current_preset),
+        f"Custom ({current_sandbox}, {current_approval})",
+    )
+    current_desc = f"审批：`{current_approval}`\n沙箱：`{current_sandbox}`"
+    if running:
+        current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
+
+    buttons = []
+    elements = [
+        {
+            "tag": "markdown",
+            "content": f"当前权限预设：**{current_label}**\n{current_desc}",
+        },
+        {"tag": "hr"},
+    ]
+    for preset in presets:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"**{preset['label']}**\n{preset['description']}",
+            }
+        )
+        buttons.append(
+            {
+                "tag": "button",
+                "text": {
+                    "tag": "plain_text",
+                    "content": f"{'✓ ' if preset['id'] == current_preset else ''}{preset['label']}",
+                },
+                "type": "primary" if preset["id"] == current_preset else "default",
+                "value": {
+                    "action": "set_permissions_preset",
+                    "plugin": KEYWORD,
+                    "preset": preset["id"],
+                },
+            }
+        )
+    elements.append({"tag": "action", "actions": buttons})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 权限预设"},
             "template": "blue",
         },
         "elements": elements,

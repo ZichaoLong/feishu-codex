@@ -170,9 +170,18 @@ python -m bot
 补充设计文档：
 
 - `docs/session-profile-semantics.md`
+- `docs/codex-permissions-model.md`
 - `docs/fcodex-shared-backend-runtime.md`
 - `docs/feishu-codex-design.md`
 - `docs/shared-backend-resume-safety.md`
+
+对应中文副本：
+
+- `docs/session-profile-semantics.zh-CN.md`
+- `docs/codex-permissions-model.zh-CN.md`
+- `docs/fcodex-shared-backend-runtime.zh-CN.md`
+- `docs/feishu-codex-design.zh-CN.md`
+- `docs/shared-backend-resume-safety.zh-CN.md`
 
 ## 当前功能
 
@@ -183,6 +192,8 @@ python -m bot
 - `/cd`、`/pwd`、`/status`、`/cancel`
 - `/mode` 查看或切换当前飞书会话后续 turn 的协作模式（`default` / `plan`）
 - `/approval` 查看或切换原生 Codex 审批策略
+- `/sandbox` 查看或切换当前飞书会话后续 turn 的沙箱策略（`read-only` / `workspace-write` / `danger-full-access`）
+- `/permissions` 以预设方式同时切换审批策略和沙箱（`read-only` / `default` / `full-access`）
 - 原生 Codex 审批卡片：
   - `item/commandExecution/requestApproval`
   - `item/fileChange/requestApproval`
@@ -196,6 +207,24 @@ python -m bot
 
 - `collaboration_mode: default` 下，Codex 仍可能把“先问用户再继续”的需求退化成普通文本回复
 - `collaboration_mode: plan` 下，Feishu 才能接到真正的 `item/tool/requestUserInput` 并回传原生回答结果
+
+### 权限模型速记
+
+- `sandbox` 管“技术边界”，也就是命令最终在什么权限下执行。
+  - `read-only`：默认只读、默认无网络；命令仍可执行，但文件系统写入会被限制。
+  - `workspace-write`：默认可读全盘、可写当前工作区；当前实现里工作区下仍会默认保护 `.git`、`.agents`、`.codex` 等路径。
+  - `danger-full-access`：基本不做内层隔离。
+- `approval_policy` 管“审批边界”，也就是什么时候要先经过审批才能继续。
+  - `untrusted`：只有“已知安全且只读”的命令会自动执行，其它大多先审批。
+  - `on-request`：由模型决定何时请求审批；这是当前默认值。
+  - `never`：不发起审批，失败直接返回给模型。
+  - `on-failure`：上游已标记 deprecated；交互式场景建议改用 `on-request`。
+- 这两项是独立旋钮，不互相替代。
+  - `workspace-write + on-request` 近似 upstream 默认 Agent 模式。
+  - `read-only + on-request` 更适合“只看代码/只分析”。
+  - `danger-full-access + never` 接近 Full Access。
+- 在当前 `feishu-codex` 里，审批默认由飞书用户处理；上游 Codex 还支持把审批路由到 `guardian_subagent`，但这里默认未启用。
+- 更具体的上游实现、平台后端与排障说明见 `docs/codex-permissions-model.md`。
 
 ## 与 feishu-cc 的现状差距
 

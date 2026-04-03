@@ -303,6 +303,25 @@ Reason:
 - `thread/list(cwd=...)` continues to mean something stable
 - matches the current `feishu-cc` mental model
 
+### 7.8 `/rm`
+
+Behavior:
+
+- call native `thread/archive`
+- do not hard-delete the persisted rollout
+- preserve the rollout JSONL by moving it from `sessions/` to `archived_sessions/`
+- rely on Codex persisted metadata to mark the thread archived
+
+List semantics:
+
+- default `thread/list` behavior should exclude archived threads
+- archived threads should only appear when an explicit archived filter is requested
+
+Product boundary:
+
+- v1 does not need to expose `thread/unarchive` immediately
+- but `/rm` must be documented as reversible archive semantics, not destructive deletion
+
 ## 8. Message and Streaming Model
 
 ### 8.1 Turn lifecycle

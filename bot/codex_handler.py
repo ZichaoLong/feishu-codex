@@ -30,9 +30,11 @@ from bot.cards import (
     build_file_change_approval_card,
     build_history_preview_card,
     build_plan_card,
+    build_permissions_preset_card,
     build_permissions_approval_card,
     build_resume_guard_card,
     build_rename_card,
+    build_sandbox_policy_card,
     build_sessions_card,
     build_thread_snapshot_card,
 )
@@ -67,6 +69,39 @@ logger = logging.getLogger(__name__)
 
 _CARD_REPLY_LIMIT_DEFAULT = 12000
 _CARD_LOG_LIMIT_DEFAULT = 8000
+_APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
+_SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
+_PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
+    "read-only": {
+        "label": "Read Only",
+        "approval_policy": "on-request",
+        "sandbox": "read-only",
+    },
+    "default": {
+        "label": "Default",
+        "approval_policy": "on-request",
+        "sandbox": "workspace-write",
+    },
+    "full-access": {
+        "label": "Full Access",
+        "approval_policy": "never",
+        "sandbox": "danger-full-access",
+    },
+}
+
+
+def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
+    for preset, config in _PERMISSIONS_PRESETS.items():
+        if config["approval_policy"] == approval_policy and config["sandbox"] == sandbox:
+            return preset
+    return ""
+
+
+def _permissions_summary(approval_policy: str, sandbox: str) -> str:
+    preset = _permissions_preset_key(approval_policy, sandbox)
+    if preset:
+        return _PERMISSIONS_PRESETS[preset]["label"]
+    return f"Custom ({sandbox}, {approval_policy})"
 
 
 class CodexHandler(BotHandler):
@@ -183,6 +218,10 @@ class CodexHandler(BotHandler):
             return self._handle_sessions_refresh_action(user_id, chat_id, toast="已取消")
         if action == "set_approval_policy":
             return self._handle_set_approval_policy(user_id, chat_id, action_value)
+        if action == "set_sandbox_policy":
+            return self._handle_set_sandbox_policy(user_id, chat_id, action_value)
+        if action == "set_permissions_preset":
+            return self._handle_set_permissions_preset(user_id, chat_id, action_value)
         if action == "set_collaboration_mode":
             return self._handle_set_collaboration_mode(user_id, chat_id, action_value)
         if action.startswith("command_") or action.startswith("file_change_") or action.startswith("permissions_"):
@@ -299,6 +338,7 @@ class CodexHandler(BotHandler):
                     "followup_sent": False,
                     "pending_local_turn_card": False,
                     "approval_policy": self._adapter_config.approval_policy,
+                    "sandbox": self._adapter_config.sandbox,
                     "collaboration_mode": self._adapter_config.collaboration_mode,
                     "model": self._adapter_config.model,
                     "reasoning_effort": self._adapter_config.reasoning_effort,
@@ -354,6 +394,12 @@ class CodexHandler(BotHandler):
         if cmd == "/approval":
             self._handle_approval_command(user_id, chat_id, arg)
             return
+        if cmd == "/sandbox":
+            self._handle_sandbox_command(user_id, chat_id, arg)
+            return
+        if cmd == "/permissions":
+            self._handle_permissions_command(user_id, chat_id, arg)
+            return
         if cmd == "/mode":
             self._handle_mode_command(user_id, chat_id, arg)
             return
@@ -398,6 +444,7 @@ class CodexHandler(BotHandler):
                 model=state["model"] or None,
                 profile=self._effective_default_profile() or None,
                 approval_policy=state["approval_policy"] or None,
+                sandbox=state["sandbox"] or None,
                 reasoning_effort=state["reasoning_effort"] or None,
                 collaboration_mode=state["collaboration_mode"] or None,
             )
@@ -444,6 +491,8 @@ class CodexHandler(BotHandler):
             snapshot = self._adapter.create_thread(
                 cwd=state["working_dir"],
                 profile=self._effective_default_profile() or None,
+                approval_policy=state["approval_policy"] or None,
+                sandbox=state["sandbox"] or None,
             )
         except Exception as exc:
             logger.exception("新建线程失败")
@@ -465,6 +514,7 @@ class CodexHandler(BotHandler):
         title = state["current_thread_name"] or "（未绑定线程）"
         running = "是" if state["running"] else "否"
         turn_id = state["current_turn_id"][:8] + "…" if state["current_turn_id"] else "-"
+        permissions_summary = _permissions_summary(state["approval_policy"], state["sandbox"])
         runtime_config = self._safe_read_runtime_config()
         profile_resolution = self._current_default_profile_resolution(runtime_config)
         local_profile = profile_resolution.effective_profile
@@ -485,7 +535,9 @@ class CodexHandler(BotHandler):
                 f"{header}\n执行中：{running}\n当前 turn：{turn_id}\n"
                 f"后端：`{self._backend_mode_label()}` `{self._backend_url()}`\n"
                 f"{profile_line}\n{provider_line}\n"
+                f"权限预设：`{permissions_summary}`\n"
                 f"审批策略：`{state['approval_policy']}`\n"
+                f"沙箱策略：`{state['sandbox']}`\n"
                 f"协作模式：`{state['collaboration_mode']}`\n"
                 "会话视角：飞书 `/session` 仅列当前目录线程；飞书 `/resume` 按后端全局精确匹配（可跨 provider）；"
                 "`fcodex /session`、`fcodex /resume <thread_name>` 复用与飞书一致的共享发现逻辑；"
@@ -682,14 +734,71 @@ class CodexHandler(BotHandler):
     def _handle_approval_command(self, user_id: str, chat_id: str, arg: str) -> None:
         state = self._get_state(user_id, chat_id)
         if arg:
-            if arg not in {"untrusted", "on-failure", "on-request", "never"}:
+            policy = arg.strip().lower()
+            if policy not in _APPROVAL_POLICIES:
                 self.bot.reply(chat_id, "审批策略仅支持：`untrusted`、`on-failure`、`on-request`、`never`")
                 return
             with self._lock:
-                state["approval_policy"] = arg
-            self.bot.reply(chat_id, f"审批策略已切换为：`{arg}`")
+                state["approval_policy"] = policy
+                running = state["running"]
+            message = f"审批策略已切换为：`{policy}`"
+            if running:
+                message += "，当前执行结束后的下一轮生效。"
+            self.bot.reply(chat_id, message)
             return
-        self.bot.reply_card(chat_id, build_approval_policy_card(state["approval_policy"]))
+        self.bot.reply_card(
+            chat_id,
+            build_approval_policy_card(state["approval_policy"], running=state["running"]),
+        )
+
+    def _handle_sandbox_command(self, user_id: str, chat_id: str, arg: str) -> None:
+        state = self._get_state(user_id, chat_id)
+        if arg:
+            policy = arg.strip().lower()
+            if policy not in _SANDBOX_POLICIES:
+                self.bot.reply(chat_id, "沙箱策略仅支持：`read-only`、`workspace-write`、`danger-full-access`")
+                return
+            with self._lock:
+                state["sandbox"] = policy
+                running = state["running"]
+            message = f"沙箱策略已切换为：`{policy}`"
+            if running:
+                message += "，当前执行结束后的下一轮生效。"
+            self.bot.reply(chat_id, message)
+            return
+        self.bot.reply_card(
+            chat_id,
+            build_sandbox_policy_card(state["sandbox"], running=state["running"]),
+        )
+
+    def _handle_permissions_command(self, user_id: str, chat_id: str, arg: str) -> None:
+        state = self._get_state(user_id, chat_id)
+        if arg:
+            preset = arg.strip().lower()
+            config = _PERMISSIONS_PRESETS.get(preset)
+            if config is None:
+                self.bot.reply(chat_id, "权限预设仅支持：`read-only`、`default`、`full-access`")
+                return
+            with self._lock:
+                state["approval_policy"] = config["approval_policy"]
+                state["sandbox"] = config["sandbox"]
+                running = state["running"]
+            message = (
+                f"权限预设已切换为：`{config['label']}`"
+                f"（审批：`{config['approval_policy']}`，沙箱：`{config['sandbox']}`）"
+            )
+            if running:
+                message += "，当前执行结束后的下一轮生效。"
+            self.bot.reply(chat_id, message)
+            return
+        self.bot.reply_card(
+            chat_id,
+            build_permissions_preset_card(
+                state["approval_policy"],
+                state["sandbox"],
+                running=state["running"],
+            ),
+        )
 
     def _handle_mode_command(self, user_id: str, chat_id: str, arg: str) -> None:
         state = self._get_state(user_id, chat_id)
@@ -889,15 +998,63 @@ class CodexHandler(BotHandler):
     def _handle_set_approval_policy(
         self, user_id: str, chat_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
-        policy = str(action_value.get("policy", ""))
-        if policy not in {"untrusted", "on-failure", "on-request", "never"}:
+        policy = str(action_value.get("policy", "")).strip().lower()
+        if policy not in _APPROVAL_POLICIES:
             return self.bot.make_card_response(toast="非法审批策略", toast_type="warning")
         state = self._get_state(user_id, chat_id)
         with self._lock:
             state["approval_policy"] = policy
+            running = state["running"]
+        toast = f"审批策略已切换为 {policy}"
+        if running:
+            toast += "，当前执行结束后的下一轮生效"
         return self.bot.make_card_response(
-            card=build_approval_policy_card(policy),
-            toast=f"审批策略已切换为 {policy}",
+            card=build_approval_policy_card(policy, running=running),
+            toast=toast,
+            toast_type="success",
+        )
+
+    def _handle_set_sandbox_policy(
+        self, user_id: str, chat_id: str, action_value: dict
+    ) -> P2CardActionTriggerResponse:
+        policy = str(action_value.get("policy", "")).strip().lower()
+        if policy not in _SANDBOX_POLICIES:
+            return self.bot.make_card_response(toast="非法沙箱策略", toast_type="warning")
+        state = self._get_state(user_id, chat_id)
+        with self._lock:
+            state["sandbox"] = policy
+            running = state["running"]
+        toast = f"沙箱策略已切换为 {policy}"
+        if running:
+            toast += "，当前执行结束后的下一轮生效"
+        return self.bot.make_card_response(
+            card=build_sandbox_policy_card(policy, running=running),
+            toast=toast,
+            toast_type="success",
+        )
+
+    def _handle_set_permissions_preset(
+        self, user_id: str, chat_id: str, action_value: dict
+    ) -> P2CardActionTriggerResponse:
+        preset = str(action_value.get("preset", "")).strip().lower()
+        config = _PERMISSIONS_PRESETS.get(preset)
+        if config is None:
+            return self.bot.make_card_response(toast="非法权限预设", toast_type="warning")
+        state = self._get_state(user_id, chat_id)
+        with self._lock:
+            state["approval_policy"] = config["approval_policy"]
+            state["sandbox"] = config["sandbox"]
+            running = state["running"]
+        toast = f"权限预设已切换为 {config['label']}"
+        if running:
+            toast += "，当前执行结束后的下一轮生效"
+        return self.bot.make_card_response(
+            card=build_permissions_preset_card(
+                config["approval_policy"],
+                config["sandbox"],
+                running=running,
+            ),
+            toast=toast,
             toast_type="success",
         )
 
@@ -1041,6 +1198,8 @@ class CodexHandler(BotHandler):
         snapshot = self._adapter.create_thread(
             cwd=state["working_dir"],
             profile=self._effective_default_profile() or None,
+            approval_policy=state["approval_policy"] or None,
+            sandbox=state["sandbox"] or None,
         )
         self._bind_thread(user_id, chat_id, snapshot.summary)
         return snapshot.summary.thread_id
@@ -1806,6 +1965,8 @@ class CodexHandler(BotHandler):
                 "/rename <title> 重命名当前线程\n"
                 "/star 收藏或取消收藏当前线程\n"
                 "/approval 查看或设置审批策略\n"
+                "/sandbox 查看或设置沙箱策略\n"
+                "/permissions 查看或设置权限预设\n"
                 "/mode 查看或设置协作模式\n"
                 "/status 查看当前状态\n"
                 "/cancel 停止当前执行\n"
