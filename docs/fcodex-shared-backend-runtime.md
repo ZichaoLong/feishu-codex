@@ -1,0 +1,210 @@
+# `fcodex` Shared-Backend Runtime
+
+This document explains the implementation model behind:
+
+- `fcodex --cd`
+- the local websocket proxy
+- the shared Codex remote app-server used by `feishu-codex`
+
+See also:
+
+- `docs/session-profile-semantics.md`
+- `docs/shared-backend-resume-safety.md`
+- `docs/feishu-codex-design.md`
+
+## 1. Runtime Pieces
+
+At steady state, the local/shared path looks like this:
+
+```text
+Feishu client
+  -> feishu-codex service
+     -> shared codex app-server (ws://127.0.0.1:8765 by default)
+
+fcodex shell wrapper
+  -> local thin proxy
+     -> shared codex app-server
+        -> upstream Codex TUI
+```
+
+The important point is that Feishu and `fcodex` are meant to talk to the same
+live app-server backend.
+
+## 2. Why `fcodex` Exists
+
+Bare `codex` normally owns its own backend lifecycle. That is fine for normal
+local use, but it is the wrong default when you want Feishu and local TUI to
+operate on the same live thread.
+
+`fcodex` exists to provide:
+
+- one shared backend with Feishu
+- a local default profile owned by `feishu-codex`
+- wrapper commands such as `/session` and `/resume <name>`
+- a compatibility patch for remote-mode working-directory behavior
+
+## 3. Installed Wrapper Environment
+
+The installed `fcodex` wrapper does three important things before it launches
+the Python entrypoint:
+
+1. loads `~/.config/environment.d/90-codex.conf` when present
+2. sets `FC_CONFIG_DIR`
+3. sets `FC_DATA_DIR`
+
+That means the service process and the local wrapper can share:
+
+- the same configuration directory
+- the same local profile-state file
+- the same auxiliary local state
+
+## 4. How `--cd` Actually Works
+
+`fcodex` resolves one effective working directory per launch:
+
+- if the user passes `--cd` or `-C`, use that
+- otherwise, use the current shell cwd
+
+It then does two separate things with that value:
+
+1. pass `--cd` through to upstream `codex`
+2. pass the same cwd into the local proxy
+
+This double handling is intentional.
+
+## 5. Why a Local Proxy Is Needed
+
+The original problem was:
+
+- in remote mode, upstream Codex TUI did not reliably send `cwd` on
+  `thread/start`
+- the shared app-server then fell back to its own process working directory
+- for `feishu-codex`, that fallback directory is typically
+  `~/.local/share/feishu-codex`
+
+Result:
+
+- plain `fcodex` fresh starts could end up in the service data directory instead
+  of the caller's shell directory
+
+The local proxy fixes that specific gap:
+
+- it forwards websocket traffic to the shared backend
+- when it sees `thread/start` with missing or empty `params.cwd`, it injects the
+  effective cwd chosen by the wrapper
+- all other traffic is forwarded unchanged
+
+This keeps the patch very narrow.
+
+## 6. Why Proxy Lifetime Follows the Parent Process
+
+During investigation we confirmed that upstream remote resume is not a
+single-connection flow.
+
+`codex --remote ... resume <id>` may:
+
+1. connect once for session lookup / startup work
+2. disconnect
+3. reconnect for the actual TUI session
+
+Therefore, the proxy cannot safely shut down after the first websocket client
+disconnects.
+
+Current model:
+
+- when launched by `fcodex`, the proxy receives the wrapper process PID
+- the proxy stays alive until that parent process exits
+- when used in tests without a parent PID, it can still fall back to a short
+  idle-timeout mode
+
+This is why the current implementation is robust against resume-time reconnects.
+
+## 7. What Uses the Shared Backend
+
+By default:
+
+- Feishu commands use the shared backend
+- plain `fcodex`
+- `fcodex <prompt>`
+- `fcodex resume <thread_id>`
+- `fcodex /resume <name>` after wrapper-side resolution
+
+Wrapper commands such as `fcodex /session` do not start a TUI, but they still
+query the same backend and the same thread metadata.
+
+## 8. Explicit `--remote` Is a Special Case
+
+If the user explicitly passes `--remote` to `fcodex`, the wrapper does not try
+to force the shared-backend path.
+
+That means:
+
+- no local cwd-fixing proxy is inserted
+- no shared-backend guarantee is implied
+- the user is choosing a custom remote target
+
+This is intentional. Explicit `--remote` means "use the target I asked for."
+
+## 9. Differences from Bare `codex`
+
+Compared with bare Codex TUI, `fcodex` adds these semantics:
+
+- shared backend with Feishu by default
+- local default-profile injection when `-p/--profile` is absent
+- wrapper commands:
+  - `/help`
+  - `/profile`
+  - `/rm`
+  - `/session`
+  - `/resume`
+- cwd patching through a thin local proxy
+
+Inside the running TUI, however, command semantics return to upstream Codex
+behavior.
+
+## 10. Known Caveats
+
+### Upstream remote protocol may change
+
+The cwd proxy exists because of current upstream remote-mode behavior. If
+upstream later changes:
+
+- `thread/start` payload shape
+- remote session startup order
+- reconnect timing
+
+the wrapper may need adjustment.
+
+### Bare `codex` is still outside the shared-thread contract
+
+If a user opens the same thread through bare `codex` using its own backend while
+Feishu or `fcodex` is also writing that thread, `feishu-codex` cannot make that
+safe.
+
+### TUI discovery remains upstream
+
+Inside the TUI, `/resume` picker behavior remains upstream and may differ from:
+
+- Feishu `/session`
+- `fcodex /session`
+- `fcodex /resume <name>`
+
+### Shared backend availability matters
+
+If the shared app-server is not running or not reachable, `fcodex` cannot do its
+job. In that case, startup fails fast rather than silently falling back to an
+isolated local backend.
+
+## 11. Developer Pointers
+
+Relevant implementation files:
+
+- wrapper argument handling and shared-backend launch:
+  - `bot/fcodex.py`
+- proxy transport and cwd injection:
+  - `bot/fcodex_proxy.py`
+- Feishu-side adapter/handler:
+  - `bot/codex_handler.py`
+  - `bot/adapters/codex_app_server.py`
+- shared discovery logic:
+  - `bot/session_resolution.py`

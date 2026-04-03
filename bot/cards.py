@@ -798,10 +798,8 @@ def build_sessions_card(
                 f"收藏优先，其余按最近更新时间排序。\n"
                 f"当前显示：{'，'.join(summary_parts)}。\n"
                 "全局恢复请用 `/resume <thread_id|thread_name>`。\n"
-                "wrapper 级 `fcodex /resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配；"
-                "本地若想先看线程，可用 `fcodex /session`；"
-                "`fcodex /help`、`/profile`、`/rm`、`/session`、`/resume` 这些 shell wrapper 自命令必须单独使用；"
-                "`fcodex` TUI 内置 `/resume` 仍保持 upstream 原样。"
+                "本地共享建议使用 `fcodex`；其中 `fcodex /session`、`fcodex /resume <thread_name>` 与飞书复用同一套共享发现逻辑；"
+                "进入 TUI 后，`/resume` 仍保持 upstream 原样。"
             ),
         },
         {"tag": "hr"},

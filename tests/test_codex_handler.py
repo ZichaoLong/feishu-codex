@@ -376,9 +376,9 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("fcodex", bot.replies[-1][1])
         self.assertIn("飞书 `/session` 仅列当前目录线程", bot.replies[-1][1])
         self.assertIn("飞书 `/resume` 按后端全局精确匹配（可跨 provider）", bot.replies[-1][1])
-        self.assertIn("wrapper 级 `fcodex /resume <name>` 与飞书 `/resume` 使用同一套跨 provider 解析", bot.replies[-1][1])
-        self.assertIn("wrapper 级 `fcodex /session` 可列当前目录跨 provider 线程", bot.replies[-1][1])
-        self.assertIn("`fcodex /help`、`/profile`、`/rm`、`/session`、`/resume` 这些 shell wrapper 自命令必须单独使用", bot.replies[-1][1])
+        self.assertIn("`fcodex /session`、`fcodex /resume <thread_name>` 复用与飞书一致的共享发现逻辑", bot.replies[-1][1])
+        self.assertIn("`fcodex resume <id>` 以及进入 TUI 后的 `/resume` 仍是 upstream 原样", bot.replies[-1][1])
+        self.assertIn("`fcodex` shell wrapper 自命令只有 `fcodex /help`、`/profile`、`/rm`、`/session`、`/resume`", bot.replies[-1][1])
 
     def test_profile_command_without_arg_shows_runtime_profiles(self) -> None:
         handler, bot = self._make_handler()
@@ -622,9 +622,8 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[0]
         self.assertIn("跨 provider 汇总", card["elements"][0]["content"])
         self.assertIn("全局恢复请用 `/resume <thread_id|thread_name>`", card["elements"][0]["content"])
-        self.assertIn("wrapper 级 `fcodex /resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配", card["elements"][0]["content"])
-        self.assertIn("`fcodex /help`、`/profile`、`/rm`、`/session`、`/resume` 这些 shell wrapper 自命令必须单独使用", card["elements"][0]["content"])
-        self.assertIn("`fcodex` TUI 内置 `/resume` 仍保持 upstream 原样", card["elements"][0]["content"])
+        self.assertIn("`fcodex /session`、`fcodex /resume <thread_name>` 与飞书复用同一套共享发现逻辑", card["elements"][0]["content"])
+        self.assertIn("进入 TUI 后，`/resume` 仍保持 upstream 原样", card["elements"][0]["content"])
 
     def test_help_mentions_session_and_resume_scope_difference(self) -> None:
         handler, bot = self._make_handler()
@@ -634,12 +633,12 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("飞书 `/session` 只列当前目录线程，但会跨 provider 汇总", bot.replies[-1][1])
         self.assertIn("飞书 `/resume` 按后端全局精确匹配", bot.replies[-1][1])
         self.assertIn("/profile", bot.replies[-1][1])
-        self.assertIn("`fcodex` shell wrapper 只接管 `fcodex /help`、`fcodex /profile`、`fcodex /rm`、`fcodex /session`、`fcodex /resume <name>` 这几类命令", bot.replies[-1][1])
-        self.assertIn("它们必须单独使用，不能与裸 `codex` 的 flags 或子命令混用", bot.replies[-1][1])
-        self.assertIn("`fcodex resume <id>` 仍是 upstream 原生命令", bot.replies[-1][1])
-        self.assertIn("wrapper 级 `fcodex /resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配", bot.replies[-1][1])
+        self.assertIn("`fcodex` shell wrapper 自命令只有 `fcodex /help`、`/profile`、`/rm`、`/session`、`/resume`", bot.replies[-1][1])
+        self.assertIn("不能与裸 `codex` 的 flags 或子命令混用", bot.replies[-1][1])
+        self.assertIn("`fcodex resume <id>` 以及进入 TUI 后的 `/resume` 仍是 upstream 原样", bot.replies[-1][1])
+        self.assertIn("`fcodex /session`、`fcodex /resume <thread_name>` 复用与飞书一致的共享发现逻辑", bot.replies[-1][1])
         self.assertIn("`fcodex /session` 或 `fcodex /session global`", bot.replies[-1][1])
-        self.assertIn("当前版本通常按 backend 默认 provider 过滤，不受 feishu-codex `/profile` 控制", bot.replies[-1][1])
+        self.assertIn("docs/session-profile-semantics.md", bot.replies[-1][1])
 
     def test_resume_card_action_for_not_loaded_thread_returns_guard_card(self) -> None:
         handler, _ = self._make_handler()

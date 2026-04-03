@@ -508,13 +508,12 @@ class FCodexTests(unittest.TestCase):
                         fcodex_main()
         self.assertEqual(exc.exception.code, 0)
         self.assertIn("fcodex /help", stdout.getvalue())
-        self.assertIn("运行中的 TUI 内输入 `/help`", stdout.getvalue())
         self.assertIn("fcodex /profile [name]", stdout.getvalue())
         self.assertIn("fcodex /rm <id|name>", stdout.getvalue())
         self.assertIn("fcodex /session", stdout.getvalue())
         self.assertIn("fcodex /resume <thread_id|thread_name>", stdout.getvalue())
-        self.assertIn("TUI 内置 /resume", stdout.getvalue())
-        self.assertIn("直接连到 shared backend", stdout.getvalue())
+        self.assertIn("进入 TUI 后，`/help`、`/resume` 等命令恢复 upstream 原样", stdout.getvalue())
+        self.assertIn("`fcodex`、`fcodex <prompt>`、`fcodex resume <id>` 仍是 upstream Codex CLI", stdout.getvalue())
 
     def test_fcodex_non_slash_text_is_passthrough_prompt(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):

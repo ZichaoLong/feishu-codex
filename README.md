@@ -66,6 +66,15 @@ provider2_api_key=...
 `fcodex` 自己解析的特殊命令只有 `fcodex /help`、`fcodex /profile`、`fcodex /rm`、`fcodex /session`、`fcodex /resume` 这几类，并且必须单独使用；其余参数和子命令都会继续原样传给裸 `codex`。
 如果你想在本地先查看线程，再决定恢复哪个，可执行 `fcodex /session`（当前目录）或 `fcodex /session global`（全局）。
 
+实用规则只记这几条：
+
+- 飞书 `/session` 只看当前目录，跨 provider 汇总
+- 飞书 `/resume` 按后端全局精确匹配
+- `fcodex /session`、`fcodex /resume <name>` 复用与飞书一致的共享发现逻辑
+- `fcodex resume <id>` 以及进入 TUI 后的 `/resume` 保持 upstream 原样
+- `/profile` 只改 feishu-codex / 默认 `fcodex` 的本地默认 profile，不改裸 `codex` 全局配置
+- 想和飞书安全共用同一线程时，优先用 `fcodex`，不要让裸 `codex` 同时写同一线程
+
 如果你希望启用 Codex 原生 `requestUserInput` 卡片，而不是让模型退化成普通文本追问，需要在 `codex.yaml` 中显式开启：
 
 ```yaml
@@ -144,44 +153,24 @@ python -m bot
 
 ## Session / Profile 语义
 
-- 飞书 `/session`
-  - 只显示当前目录线程
-  - 显式跨 provider 汇总
-- 飞书 `/resume <thread_id|thread_name>`
-  - 按后端全局精确匹配
-  - 可跨 provider
-  - 同名多匹配直接报错
-- wrapper 级 `fcodex /resume <thread_name>`
-  - 先调用 feishu-codex 的共享发现逻辑做跨 provider 精确匹配
-  - 匹配到唯一线程后，转成 `thread_id` 调 upstream `codex --remote ... resume <id>`
-- plain `fcodex` / `fcodex <prompt>`
-  - 直接连接 shared backend
-  - 目录语义由 `--cd` 或当前 shell cwd 决定
-- wrapper 级 `fcodex /session [cwd|global]`
-  - 使用 feishu-codex 的共享发现逻辑列线程
-  - `fcodex /session` 默认列当前目录、跨 provider 线程
-  - `fcodex /session global` 列后端全局、跨 provider 线程
-- wrapper 级 `fcodex /help`
-  - 只展示这些 shell wrapper 自命令的边界与语义
-  - 不能写成 `fcodex --cd /repo /session` 或 `fcodex /resume demo --model ...` 这种混合形式
-- wrapper 级 `fcodex /profile [name]`
-  - 查看或切换 feishu-codex / 默认 `fcodex` 的本地默认 profile
-  - 不改写裸 `codex` 全局配置
-- wrapper 级 `fcodex /rm <thread_id|thread_name>`
-  - 调用 Codex 公开的线程归档（archive）
-  - 会从常规列表中隐藏，不是硬删除
-- `fcodex` TUI 内置 `/resume`
-  - 保持 upstream 原样
-  - 不复用 feishu-codex 的跨 provider 名字解析逻辑
-  - 当前版本通常按 backend 默认 provider 过滤
-  - 不受 feishu-codex `/profile` 控制，也不应假定它与飞书 `/session` 的筛选范围一致
-- `/profile`
-  - 只影响飞书侧默认 profile 与未显式 `-p/--profile` 的 `fcodex`
-  - 不影响裸 `codex`
-  - `fcodex -p <profile>` 永远优先
+推荐把语义理解为三层：
+
+- 飞书命令
+  - `/session`：当前目录，跨 provider
+  - `/resume`：后端全局精确匹配，跨 provider
+- `fcodex` shell wrapper 命令
+  - `fcodex /session`、`fcodex /resume <name>`：复用飞书同一套共享发现逻辑
+- 进入 TUI 后的 upstream 命令
+  - TUI 内 `/help`、`/resume` 仍按 upstream 原样工作
+
+完整语义见：
+
+- `docs/session-profile-semantics.md`
 
 补充设计文档：
 
+- `docs/session-profile-semantics.md`
+- `docs/fcodex-shared-backend-runtime.md`
 - `docs/feishu-codex-design.md`
 - `docs/shared-backend-resume-safety.md`
 
