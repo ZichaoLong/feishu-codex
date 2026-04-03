@@ -1,19 +1,27 @@
+import json
 import os
+import queue
+import threading
+import time
 import unittest
-from unittest.mock import patch
+from websockets.exceptions import ConnectionClosedOK
+from websockets.sync.client import connect
+from websockets.sync.server import serve
+from unittest.mock import Mock, patch
 from io import StringIO
 from pathlib import Path
 
+from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, ThreadSummary
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.codex_protocol.client import CodexRpcClient
-from bot.fcodex import _default_data_dir, main as fcodex_main
+from bot.fcodex import _default_data_dir, _launch_local_cwd_proxy, main as fcodex_main
+from bot.fcodex_proxy import _relay_messages, _rewrite_thread_start_cwd, run_proxy
 from bot.profile_resolution import resolve_local_default_profile
 from bot.session_resolution import (
     format_thread_match,
     looks_like_thread_id,
     resolve_resume_target_by_name,
 )
-from bot.adapters.base import ThreadSummary
 
 
 class _FakeRpc:
@@ -229,6 +237,15 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         self.assertEqual(fake_rpc.calls[1][0], "config/read")
         self.assertEqual(runtime.current_profile, "provider1")
 
+    def test_archive_thread_calls_public_archive_api(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.archive_thread("thread-1")
+
+        self.assertEqual(fake_rpc.calls[0], ("thread/archive", {"threadId": "thread-1"}))
+
     def test_config_rejects_invalid_collaboration_mode(self) -> None:
         with self.assertRaises(ValueError):
             CodexAppServerConfig.from_dict({"collaboration_mode": "broken"})
@@ -325,13 +342,18 @@ class FCodexTests(unittest.TestCase):
     def test_fcodex_injects_remote_url(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
-                with patch("bot.fcodex.os.execvpe") as mock_exec:
-                    with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
-                        fcodex_main()
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                    mock_resolve.return_value.effective_profile = ""
+                    mock_resolve.return_value.stale_profile = ""
+                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())) as mock_proxy:
+                        with patch("bot.fcodex.os.execvpe") as mock_exec:
+                            with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
+                                fcodex_main()
 
+        mock_proxy.assert_called_once_with("ws://127.0.0.1:8765", os.getcwd())
         self.assertEqual(
             mock_exec.call_args[0][1],
-            ["codex", "--remote", "ws://127.0.0.1:8765", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
+            ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
         )
 
     def test_fcodex_injects_default_profile_when_not_explicit(self) -> None:
@@ -340,16 +362,19 @@ class FCodexTests(unittest.TestCase):
                 with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
                     mock_resolve.return_value.effective_profile = "provider2"
                     mock_resolve.return_value.stale_profile = ""
-                    with patch("bot.fcodex.os.execvpe") as mock_exec:
-                        with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
-                            fcodex_main()
+                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())):
+                        with patch("bot.fcodex.os.execvpe") as mock_exec:
+                            with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
+                                fcodex_main()
 
         self.assertEqual(
             mock_exec.call_args[0][1],
             [
                 "codex",
                 "--remote",
-                "ws://127.0.0.1:8765",
+                "ws://127.0.0.1:9100",
+                "--cd",
+                os.getcwd(),
                 "--profile",
                 "provider2",
                 "resume",
@@ -360,69 +385,49 @@ class FCodexTests(unittest.TestCase):
     def test_fcodex_explicit_profile_wins(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value="provider2"):
-                with patch("bot.fcodex.os.execvpe") as mock_exec:
-                    with patch("sys.argv", ["fcodex", "-p", "provider1", "resume", "thread-1"]):
-                        fcodex_main()
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                    mock_resolve.return_value.effective_profile = "provider2"
+                    mock_resolve.return_value.stale_profile = ""
+                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())):
+                        with patch("bot.fcodex.os.execvpe") as mock_exec:
+                            with patch("sys.argv", ["fcodex", "-p", "provider1", "resume", "thread-1"]):
+                                fcodex_main()
 
         self.assertEqual(
             mock_exec.call_args[0][1],
-            ["codex", "--remote", "ws://127.0.0.1:8765", "-p", "provider1", "resume", "thread-1"],
-        )
-
-    def test_fcodex_resume_name_uses_shared_resolution(self) -> None:
-        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
-            with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
-                with patch("bot.fcodex.resolve_resume_name_via_remote_backend") as mock_resolve:
-                    mock_resolve.return_value = ThreadSummary(
-                        thread_id="019d2e94-a475-7bc1-b2f7-a3ce37628ede",
-                        cwd="/tmp/project",
-                        name="demo",
-                        preview="hello",
-                        created_at=0,
-                        updated_at=0,
-                        source="cli",
-                        status="notLoaded",
-                    )
-                    with patch("bot.fcodex.os.execvpe") as mock_exec:
-                        with patch("sys.argv", ["fcodex", "resume", "demo"]):
-                            fcodex_main()
-
-        self.assertEqual(mock_resolve.call_args.kwargs["target"], "demo")
-        self.assertEqual(
-            mock_exec.call_args[0][1],
-            [
-                "codex",
-                "--remote",
-                "ws://127.0.0.1:8765",
-                "resume",
-                "019d2e94-a475-7bc1-b2f7-a3ce37628ede",
-            ],
+            ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "-p", "provider1", "resume", "thread-1"],
         )
 
     def test_fcodex_explicit_remote_skips_shared_resolution(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
-                with patch("bot.fcodex.resolve_resume_name_via_remote_backend") as mock_resolve:
-                    with patch("bot.fcodex.os.execvpe") as mock_exec:
-                        with patch("sys.argv", ["fcodex", "--remote", "ws://127.0.0.1:9900", "resume", "demo"]):
-                            fcodex_main()
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_profile_resolve:
+                    mock_profile_resolve.return_value.effective_profile = ""
+                    mock_profile_resolve.return_value.stale_profile = ""
+                    with patch("bot.fcodex.resolve_resume_name_via_remote_backend") as mock_resolve:
+                        with patch("bot.fcodex.os.execvpe") as mock_exec:
+                            with patch("sys.argv", ["fcodex", "--remote", "ws://127.0.0.1:9900", "resume", "demo"]):
+                                fcodex_main()
 
         mock_resolve.assert_not_called()
         self.assertEqual(
             mock_exec.call_args[0][1],
-            ["codex", "--remote", "ws://127.0.0.1:9900", "resume", "demo"],
+            ["codex", "--cd", os.getcwd(), "--remote", "ws://127.0.0.1:9900", "resume", "demo"],
         )
 
     def test_fcodex_respects_explicit_remote_arg(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
-                with patch("bot.fcodex.os.execvpe") as mock_exec:
-                    with patch("sys.argv", ["fcodex", "--remote", "ws://127.0.0.1:9900", "resume"]):
-                        fcodex_main()
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_profile_resolve:
+                    mock_profile_resolve.return_value.effective_profile = ""
+                    mock_profile_resolve.return_value.stale_profile = ""
+                    with patch("bot.fcodex.os.execvpe") as mock_exec:
+                        with patch("sys.argv", ["fcodex", "--remote", "ws://127.0.0.1:9900", "resume"]):
+                            fcodex_main()
 
         self.assertEqual(
             mock_exec.call_args[0][1],
-            ["codex", "--remote", "ws://127.0.0.1:9900", "resume"],
+            ["codex", "--cd", os.getcwd(), "--remote", "ws://127.0.0.1:9900", "resume"],
         )
 
     def test_fcodex_clears_stale_local_default_profile(self) -> None:
@@ -432,17 +437,18 @@ class FCodexTests(unittest.TestCase):
                     with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
                         mock_resolve.return_value.effective_profile = ""
                         mock_resolve.return_value.stale_profile = "provider9"
-                        with patch("bot.fcodex.os.execvpe") as mock_exec:
-                            with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
-                                fcodex_main()
+                        with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())):
+                            with patch("bot.fcodex.os.execvpe") as mock_exec:
+                                with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
+                                    fcodex_main()
 
         mock_save.assert_called_once_with("")
         self.assertEqual(
             mock_exec.call_args[0][1],
-            ["codex", "--remote", "ws://127.0.0.1:8765", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
+            ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
         )
 
-    def test_fcodex_sessions_uses_shared_current_dir_listing(self) -> None:
+    def test_fcodex_slash_session_uses_shared_current_dir_listing(self) -> None:
         thread = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -459,7 +465,7 @@ class FCodexTests(unittest.TestCase):
             with patch("bot.fcodex.list_current_dir_threads", return_value=[thread]) as mock_list:
                 with patch("bot.fcodex.CodexAppServerAdapter"):
                     with patch("bot.fcodex.sys.stdout", stdout):
-                        with patch("sys.argv", ["fcodex", "sessions"]):
+                        with patch("sys.argv", ["fcodex", "/session"]):
                             with self.assertRaises(SystemExit) as exc:
                                 fcodex_main()
         self.assertEqual(exc.exception.code, 0)
@@ -468,7 +474,7 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("provider2", stdout.getvalue())
         self.assertIn("hello", stdout.getvalue())
 
-    def test_fcodex_sessions_global_uses_shared_global_listing(self) -> None:
+    def test_fcodex_slash_session_global_uses_shared_global_listing(self) -> None:
         thread = ThreadSummary(
             thread_id="thread-2",
             cwd="/tmp/project",
@@ -485,7 +491,7 @@ class FCodexTests(unittest.TestCase):
             with patch("bot.fcodex.list_global_threads", return_value=[thread]) as mock_list:
                 with patch("bot.fcodex.CodexAppServerAdapter"):
                     with patch("bot.fcodex.sys.stdout", stdout):
-                        with patch("sys.argv", ["fcodex", "sessions", "global"]):
+                        with patch("sys.argv", ["fcodex", "/session", "global"]):
                             with self.assertRaises(SystemExit) as exc:
                                 fcodex_main()
         self.assertEqual(exc.exception.code, 0)
@@ -493,17 +499,354 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("thread-2", stdout.getvalue())
         self.assertIn("provider1", stdout.getvalue())
 
-    def test_fcodex_help_resume_explains_upstream_picker_boundary(self) -> None:
+    def test_fcodex_slash_help_explains_upstream_picker_boundary(self) -> None:
         stdout = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stdout", stdout):
-                with patch("sys.argv", ["fcodex", "help-resume"]):
+                with patch("sys.argv", ["fcodex", "/help"]):
                     with self.assertRaises(SystemExit) as exc:
                         fcodex_main()
         self.assertEqual(exc.exception.code, 0)
-        self.assertIn("fcodex sessions", stdout.getvalue())
-        self.assertIn("fcodex resume <thread_name>", stdout.getvalue())
+        self.assertIn("fcodex /help", stdout.getvalue())
+        self.assertIn("运行中的 TUI 内输入 `/help`", stdout.getvalue())
+        self.assertIn("fcodex /profile [name]", stdout.getvalue())
+        self.assertIn("fcodex /rm <id|name>", stdout.getvalue())
+        self.assertIn("fcodex /session", stdout.getvalue())
+        self.assertIn("fcodex /resume <thread_id|thread_name>", stdout.getvalue())
         self.assertIn("TUI 内置 /resume", stdout.getvalue())
+        self.assertIn("直接连到 shared backend", stdout.getvalue())
+
+    def test_fcodex_non_slash_text_is_passthrough_prompt(self) -> None:
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                    mock_resolve.return_value.effective_profile = ""
+                    mock_resolve.return_value.stale_profile = ""
+                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())):
+                        with patch("bot.fcodex.os.execvpe") as mock_exec:
+                            with patch("sys.argv", ["fcodex", "session"]):
+                                fcodex_main()
+
+        self.assertEqual(
+            mock_exec.call_args[0][1],
+            ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "session"],
+        )
+
+    def test_fcodex_rejects_wrapper_command_mixed_with_prefix_flags(self) -> None:
+        stderr = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.sys.stderr", stderr):
+                with patch("sys.argv", ["fcodex", "--cd", "/tmp/project", "/session"]):
+                    with self.assertRaises(SystemExit) as exc:
+                        fcodex_main()
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("wrapper 自命令必须单独使用", stderr.getvalue())
+        self.assertIn("fcodex /session [cwd|global]", stderr.getvalue())
+
+    def test_fcodex_rejects_wrapper_command_with_extra_args(self) -> None:
+        stderr = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.sys.stderr", stderr):
+                with patch("sys.argv", ["fcodex", "/resume", "demo", "--model", "gpt-5"]):
+                    with self.assertRaises(SystemExit) as exc:
+                        fcodex_main()
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("用法：fcodex /resume <thread_id|thread_name>", stderr.getvalue())
+
+    def test_fcodex_rejects_unknown_slash_command_in_shell_wrapper(self) -> None:
+        stderr = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.sys.stderr", stderr):
+                with patch("sys.argv", ["fcodex", "/cd", "/tmp/project"]):
+                    with self.assertRaises(SystemExit) as exc:
+                        fcodex_main()
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("未知 fcodex 自命令：/cd", stderr.getvalue())
+        self.assertIn("shell 层只支持 `/help`、`/profile`、`/rm`、`/session`、`/resume`", stderr.getvalue())
+
+    def test_fcodex_slash_profile_shows_runtime_summary(self) -> None:
+        stdout = StringIO()
+        runtime = RuntimeConfigSummary(
+            current_profile="provider1",
+            current_model_provider="provider1_api",
+            profiles=[
+                RuntimeProfileSummary(name="provider1", model_provider="provider1_api"),
+                RuntimeProfileSummary(name="provider2", model_provider="provider2_api"),
+            ],
+        )
+        mock_adapter = Mock()
+        mock_adapter.read_runtime_config.return_value = runtime
+        mock_adapter.stop.return_value = None
+        resolution = Mock()
+        resolution.effective_profile = "provider2"
+        resolution.stale_profile = ""
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.CodexAppServerAdapter", return_value=mock_adapter):
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend", return_value=resolution):
+                    with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value="provider2"):
+                        with patch("bot.fcodex.sys.stdout", stdout):
+                            with patch("sys.argv", ["fcodex", "/profile"]):
+                                with self.assertRaises(SystemExit) as exc:
+                                    fcodex_main()
+        self.assertEqual(exc.exception.code, 0)
+        self.assertIn("feishu-codex / fcodex 默认 profile：`provider2`", stdout.getvalue())
+        self.assertIn("当前运行时 provider：`provider1_api`", stdout.getvalue())
+        self.assertIn("`provider2` -> `provider2_api` <- 默认", stdout.getvalue())
+
+    def test_fcodex_slash_profile_switches_local_default_profile(self) -> None:
+        stdout = StringIO()
+        runtime = RuntimeConfigSummary(
+            current_profile="provider1",
+            current_model_provider="provider1_api",
+            profiles=[
+                RuntimeProfileSummary(name="provider1", model_provider="provider1_api"),
+                RuntimeProfileSummary(name="provider2", model_provider="provider2_api"),
+            ],
+        )
+        mock_adapter = Mock()
+        mock_adapter.read_runtime_config.return_value = runtime
+        mock_adapter.stop.return_value = None
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.CodexAppServerAdapter", return_value=mock_adapter):
+                with patch("bot.fcodex.ProfileStateStore.save_default_profile") as mock_save:
+                    with patch("bot.fcodex.sys.stdout", stdout):
+                        with patch("sys.argv", ["fcodex", "/profile", "provider2"]):
+                            with self.assertRaises(SystemExit) as exc:
+                                fcodex_main()
+        self.assertEqual(exc.exception.code, 0)
+        mock_save.assert_called_once_with("provider2")
+        self.assertIn("默认 profile 已切换为：`provider2`", stdout.getvalue())
+        self.assertIn("对应 provider：`provider2_api`", stdout.getvalue())
+
+    def test_fcodex_slash_rm_archives_thread(self) -> None:
+        stdout = StringIO()
+        thread_id = "019d2e94-a475-7bc1-b2f7-a3ce37628ede"
+        thread = ThreadSummary(
+            thread_id=thread_id,
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        mock_adapter = Mock()
+        mock_adapter.read_thread.return_value.summary = thread
+        mock_adapter.stop.return_value = None
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.CodexAppServerAdapter", return_value=mock_adapter):
+                with patch("bot.fcodex.sys.stdout", stdout):
+                    with patch("sys.argv", ["fcodex", "/rm", thread_id]):
+                        with self.assertRaises(SystemExit) as exc:
+                            fcodex_main()
+        self.assertEqual(exc.exception.code, 0)
+        mock_adapter.archive_thread.assert_called_once_with(thread_id)
+        self.assertIn("已归档线程：`019d2e94…` demo", stdout.getvalue())
+        self.assertIn("不是硬删除", stdout.getvalue())
+
+    def test_fcodex_slash_resume_resolves_name(self) -> None:
+        stdout = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_profile_resolve:
+                    mock_profile_resolve.return_value.effective_profile = ""
+                    mock_profile_resolve.return_value.stale_profile = ""
+                with patch("bot.fcodex.resolve_resume_name_via_remote_backend") as mock_resolve:
+                    mock_resolve.return_value = ThreadSummary(
+                        thread_id="019d2e94-a475-7bc1-b2f7-a3ce37628ede",
+                        cwd="/tmp/project",
+                        name="demo",
+                        preview="hello",
+                        created_at=0,
+                        updated_at=0,
+                        source="cli",
+                        status="notLoaded",
+                    )
+                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())):
+                        with patch("bot.fcodex.sys.stdout", stdout):
+                            with patch("bot.fcodex.os.execvpe") as mock_exec:
+                                with patch("sys.argv", ["fcodex", "/resume", "demo"]):
+                                    fcodex_main()
+
+        self.assertEqual(mock_resolve.call_args.kwargs["target"], "demo")
+        self.assertEqual(
+            mock_exec.call_args[0][1],
+            ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
+        )
+
+    def test_fcodex_explicit_cd_is_forwarded_to_proxy(self) -> None:
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                    mock_resolve.return_value.effective_profile = ""
+                    mock_resolve.return_value.stale_profile = ""
+                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9101", Mock())) as mock_proxy:
+                        with patch("bot.fcodex.os.execvpe") as mock_exec:
+                            with patch("sys.argv", ["fcodex", "--cd", "/home/tester/project"]):
+                                fcodex_main()
+
+        mock_proxy.assert_called_once_with("ws://127.0.0.1:8765", "/home/tester/project")
+        self.assertEqual(
+            mock_exec.call_args[0][1],
+            ["codex", "--remote", "ws://127.0.0.1:9101", "--cd", "/home/tester/project"],
+        )
+
+    def test_launch_local_cwd_proxy_passes_parent_pid(self) -> None:
+        process = Mock()
+        process.stdout.readline.return_value = "ws://127.0.0.1:9100\n"
+        process.poll.return_value = None
+        with patch("bot.fcodex.os.getpid", return_value=4321):
+            with patch("bot.fcodex.subprocess.Popen", return_value=process) as mock_popen:
+                proxy_url, _ = _launch_local_cwd_proxy(
+                    "ws://127.0.0.1:8765",
+                    "/tmp/project",
+                )
+
+        self.assertEqual(proxy_url, "ws://127.0.0.1:9100")
+        cmd = mock_popen.call_args.args[0]
+        self.assertIn("--parent-pid", cmd)
+        self.assertIn("4321", cmd)
+
+    def test_thread_start_proxy_rewrites_only_missing_cwd(self) -> None:
+        rewritten = _rewrite_thread_start_cwd(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "thread/start",
+                    "params": {"approvalPolicy": "on-request"},
+                }
+            ),
+            "/tmp/project",
+        )
+
+        self.assertEqual(
+            json.loads(rewritten),
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "thread/start",
+                "params": {"approvalPolicy": "on-request", "cwd": "/tmp/project"},
+            },
+        )
+
+    def test_thread_start_proxy_keeps_existing_cwd_and_other_methods(self) -> None:
+        original_start = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "thread/start",
+                "params": {"cwd": "/srv/already-set"},
+            }
+        )
+        original_resume = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "thread/resume",
+                "params": {},
+            }
+        )
+
+        self.assertEqual(
+            _rewrite_thread_start_cwd(original_start, "/tmp/project"),
+            original_start,
+        )
+        self.assertEqual(
+            _rewrite_thread_start_cwd(original_resume, "/tmp/project"),
+            original_resume,
+        )
+
+    def test_relay_messages_treats_normal_target_close_as_clean_exit(self) -> None:
+        class _Source:
+            def __iter__(self):
+                return iter(["hello"])
+
+        class _Target:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def send(self, payload: str) -> None:
+                self.calls.append(payload)
+                raise ConnectionClosedOK(None, None)
+
+        target = _Target()
+        _relay_messages(_Source(), target)
+        self.assertEqual(target.calls, ["hello"])
+
+    def test_proxy_stays_alive_across_resume_style_reconnect(self) -> None:
+        backend_url_queue: queue.Queue[str] = queue.Queue()
+        backend_server_ref: dict[str, object] = {}
+
+        def _backend_handler(ws) -> None:
+            for message in ws:
+                ws.send(message)
+
+        def _backend_main() -> None:
+            with serve(_backend_handler, "127.0.0.1", 0, max_size=None) as server:
+                backend_server_ref["server"] = server
+                port = server.socket.getsockname()[1]
+                backend_url_queue.put(f"ws://127.0.0.1:{port}")
+                server.serve_forever()
+
+        backend_thread = threading.Thread(target=_backend_main, daemon=True)
+        backend_thread.start()
+        backend_url = backend_url_queue.get(timeout=1)
+
+        proxy_url_queue: queue.Queue[str] = queue.Queue()
+        proxy_thread = threading.Thread(
+            target=run_proxy,
+            kwargs={
+                "backend_url": backend_url,
+                "cwd": "/tmp/project",
+                "idle_timeout_seconds": 0.3,
+                "on_listen": proxy_url_queue.put,
+            },
+            daemon=True,
+        )
+        proxy_thread.start()
+        proxy_url = proxy_url_queue.get(timeout=1)
+
+        try:
+            with connect(proxy_url, open_timeout=1, max_size=None) as ws:
+                ws.send(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "thread/start",
+                            "params": {},
+                        }
+                    )
+                )
+                echoed = json.loads(ws.recv())
+                self.assertEqual(echoed["params"]["cwd"], "/tmp/project")
+
+            time.sleep(0.1)
+
+            with connect(proxy_url, open_timeout=1, max_size=None) as ws:
+                ws.send(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "thread/resume",
+                            "params": {"threadId": "thread-1"},
+                        }
+                    )
+                )
+                echoed = json.loads(ws.recv())
+                self.assertEqual(echoed["method"], "thread/resume")
+                self.assertNotIn("cwd", echoed["params"])
+
+            proxy_thread.join(timeout=1)
+            self.assertFalse(proxy_thread.is_alive())
+        finally:
+            backend_server = backend_server_ref.get("server")
+            if backend_server is not None:
+                backend_server.shutdown()
+            backend_thread.join(timeout=1)
 
 
 class SessionResolutionTests(unittest.TestCase):

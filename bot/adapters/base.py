@@ -96,6 +96,10 @@ class AgentAdapter(ABC):
         ...
 
     @abstractmethod
+    def archive_thread(self, thread_id: str) -> None:
+        ...
+
+    @abstractmethod
     def start_turn(
         self,
         *,

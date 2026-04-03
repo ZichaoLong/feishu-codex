@@ -167,6 +167,9 @@ class CodexAppServerAdapter(AgentAdapter):
     def rename_thread(self, thread_id: str, name: str) -> None:
         self._rpc.request("thread/name/set", {"threadId": thread_id, "name": name})
 
+    def archive_thread(self, thread_id: str) -> None:
+        self._rpc.request("thread/archive", {"threadId": thread_id})
+
     def start_turn(
         self,
         *,

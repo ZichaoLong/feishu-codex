@@ -44,6 +44,20 @@ class FavoritesStore:
             self._write_all(data)
         return starred
 
+    def remove(self, user_id: str, thread_id: str) -> bool:
+        with self._lock:
+            data = self._read_all()
+            favorites = {
+                item for item in data.get(user_id, [])
+                if isinstance(item, str) and item
+            }
+            if thread_id not in favorites:
+                return False
+            favorites.remove(thread_id)
+            data[user_id] = sorted(favorites)
+            self._write_all(data)
+        return True
+
     def _read_all(self) -> dict[str, list[str]]:
         path = self._file_path()
         if not path.exists():

@@ -342,6 +342,9 @@ class CodexHandler(BotHandler):
         if cmd == "/resume":
             self._handle_resume_command(user_id, chat_id, arg)
             return
+        if cmd == "/rm":
+            self._handle_rm_command(user_id, chat_id, arg)
+            return
         if cmd == "/rename":
             self._handle_rename_command(user_id, chat_id, arg)
             return
@@ -485,9 +488,10 @@ class CodexHandler(BotHandler):
                 f"审批策略：`{state['approval_policy']}`\n"
                 f"协作模式：`{state['collaboration_mode']}`\n"
                 "会话视角：飞书 `/session` 仅列当前目录线程；飞书 `/resume` 按后端全局精确匹配（可跨 provider）；"
-                "shell 级 `fcodex resume <name>` 与飞书 `/resume` 使用同一套跨 provider 解析；"
-                "shell 级 `fcodex sessions` 可列当前目录跨 provider 线程；"
-                "`fcodex` TUI 内置 `/resume` 仍保持 upstream 原样，不保证跨 provider。\n"
+                "wrapper 级 `fcodex /resume <name>` 与飞书 `/resume` 使用同一套跨 provider 解析；"
+                "wrapper 级 `fcodex /session` 可列当前目录跨 provider 线程；"
+                "`fcodex /help`、`/profile`、`/rm`、`/session`、`/resume` 这些 shell wrapper 自命令必须单独使用；"
+                "`fcodex` TUI 内置 `/resume` 当前通常按 backend 默认 provider 过滤。\n"
                 "可用 `/profile` 查看或切换 feishu-codex 默认 profile；这不会改动裸 `codex` 的全局配置。\n"
                 + (
                     f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。\n"
@@ -624,6 +628,49 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["current_thread_name"] = arg
         self.bot.reply(chat_id, f"已重命名为：{arg}")
+
+    def _handle_rm_command(self, user_id: str, chat_id: str, arg: str) -> None:
+        state = self._get_state(user_id, chat_id)
+        with self._lock:
+            if state["running"]:
+                self.bot.reply(chat_id, "执行中不能归档线程，请等待结束或先执行 `/cancel`。")
+                return
+        target = arg.strip() if arg else ""
+        if target:
+            try:
+                thread = self._resolve_resume_target(target)
+            except Exception as exc:
+                logger.exception("解析归档目标失败")
+                self.bot.reply(chat_id, f"归档线程失败：{exc}")
+                return
+        else:
+            if not state["current_thread_id"]:
+                self.bot.reply(chat_id, "用法：`/rm [thread_id 或 thread_name]`；省略参数时归档当前线程。")
+                return
+            try:
+                thread = self._read_thread_summary(state["current_thread_id"], original_arg=state["current_thread_id"])
+            except Exception as exc:
+                logger.exception("读取当前线程失败")
+                self.bot.reply(chat_id, f"归档线程失败：{exc}")
+                return
+
+        try:
+            self._adapter.archive_thread(thread.thread_id)
+        except Exception as exc:
+            logger.exception("归档线程失败")
+            self.bot.reply(chat_id, f"归档线程失败：{exc}")
+            return
+
+        self._favorites.remove(user_id, thread.thread_id)
+        if state["current_thread_id"] == thread.thread_id:
+            self._clear_thread_binding(user_id, chat_id)
+        self.bot.reply(
+            chat_id,
+            (
+                f"已归档线程：`{thread.thread_id[:8]}…` {thread.title}\n"
+                "说明：这里调用的是 Codex 的线程归档（archive），会从常规列表中隐藏，不是硬删除。"
+            ),
+        )
 
     def _handle_star_command(self, user_id: str, chat_id: str) -> None:
         state = self._get_state(user_id, chat_id)
@@ -1753,6 +1800,7 @@ class CodexHandler(BotHandler):
                 "/new 新建线程\n"
                 "/session 查看当前目录线程\n"
                 "/resume <thread_id|thread_name> 按后端全局精确恢复线程并切换目录\n"
+                "/rm [thread_id|thread_name] 归档线程；省略参数时归档当前线程\n"
                 "/profile 查看或切换 feishu-codex 默认 profile\n"
                 "/cd <path> 切换当前目录并清空当前线程绑定\n"
                 "/pwd 查看当前目录\n"
@@ -1765,8 +1813,11 @@ class CodexHandler(BotHandler):
                 "/help 查看帮助\n\n"
                 "说明：`/new` 只会先绑定一个新的空线程；发送第一条消息后，该线程才会在 Codex 侧 materialize。\n"
                 "说明：飞书 `/session` 只列当前目录线程，但会跨 provider 汇总；飞书 `/resume` 按后端全局精确匹配，若有多个同名线程会直接报错。\n"
-                "说明：shell 级 `fcodex resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配；如需先查看线程，可在本地执行 `fcodex sessions` 或 `fcodex sessions global`。\n"
-                "说明：运行中的 `fcodex` TUI 内置 `/resume` 仍保持 upstream 原样，不保证跨 provider，也不保证与飞书 `/session` 的筛选范围一致。\n"
+                "说明：飞书 `/rm` 调用的是 Codex 公开的线程归档（archive），会从常规列表中隐藏，不是硬删除。\n"
+                "说明：`fcodex` shell wrapper 只接管 `fcodex /help`、`fcodex /profile`、`fcodex /rm`、`fcodex /session`、`fcodex /resume <name>` 这几类命令；它们必须单独使用，不能与裸 `codex` 的 flags 或子命令混用。\n"
+                "说明：除上述 `/...` wrapper 自命令外，其余参数和子命令都会继续原样传给裸 `codex`，例如 `fcodex resume <id>` 仍是 upstream 原生命令。\n"
+                "说明：wrapper 级 `fcodex /resume <thread_name>` 与飞书 `/resume` 使用同一套跨 provider 精确匹配；如需先查看线程，可在本地执行 `fcodex /session` 或 `fcodex /session global`。\n"
+                "说明：运行中的 `fcodex` TUI 内置 `/resume` 仍保持 upstream 原样；当前版本通常按 backend 默认 provider 过滤，不受 feishu-codex `/profile` 控制，也不等同于飞书 `/session`。\n"
                 "说明：`/profile` 切的是 feishu-codex 与默认 `fcodex` 的本地默认 profile，不会改动裸 `codex` 全局配置；`fcodex -p <profile>` 仍以显式参数为准。\n"
                 "说明：如果希望本地与飞书安全共用同一线程，请使用 `fcodex`，不要让裸 `codex` 与飞书同时写同一线程。\n"
                 "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。"
