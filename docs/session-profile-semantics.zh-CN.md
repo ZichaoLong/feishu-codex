@@ -141,8 +141,18 @@ wrapper 额外增加的行为：
 - TUI 内 `/resume` 不等同于飞书 `/resume`
 - TUI 内 `/resume` 不等同于 `fcodex /resume <name>`
 - TUI 内 `/resume` 不复用 `feishu-codex` 的跨 provider 名称匹配
+- 飞书 `/mode` 只改变未来由飞书发起的 turn 会携带的 mode
+- TUI 内协作模式的修改只影响未来由 TUI 发起的 turn
+- shared backend 表示共享 live thread 状态，不表示存在一个全局即时同步的协作模式控制面
 
 应把 TUI 视为“运行在 shared backend 上的 upstream 行为”，而不是 wrapper 命令面的延伸。
+
+### 协作模式作用域
+
+- 飞书 `/mode` 不会立刻改写 TUI `/collab` 当前显示的内容
+- TUI `/collab` 不是“当前飞书会话待发下一轮 mode”的权威视图
+- 真正决定下一轮协作模式的是：哪个客户端实际发起了下一次 `turn/start`
+- 一旦某轮 turn 启动，该轮携带的 `collaborationMode` 会更新 backend 线程的后续默认值，直到之后又被其他客户端显式覆盖
 
 ## 5. Profile 契约
 

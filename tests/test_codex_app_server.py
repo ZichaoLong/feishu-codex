@@ -133,7 +133,7 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             ),
         )
 
-    def test_start_turn_default_mode_omits_collaboration_mode(self) -> None:
+    def test_start_turn_default_mode_sends_explicit_collaboration_mode(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
         fake_rpc = _FakeRpc()
         adapter._rpc = fake_rpc
@@ -143,6 +143,7 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         self.assertEqual(
             fake_rpc.calls,
             [
+                ("model/list", {}),
                 (
                     "turn/start",
                     {
@@ -160,6 +161,14 @@ class CodexAppServerAdapterTests(unittest.TestCase):
                             "excludeSlashTmp": False,
                         },
                         "personality": "pragmatic",
+                        "collaborationMode": {
+                            "mode": "default",
+                            "settings": {
+                                "model": "gpt-5.3-codex",
+                                "reasoning_effort": None,
+                                "developer_instructions": None,
+                            },
+                        },
                     },
                 )
             ],
@@ -213,10 +222,12 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             collaboration_mode="default",
         )
 
-        self.assertEqual(len(fake_rpc.calls), 1)
-        method, params = fake_rpc.calls[0]
+        self.assertEqual(len(fake_rpc.calls), 2)
+        self.assertEqual(fake_rpc.calls[0], ("model/list", {}))
+        method, params = fake_rpc.calls[1]
         self.assertEqual(method, "turn/start")
-        self.assertNotIn("collaborationMode", params)
+        self.assertEqual(params["collaborationMode"]["mode"], "default")
+        self.assertEqual(params["collaborationMode"]["settings"]["model"], "gpt-5.3-codex")
 
     def test_start_turn_can_attach_profile_override(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
@@ -225,8 +236,9 @@ class CodexAppServerAdapterTests(unittest.TestCase):
 
         adapter.start_turn(thread_id="thread-1", text="hello", cwd="/tmp", profile="provider2")
 
-        self.assertEqual(fake_rpc.calls[0][0], "turn/start")
-        self.assertEqual(fake_rpc.calls[0][1]["config"], {"profile": "provider2"})
+        self.assertEqual(fake_rpc.calls[0], ("model/list", {}))
+        self.assertEqual(fake_rpc.calls[1][0], "turn/start")
+        self.assertEqual(fake_rpc.calls[1][1]["config"], {"profile": "provider2"})
 
     def test_start_turn_can_override_sandbox_policy(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
@@ -240,9 +252,10 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             sandbox="danger-full-access",
         )
 
-        self.assertEqual(fake_rpc.calls[0][0], "turn/start")
+        self.assertEqual(fake_rpc.calls[0], ("model/list", {}))
+        self.assertEqual(fake_rpc.calls[1][0], "turn/start")
         self.assertEqual(
-            fake_rpc.calls[0][1]["sandboxPolicy"],
+            fake_rpc.calls[1][1]["sandboxPolicy"],
             {"type": "dangerFullAccess"},
         )
 

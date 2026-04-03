@@ -144,9 +144,19 @@ Important consequence:
 - TUI `/resume` is not equivalent to Feishu `/resume`
 - TUI `/resume` is not equivalent to `fcodex /resume <name>`
 - TUI `/resume` does not reuse `feishu-codex` cross-provider name matching
+- Feishu `/mode` changes only the mode that future Feishu-started turns will send
+- TUI collaboration-mode changes affect only future TUI-started turns
+- shared backend means shared live thread state, not one globally synchronized collaboration-mode control plane
 
 Treat the TUI as upstream behavior running on a shared backend, not as an
 extension of the wrapper command surface.
+
+### Collaboration Mode Scope
+
+- Feishu `/mode` does not immediately rewrite what TUI `/collab` shows
+- TUI `/collab` is not an authoritative view of the current Feishu chat's pending next-turn mode
+- whichever client actually starts the next `turn/start` determines the collaboration mode for that turn
+- once a turn starts, that turn's `collaborationMode` can update the backend thread defaults for subsequent turns, until another client explicitly overrides them later
 
 ## 5. Profile Contract
 

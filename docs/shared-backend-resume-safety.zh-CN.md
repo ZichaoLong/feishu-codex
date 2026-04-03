@@ -81,6 +81,13 @@ codex --remote ws://127.0.0.1:PORT "$@"
 - 对同一线程，不会因双 live thread 而产生分叉
 - 对多个本地 TUI 窗口连接到同一个 shared backend 也是安全的
 - 一旦用户接受这条路径，心智负担更低
+- shared backend 不意味着存在一个跨客户端即时同步的统一控制面，例如“待发下一轮的协作模式选择”
+
+补充说明：
+
+- live thread 通过同一个 backend 共享
+- 但每个客户端仍各自决定自己下一次 `turn/start` 要发送什么
+- 因此，飞书里改的协作模式不会立刻改写已打开 TUI 的当前显示，反过来也是一样
 
 ### 6.2 Isolated backend 模式
 

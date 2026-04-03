@@ -551,6 +551,15 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
         self.assertEqual(handler._adapter.start_turn_calls[-1]["profile"], "provider2")
 
+    def test_prompt_after_switching_back_to_default_uses_default_collaboration_mode(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/mode plan")
+        handler.handle_message("u1", "c1", "/mode default")
+        handler.handle_message("u1", "c1", "hello")
+
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["collaboration_mode"], "default")
+
     def test_permissions_command_applies_to_thread_creation_and_turn_start(self) -> None:
         handler, _ = self._make_handler()
 

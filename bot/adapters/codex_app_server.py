@@ -86,7 +86,7 @@ class CodexAppServerAdapter(AgentAdapter):
         on_request: Callable[[int | str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._config = config
-        self._plan_mode_model: str | None = None
+        self._collaboration_mode_model: str | None = None
         self._rpc = CodexRpcClient(
             codex_command=config.codex_command,
             app_server_mode=config.app_server_mode,
@@ -219,15 +219,11 @@ class CodexAppServerAdapter(AgentAdapter):
         }
         if profile:
             params["config"] = {"profile": profile}
-        if effective_collaboration_mode == "plan":
-            params["collaborationMode"] = {
-                "mode": "plan",
-                "settings": {
-                    "model": self._resolve_plan_mode_model(effective_model),
-                    "reasoning_effort": effective_reasoning,
-                    "developer_instructions": None,
-                },
-            }
+        params["collaborationMode"] = self._collaboration_mode_payload(
+            effective_collaboration_mode,
+            model=effective_model,
+            reasoning_effort=effective_reasoning,
+        )
         return self._rpc.request("turn/start", _compact(params))
 
     def interrupt_turn(self, *, thread_id: str, turn_id: str) -> None:
@@ -322,23 +318,42 @@ class CodexAppServerAdapter(AgentAdapter):
             "excludeSlashTmp": False,
         }
 
-    def _resolve_plan_mode_model(self, configured_model: str | None) -> str:
+    def _collaboration_mode_payload(
+        self,
+        mode: str,
+        *,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> dict[str, Any]:
+        normalized = str(mode).strip().lower()
+        if normalized not in {"default", "plan"}:
+            raise ValueError("collaboration_mode 仅支持 default 或 plan")
+        return {
+            "mode": normalized,
+            "settings": {
+                "model": self._resolve_collaboration_mode_model(model),
+                "reasoning_effort": reasoning_effort,
+                "developer_instructions": None,
+            },
+        }
+
+    def _resolve_collaboration_mode_model(self, configured_model: str | None) -> str:
         if configured_model:
             return configured_model
-        if self._plan_mode_model:
-            return self._plan_mode_model
+        if self._collaboration_mode_model:
+            return self._collaboration_mode_model
 
         result = self._rpc.request("model/list", {})
         models = result.get("data") or []
         for item in models:
             if item.get("isDefault") and item.get("model"):
-                self._plan_mode_model = str(item["model"])
-                return self._plan_mode_model
+                self._collaboration_mode_model = str(item["model"])
+                return self._collaboration_mode_model
         for item in models:
             if not item.get("hidden") and item.get("model"):
-                self._plan_mode_model = str(item["model"])
-                return self._plan_mode_model
-        raise RuntimeError("无法解析 Codex 默认模型，plan 模式不可用")
+                self._collaboration_mode_model = str(item["model"])
+                return self._collaboration_mode_model
+        raise RuntimeError("无法解析 Codex 默认模型，无法构造 collaboration mode 参数")
 
     @staticmethod
     def _snapshot_from_thread(thread: dict[str, Any]) -> ThreadSnapshot:

@@ -207,6 +207,9 @@ python -m bot
 
 - `collaboration_mode: default` 下，Codex 仍可能把“先问用户再继续”的需求退化成普通文本回复
 - `collaboration_mode: plan` 下，Feishu 才能接到真正的 `item/tool/requestUserInput` 并回传原生回答结果
+- `/mode` 改的是“当前飞书会话后续 turn”的协作模式；只有下一条由飞书发起的普通消息真正触发 `turn/start` 时才会写入 backend
+- `fcodex` TUI 与飞书共享同一 live thread，但不共享一个即时同步的 mode 控制面；TUI `/collab` 看到的是 TUI 自己这侧的当前状态，不保证与飞书刚执行的 `/mode` 立即一致
+- 如果飞书和 TUI 同时都在操作同一线程，谁发起下一轮 turn，哪一轮就按谁当前携带的 mode 执行
 
 ### 权限模型速记
 

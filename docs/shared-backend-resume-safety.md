@@ -79,6 +79,13 @@ Properties:
 - safe against dual-live-thread divergence for the same thread
 - safe for multiple local TUI windows connected to the same shared backend
 - lower cognitive load once adopted
+- shared backend does not imply one globally synchronized per-client control plane such as pending collaboration-mode selections
+
+Clarification:
+
+- the live thread is shared through one backend
+- each client still decides what it will send on its own next `turn/start`
+- collaboration-mode choices made in Feishu do not immediately rewrite what an already-open TUI shows, and vice versa
 
 ### 6.2 Isolated backend mode
 
