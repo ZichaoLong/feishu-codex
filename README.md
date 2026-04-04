@@ -1,8 +1,12 @@
 # feishu-codex
 
+> 说明：本项目最开始来源于 [shenman9/feishu_bot](https://github.com/shenman9/feishu_bot)。更准确地说，它是从 `feishu_bot` 中用于“飞书 + Claude Code”的那部分子集能力演进而来，并在此基础上改造成面向 Codex 的实现，因此形成了当前的 `feishu-codex`。
+>
+> 也可以把它理解为：保留飞书侧消息、卡片、审批和会话管理这类交互形态，同时将底层接入切换为 Codex 原生 app-server 协议。
+
 `feishu-codex` 通过 Feishu 机器人把消息、审批和会话管理接到 `codex app-server`，不依赖 Claude 风格 hook，也不扫描私有会话文件。
 
-当前状态是可安装、可启动、核心链路可用的 MVP，架构已经切到 Codex 原生协议，但功能成熟度仍低于 `feishu-cc`。
+当前状态是可安装、可启动、核心链路可用的 MVP，架构已经切到 Codex 原生协议，功能仍在持续补齐中。
 
 ## 前置条件
 
@@ -229,7 +233,7 @@ python -m bot
 - 在当前 `feishu-codex` 里，审批默认由飞书用户处理；上游 Codex 还支持把审批路由到 `guardian_subagent`，但这里默认未启用。
 - 更具体的上游实现、平台后端与排障说明见 `docs/codex-permissions-model.md`。
 
-## 与 feishu-cc 的现状差距
+## 与 [feishu-cc](https://github.com/ZichaoLong/feishu-cc) 的现状差距
 
 当前还没有这些能力：
 
