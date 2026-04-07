@@ -11,6 +11,18 @@ _HISTORY_TEXT_MAX = 300
 _PLAN_CONTENT_MAX = 4000
 
 
+def build_markdown_card(title: str, content: str, *, template: str = "blue") -> dict:
+    """构造简单说明卡片。"""
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": template,
+        },
+        "elements": [{"tag": "markdown", "content": content}],
+    }
+
+
 def build_execution_card(
     log_text: str,
     reply_text: str = "",
@@ -338,14 +350,18 @@ def build_approval_policy_card(current_policy: str, *, running: bool = False) ->
         "never": "never",
     }
     descs = {
-        "untrusted": "偏保守，更多操作会要求审批。",
-        "on-failure": "仅在受限操作失败后请求审批。",
-        "on-request": "仅在模型显式请求时审批。",
-        "never": "不请求审批，自动执行。",
+        "untrusted": "偏保守，更多操作会先停下来等你确认。",
+        "on-failure": "受限操作失败后，再请求审批。",
+        "on-request": "仅在模型明确请求时，才停下来等你确认。",
+        "never": "不请求审批，直接执行。",
     }
 
     current_label = labels.get(current_policy, current_policy or "（未设置）")
-    current_desc = descs.get(current_policy, "")
+    current_desc = (
+        "它只决定什么时候停下来等你确认，不改变文件或网络边界。\n"
+        "多数情况下，优先使用 `/permissions`。\n"
+        "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
+    )
     if running:
         current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
 
@@ -394,13 +410,17 @@ def build_sandbox_policy_card(current_sandbox: str, *, running: bool = False) ->
         "danger-full-access": "danger-full-access",
     }
     descs = {
-        "read-only": "只读模式；可读当前工作区，编辑文件或访问网络通常需要更高权限组合。",
-        "workspace-write": "默认 Agent 模式；可读写当前工作区，工作区外写入仍受限。",
-        "danger-full-access": "完全访问；可编辑工作区外文件并直接联网，风险最高。",
+        "read-only": "只读当前工作区；修改文件通常需要更高权限组合。",
+        "workspace-write": "可读写当前工作区；工作区外写入仍受限。",
+        "danger-full-access": "可编辑工作区外文件并直接联网，风险最高。",
     }
 
     current_label = labels.get(current_sandbox, current_sandbox or "（未设置）")
-    current_desc = descs.get(current_sandbox, "")
+    current_desc = (
+        "它只决定文件和网络边界，不决定是否停下来审批。\n"
+        "多数情况下，优先使用 `/permissions`。\n"
+        "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
+    )
     if running:
         current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
 
@@ -451,22 +471,22 @@ def build_permissions_preset_card(
     presets = [
         {
             "id": "read-only",
-            "label": "Read Only",
-            "description": "Codex 可读取当前工作区；编辑文件或访问网络需要审批。",
+            "label": "read-only",
+            "description": "只读当前工作区；更安全，改文件前通常会停下来。",
             "approval": "on-request",
             "sandbox": "read-only",
         },
         {
             "id": "default",
-            "label": "Default",
-            "description": "Codex 可读写当前工作区并执行命令；访问网络或工作区外写入需要审批。",
+            "label": "default",
+            "description": "推荐默认值；可改当前工作区，风险和可用性更平衡。",
             "approval": "on-request",
             "sandbox": "workspace-write",
         },
         {
             "id": "full-access",
-            "label": "Full Access",
-            "description": "Codex 可直接访问互联网并编辑工作区外文件，不再请求审批。",
+            "label": "full-access",
+            "description": "不再请求审批；也可联网并写工作区外文件，风险最高。",
             "approval": "never",
             "sandbox": "danger-full-access",
         },
@@ -483,7 +503,13 @@ def build_permissions_preset_card(
         (preset["label"] for preset in presets if preset["id"] == current_preset),
         f"Custom ({current_sandbox}, {current_approval})",
     )
-    current_desc = f"审批：`{current_approval}`\n沙箱：`{current_sandbox}`"
+    current_desc = (
+        "推荐先用这个；它会同时设置审批策略和沙箱。\n"
+        "不确定时，优先选 `default`。\n"
+        "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。\n\n"
+        f"审批：`{current_approval}`\n"
+        f"沙箱：`{current_sandbox}`"
+    )
     if running:
         current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
 
@@ -536,11 +562,15 @@ def build_collaboration_mode_card(current_mode: str, *, running: bool = False) -
         "plan": "plan",
     }
     descs = {
-        "default": "普通协作模式，更接近直接执行；不保证触发原生 requestUserInput 或计划通知。",
-        "plan": "规划式协作模式；可启用原生 requestUserInput，并可能产出计划通知。",
+        "default": "更接近直接执行。",
+        "plan": "更容易先规划、提问，并展示计划卡片。",
     }
 
-    current_desc = descs[current_mode]
+    current_desc = (
+        f"{descs[current_mode]}\n"
+        "如果你希望模型先澄清再动手，通常用 `plan`。\n"
+        "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
+    )
     if running:
         current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
 
@@ -569,7 +599,7 @@ def build_collaboration_mode_card(current_mode: str, *, running: bool = False) -
                 },
             }
         )
-    elements.append({"tag": "action", "actions": buttons})
+    elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
 
     return {
         "config": {"wide_screen_mode": True},
@@ -758,7 +788,8 @@ def build_resume_guard_card(
         "该线程当前**未加载在 feishu-codex 的 backend 中**。\n"
         "如果直接恢复并继续写入，feishu-codex 会在自己的 backend 里再恢复一份 live thread。\n"
         "若本地裸 `codex` 也继续写同一线程，历史可能分叉或错乱。\n\n"
-        "如果只是想先看内容，请选“查看快照”；如果希望本地与飞书安全共用同一线程，请改用 `fcodex`。"
+        "如果只是想先看内容，请选“查看快照”。\n"
+        "如果希望本地与飞书继续同一个线程，请改用 `fcodex`，不要直接用裸 `codex`。"
     )
     return {
         "config": {"wide_screen_mode": True},
@@ -871,6 +902,7 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
         {"tag": "markdown", "content": line},
         {
             "tag": "action",
+            "layout": "trisection",
             "actions": [
                 {
                     "tag": "button",
@@ -945,9 +977,8 @@ def build_sessions_card(
                 "已按当前目录跨 provider 汇总显示线程。\n"
                 f"收藏优先，其余按最近更新时间排序。\n"
                 f"当前显示：{'，'.join(summary_parts)}。\n"
-                "全局恢复请用 `/resume <thread_id|thread_name>`。\n"
-                "本地共享建议使用 `fcodex`；其中 `fcodex /session`、`fcodex /resume <thread_name>` 与飞书复用同一套共享发现逻辑；"
-                "进入 TUI 后，`/resume` 仍保持 upstream 原样。"
+                "想恢复其他目录的线程，或按名字做全局精确查找，请用 `/resume <thread_id|thread_name>`。\n"
+                "如需在本地继续同一线程，请使用 `fcodex`；详情见 `/help local`。"
             ),
         },
         {"tag": "hr"},
@@ -1031,9 +1062,17 @@ def build_rename_card(session: dict) -> dict:
     }
 
 
-def build_history_preview_card(thread_id: str, rounds: list[tuple[str, str]]) -> dict:
+def build_history_preview_card(
+    thread_id: str,
+    rounds: list[tuple[str, str]],
+    *,
+    summary: str = "",
+) -> dict:
     """构造历史预览卡片。"""
     elements: list[dict] = []
+    if summary:
+        elements.append({"tag": "markdown", "content": summary})
+        elements.append({"tag": "hr"})
     for user_text, assistant_text in rounds:
         elements.append({"tag": "markdown", "content": f"👤 **你**\n{shorten(user_text, _HISTORY_TEXT_MAX)}"})
         elements.append({"tag": "markdown", "content": f"🤖 **Codex**\n{shorten(assistant_text, _HISTORY_TEXT_MAX)}"})

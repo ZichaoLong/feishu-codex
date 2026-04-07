@@ -17,6 +17,7 @@ from bot.adapters.base import (
 )
 from bot.codex_protocol.client import CodexRpcClient
 from bot.constants import DEFAULT_APP_SERVER_MODE, DEFAULT_APP_SERVER_URL, DEFAULT_SOURCE_KINDS
+from bot.stores.app_server_runtime_store import AppServerRuntimeStore
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ class CodexAppServerAdapter(AgentAdapter):
         *,
         on_notification: Callable[[str, dict[str, Any]], None] | None = None,
         on_request: Callable[[int | str, str, dict[str, Any]], None] | None = None,
+        app_server_runtime_store: AppServerRuntimeStore | None = None,
     ) -> None:
         self._config = config
         self._collaboration_mode_model: str | None = None
@@ -95,6 +97,7 @@ class CodexAppServerAdapter(AgentAdapter):
             request_timeout_seconds=config.request_timeout_seconds,
             on_notification=on_notification,
             on_request=on_request,
+            app_server_runtime_store=app_server_runtime_store,
         )
 
     def start(self) -> None:
@@ -102,6 +105,9 @@ class CodexAppServerAdapter(AgentAdapter):
 
     def stop(self) -> None:
         self._rpc.stop()
+
+    def current_app_server_url(self) -> str:
+        return self._rpc.current_app_server_url()
 
     def create_thread(
         self,

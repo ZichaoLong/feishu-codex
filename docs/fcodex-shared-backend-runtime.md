@@ -1,5 +1,10 @@
 # `fcodex` Shared-Backend Runtime
 
+This document is the implementation note for the current shared-backend and
+wrapper runtime model in `feishu-codex`. If you want to understand why
+`fcodex`, the shared backend, dynamic port fallback, or the cwd proxy exist,
+start here.
+
 This document explains the implementation model behind:
 
 - `fcodex --cd`
@@ -12,14 +17,24 @@ See also:
 - `docs/shared-backend-resume-safety.md`
 - `docs/feishu-codex-design.md`
 
-## 1. Runtime Pieces
+## 1. Upstream Baseline
+
+- Upstream project: [`openai/codex`](https://github.com/openai/codex.git)
+- Current local validation baseline: `codex-cli 0.118.0` (checked on 2026-04-03)
+- This document describes the runtime model verified by the current
+  `feishu-codex` integration against stock Codex CLI / `codex app-server` /
+  `--remote` behavior. If upstream changes those behaviors later, this document
+  should be updated accordingly.
+
+## 2. Runtime Pieces
 
 At steady state, the local/shared path looks like this:
 
 ```text
 Feishu client
   -> feishu-codex service
-     -> shared codex app-server (ws://127.0.0.1:8765 by default)
+     -> shared codex app-server
+        (prefers ws://127.0.0.1:8765; auto-falls back to a free local port)
 
 fcodex shell wrapper
   -> local thin proxy
@@ -30,7 +45,7 @@ fcodex shell wrapper
 The important point is that Feishu and `fcodex` are meant to talk to the same
 live app-server backend.
 
-## 2. Why `fcodex` Exists
+## 3. Why `fcodex` Exists
 
 Bare `codex` normally owns its own backend lifecycle. That is fine for normal
 local use, but it is the wrong default when you want Feishu and local TUI to
@@ -43,7 +58,7 @@ operate on the same live thread.
 - wrapper commands such as `/session` and `/resume <name>`
 - a compatibility patch for remote-mode working-directory behavior
 
-## 3. Installed Wrapper Environment
+## 4. Installed Wrapper Environment
 
 The installed `fcodex` wrapper does three important things before it launches
 the Python entrypoint:
@@ -58,7 +73,12 @@ That means the service process and the local wrapper can share:
 - the same local profile-state file
 - the same auxiliary local state
 
-## 4. How `--cd` Actually Works
+That auxiliary local state also includes runtime shared-backend discovery. When
+the default `ws://127.0.0.1:8765` endpoint is unavailable and the service falls
+back to another free local port, `fcodex` uses that state to find the active
+backend.
+
+## 5. How `--cd` Actually Works
 
 `fcodex` resolves one effective working directory per launch:
 
@@ -72,7 +92,7 @@ It then does two separate things with that value:
 
 This double handling is intentional.
 
-## 5. Why a Local Proxy Is Needed
+## 6. Why a Local Proxy Is Needed
 
 The original problem was:
 
@@ -96,7 +116,7 @@ The local proxy fixes that specific gap:
 
 This keeps the patch very narrow.
 
-## 6. Why Proxy Lifetime Follows the Parent Process
+## 7. Why Proxy Lifetime Follows the Parent Process
 
 During investigation we confirmed that upstream remote resume is not a
 single-connection flow.
@@ -119,7 +139,7 @@ Current model:
 
 This is why the current implementation is robust against resume-time reconnects.
 
-## 7. What Uses the Shared Backend
+## 8. What Uses the Shared Backend
 
 By default:
 
@@ -132,7 +152,7 @@ By default:
 Wrapper commands such as `fcodex /session` do not start a TUI, but they still
 query the same backend and the same thread metadata.
 
-## 8. Explicit `--remote` Is a Special Case
+## 9. Explicit `--remote` Is a Special Case
 
 If the user explicitly passes `--remote` to `fcodex`, the wrapper does not try
 to force the shared-backend path.
@@ -145,7 +165,7 @@ That means:
 
 This is intentional. Explicit `--remote` means "use the target I asked for."
 
-## 9. Differences from Bare `codex`
+## 10. Differences from Bare `codex`
 
 Compared with bare Codex TUI, `fcodex` adds these semantics:
 
@@ -162,7 +182,7 @@ Compared with bare Codex TUI, `fcodex` adds these semantics:
 Inside the running TUI, however, command semantics return to upstream Codex
 behavior.
 
-## 10. Known Caveats
+## 11. Known Caveats
 
 ### Upstream remote protocol may change
 
@@ -173,7 +193,8 @@ upstream later changes:
 - remote session startup order
 - reconnect timing
 
-the wrapper may need adjustment.
+the wrapper may need adjustment. For the upstream implementation and release
+history, refer to [`openai/codex`](https://github.com/openai/codex.git).
 
 ### Bare `codex` is still outside the shared-thread contract
 
@@ -195,7 +216,7 @@ If the shared app-server is not running or not reachable, `fcodex` cannot do its
 job. In that case, startup fails fast rather than silently falling back to an
 isolated local backend.
 
-## 11. Developer Pointers
+## 12. Developer Pointers
 
 Relevant implementation files:
 

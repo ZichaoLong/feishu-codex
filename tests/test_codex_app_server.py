@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import tempfile
 import threading
 import time
 import unittest
@@ -17,6 +18,7 @@ from bot.codex_protocol.client import CodexRpcClient
 from bot.fcodex import _default_data_dir, _launch_local_cwd_proxy, main as fcodex_main
 from bot.fcodex_proxy import _relay_messages, _rewrite_thread_start_cwd, run_proxy
 from bot.profile_resolution import resolve_local_default_profile
+from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.session_resolution import (
     format_thread_match,
     looks_like_thread_id,
@@ -335,6 +337,41 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             CodexAppServerConfig.from_dict({"app_server_mode": "broken"})
 
 
+class AppServerRuntimeStoreTests(unittest.TestCase):
+    def test_resolve_effective_app_server_url_uses_runtime_state_for_default_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = AppServerRuntimeStore(data_dir)
+            store.save_managed_runtime(
+                configured_url="ws://127.0.0.1:8765",
+                active_url="ws://127.0.0.1:43210",
+                owner_pid=os.getpid(),
+                app_server_pid=os.getpid(),
+            )
+
+            self.assertEqual(
+                resolve_effective_app_server_url("ws://127.0.0.1:8765", data_dir=data_dir),
+                "ws://127.0.0.1:43210",
+            )
+
+    def test_resolve_effective_app_server_url_ignores_stale_runtime_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = AppServerRuntimeStore(data_dir)
+            store.save_managed_runtime(
+                configured_url="ws://127.0.0.1:8765",
+                active_url="ws://127.0.0.1:43210",
+                owner_pid=999999,
+                app_server_pid=999999,
+            )
+
+            with patch("bot.stores.app_server_runtime_store._process_exists", return_value=False):
+                self.assertEqual(
+                    resolve_effective_app_server_url("ws://127.0.0.1:8765", data_dir=data_dir),
+                    "ws://127.0.0.1:8765",
+                )
+
+
 class CodexRpcClientTests(unittest.TestCase):
     def test_start_initializes_with_experimental_api(self) -> None:
         client = CodexRpcClient()
@@ -408,8 +445,52 @@ class CodexRpcClientTests(unittest.TestCase):
         mock_popen.assert_not_called()
         self.assertIsNotNone(client._ws)
 
+    def test_start_locked_falls_back_to_free_port_when_default_is_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fallback_url = "ws://127.0.0.1:43210"
+            store = AppServerRuntimeStore(Path(tmpdir))
+            client = CodexRpcClient(app_server_runtime_store=store)
+
+            class _Proc:
+                pid = os.getpid()
+                stdout = StringIO("")
+                stderr = StringIO("")
+
+                def poll(self):
+                    return None
+
+            class _ThreadStub:
+                def __init__(self, *args, **kwargs) -> None:
+                    pass
+
+                def start(self) -> None:
+                    return None
+
+            with patch.object(client, "_can_bind_listen_url", return_value=False):
+                with patch.object(client, "_allocate_free_listen_url", return_value=fallback_url):
+                    with patch.object(client, "_connect_ws_locked", lambda: setattr(client, "_ws", object())):
+                        with patch("bot.codex_protocol.client.subprocess.Popen", return_value=_Proc()) as mock_popen:
+                            with patch("bot.codex_protocol.client.threading.Thread", _ThreadStub):
+                                client._start_locked()
+
+            self.assertEqual(client.current_app_server_url(), fallback_url)
+            self.assertEqual(mock_popen.call_args[0][0][-1], fallback_url)
+            self.assertEqual(
+                resolve_effective_app_server_url("ws://127.0.0.1:8765", data_dir=Path(tmpdir)),
+                fallback_url,
+            )
+
 
 class FCodexTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = patch(
+            "bot.fcodex.resolve_effective_app_server_url",
+            side_effect=lambda configured_url, *, data_dir: configured_url,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_default_data_dir_falls_back_to_install_path_when_not_in_dev_layout(self) -> None:
         with patch.dict("bot.fcodex.os.environ", {}, clear=True):
             with patch("bot.fcodex._looks_like_dev_layout", return_value=False):
@@ -431,6 +512,26 @@ class FCodexTests(unittest.TestCase):
                                 fcodex_main()
 
         mock_proxy.assert_called_once_with("ws://127.0.0.1:8765", os.getcwd())
+        self.assertEqual(
+            mock_exec.call_args[0][1],
+            ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
+        )
+
+    def test_fcodex_uses_runtime_resolved_backend_url(self) -> None:
+        fallback_url = "ws://127.0.0.1:43210"
+        with patch("bot.fcodex.resolve_effective_app_server_url", return_value=fallback_url):
+            with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+                with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                    with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_profile_resolve:
+                        mock_profile_resolve.return_value.effective_profile = ""
+                        mock_profile_resolve.return_value.stale_profile = ""
+                        with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())) as mock_proxy:
+                            with patch("bot.fcodex.os.execvpe") as mock_exec:
+                                with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
+                                    fcodex_main()
+
+        self.assertEqual(mock_profile_resolve.call_args.kwargs["app_server_url"], fallback_url)
+        mock_proxy.assert_called_once_with(fallback_url, os.getcwd())
         self.assertEqual(
             mock_exec.call_args[0][1],
             ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
@@ -715,12 +816,14 @@ class FCodexTests(unittest.TestCase):
         mock_adapter.stop.return_value = None
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.CodexAppServerAdapter", return_value=mock_adapter):
-                with patch("bot.fcodex.sys.stdout", stdout):
-                    with patch("sys.argv", ["fcodex", "/rm", thread_id]):
-                        with self.assertRaises(SystemExit) as exc:
-                            fcodex_main()
+                with patch("bot.fcodex.FavoritesStore.remove_thread_globally") as mock_remove:
+                    with patch("bot.fcodex.sys.stdout", stdout):
+                        with patch("sys.argv", ["fcodex", "/rm", thread_id]):
+                            with self.assertRaises(SystemExit) as exc:
+                                fcodex_main()
         self.assertEqual(exc.exception.code, 0)
         mock_adapter.archive_thread.assert_called_once_with(thread_id)
+        mock_remove.assert_called_once_with(thread_id)
         self.assertIn("已归档线程：`019d2e94…` demo", stdout.getvalue())
         self.assertIn("不是硬删除", stdout.getvalue())
 

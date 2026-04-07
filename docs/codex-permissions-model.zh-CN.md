@@ -9,6 +9,12 @@
 - 让飞书侧文案始终与 upstream Codex 行为保持一致
 - 把精简用户帮助与实现细节、排障细节分开
 
+上游基线：
+
+- Codex 源码仓库：[`openai/codex`](https://github.com/openai/codex.git)
+- 当前本地验证基线：`codex-cli 0.118.0`（2026-04-03）
+- 文中后续的文件 / 行号引用，是基于这套基线在本地核对过的实现线索，适合做定位参考，但不应视为永久稳定的 permalink
+
 ## 1. 三层概念
 
 `feishu-codex` 暴露了三个彼此相关的概念：

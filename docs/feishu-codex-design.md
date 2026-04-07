@@ -2,599 +2,228 @@
 
 See also:
 
-- `docs/shared-backend-resume-safety.md` for the backend-sharing and guarded-`/resume` model.
+- `docs/session-profile-semantics.md`
+- `docs/fcodex-shared-backend-runtime.md`
+- `docs/shared-backend-resume-safety.md`
 
 ## 1. Background
 
-`feishu-cc` works because it wraps Claude Code CLI and fills several gaps with local conventions:
+`feishu-codex` is an independent Codex-oriented project, not a thin rename of an
+older Claude integration.
 
-- session discovery by scanning `~/.claude/projects/*.jsonl`
-- title sync by reading/writing Claude session JSONL
-- permission interception by `PreToolUse` hook + local HTTP server
-- special interactive flows by translating Claude hook decisions back into CLI-visible output
+Historical context still matters:
 
-That approach is deeply tied to Claude Code internals. It is workable, but maintenance cost is high because:
+- [`feishu-cc`](https://github.com/ZichaoLong/feishu-cc) proved the Feishu-side
+  interaction model
+- but that project depended on Claude-specific local file formats and hook
+  behavior
+- `feishu-codex` keeps the Feishu-side transport and interaction lessons while
+  switching the agent/runtime integration to Codex-native surfaces
 
-- session metadata comes from private on-disk formats
-- permission handling depends on shell hook behavior
-- some UX flows are reconstructed rather than using a native remote protocol
+Upstream baseline:
 
-For Codex, local inspection shows a better path exists.
+- Codex source repository: [`openai/codex`](https://github.com/openai/codex.git)
+- Current local validation baseline: `codex-cli 0.118.0` (checked on
+  2026-04-03)
 
-Verified locally on 2026-03-31:
+The design is based on current Codex capabilities that are useful to a Feishu
+bridge:
 
-- `codex exec --json` emits structured JSONL events such as `thread.started`, `turn.started`, `item.completed`, `turn.completed`
-- `codex exec resume` supports non-interactive session continuation by id or thread name
-- `codex app-server` exposes an application protocol with:
-  - `thread/start`
-  - `thread/resume`
-  - `thread/list`
-  - `thread/read`
-  - `thread/name/set`
-  - `turn/start`
-  - `turn/interrupt`
-  - permission approval request/response objects
-
-This means `feishu-codex` should not be a string-replaced clone of `feishu-cc`.
-It should be a new adapter-driven design that keeps the Feishu layer and replaces the agent integration layer.
+- `codex app-server` as the primary application-facing runtime surface
+- `codex exec --json` as a structured probe / debugging aid
+- `codex exec resume` and thread-oriented CLI / app-server flows for session
+  continuity
 
 ## 2. Goals
 
-- Build a `feishu-codex` service with the same core user value as `feishu-cc`:
-  - send prompts from Feishu
-  - stream progress and final answer back to Feishu cards
-  - manage long-lived sessions
-  - resume sessions from the current directory
-  - rename sessions
-  - interrupt active work
-  - route approvals to Feishu
-- Make session metadata use a single source of truth from Codex itself.
-- Avoid parsing private Codex on-disk files.
-- Avoid shell-hook-based approval interception when Codex protocol already provides approvals.
-- Make the implementation easier to maintain than `feishu-cc`.
+- Provide a Feishu bridge for Codex prompts, streaming output, approvals, and
+  long-lived thread management
+- Keep Codex thread metadata under Codex as the source of truth
+- Minimize coupling to private on-disk formats or shell-hook behavior
+- Keep the Feishu layer, local wrapper layer, and Codex protocol layer cleanly
+  separated
+- Preserve a low-friction path for users who need to continue the same live
+  thread from Feishu and local TUI
 
 ## 3. Non-goals
 
-- Do not emulate Codex TUI screen rendering in Feishu.
-- Do not depend on undocumented internal file layouts for thread discovery or naming.
-- Do not attempt to support every Codex experimental feature in v1.
-- Do not build a generic multi-agent bridge in the first version.
+- Recreate the Codex TUI screen inside Feishu
+- Depend on undocumented Codex disk layouts for thread discovery or metadata
+- Support every experimental Codex feature in the first iteration
+- Reuse `feishu-cc` code as a hard architectural dependency
+- Treat bare `codex` and shared-backend `fcodex` as the same operational path
 
-## 4. Design Principles
+## 4. Current Design Principles
 
-- Native protocol first: prefer `codex app-server` APIs over CLI scraping or disk scanning.
-- Single source of truth: thread id, cwd, title, preview come from Codex protocol, not local caches.
-- Feishu-specific state stays local: only store metadata that Codex itself does not own, such as user-specific favorites.
-- Keep transport and agent runtime separated so the Feishu layer can be reused.
-- Make fallback paths explicit: `codex exec --json` is a validation and emergency fallback path, not the primary architecture.
+- Native protocol first: prefer `codex app-server` behavior and APIs over local
+  scraping or reconstructed state
+- Single source of truth: thread id, cwd, title, preview, source, and runtime
+  config come from Codex
+- Feishu-specific state stays local: favorites, local default profile, and UI
+  binding state remain in `feishu-codex`
+- Shared-backend behavior is explicit: continuing the same live thread with
+  Feishu should go through one backend
+- Runtime assumptions are documented: wrapper and shared-backend behavior should
+  live in docs, not only in code
 
-## 5. Recommended Architecture
+## 5. Current Architecture
 
-### 5.1 High-level layout
+### 5.1 Layers
 
-`feishu-codex` should be split into 4 layers:
+`feishu-codex` is organized into four layers:
 
 1. Feishu transport layer
-- receive user messages and card actions
-- send text / cards / patch updates
-
+   - receives user messages and card actions
+   - sends text, cards, and message patches
 2. Application layer
-- command routing
-- per-user-per-chat state
-- card rendering
-- session list sorting and matching
+   - command routing
+   - per-user / per-chat runtime state
+   - card rendering
+   - session and resume coordination
+3. Codex adapter and protocol layer
+   - owns the Codex runtime connection
+   - translates handler actions into Codex requests
+   - normalizes notifications and responses
+4. Local state layer
+   - stores Feishu-only metadata and runtime discovery state
+   - deliberately does not replace Codex thread metadata
 
-3. Codex adapter layer
-- owns the Codex runtime connection
-- translates app intents into Codex protocol requests
-- translates Codex notifications into normalized events
+### 5.2 Runtime Topology
 
-4. Persistence layer
-- local store for Feishu-only metadata
-- no local cache for Codex thread title / cwd / preview
+Current runtime behavior:
 
-### 5.2 Process topology
+- the `feishu-codex` service uses a managed app-server path by default
+- it starts a local `codex app-server` subprocess and talks to it over websocket
+- the shared backend prefers `ws://127.0.0.1:8765`
+- if that default port is unavailable, the service falls back to a free local
+  port and publishes the active endpoint through local runtime state
+- `fcodex` and other remote-style flows discover that active endpoint and attach
+  to the same shared backend
+- `fcodex` adds a thin local websocket proxy only when it needs shared-backend
+  cwd correction for upstream remote-mode behavior
 
-Use a long-lived local `codex app-server` subprocess over `stdio://`.
+The exact wrapper/runtime mechanics are documented in
+`docs/fcodex-shared-backend-runtime.md`.
 
-Why:
+### 5.3 Key Application Modules
 
-- simpler than remote websocket auth
-- keeps deployment similar to `feishu-cc`
-- no need to expose an extra network port
-- lets one service process own a persistent Codex protocol session
+Current module split:
 
-Future extension:
+- `bot/codex_handler.py`: Feishu-facing command handling and session binding
+- `bot/cards.py`: user-facing card rendering
+- `bot/adapters/codex_app_server.py`: Codex adapter boundary
+- `bot/codex_protocol/client.py`: websocket JSON-RPC client for `codex app-server`
+- `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and thin proxy
+- `bot/stores/*.py`: favorites, local default profile, and runtime backend
+  discovery state
 
-- allow connecting to remote `codex app-server` via websocket
-- keep the same adapter interface
+## 6. Data and Behavioral Boundaries
 
-### 5.3 Why app-server is the primary path
+### 6.1 Codex-Owned Data
 
-The app-server protocol already exposes the lifecycle and approval primitives we need.
-
-Compared with `codex exec --json`:
-
-- better session control
-- native thread listing and reading
-- native rename API
-- native interrupt API
-- native approval requests and responses
-- no need to infer behavior from stdout only
-
-`codex exec --json` should remain as:
-
-- a smoke-test tool
-- an integration probe
-- a fallback for narrow environments where app-server is unavailable
-
-## 6. Core Abstractions
-
-### 6.1 AgentAdapter
-
-Introduce an adapter interface instead of baking CLI behavior into the handler.
-
-Suggested shape:
-
-```python
-class AgentAdapter(Protocol):
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-
-    def create_thread(self, *, cwd: str, model: str | None, settings: TurnSettings) -> ThreadRef: ...
-    def resume_thread(self, thread_id: str) -> ThreadRef: ...
-    def list_threads(self, query: ThreadQuery) -> ThreadPage: ...
-    def read_thread(self, thread_id: str, include_turns: bool = False) -> ThreadData: ...
-    def rename_thread(self, thread_id: str, name: str) -> None: ...
-
-    def start_turn(self, thread_id: str, input_items: list[InputItem], settings: TurnSettings) -> TurnRef: ...
-    def interrupt_turn(self, thread_id: str, turn_id: str | None = None) -> None: ...
-
-    def approve_permissions(self, request_id: str, decision: PermissionDecision) -> None: ...
-    def approve_exec(self, request_id: str, decision: ExecDecision) -> None: ...
-```
-
-### 6.2 Normalized domain objects
-
-The application layer should not depend on raw protocol JSON.
-
-Normalize these objects:
-
-- `ThreadSummary`
-  - `id`
-  - `cwd`
-  - `name`
-  - `preview`
-  - `created_at`
-  - `updated_at`
-  - `source_kind`
-  - `status`
-- `TurnEvent`
-  - `thread_id`
-  - `turn_id`
-  - `phase`
-  - `text_delta`
-  - `tool_call`
-  - `command_execution`
-  - `diff`
-  - `completed`
-  - `error`
-- `PermissionRequest`
-  - `request_id`
-  - `thread_id`
-  - `turn_id`
-  - `kind`
-  - `filesystem_read`
-  - `filesystem_write`
-  - `network_enabled`
-  - `reason`
-
-## 7. Session and Thread Model
-
-### 7.1 Single source of truth
-
-Codex owns:
+Codex remains the authority for:
 
 - thread id
 - cwd
 - thread name
 - preview text
-- source kind
-- timestamps
+- source kind and status
+- thread timestamps
+- runtime config and model/provider state
 
-Feishu local store owns only:
+### 6.2 Feishu-Local Data
 
-- favorites / starred flag
-- per-chat current binding
-- transient UI state
+`feishu-codex` keeps only data that is Feishu- or integration-specific:
 
-This avoids the `feishu_sessions.json.title` ambiguity that `feishu-cc` had to clean up.
+- favorites / starred state
+- local default profile used by Feishu and default `fcodex` launches
+- runtime shared-backend discovery state
+- per-chat thread bindings
+- transient approval, rename, and card state
 
-### 7.2 Per-chat runtime state
+### 6.3 Session and Directory Semantics
 
-For each `(user_id, chat_id)` keep:
+Exact command semantics are documented outside this design document:
 
-- `current_thread_id`
-- `current_cwd`
-- `current_turn_id`
-- `running`
-- `session_model`
-- `approval_mode`
-- `message_queue`
-- pending approval / form state
+- `docs/session-profile-semantics.md` covers `/session`, `/resume`, `/profile`,
+  `/rm`, and wrapper semantics
+- `docs/shared-backend-resume-safety.md` covers guarded `/resume` and backend
+  safety rules
 
-### 7.3 `/new`
+This document only fixes the boundary:
 
-Behavior:
+- thread metadata comes from Codex
+- Feishu chat state decides the current working context
+- shared-backend continuation is explicit rather than implicit
 
-- create a new Codex thread with `thread/start`
-- bind current Feishu chat to the new thread id
-- keep current `cwd`, `model`, and approval settings
+### 6.4 Approval Model
 
-### 7.4 `/session`
+The current project uses Codex-native approval and sandbox concepts:
 
-Behavior:
+- app-server approval requests and responses
+- Codex approval policy and sandbox policy fields
+- Feishu-facing presets layered on top of those primitives
 
-- call `thread/list`
-- filter by `cwd = current_cwd`
-- explicitly include source kinds instead of relying on protocol default
+The integration does not depend on Claude-style shell hook interception.
 
-Required source kinds:
+## 7. Current Repository Structure
 
-- `cli`
-- `appServer`
-- `exec` if we allow fallback-created threads
-
-Rationale:
-
-- protocol default source filtering is not enough
-- otherwise local CLI threads and Feishu-created threads may appear in different universes
-
-Display policy:
-
-- favorites first
-- then recent non-favorites
-- use Codex `name` if set
-- otherwise use Codex `preview`
-- never use locally cached title fallback
-
-### 7.5 `/resume <arg>`
-
-Matching order:
-
-1. exact thread id
-2. unique thread id prefix
-3. exact thread name
-
-Candidate scope:
-
-- same allowed source kinds as `/session`
-- current cwd first for the card flow
-- configurable broader search for explicit `/resume`
-
-Implementation:
-
-- use `thread/list` / `thread/read`
-- if thread is not currently loaded by app-server, call `thread/resume`
-- then bind the Feishu chat to that thread id
-
-### 7.6 `/rename`
-
-Use native `thread/name/set`.
-
-This is a major improvement over `feishu-cc`:
-
-- no JSONL patching
-- no local title override
-- title consistency between local Codex CLI and Feishu is native
-
-### 7.7 `/cd`
-
-Recommended behavior for v1:
-
-- keep current `cwd` as a Feishu chat-level default
-- changing cwd clears current thread binding and prepares a new thread on next user message
-
-Do not mutate an existing thread across directories in v1.
-
-Reason:
-
-- session browsing semantics stay simple
-- `thread/list(cwd=...)` continues to mean something stable
-- matches the current `feishu-cc` mental model
-
-### 7.8 `/rm`
-
-Behavior:
-
-- call native `thread/archive`
-- do not hard-delete the persisted rollout
-- preserve the rollout JSONL by moving it from `sessions/` to `archived_sessions/`
-- rely on Codex persisted metadata to mark the thread archived
-
-List semantics:
-
-- default `thread/list` behavior should exclude archived threads
-- archived threads should only appear when an explicit archived filter is requested
-
-Product boundary:
-
-- v1 does not need to expose `thread/unarchive` immediately
-- but `/rm` must be documented as reversible archive semantics, not destructive deletion
-
-## 8. Message and Streaming Model
-
-### 8.1 Turn lifecycle
-
-Use `turn/start` for new user input against the current thread.
-
-`TurnStartParams` already supports:
-
-- `threadId`
-- `input`
-- `cwd`
-- `model`
-- `approvalPolicy`
-- `sandboxPolicy`
-
-This is a better fit than building shell commands by hand.
-
-### 8.2 Feishu streaming card
-
-Maintain one active Feishu execution card per turn:
-
-- assistant text deltas update the reply section
-- command execution items render as tool / bash progress
-- diff items render as concise summaries
-- final turn completion seals the card
-
-The card update path should operate on normalized events from the adapter, not raw Codex JSON.
-
-### 8.3 Interrupt
-
-Use native `turn/interrupt`.
-
-Do not treat process kill as the first-line interrupt mechanism.
-
-Process kill remains a last-resort recovery path only if:
-
-- app-server subprocess hangs
-- protocol connection is lost
-
-## 9. Approval Model
-
-Codex has a materially better approval model than Claude hook interception.
-
-### 9.1 Native permission approvals
-
-Verified protocol objects:
-
-- `PermissionsRequestApprovalParams`
-  - `threadId`
-  - `turnId`
-  - `itemId`
-  - requested file system and network permissions
-- `PermissionsRequestApprovalResponse`
-  - granted permissions profile
-  - scope: `turn` or `session`
-
-This maps cleanly to Feishu buttons:
-
-- allow once
-- allow for session
-- deny
-
-### 9.2 Native exec approvals
-
-Verified protocol object:
-
-- `ExecCommandApprovalResponse`
-  - `approved`
-  - `approved_for_session`
-  - `denied`
-  - `abort`
-  - protocol-specific policy-amendment variants
-
-Recommended Feishu mapping:
-
-- allow once
-- allow this session
-- deny but continue
-- deny and stop current turn
-
-The protocol is richer than `feishu-cc` today. V1 does not need to expose every advanced policy-amendment path in the UI.
-
-### 9.3 Approval mode model
-
-Do not copy Claude-specific permission modes exactly.
-
-Use Codex-native concepts in the adapter, then map them to a Feishu-friendly UI:
-
-- `interactive`
-  - all protocol approval requests are surfaced to Feishu
-- `session_relaxed`
-  - session-scoped approvals can be granted from cards and cached naturally by Codex
-- `dangerous`
-  - only if explicitly configured
-  - bypasses normal approval friction
-
-The UI labels may stay compatible with `feishu-cc`, but the underlying model should be Codex-native.
-
-## 10. User Input / Question Cards
-
-`feishu-cc` needed dedicated handling for `AskUserQuestion` and `ExitPlanMode`.
-
-For Codex, v1 should not assume an identical feature model exists.
-
-Design choice:
-
-- build the core bridge first around:
-  - turns
-  - streaming
-  - approvals
-  - session list / resume / rename / interrupt
-- keep a generic `PromptRequest` / `UserResponse` abstraction in the adapter
-- add specialized question cards only after verifying stable Codex protocol objects that require user choice
-
-This prevents overfitting to Claude-specific interaction patterns.
-
-## 11. Persistence Design
-
-### 11.1 Local store contents
-
-Suggested local store: `data/codex_threads.json`
-
-Per user:
-
-- `thread_id`
-- `starred`
-- optional Feishu-local tags later
-
-Do not store:
-
-- thread title
-- cwd
-- preview
-- timestamps
-
-### 11.2 Why favorites remain local
-
-Codex has native thread naming, but not a clearly verified cross-client favorite concept.
-Favorites are a Feishu UX concern, so keeping them local is acceptable.
-
-Constraint:
-
-- favorites must never override or shadow Codex thread metadata
-
-## 12. Directory Semantics
-
-`feishu-codex` should preserve the useful part of current `feishu-cc` behavior:
-
-- Feishu chat has a current directory concept
-- `/session` lists only current-directory candidates
-- `/resume` can restore and switch current directory
-
-Implementation with Codex protocol:
-
-- `thread.list(cwd=current_dir, sourceKinds=[...])` for `/session`
-- `thread.read` returns authoritative `cwd`
-- restoring a thread updates the Feishu chat's `current_cwd`
-
-## 13. Proposed Repository Structure
-
-Suggested layout for the new project:
+The current repository layout is:
 
 ```text
 feishu-codex/
   bot/
+    __main__.py
+    standalone.py
     feishu_bot.py
-    cards.py
     handler.py
+    cards.py
     codex_handler.py
-    stores/
-      favorites_store.py
-      chat_state_store.py
+    fcodex.py
+    fcodex_proxy.py
+    config.py
+    constants.py
+    profile_resolution.py
+    session_resolution.py
     adapters/
       base.py
       codex_app_server.py
-      codex_exec_fallback.py
     codex_protocol/
       client.py
-      events.py
-      models.py
-      approvals.py
-      threads.py
+    stores/
+      app_server_runtime_store.py
+      favorites_store.py
+      profile_state_store.py
   config/
+    system.yaml.example
     codex.yaml.example
   docs/
-    feishu-codex-design.md
+    *.md
+    *.zh-CN.md
+  tests/
+    test_codex_app_server.py
+    test_codex_handler.py
+  install.sh
+  pyproject.toml
+  README.md
 ```
 
-If code reuse from `feishu-cc` is desired later, extract common Feishu and card infrastructure into a shared package after `feishu-codex` proves stable.
+This structure is already sufficient for the current architecture:
 
-Do not start with a shared library first.
+- Feishu transport and handler code stay in `bot/`
+- Codex integration boundaries stay in `bot/adapters/` and
+  `bot/codex_protocol/`
+- local persisted state stays in `bot/stores/`
+- semantic, runtime, and design explanations stay in `docs/`
 
-## 14. Implementation Plan
+## 8. Evolution Boundaries
 
-### Phase 0: Protocol probe
-
-- start local `codex app-server` over stdio
-- build a tiny JSON-RPC client
-- verify:
-  - initialize
-  - thread/start
-  - turn/start
-  - streaming notifications
-  - turn/interrupt
-  - thread/list
-  - thread/name/set
-  - approval round-trip
-
-### Phase 1: Core Feishu bridge
-
-- new `CodexAppServerAdapter`
-- new `codex_handler.py`
-- prompt in, stream out
-- `/new`
-- `/status`
-- `/cancel`
-
-### Phase 2: Session management
-
-- `/session`
-- `/resume`
-- `/rename`
-- favorites
-- current-directory semantics
-
-### Phase 3: Native approvals
-
-- permission approval cards
-- exec approval cards
-- session-scoped approval support
-
-### Phase 4: Polishing
-
-- model selection
-- improved event rendering
-- queue management
-- fallback path via `codex exec --json`
-
-## 15. Risks
-
-### 15.1 app-server is marked experimental
-
-Mitigation:
-
-- keep the adapter isolated
-- validate required APIs in Phase 0 before wider implementation
-- keep `codex exec --json` fallback for smoke tests and emergency downgrade
-
-### 15.2 Source-kind filtering can split session universes
-
-Mitigation:
-
-- always set explicit `sourceKinds`
-- do not rely on protocol defaults
-
-### 15.3 Protocol richness can tempt over-design
-
-Mitigation:
-
-- implement only thread lifecycle, turn lifecycle, streaming, rename, interrupt, approvals in v1
-
-## 16. Recommendation
-
-Build `feishu-codex` as a new project using `codex app-server` over stdio as the primary integration.
-
-Do not fork `feishu-cc` and swap binaries.
-Do not build on private Codex disk formats.
-Do not start with `codex exec --json` as the main runtime.
-
-This gives:
-
-- cleaner session model
-- native rename and resume
-- cleaner approval handling
-- less protocol guessing
-- better long-term maintainability than `feishu-cc`
+- Upstream Codex app-server and remote behavior may evolve; keep the adapter and
+  wrapper boundaries isolated
+- Shared-backend wrapper behavior depends on current upstream remote semantics,
+  especially around `thread/start`, `cwd`, and reconnect timing
+- `codex exec --json` remains useful for probes, smoke checks, and debugging,
+  but it is not the current primary runtime path
+- Future feature work should preserve the current document split:
+  semantics, runtime model, safety model, and design constraints are separate
+  concerns

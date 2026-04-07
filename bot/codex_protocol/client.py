@@ -8,14 +8,18 @@ import json
 import logging
 import os
 import shlex
+import socket
 import subprocess
 import threading
 import time
+from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
+
+from bot.stores.app_server_runtime_store import AppServerRuntimeStore, uses_default_app_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +54,17 @@ class CodexRpcClient:
         request_timeout_seconds: float = 30.0,
         on_notification: Callable[[str, dict[str, Any]], None] | None = None,
         on_request: Callable[[int | str, str, dict[str, Any]], None] | None = None,
+        app_server_runtime_store: AppServerRuntimeStore | None = None,
     ) -> None:
         self._codex_command = codex_command
         self._app_server_mode = app_server_mode
+        self._configured_app_server_url = app_server_url
         self._app_server_url = app_server_url
         self._connect_timeout_seconds = connect_timeout_seconds
         self._request_timeout_seconds = request_timeout_seconds
         self._on_notification = on_notification or (lambda _method, _params: None)
         self._on_request = on_request or (lambda _request_id, _method, _params: None)
+        self._app_server_runtime_store = app_server_runtime_store
 
         self._lock = threading.RLock()
         self._send_lock = threading.Lock()
@@ -110,7 +117,11 @@ class CodexRpcClient:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
+        self._clear_managed_runtime_state()
         self._fail_pending({"code": -32000, "message": "Codex app-server closed"})
+
+    def current_app_server_url(self) -> str:
+        return self._app_server_url or self._configured_app_server_url
 
     def request(self, method: str, params: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
         """发送 JSON-RPC 请求并等待响应。"""
@@ -148,6 +159,7 @@ class CodexRpcClient:
             if self._process is not None and self._process.poll() is not None:
                 self._process = None
             if self._process is None:
+                self._app_server_url = self._select_managed_listen_url()
                 cmd = [*shlex.split(self._codex_command), "app-server", "--listen", self._app_server_url]
                 logger.info("启动 Codex app-server: %s", cmd)
                 self._process = subprocess.Popen(
@@ -173,7 +185,10 @@ class CodexRpcClient:
                 ).start()
             else:
                 logger.info("复用已运行的 Codex app-server: %s", self._app_server_url)
+        else:
+            self._app_server_url = self._configured_app_server_url
         self._connect_ws_locked()
+        self._record_managed_runtime_state()
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
 
@@ -301,3 +316,82 @@ class CodexRpcClient:
             text = line.rstrip()
             if text:
                 logger.log(level, "[codex app-server %s] %s", name, text)
+
+    def _record_managed_runtime_state(self) -> None:
+        if self._app_server_mode != "managed" or self._app_server_runtime_store is None:
+            return
+        app_server_pid = 0
+        if self._process is not None and getattr(self._process, "pid", None):
+            app_server_pid = int(self._process.pid)
+        self._app_server_runtime_store.save_managed_runtime(
+            configured_url=self._configured_app_server_url,
+            active_url=self._app_server_url,
+            owner_pid=os.getpid(),
+            app_server_pid=app_server_pid,
+        )
+
+    def _clear_managed_runtime_state(self) -> None:
+        if self._app_server_mode != "managed" or self._app_server_runtime_store is None:
+            return
+        self._app_server_runtime_store.clear_managed_runtime(owner_pid=os.getpid())
+
+    def _select_managed_listen_url(self) -> str:
+        listen_url = self._configured_app_server_url
+        if not uses_default_app_server_url(listen_url):
+            return listen_url
+        if self._can_bind_listen_url(listen_url):
+            return listen_url
+        fallback_url = self._allocate_free_listen_url(listen_url)
+        logger.warning("Codex app-server 默认地址 %s 不可用，自动切换到 %s", listen_url, fallback_url)
+        return fallback_url
+
+    @classmethod
+    def _can_bind_listen_url(cls, url: str) -> bool:
+        family, address = cls._socket_address_for_url(url)
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(address)
+            except OSError:
+                return False
+        return True
+
+    @classmethod
+    def _allocate_free_listen_url(cls, url: str) -> str:
+        scheme, host, _port, path = cls._parse_listen_url(url)
+        family = socket.AF_INET6 if ":" in host else socket.AF_INET
+        bind_address: tuple[Any, ...]
+        if family == socket.AF_INET6:
+            bind_address = (host, 0, 0, 0)
+        else:
+            bind_address = (host, 0)
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.bind(bind_address)
+            actual_port = int(sock.getsockname()[1])
+        return cls._format_listen_url(scheme, host, actual_port, path)
+
+    @classmethod
+    def _socket_address_for_url(cls, url: str) -> tuple[socket.AddressFamily, tuple[Any, ...]]:
+        _scheme, host, port, _path = cls._parse_listen_url(url)
+        if ":" in host:
+            return socket.AF_INET6, (host, port, 0, 0)
+        return socket.AF_INET, (host, port)
+
+    @staticmethod
+    def _parse_listen_url(url: str) -> tuple[str, str, int, str]:
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"ws", "wss"}:
+            raise ValueError(f"不支持的 app-server URL：{url}")
+        if parsed.query or parsed.fragment:
+            raise ValueError(f"不支持带 query/fragment 的 app-server URL：{url}")
+        host = parsed.hostname
+        port = parsed.port
+        if not host or port is None:
+            raise ValueError(f"app-server URL 缺少 host/port：{url}")
+        path = parsed.path if parsed.path not in {"", "/"} else ""
+        return parsed.scheme, host, port, path
+
+    @staticmethod
+    def _format_listen_url(scheme: str, host: str, port: int, path: str = "") -> str:
+        netloc = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        return urlunsplit((scheme, netloc, path, "", ""))

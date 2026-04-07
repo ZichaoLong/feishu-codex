@@ -19,6 +19,10 @@ There are three distinct command surfaces:
 3. Upstream Codex commands inside a running TUI, such as TUI `/resume`
 
 They may share backend state, but they are not interchangeable.
+More precisely: the underlying backend thread/session data may be the same, but
+"how candidates are discovered, how they are matched, whether a thread is
+resumed, and how the current client binds to it afterward" belong to different
+semantic layers.
 
 ## 2. Feishu Semantics
 

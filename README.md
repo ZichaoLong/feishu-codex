@@ -4,9 +4,9 @@
 >
 > 也可以把它理解为：保留飞书侧消息、卡片、审批和会话管理这类交互形态，同时将底层接入切换为 Codex 原生 app-server 协议。
 
-`feishu-codex` 通过 Feishu 机器人把消息、审批和会话管理接到 `codex app-server`，不依赖 Claude 风格 hook，也不扫描私有会话文件。
+`feishu-codex` 通过 Feishu 机器人把消息、审批和会话管理接到 `codex app-server`。
 
-当前状态是可安装、可启动、核心链路可用的 MVP，架构已经切到 Codex 原生协议，功能仍在持续补齐中。
+当前状态是可安装（Linux）、可启动、核心链路可用的 MVP，功能仍在持续补齐中。
 
 ## 前置条件
 
@@ -14,27 +14,56 @@
 - 本机已安装 `codex` CLI，且 `codex --help` 可正常执行
 - 飞书开放平台已创建应用，获取 `app_id` 和 `app_secret`
 
-## 安装
+## 先理解这几件事
 
-```bash
-cd /path/to/feishu-codex
-bash install.sh
-```
+- `feishu-codex` service 持有一个 shared Codex backend；飞书侧与 `fcodex` 只有接到同一个 backend，才适合继续同一个 live thread
+- 大多数独立本地使用场景，直接用裸 `codex` 就可以；只有在“接飞书正在操作的同一线程”或“借助 shared discovery 恢复线程”时，才优先使用 `fcodex`
+- README 负责快速开始、常用命令和避坑；如果你想继续深挖而不先读源码，文末“继续深挖看哪里”会把问题映射到对应文档
+
+## 现在怎么开始
+
+1. 安装：
+
+   ```bash
+   cd /path/to/feishu-codex
+   bash install.sh
+   ```
+
+2. 填写飞书凭证：
+
+   ```bash
+   nano ~/.config/feishu-codex/system.yaml
+   ```
+
+3. 如果你的 Codex provider 通过环境变量取 key，写到：
+
+   ```bash
+   nano ~/.config/environment.d/90-codex.conf
+   ```
+
+4. 启动服务：
+
+   ```bash
+   systemctl --user start feishu-codex.service
+   ```
+
+5. 在飞书里给机器人发送一条普通文本开始。
+
+如果希望在本地继续写入飞书里的同一线程（同一段连续对话及其上下文），请使用 `fcodex`，不要直接用裸 `codex`。更完整的线程语义见 `docs/session-profile-semantics.zh-CN.md`。
+
+## 安装后会发生什么
 
 `install.sh` 会自动完成：
 
 - 创建 Python 虚拟环境到 `~/.local/share/feishu-codex/.venv/`
 - 安装代码包与依赖
 - 初始化配置文件到 `~/.config/feishu-codex/`
-- 注册 systemd 用户服务并安装 `feishu-codex` 管理命令
+- 注册 systemd 用户服务
+- 安装 `feishu-codex` 管理命令和 `fcodex` wrapper
 
-安装后填写飞书凭证：
+## 必要配置
 
-```bash
-nano ~/.config/feishu-codex/system.yaml
-```
-
-可选地调整飞书 API 请求超时：
+最少需要填写飞书凭证：
 
 ```yaml
 # ~/.config/feishu-codex/system.yaml
@@ -49,195 +78,145 @@ app_secret: "..."
 nano ~/.config/feishu-codex/codex.yaml
 ```
 
-如果你的 Codex provider 通过环境变量取 key，推荐统一写到：
-
-```bash
-nano ~/.config/environment.d/90-codex.conf
-```
-
-例如：
+如果 provider key 走环境变量，推荐统一放在：
 
 ```ini
+# ~/.config/environment.d/90-codex.conf
 provider1_api_key=...
 provider2_api_key=...
 ```
 
-`install.sh` 会把这个文件接入 `feishu-codex.service`，并且 `feishu-codex run`、`fcodex` wrapper 也会一并加载它。
+`install.sh` 会把这个文件接入 `feishu-codex.service`，并且 `feishu-codex run`、`fcodex` 也会一并加载它。
 
-如果你希望本地 TUI 与飞书安全共用同一线程，推荐使用安装脚本生成的 `fcodex` wrapper。
-它会自动把本地 TUI 接到 `feishu-codex` 使用的 shared app-server endpoint，而不是再起一个独立 backend。
-默认情况下，`fcodex` 还会继承 `feishu-codex` 自己维护的本地默认 profile；显式 `fcodex -p <profile>` 仍以显式参数为准。
-`fcodex` 自己解析的特殊命令只有 `fcodex /help`、`fcodex /profile`、`fcodex /rm`、`fcodex /session`、`fcodex /resume` 这几类，并且必须单独使用；其余参数和子命令都会继续原样传给裸 `codex`。
-如果你想在本地先查看线程，再决定恢复哪个，可执行 `fcodex /session`（当前目录）或 `fcodex /session global`（全局）。
+[飞书开放平台](https://open.feishu.cn)里，建议先把应用权限、事件与回调一次性配好。
 
-实用规则只记这几条：
+在「权限管理」中，建议至少开通这些权限：
 
-- 飞书 `/session` 只看当前目录，跨 provider 汇总
-- 飞书 `/resume` 按后端全局精确匹配
-- `fcodex /session`、`fcodex /resume <name>` 复用与飞书一致的共享发现逻辑
-- `fcodex resume <id>` 以及进入 TUI 后的 `/resume` 保持 upstream 原样
-- `/profile` 只改 feishu-codex / 默认 `fcodex` 的本地默认 profile，不改裸 `codex` 全局配置
-- 想和飞书安全共用同一线程时，优先用 `fcodex`，不要让裸 `codex` 同时写同一线程
+| 权限标识 | 用途 |
+| --- | --- |
+| `im:message.p2p_msg:readonly` | 接收单聊消息 |
+| `im:message.group_at_msg:readonly` | 接收群聊里 @机器人的消息 |
+| `im:message.group_msg` | 支持群聊“全部唤醒”这类需要读取非 @ 消息的场景 |
+| `im:message` | 读取消息内容，并发送/引用回复消息 |
+| `im:message:readonly` | 读取消息详情，例如展开合并转发消息 |
+| `im:message:send_as_bot` | 以应用身份发送文本和卡片消息 |
+| `im:message:update` | 更新执行中的卡片内容 |
+| `application:application:self_manage` | 读取机器人自身信息，用于更准确识别群聊里是否真的 @到机器人 |
+| `contact:user.basic_profile:readonly` | 在合并转发消息里尽量展示用户名；缺少时会回退成 open_id 前缀 |
 
-如果你希望启用 Codex 原生 `requestUserInput` 卡片，而不是让模型退化成普通文本追问，需要在 `codex.yaml` 中显式开启：
+可在「权限管理」页面点击「批量开通」，粘贴以下 JSON：
 
-```yaml
-collaboration_mode: plan
-```
-
-## 配置
-
-运行时环境变量：
-
-- `FC_CONFIG_DIR`: 配置目录
-- `FC_DATA_DIR`: 数据目录
-
-未设置时，开发态默认读取项目内 `config/`，数据默认写到 `data/feishu_codex/`。
-
-与 shared backend 相关的常用配置项：
-
-```yaml
-# app_server_mode: managed
-# app_server_url: ws://127.0.0.1:8765
-```
-
-## 使用
-
-```bash
-feishu-codex start
-feishu-codex stop
-feishu-codex restart
-feishu-codex status
-feishu-codex log
-feishu-codex run
-feishu-codex config
-feishu-codex uninstall
-feishu-codex purge
-```
-
-本地若要安全继续飞书侧同一线程，使用：
-
-```bash
-fcodex
-fcodex /help
-fcodex /profile
-fcodex /profile <profile_name>
-fcodex /rm <thread_id>
-fcodex /session
-fcodex /session global
-fcodex /resume <thread_id>
-fcodex /resume <thread_name>
-fcodex resume <thread_id>
+```json
+{
+  "scopes": {
+    "tenant": [
+      "application:application:self_manage",
+      "contact:user.basic_profile:readonly",
+      "im:message.group_msg",
+      "im:message.group_at_msg:readonly",
+      "im:message",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:message:update"
+    ]
+  }
+}
 ```
 
 说明：
 
-- `fcodex /profile`、`fcodex /rm`、`fcodex /session`、`fcodex /resume ...` 是 `fcodex` wrapper 自己处理的特殊命令
-- 目前 wrapper 只接管 `fcodex /help`、`fcodex /profile`、`fcodex /rm`、`fcodex /session`、`fcodex /resume ...`
-- 这些 wrapper 自命令必须单独使用，不能和裸 `codex` 的 flags/子命令混用
-- 非 `/` 开头的参数和子命令，会继续原样传给裸 `codex`
-- 因此 `fcodex session` 不再被当作 wrapper 命令，而会像 `codex session` 一样继续透传
+- 上面这组权限覆盖当前 README 所描述的主链路能力
+- 当前 `feishu-codex` 不要求你额外开 `docs`、`drive`、`calendar`、`wiki`、`base` 这些 scope
+- `im:message.group_msg` 主要服务群聊“全部唤醒”场景；如果你明确只打算使用私聊和群聊 @机器人，可按需评估是否保留
 
-如果你只是临时调试，也可以直接：
+在「事件与回调」中，启用 **WebSocket 长连接模式**，并配置：
+
+- 事件配置：`im.message.receive_v1`
+- 回调配置：`card.action.trigger`
+
+本项目默认走飞书长连接，不需要额外配置公网 webhook URL。
+
+## 启动与使用
+使用 `systemctl --user` 管理服务：
 
 ```bash
-python -m bot
+systemctl --user start feishu-codex
+systemctl --user stop feishu-codex
+systemctl --user restart feishu-codex
+systemctl --user status feishu-codex --no-pager
+journalctl --user -u feishu-codex -f
 ```
 
-## 设计要点
+或使用 `feishu-codex` 命令管理服务：
 
-- Codex 线程元数据以 app-server 为单一事实源
-- 本地只持久化 Feishu 特有状态，例如收藏
-- `/session` 显示当前目录线程，收藏优先
-- `/resume` 先按 thread id 原生恢复，失败后再按 thread name 精确匹配
-- `/session` 与名字匹配式 `/resume` 都显式跨 provider 检索
-- `/profile` 只维护 feishu-codex 与默认 `fcodex` 的本地默认 profile，不改动裸 `codex` 全局配置
-- 对未加载在当前 backend 中的外部线程，`/resume` 会先给出“查看快照 / 恢复并继续写入 / 取消”三选一保护卡片
-- 原生 `requestUserInput` 依赖 `collaboration_mode: plan`，并通过 `initialize.capabilities.experimentalApi=true` 启用
+```bash
+feishu-codex start/stop/restart/status # 转调 systemctl --user [xxx] feishu-codex
+feishu-codex log # 转调 journalctl --user -u feishu-codex -f
+feishu-codex run # 前台调试，不走 systemd
+feishu-codex config/uninstall/purge # 其他便捷命令: 配置、卸载、卸载+删除配置
+```
 
-## Session / Profile 语义
+## 常用命令
 
-推荐把语义理解为三层：
+飞书侧：
 
-- 飞书命令
-  - `/session`：当前目录，跨 provider
-  - `/resume`：后端全局精确匹配，跨 provider
-- `fcodex` shell wrapper 命令
-  - `fcodex /session`、`fcodex /resume <name>`：复用飞书同一套共享发现逻辑
-- 进入 TUI 后的 upstream 命令
-  - TUI 内 `/help`、`/resume` 仍按 upstream 原样工作
+- 直接发送普通文本：向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建
+- `/session`：查看当前目录线程
+- `/resume <thread_id|thread_name>`：按后端全局精确匹配恢复线程，并切换到线程自己的目录
+- `/new`：立即新建线程
+- `/cd <path>`、`/pwd`、`/status`、`/cancel`
+- `/rename <title>`、`/star`、`/rm [thread_id|thread_name]`
+- `/profile`：查看或切换 feishu-codex 默认 profile
+- `/permissions`：查看或设置权限预设
+- `/approval`、`/sandbox`：单独调整审批策略和沙箱策略
+- `/mode`：查看或切换当前飞书会话后续 turn 的协作模式
+- `/help`、`/help session`、`/help settings`、`/help local`
 
-完整语义见：
 
-- `docs/session-profile-semantics.md`
 
-补充设计文档：
+本地 `fcodex`：
+`fcodex` 是一个面向 `feishu-codex` shared backend 的本地 wrapper。你可以把它理解为：`fcodex` 默认把 `codex` 接到 shared backend；裸 `codex` 则更适合独立本地会话。
 
-- `docs/session-profile-semantics.md`
-- `docs/codex-permissions-model.md`
-- `docs/fcodex-shared-backend-runtime.md`
-- `docs/feishu-codex-design.md`
-- `docs/shared-backend-resume-safety.md`
+`fcodex` 支持 `/xxx` 自命令，除了 `/xxx` 型自命令，其余参数和子命令仍会继续走 upstream `codex`。
 
-对应中文副本：
+- `fcodex`：启动 `codex` 并接到 feishu-codex shared backend
+- `fcodex /help`
+- `fcodex /session [global]`：查看 shared backend 可见的线程，不限于飞书创建的线程；默认当前目录，`global` 为 backend 全局，均跨 provider 聚合。当前默认 `sourceKinds` 为 `cli`、`vscode`、`exec`、`appServer`
+- `fcodex /resume <thread_id>`：按精确 `thread_id` 恢复线程
+- `fcodex /rm <thread_id|thread_name>`：同飞书侧 `/rm`，调用 Codex archive，会从常规列表中隐藏，不是硬删除
+- `fcodex /resume <thread_name>`：基于 `fcodex /session` 会话发现逻辑，恢复 thread_name 对应会话
+- `fcodex /profile`：同飞书侧 `profile`，持久修改 feishu-codex / 默认 `fcodex` 的本地默认 profile，不会改动裸 `codex` 全局配置
 
-- `docs/session-profile-semantics.zh-CN.md`
-- `docs/codex-permissions-model.zh-CN.md`
-- `docs/fcodex-shared-backend-runtime.zh-CN.md`
-- `docs/feishu-codex-design.zh-CN.md`
-- `docs/shared-backend-resume-safety.zh-CN.md`
+如果你需要在本地继续飞书相关的会话，见下文“什么时候用 `fcodex`”。
 
-## 当前功能
+## 什么时候用 `fcodex`
 
-- 直接发送普通文本给当前线程；若未绑定线程，会在当前目录自动新建
-- `/new`、`/session`、`/resume <thread_id|thread_name>`、`/rename <title>`、`/star`
-- `/profile` 查看或切换 feishu-codex 默认 profile
-- `/rm [thread_id|thread_name]` 归档线程；省略参数时归档当前线程
-- `/cd`、`/pwd`、`/status`、`/cancel`
-- `/mode` 查看或切换当前飞书会话后续 turn 的协作模式（`default` / `plan`）
-- `/approval` 查看或切换原生 Codex 审批策略
-- `/sandbox` 查看或切换当前飞书会话后续 turn 的沙箱策略（`read-only` / `workspace-write` / `danger-full-access`）
-- `/permissions` 以预设方式同时切换审批策略和沙箱（`read-only` / `default` / `full-access`）
-- 原生 Codex 审批卡片：
-  - `item/commandExecution/requestApproval`
-  - `item/fileChange/requestApproval`
-  - `item/permissions/requestApproval`
-  - `item/tool/requestUserInput`
-- 第一版计划卡片：
-  - `turn/plan/updated` 会展示结构化计划步骤
-  - `item=plan` 完成时会展示计划正文
+- 要在本地继续飞书正在写的同一线程时，用 `fcodex`。
+- 要先按与飞书一致的规则查找线程、确认 `thread_id` 时，用 `fcodex /session [global]`。
+- 只是开一个独立本地会话时，直接用裸 `codex`。
 
-说明：
+如果你已经拿到精确 `thread_id`，也可以用 `fcodex /resume <thread_id>` 恢复线程。恢复时优先使用该线程原本在用的 provider；跨 provider 恢复可能因历史加密内容失败。更完整的 `session` / `resume` 语义见 `docs/session-profile-semantics.zh-CN.md`
 
-- `collaboration_mode: default` 下，Codex 仍可能把“先问用户再继续”的需求退化成普通文本回复
-- `collaboration_mode: plan` 下，Feishu 才能接到真正的 `item/tool/requestUserInput` 并回传原生回答结果
-- `/mode` 改的是“当前飞书会话后续 turn”的协作模式；只有下一条由飞书发起的普通消息真正触发 `turn/start` 时才会写入 backend
-- `fcodex` TUI 与飞书共享同一 live thread，但不共享一个即时同步的 mode 控制面；TUI `/collab` 看到的是 TUI 自己这侧的当前状态，不保证与飞书刚执行的 `/mode` 立即一致
-- 如果飞书和 TUI 同时都在操作同一线程，谁发起下一轮 turn，哪一轮就按谁当前携带的 mode 执行
+## 避坑速记
 
-### 权限模型速记
+- `/new` 会立即创建一个新线程，不是先绑一个空占位
+- `/rm` 调用的是 Codex archive，会从常规列表中隐藏，不是硬删除
+- 进入 TUI 后，里面的 `/resume` 是 upstream Codex 行为，不等同于 `fcodex /resume`
+- `/profile` 改的是 feishu-codex / 默认 `fcodex` 的本地默认 profile，不改裸 `codex` 全局配置
 
-- `sandbox` 管“技术边界”，也就是命令最终在什么权限下执行。
-  - `read-only`：默认只读、默认无网络；命令仍可执行，但文件系统写入会被限制。
-  - `workspace-write`：默认可读全盘、可写当前工作区；当前实现里工作区下仍会默认保护 `.git`、`.agents`、`.codex` 等路径。
-  - `danger-full-access`：基本不做内层隔离。
-- `approval_policy` 管“审批边界”，也就是什么时候要先经过审批才能继续。
-  - `untrusted`：只有“已知安全且只读”的命令会自动执行，其它大多先审批。
-  - `on-request`：由模型决定何时请求审批；这是当前默认值。
-  - `never`：不发起审批，失败直接返回给模型。
-  - `on-failure`：上游已标记 deprecated；交互式场景建议改用 `on-request`。
-- 这两项是独立旋钮，不互相替代。
-  - `workspace-write + on-request` 近似 upstream 默认 Agent 模式。
-  - `read-only + on-request` 更适合“只看代码/只分析”。
-  - `danger-full-access + never` 接近 Full Access。
-- 在当前 `feishu-codex` 里，审批默认由飞书用户处理；上游 Codex 还支持把审批路由到 `guardian_subagent`，但这里默认未启用。
-- 更具体的上游实现、平台后端与排障说明见 `docs/codex-permissions-model.md`。
+## 继续深挖看哪里
 
-## 与 [feishu-cc](https://github.com/ZichaoLong/feishu-cc) 的现状差距
+如果你已经能用起来，但还想进一步理解项目，又不想先去读源码，建议按问题找文档：
 
-当前还没有这些能力：
+- 想理解 `/session`、`/resume`、`/profile`、thread / session 的精确语义：`docs/session-profile-semantics.zh-CN.md`
+- 想理解 `fcodex`、shared backend、动态端口、cwd 代理这些运行时机制：`docs/fcodex-shared-backend-runtime.zh-CN.md`
+- 想理解为什么 `/resume` 需要保护、什么情况下会有双 backend 风险：`docs/shared-backend-resume-safety.zh-CN.md`
+- 想理解整体架构、模块边界、仓库结构，以及 `feishu-cc` 与 Codex 的关系：`docs/feishu-codex-design.zh-CN.md`
+- 想理解 `approval`、`sandbox`、`permissions` 这些概念背后的模型：`docs/codex-permissions-model.zh-CN.md`
 
-- `feishu-cc` 的 workspace 系列命令和 `/run`
-- `feishu-cc` 的 `/model` 和更多会话控制能力
-- 更完整的降级、重试、异常恢复和可观测性
-- 更完整的 MCP 交互支持
+补充说明：
+
+- `docs/fcodex-shared-backend-runtime*` 与 `docs/feishu-codex-design*` 里会引用上游 Codex 源码仓库：<https://github.com/openai/codex.git>
+- 这些实现向文档也会标明当前本地验证所依据的 Codex CLI 版本基线
+- 对应英文副本就在同名 `.md` 文件中

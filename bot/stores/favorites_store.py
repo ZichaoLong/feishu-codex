@@ -58,6 +58,27 @@ class FavoritesStore:
             self._write_all(data)
         return True
 
+    def remove_thread_globally(self, thread_id: str) -> bool:
+        with self._lock:
+            data = self._read_all()
+            changed = False
+            for user_id in list(data):
+                favorites = {
+                    item for item in data.get(user_id, [])
+                    if isinstance(item, str) and item
+                }
+                if thread_id not in favorites:
+                    continue
+                favorites.remove(thread_id)
+                changed = True
+                if favorites:
+                    data[user_id] = sorted(favorites)
+                else:
+                    data.pop(user_id, None)
+            if changed:
+                self._write_all(data)
+        return changed
+
     def _read_all(self) -> dict[str, list[str]]:
         path = self._file_path()
         if not path.exists():

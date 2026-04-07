@@ -6,13 +6,16 @@
 # codex_command: codex
 
 # app-server 连接模式；默认值：managed
-# managed: feishu-codex 自己拉起并维护固定 endpoint 的 app-server
+# managed: feishu-codex 自己拉起并维护 shared app-server；
+#          默认优先监听 ws://127.0.0.1:8765，若被占用会自动切到空闲本地端口
 # remote:  feishu-codex 连接到一个已存在的 app-server endpoint
 # app_server_mode: managed
 
 # app-server 地址；默认值：ws://127.0.0.1:8765
-# 说明：在 managed 模式下，这是 feishu-codex 维护的固定 endpoint；
-# 本地若希望与飞书安全共用同一线程，可使用 fcodex，它会自动连接到这个地址。
+# 说明：在 managed 模式下，这是默认目标地址；若默认端口不可用，
+# feishu-codex 会自动改用空闲端口，并把实际地址写入本地运行时状态。
+# 本地若希望与飞书安全共用同一线程，可使用 fcodex；当这里仍是默认值时，
+# 它会自动发现当前实际运行的 shared backend 地址。
 # app_server_url: ws://127.0.0.1:8765
 
 # app-server 连接超时（秒）；默认值：15

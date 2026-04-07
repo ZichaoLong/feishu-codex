@@ -11,10 +11,18 @@ from bot.codex_protocol.client import CodexRpcError
 
 
 class _FakeAdapter:
-    def __init__(self, config, *, on_notification=None, on_request=None) -> None:
+    def __init__(
+        self,
+        config,
+        *,
+        on_notification=None,
+        on_request=None,
+        app_server_runtime_store=None,
+    ) -> None:
         self.config = config
         self.on_notification = on_notification
         self.on_request = on_request
+        self.app_server_runtime_store = app_server_runtime_store
         self.start_calls = 0
         self.last_profile = "provider1"
         self.set_active_profile_calls: list[str] = []
@@ -28,6 +36,9 @@ class _FakeAdapter:
 
     def start(self) -> None:
         self.start_calls += 1
+
+    def current_app_server_url(self) -> str:
+        return self.config.app_server_url
 
     def create_thread(
         self,
@@ -154,6 +165,12 @@ class _FakeBot:
 
 
 class CodexHandlerTests(unittest.TestCase):
+    @staticmethod
+    def _first_action(card: dict) -> dict:
+        return next(
+            element for element in card["elements"] if isinstance(element, dict) and element.get("tag") == "action"
+        )
+
     def _make_handler(self) -> tuple[CodexHandler, _FakeBot]:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -176,7 +193,8 @@ class CodexHandlerTests(unittest.TestCase):
 
         state = handler._get_state("u1", "c1")
         self.assertEqual(state["collaboration_mode"], "plan")
-        self.assertEqual(bot.replies[-1], ("c1", "协作模式已切换为：`plan`"))
+        self.assertIn("已切换协作模式：`plan`", bot.replies[-1][1])
+        self.assertIn("只影响当前飞书会话的后续 turn", bot.replies[-1][1])
 
     def test_on_register_eagerly_starts_adapter(self) -> None:
         handler, bot = self._make_handler()
@@ -264,6 +282,14 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
         self.assertEqual(card["header"]["title"]["content"], "Codex 协作模式")
+        content = "\n".join(
+            element.get("content", "")
+            for element in card["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("更接近直接执行", content)
+        self.assertIn("更容易先规划、提问，并展示计划卡片", content)
+        self.assertEqual(self._first_action(card)["layout"], "trisection")
 
     def test_sandbox_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
@@ -272,7 +298,8 @@ class CodexHandlerTests(unittest.TestCase):
 
         state = handler._get_state("u1", "c1")
         self.assertEqual(state["sandbox"], "read-only")
-        self.assertEqual(bot.replies[-1], ("c1", "沙箱策略已切换为：`read-only`"))
+        self.assertIn("已切换沙箱策略：`read-only`", bot.replies[-1][1])
+        self.assertIn("只影响当前飞书会话的后续 turn", bot.replies[-1][1])
 
     def test_sandbox_command_without_arg_shows_sandbox_card(self) -> None:
         handler, bot = self._make_handler()
@@ -282,6 +309,8 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
         self.assertEqual(card["header"]["title"]["content"], "Codex 沙箱策略")
+        self.assertIn("它只决定文件和网络边界", card["elements"][0]["content"])
+        self.assertIn("优先使用 `/permissions`", card["elements"][0]["content"])
 
     def test_permissions_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
@@ -302,6 +331,19 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
         self.assertEqual(card["header"]["title"]["content"], "Codex 权限预设")
+        self.assertIn("推荐先用这个", card["elements"][0]["content"])
+        self.assertIn("优先选 `default`", card["elements"][0]["content"])
+
+    def test_approval_command_without_arg_shows_approval_boundary(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/approval")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[0]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 审批策略")
+        self.assertIn("只决定什么时候停下来等你确认", card["elements"][0]["content"])
+        self.assertIn("优先使用 `/permissions`", card["elements"][0]["content"])
 
     def test_mode_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
@@ -451,34 +493,39 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertIn("/help", card["body"]["elements"][0]["content"])
 
-    def test_status_includes_backend_hint(self) -> None:
+    def test_status_includes_user_facing_summary(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("u1", "c1", "/status")
 
-        self.assertIn("后端：`managed` `ws://127.0.0.1:8765`", bot.replies[-1][1])
-        self.assertIn("feishu-codex 默认 profile：`（未设置）`", bot.replies[-1][1])
-        self.assertIn("当前运行时 provider：`provider1_api`", bot.replies[-1][1])
-        self.assertIn("权限预设：`Default`", bot.replies[-1][1])
-        self.assertIn("审批策略：`on-request`", bot.replies[-1][1])
-        self.assertIn("沙箱策略：`workspace-write`", bot.replies[-1][1])
-        self.assertIn("fcodex", bot.replies[-1][1])
-        self.assertIn("飞书 `/session` 仅列当前目录线程", bot.replies[-1][1])
-        self.assertIn("飞书 `/resume` 按后端全局精确匹配（可跨 provider）", bot.replies[-1][1])
-        self.assertIn("`fcodex /session`、`fcodex /resume <thread_name>` 复用与飞书一致的共享发现逻辑", bot.replies[-1][1])
-        self.assertIn("`fcodex resume <id>` 以及进入 TUI 后的 `/resume` 仍是 upstream 原样", bot.replies[-1][1])
-        self.assertIn("`fcodex` shell wrapper 自命令只有 `fcodex /help`、`/profile`、`/rm`、`/session`、`/resume`", bot.replies[-1][1])
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 当前状态")
+        content = card["elements"][0]["content"]
+        self.assertIn("默认 profile：`（未设置）`", content)
+        self.assertIn("当前 provider：`provider1_api`", content)
+        self.assertIn("权限预设：`Default`", content)
+        self.assertIn("审批策略：`on-request`", content)
+        self.assertIn("沙箱策略：`workspace-write`", content)
+        self.assertIn("直接发送普通文本，会在当前目录自动新建线程。", content)
 
     def test_profile_command_without_arg_shows_runtime_profiles(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("u1", "c1", "/profile")
 
-        reply = bot.replies[-1][1]
-        self.assertIn("feishu-codex 默认 profile：`（未设置）`", reply)
-        self.assertIn("`provider1` -> `provider1_api`", reply)
-        self.assertIn("`provider2` -> `provider2_api`", reply)
-        self.assertIn("不会改动裸 `codex` 全局配置", reply)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 默认 Profile")
+        content = card["elements"][0]["content"]
+        self.assertIn("当前默认 profile：`（未设置）`", content)
+        self.assertIn("默认 profile 对应 provider：跟随 Codex 原生默认", content)
+        self.assertIn("切换方式：`/profile <name>`，例如：`/profile provider1`", content)
+        self.assertIn("**可用 profile**", content)
+        self.assertIn("`provider1` -> `provider1_api`", content)
+        self.assertIn("`provider2` -> `provider2_api`", content)
+        self.assertIn("**说明**", content)
+        self.assertIn("作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。", content)
+        self.assertIn("已打开的 `fcodex` TUI 不会热切换。", content)
 
     def test_profile_command_switches_local_default_profile(self) -> None:
         handler, bot = self._make_handler()
@@ -486,10 +533,45 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("u1", "c1", "/profile provider2")
 
         self.assertEqual(handler._adapter.set_active_profile_calls, [])
-        reply = bot.replies[-1][1]
-        self.assertIn("feishu-codex 默认 profile 已切换为：`provider2`", reply)
-        self.assertIn("对应 provider：`provider2_api`", reply)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 默认 Profile")
+        content = card["elements"][0]["content"]
+        self.assertIn("已切换默认 profile：`provider2`", content)
+        self.assertIn("默认 profile 对应 provider：`provider2_api`", content)
+        self.assertIn("再次切换：`/profile <name>`", content)
+        self.assertIn("**说明**", content)
+        self.assertIn("作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。", content)
+        self.assertIn("已打开的 `fcodex` TUI 不会热切换。", content)
         self.assertEqual(handler._profile_state.load_default_profile(), "provider2")
+
+    def test_profile_command_prefers_profile_mapping_for_default_provider(self) -> None:
+        handler, bot = self._make_handler()
+        handler._profile_state.save_default_profile("provider2")
+        handler._adapter.read_runtime_config = lambda **kwargs: RuntimeConfigSummary(
+            current_profile="provider1",
+            current_model_provider=None,
+            profiles=[
+                RuntimeProfileSummary(name="provider1", model_provider="provider1_api"),
+                RuntimeProfileSummary(name="provider2", model_provider="provider2_api"),
+            ],
+        )
+
+        handler.handle_message("u1", "c1", "/profile")
+
+        _, card = bot.cards[-1]
+        content = card["elements"][0]["content"]
+        self.assertIn("当前默认 profile：`provider2`", content)
+        self.assertIn("默认 profile 对应 provider：`provider2_api`", content)
+        self.assertNotIn("当前运行时 provider", content)
+
+    def test_profile_command_with_unknown_name_shows_usage(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/profile provider9")
+
+        self.assertIn("未找到 profile：`provider9`", bot.replies[-1][1])
+        self.assertIn("用法：`/profile <name>`", bot.replies[-1][1])
+        self.assertIn("先发 `/profile` 查看可用 profile。", bot.replies[-1][1])
 
     def test_rm_command_archives_current_thread_and_clears_binding(self) -> None:
         handler, bot = self._make_handler()
@@ -514,14 +596,36 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertFalse(handler._favorites.is_starred("u1", "thread-1"))
         self.assertIn("不是硬删除", bot.replies[-1][1])
 
+    def test_rm_command_clears_favorites_for_all_users(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("u1", "c1", thread)
+        handler._favorites.toggle("u1", "thread-1")
+        handler._favorites.toggle("u2", "thread-1")
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
+
+        handler.handle_message("u1", "c1", "/rm")
+
+        self.assertFalse(handler._favorites.is_starred("u1", "thread-1"))
+        self.assertFalse(handler._favorites.is_starred("u2", "thread-1"))
+
     def test_profile_command_clears_stale_local_default_profile(self) -> None:
         handler, bot = self._make_handler()
         handler._profile_state.save_default_profile("provider9")
 
         handler.handle_message("u1", "c1", "/profile")
 
-        reply = bot.replies[-1][1]
-        self.assertIn("已不存在，现已自动清空并回退到 Codex 原生默认", reply)
+        _, card = bot.cards[-1]
+        self.assertIn("已不存在，现已自动清空并回退到 Codex 原生默认", card["elements"][0]["content"])
         self.assertEqual(handler._profile_state.load_default_profile(), "")
 
     def test_status_mentions_stale_local_default_profile_cleanup(self) -> None:
@@ -530,8 +634,8 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("u1", "c1", "/status")
 
-        reply = bot.replies[-1][1]
-        self.assertIn("已自动回退到 Codex 原生默认", reply)
+        _, card = bot.cards[-1]
+        self.assertIn("已自动回退到 Codex 原生默认", card["elements"][0]["content"])
         self.assertEqual(handler._profile_state.load_default_profile(), "")
 
     def test_new_thread_uses_local_default_profile(self) -> None:
@@ -730,24 +834,175 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
         self.assertIn("跨 provider 汇总", card["elements"][0]["content"])
-        self.assertIn("全局恢复请用 `/resume <thread_id|thread_name>`", card["elements"][0]["content"])
-        self.assertIn("`fcodex /session`、`fcodex /resume <thread_name>` 与飞书复用同一套共享发现逻辑", card["elements"][0]["content"])
-        self.assertIn("进入 TUI 后，`/resume` 仍保持 upstream 原样", card["elements"][0]["content"])
+        self.assertIn("`/resume <thread_id|thread_name>`", card["elements"][0]["content"])
+        self.assertIn("`/help local`", card["elements"][0]["content"])
 
-    def test_help_mentions_session_and_resume_scope_difference(self) -> None:
+    def test_session_card_uses_trisection_layout_for_row_actions(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+
+        handler.handle_message("u1", "c1", "/session")
+
+        _, card = bot.cards[0]
+        self.assertEqual(self._first_action(card)["layout"], "trisection")
+
+    def test_help_overview_is_layered(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("u1", "c1", "/help")
 
-        self.assertIn("飞书 `/session` 只列当前目录线程，但会跨 provider 汇总", bot.replies[-1][1])
-        self.assertIn("飞书 `/resume` 按后端全局精确匹配", bot.replies[-1][1])
-        self.assertIn("/profile", bot.replies[-1][1])
-        self.assertIn("`fcodex` shell wrapper 自命令只有 `fcodex /help`、`/profile`、`/rm`、`/session`、`/resume`", bot.replies[-1][1])
-        self.assertIn("不能与裸 `codex` 的 flags 或子命令混用", bot.replies[-1][1])
-        self.assertIn("`fcodex resume <id>` 以及进入 TUI 后的 `/resume` 仍是 upstream 原样", bot.replies[-1][1])
-        self.assertIn("`fcodex /session`、`fcodex /resume <thread_name>` 复用与飞书一致的共享发现逻辑", bot.replies[-1][1])
-        self.assertIn("`fcodex /session` 或 `fcodex /session global`", bot.replies[-1][1])
-        self.assertIn("docs/session-profile-semantics.md", bot.replies[-1][1])
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助")
+        content = card["elements"][0]["content"]
+        self.assertIn("/new", content)
+        self.assertIn("/session", content)
+        self.assertIn("/resume <thread_id|thread_name>", content)
+        self.assertIn("/cd <path>", content)
+        self.assertIn("/status", content)
+        self.assertNotIn("/cancel", content)
+        self.assertIn("/help session", content)
+        self.assertIn("/help settings", content)
+        self.assertIn("/help local", content)
+        self.assertIn("如需在本地继续同一线程，请使用 `fcodex`", content)
+
+    def test_help_session_mentions_resume_scope_and_new_semantics(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/help session")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：线程")
+        content = card["elements"][0]["content"]
+        self.assertIn("`/session` 只列当前目录的线程", content)
+        self.assertIn("`/resume <thread_id|thread_name>` 会做全局精确匹配", content)
+        self.assertIn("`/new` 立即新建并切换到新线程", content)
+
+    def test_help_settings_mentions_permissions_as_recommended_entry(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/help settings")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：设置")
+        content = card["elements"][0]["content"]
+        self.assertIn("`/profile` 查看或切换默认 profile", content)
+        self.assertIn("推荐先用 `/permissions`", content)
+        self.assertIn("不热切换已打开的 `fcodex` TUI", content)
+        self.assertIn("只影响当前飞书会话的后续 turn", content)
+        self.assertIn("/profile [name]", content)
+        self.assertIn("/approval [untrusted|on-failure|on-request|never]", content)
+        self.assertIn("/sandbox [read-only|workspace-write|danger-full-access]", content)
+        self.assertIn("如果当前正在执行，新设置从下一轮生效。", content)
+
+    def test_help_local_explains_wrapper_and_tui_resume_difference(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/help local")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：本地继续")
+        content = card["elements"][0]["content"]
+        self.assertIn("`fcodex` 是 `codex --remote` 的 wrapper", content)
+        self.assertIn("跨 provider 找线程", content)
+        self.assertIn("不等同于 `fcodex /resume`", content)
+
+    def test_new_command_reply_focuses_on_next_step(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/new")
+
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 线程已新建")
+        content = card["elements"][0]["content"]
+        self.assertIn("线程：`", content)
+        self.assertIn("目录：`", content)
+        self.assertIn("直接发送普通文本开始第一轮对话。", content)
+
+    def test_cd_command_success_uses_card_and_clears_binding(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("u1", "c1", thread)
+
+        handler.handle_message("u1", "c1", "/cd /tmp")
+
+        self.assertEqual(handler._get_state("u1", "c1")["working_dir"], "/tmp")
+        self.assertEqual(handler._get_state("u1", "c1")["current_thread_id"], "")
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 目录已切换")
+        self.assertIn("当前线程绑定已清空。", card["elements"][0]["content"])
+
+    def test_cd_command_failure_uses_warning_card(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("u1", "c1", "/cd /definitely-not-exists")
+
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 目录未切换")
+        self.assertIn("目录不存在", card["elements"][0]["content"])
+
+    def test_resume_success_merges_switch_summary_into_history_preview_card(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="vscode",
+            status="idle",
+        )
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
+        handler._adapter.resume_thread = lambda thread_id, profile=None: ThreadSnapshot(
+            summary=thread,
+            turns=[
+                {
+                    "items": [
+                        {"type": "userMessage", "content": [{"type": "text", "text": "hello"}]},
+                        {"type": "agentMessage", "text": "world"},
+                    ]
+                }
+            ],
+        )
+
+        handler.handle_message("u1", "c1", "/resume demo")
+
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "线程 thread-1… 最近对话")
+        content = "\n".join(
+            element.get("content", "")
+            for element in card["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("已切换到线程", content)
+        self.assertIn("目录：`/tmp/project`", content)
+        self.assertIn("👤 **你**", content)
+        self.assertIn("🤖 **Codex**", content)
 
     def test_resume_card_action_for_not_loaded_thread_returns_guard_card(self) -> None:
         handler, _ = self._make_handler()

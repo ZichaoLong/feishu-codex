@@ -8,6 +8,14 @@ It exists for two reasons:
 - keep the Feishu-side wording aligned with upstream Codex behavior
 - separate concise user-facing help from implementation and troubleshooting detail
 
+Upstream baseline:
+
+- Codex source repository: [`openai/codex`](https://github.com/openai/codex.git)
+- Current local validation baseline: `codex-cli 0.118.0` (checked on 2026-04-03)
+- File/line references below are implementation breadcrumbs verified locally
+  against that baseline; they are useful for orientation, not guaranteed stable
+  permalinks
+
 ## 1. The Three Layers
 
 `feishu-codex` exposes three closely related concepts:

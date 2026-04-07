@@ -1,50 +1,48 @@
-# Shared Backend 与 Resume 安全性设计
+# Shared Backend 与 Resume 安全性
 
 英文原文：`docs/shared-backend-resume-safety.md`
 
-## 1. 问题陈述
+另见：
 
-只有当 `feishu-codex` 与原生 Codex TUI 通过同一个 app-server backend 写入同一个线程时，它们才是安全的。
+- `docs/fcodex-shared-backend-runtime.zh-CN.md`：当前 shared backend 与 wrapper 的运行时模型
+- `docs/session-profile-semantics.zh-CN.md`：精确的命令与 wrapper 语义
+- `docs/feishu-codex-design.zh-CN.md`：架构与仓库边界
+
+## 1. 上游基线
+
+- 上游项目：[`openai/codex`](https://github.com/openai/codex.git)
+- 当前本地验证基线：`codex-cli 0.118.0`（2026-04-03）
+- 本文只聚焦安全边界与 `/resume` 语义；wrapper 运行时细节不再在这里重复展开，而是以 `fcodex-shared-backend-runtime` 为准。
+
+## 2. 问题陈述
+
+只有当 `feishu-codex` 与 stock Codex TUI 通过同一个 app-server backend 写入同一个线程时，它们才是安全的。
 
 如果它们通过不同的 app-server 进程去恢复同一个持久化线程，就可能各自物化出自己的 live 内存线程，随后再追加彼此冲突的状态。
 
-本文定义以下内容的安全模型、面向用户的语义，以及实现边界：
+本文定义当前的安全模型，用于说明：
 
-- shared backend 模式
+- shared backend 路径
 - 对当前 backend 中未加载线程执行 `/resume`
-- 同一线程在多个飞书会话中的行为
+- 同一线程在多个飞书会话中的行为边界
 
-## 2. 已验证约束
+## 3. 已验证约束
 
-### 2.1 我们可以依赖的硬事实
+### 3.1 我们可以依赖的硬事实
 
 - 在同一个 app-server 进程内，恢复一个已经加载的线程时，会复用已加载线程和订阅者模型，而不是创建第二份 live 副本。
 - `thread/loaded/list`、`thread/list.status` 和 `thread/read.status` 只描述当前 app-server 进程。
 - `thread/read` 读取的是已存储历史，不会创建 live thread。
 - `thread/resume` 会把线程加载进当前 app-server，成为 live thread。
 
-### 2.2 我们不能依赖的事实
+### 3.2 我们不能依赖的事实
 
-- 我们无法可靠检测另一个原生 TUI 进程当前是否正在写同一个线程。
+- 我们无法可靠检测另一个 stock TUI 进程当前是否正在写同一个线程。
 - `source` 和 `service_name` 只是来源提示，不是 live ownership 或 lock 信号。
-- 我们无法强制一个原生 TUI 进程停止写入。
+- 我们无法强制另一个 stock TUI 进程停止写入。
 - 以当前公开机制，我们无法自动附着到原生 TUI 自带的 app-server。
 
-## 3. 设计目标
-
-- 让安全路径清晰且容易采用。
-- 避免伪确定性，例如“没有其它客户端正在写”。
-- 避免对外部线程静默双写。
-- 让用户心智模型保持足够简单，便于日常使用。
-
-## 4. 非目标
-
-- 不尝试做全局跨进程线程锁。
-- 不把“takeover”表述成真实的技术交接。
-- 不默认在 resume 时 fork。
-- 不根据 `source=cli` 之类启发式信息做安全决策。
-
-## 5. 核心模型
+## 4. 核心安全规则
 
 所有地方统一使用一条规则：
 
@@ -52,65 +50,42 @@
 
 如果用户希望飞书和本地 TUI 安全地同时操作同一个 live thread，它们就必须连接到同一个 app-server backend。
 
-## 6. Backend 模式
+## 5. Backend 安全边界
 
-### 6.1 Shared backend 模式
+### 5.1 Shared backend
 
-这是推荐的稳定工作模式。
-
-行为：
-
-- `feishu-codex` 维护一个稳定的本地 websocket endpoint。
-- 本地 TUI 通过 `codex --remote ...` 连接，而不是启动自己的内嵌 backend。
-- 飞书与本地 TUI 共享同一份已加载线程状态。
-
-推荐本地 wrapper：
-
-```bash
-fcodex "$@"
-```
-
-等价启动形态：
-
-```bash
-codex --remote ws://127.0.0.1:PORT "$@"
-```
+这是推荐的安全路径。
 
 特性：
 
-- 对同一线程，不会因双 live thread 而产生分叉
-- 对多个本地 TUI 窗口连接到同一个 shared backend 也是安全的
-- 一旦用户接受这条路径，心智负担更低
-- shared backend 不意味着存在一个跨客户端即时同步的统一控制面，例如“待发下一轮的协作模式选择”
+- 飞书与本地 TUI 通过同一个 app-server backend 写入
+- 已加载线程状态在这个 backend 内共享
+- 多个本地 TUI 窗口附着到同一个 backend，也不会引入跨进程分叉
 
-补充说明：
+shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared-backend-runtime.zh-CN.md`。
 
-- live thread 通过同一个 backend 共享
-- 但每个客户端仍各自决定自己下一次 `turn/start` 要发送什么
-- 因此，飞书里改的协作模式不会立刻改写已打开 TUI 的当前显示，反过来也是一样
+### 5.2 Isolated backend
 
-### 6.2 Isolated backend 模式
-
-当用户不带 `--remote` 直接运行原生 TUI 时，这是兼容模式。
+当用户脱离 shared backend 直接运行 stock TUI 时，就是这一路径。
 
 特性：
 
-- `feishu-codex` 无法知道本地 TUI 是空闲、关闭，还是即将写入
-- `feishu-codex` 不能安全地假设自己对某个外部线程拥有独占所有权
-- 对外部线程执行 resume 时，必须要求用户显式选择
+- `feishu-codex` 无法知道这个本地 TUI 是空闲、关闭，还是即将写入
+- `feishu-codex` 不能安全地假设自己对该线程拥有独占所有权
+- 对这种外部线程的 resume，必须要求用户显式选择
 
-## 7. `/resume` 语义
+## 6. `/resume` 安全模型
 
-### 7.1 分类
+### 6.1 分类
 
 在匹配到目标线程后，只使用硬事实进行分类：
 
 1. `loaded-in-current-backend`
 2. `not-loaded-in-current-backend`
 
-不要基于缓存的 ownership 启发式，再额外发明一个“可能安全”的第三类。
+不要再额外发明一个基于启发式缓存的“可能安全”类别。
 
-### 7.2 已加载于当前 backend
+### 6.2 已加载于当前 backend
 
 如果目标线程已经加载在当前 `feishu-codex` backend 中：
 
@@ -120,9 +95,9 @@ codex --remote ws://127.0.0.1:PORT "$@"
 
 这是安全的，因为该线程已经活在同一个 backend 里。
 
-### 7.3 未加载于当前 backend
+### 6.3 未加载于当前 backend
 
-如果目标线程当前没有加载在本 backend 中，`/resume` 不能立刻调用 `thread/resume`。
+如果目标线程当前没有加载在本 backend 中，`/resume` 不应立刻调用 `thread/resume`。
 
 应先展示一张三操作卡片：
 
@@ -139,7 +114,7 @@ codex --remote ws://127.0.0.1:PORT "$@"
 - 不绑定当前飞书会话
 - 不在当前 backend 中创建 live thread
 
-它是安全的只读检查路径。
+这是安全的只读检查路径。
 
 #### `恢复并继续写入`
 
@@ -147,12 +122,12 @@ codex --remote ws://127.0.0.1:PORT "$@"
 
 - 调用 `thread/resume`
 - 将当前飞书会话绑定到该线程
-- 明确回复一条警告：这会在 `feishu-codex` backend 中创建一个 live thread
+- 明确回复一条警告：这会在当前 `feishu-codex` backend 中创建一个 live thread
 
-必须表达清楚的警告含义：
+警告需要表达清楚的含义：
 
 - 如果另一个非 shared-backend 客户端也在写这个线程，历史可能分叉，或者至少让后续状态变得混乱
-- 如果想避免这件事，本地继续时请使用 `fcodex`
+- 如果目标是本地继续同一个 live thread，应优先走 shared backend 路径
 
 这是一条经用户确认的风险路径，不是技术上的“接管”。
 
@@ -162,16 +137,7 @@ codex --remote ws://127.0.0.1:PORT "$@"
 
 - 不做任何事
 
-### 7.4 为什么 fork 不在默认流程里
-
-`thread/fork` 从技术上是安全的，但它会制造额外分支线程，进而让 TUI 和飞书两边后续的会话恢复都变得更难理解。
-
-因此当前策略是：
-
-- 不在默认 `/resume` 风险卡片中提供 fork
-- 如果未来需要，再把 fork 作为显式命令单独暴露
-
-## 8. 来源展示
+## 7. 来源展示与对称风险
 
 把来源元数据只作为信息展示：
 
@@ -185,81 +151,39 @@ codex --remote ws://127.0.0.1:PORT "$@"
 
 不要仅凭 provenance 自动做安全决策。
 
-## 9. 用户指引
+风险是对称的：
 
-产品应反复教一条操作规则，而不是堆很多例外：
+- 如果飞书把外部线程恢复进自己的 backend，可能产生分叉
+- 如果用户之后又用裸 `codex` 在另一个 backend 恢复飞书正在使用的线程，同样存在风险
 
-- 如果希望在本地与飞书继续同一个线程，请使用 `fcodex`，不要直接用裸 `codex`。
+`feishu-codex` 不能消除这种风险。它能做的，是避免把未知外部线程静默恢复到可写状态，并让安全路径保持显式。
 
-建议放在高价值位置：
+## 8. 飞书多会话边界
 
-1. `/help`
-2. 外部线程的 `/resume` 风险卡片
-3. 飞书第一次物化线程后给一次提示
+安全性和 UX 是两个不同问题。
 
-不要在每一张执行卡片或每一条消息卡片上重复警告。
-
-## 10. 对称风险
-
-风险是对称的。
-
-如果某个线程已经在 `feishu-codex` 中活跃，用户之后又用裸 `codex` 通过自己的 backend 恢复同一个线程，同样存在双 backend 分叉风险。
-
-`feishu-codex` 无法阻止这件事。它能做的只有：
-
-- 推荐用户使用 `fcodex`
-- 避免把未知外部线程静默恢复到可写状态
-
-## 11. 飞书多会话语义
-
-当前的安全性和 UX 是两个不同问题。
-
-### 11.1 安全性
+### 8.1 安全性
 
 同一个 `feishu-codex` service 下的所有飞书会话本来就共享同一个 backend 进程，因此不会像飞书和裸 TUI 之间那样，为每个会话创建不同的 app-server 进程。
 
-所以它们不会遭遇跨进程双 live thread 分叉问题。
+所以它们不会遭遇那种跨进程双 live thread 分叉问题。
 
-### 11.2 当前 UX 限制
+### 8.2 当前 UX 限制
 
-当前实现对每个 `thread_id` 只维护一个 `(user_id, chat_id)` 绑定。
+当前实现对每个 `thread_id` 只维护一个主要的 `(user_id, chat_id)` 通知绑定。
 
 这意味着：
 
 - 最后一个绑定到该线程的飞书会话，会收到流式更新和审批请求
 - 当前并不支持多会话镜像式 live view
 
-因此，当前支持的语义是：
+当前支持的语义是：
 
 - 飞书内部共享线程状态，对 backend 安全
 - 每个线程只有一个会话拥有通知归属权
 
-真正的多会话镜像查看不在本文设计范围内。
+## 9. 相关文档
 
-## 12. 最小实现计划
-
-### Phase A: Shared backend 模式
-
-- 把随机监听地址替换为可配置的稳定 endpoint
-- 支持可选的本地 auth token
-- 提供 `fcodex` wrapper 或等价辅助命令
-- 在 `/status` 中展示当前 backend 模式
-
-### Phase B: 受保护的外部线程 resume
-
-- 增加线程分类：当前 backend 中已加载 / 未加载
-- 增加三操作外部线程卡片
-- 基于 `thread/read` 增加快照预览渲染
-
-### Phase C: UX 指引
-
-- 在 `/help` 中加入一条清晰规则
-- 在风险卡片文案中明确推荐 shared 模式
-- 在合适位置展示 provenance 信息
-
-## 13. 验收标准
-
-- 在 shared 模式下，飞书和本地 TUI 可以恢复并写入同一个线程，而不会因为各自物化出独立 live 副本而分叉。
-- 对外部线程，飞书绝不会静默将其恢复到可写状态。
-- 用户始终有一条不会物化 live thread 的安全查看路径。
-- UI 永远不会声称自己知道另一个外部 TUI 是否正在主动写入。
+- `docs/session-profile-semantics.zh-CN.md`：`/session`、`/resume`、`fcodex` 与 profile 的精确命令语义
+- `docs/fcodex-shared-backend-runtime.zh-CN.md`：shared backend、动态端口发现、cwd 代理与 wrapper 运行时行为
+- `docs/feishu-codex-design.zh-CN.md`：架构、设计约束与当前仓库结构

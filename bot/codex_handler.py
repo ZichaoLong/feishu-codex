@@ -10,6 +10,7 @@ import logging
 import pathlib
 import threading
 import time
+from dataclasses import replace
 from typing import Any
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from bot.cards import (
     build_execution_card,
     build_file_change_approval_card,
     build_history_preview_card,
+    build_markdown_card,
     build_plan_card,
     build_permissions_preset_card,
     build_permissions_approval_card,
@@ -41,7 +43,6 @@ from bot.cards import (
 from bot.config import load_config_file
 from bot.constants import (
     DEFAULT_APP_SERVER_MODE,
-    DEFAULT_APP_SERVER_URL,
     DEFAULT_HISTORY_PREVIEW_ROUNDS,
     DEFAULT_SESSION_RECENT_LIMIT,
     DEFAULT_SESSION_STARRED_LIMIT,
@@ -62,6 +63,7 @@ from bot.session_resolution import (
     looks_like_thread_id,
     resolve_resume_target_by_name,
 )
+from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.favorites_store import FavoritesStore
 from bot.stores.profile_state_store import ProfileStateStore
 
@@ -71,6 +73,9 @@ _CARD_REPLY_LIMIT_DEFAULT = 12000
 _CARD_LOG_LIMIT_DEFAULT = 8000
 _APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
+_LOCAL_THREAD_SAFETY_RULE = (
+    "如需在本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。"
+)
 _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
     "read-only": {
         "label": "Read Only",
@@ -134,12 +139,22 @@ class CodexHandler(BotHandler):
         self._card_log_limit = int(cfg.get("card_log_limit", _CARD_LOG_LIMIT_DEFAULT))
 
         self._adapter_config = CodexAppServerConfig.from_dict(cfg)
+        self._app_server_runtime = AppServerRuntimeStore(self._data_dir)
+        if self._adapter_config.app_server_mode == "remote":
+            self._adapter_config = replace(
+                self._adapter_config,
+                app_server_url=resolve_effective_app_server_url(
+                    self._adapter_config.app_server_url,
+                    data_dir=self._data_dir,
+                ),
+            )
         self._favorites = FavoritesStore(self._data_dir)
         self._profile_state = ProfileStateStore(self._data_dir)
         self._adapter = CodexAppServerAdapter(
             self._adapter_config,
             on_notification=self._handle_adapter_notification,
             on_request=self._handle_adapter_request,
+            app_server_runtime_store=self._app_server_runtime,
         )
         atexit.register(self.shutdown)
 
@@ -356,7 +371,7 @@ class CodexHandler(BotHandler):
         cmd = command.lower()
 
         if cmd in ("/help", "/h"):
-            self._reply_help(chat_id)
+            self._reply_help(chat_id, arg)
             return
         if cmd == "/pwd":
             self.bot.reply(chat_id, f"当前目录：`{display_path(self._get_state(user_id, chat_id)['working_dir'])}`")
@@ -461,25 +476,62 @@ class CodexHandler(BotHandler):
         state = self._get_state(user_id, chat_id)
         with self._lock:
             if state["running"]:
-                self.bot.reply(chat_id, "执行中不能切换目录，请等待结束或先执行 `/cancel`。")
+                self.bot.reply_card(
+                    chat_id,
+                    build_markdown_card(
+                        "Codex 目录未切换",
+                        "执行中不能切换目录，请等待结束或先停止当前执行。",
+                        template="orange",
+                    ),
+                )
                 return
 
         if not arg:
-            self.bot.reply(chat_id, f"当前目录：`{display_path(state['working_dir'])}`")
+            self.bot.reply_card(
+                chat_id,
+                build_markdown_card(
+                    "Codex 当前目录",
+                    f"当前目录：`{display_path(state['working_dir'])}`",
+                ),
+            )
             return
 
         target = resolve_working_dir(arg, fallback=state["working_dir"])
         if not pathlib.Path(target).exists():
-            self.bot.reply(chat_id, f"目录不存在：`{display_path(target)}`")
+            self.bot.reply_card(
+                chat_id,
+                build_markdown_card(
+                    "Codex 目录未切换",
+                    f"目录不存在：`{display_path(target)}`",
+                    template="orange",
+                ),
+            )
             return
         if not pathlib.Path(target).is_dir():
-            self.bot.reply(chat_id, f"不是目录：`{display_path(target)}`")
+            self.bot.reply_card(
+                chat_id,
+                build_markdown_card(
+                    "Codex 目录未切换",
+                    f"不是目录：`{display_path(target)}`",
+                    template="orange",
+                ),
+            )
             return
 
         self._clear_thread_binding(user_id, chat_id)
         with self._lock:
             state["working_dir"] = target
-        self.bot.reply(chat_id, f"已切换目录到 `{display_path(target)}`，当前线程绑定已清空。")
+        self.bot.reply_card(
+            chat_id,
+            build_markdown_card(
+                "Codex 目录已切换",
+                (
+                    f"目录：`{display_path(target)}`\n"
+                    "当前线程绑定已清空。\n"
+                    "直接发送普通文本，会在新目录自动新建线程。"
+                ),
+            ),
+        )
 
     def _handle_new_command(self, user_id: str, chat_id: str) -> None:
         state = self._get_state(user_id, chat_id)
@@ -499,12 +551,16 @@ class CodexHandler(BotHandler):
             self.bot.reply(chat_id, f"新建线程失败：{exc}")
             return
         self._bind_thread(user_id, chat_id, snapshot.summary)
-        self.bot.reply(
+        self.bot.reply_card(
             chat_id,
-            (
-                f"已新建线程：`{snapshot.summary.thread_id[:8]}…`\n"
-                f"目录：`{display_path(snapshot.summary.cwd)}`\n"
-                "发送 `/help` 查看可用命令列表。"
+            build_markdown_card(
+                "Codex 线程已新建",
+                (
+                    f"线程：`{snapshot.summary.thread_id[:8]}…`\n"
+                    f"目录：`{display_path(snapshot.summary.cwd)}`\n"
+                    "直接发送普通文本开始第一轮对话。"
+                ),
+                template="green",
             ),
         )
 
@@ -519,41 +575,43 @@ class CodexHandler(BotHandler):
         profile_resolution = self._current_default_profile_resolution(runtime_config)
         local_profile = profile_resolution.effective_profile
         if runtime_config:
-            profile_line = f"feishu-codex 默认 profile：`{local_profile or '（未设置）'}`"
-            provider_line = f"当前运行时 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
+            profile_line = f"默认 profile：`{local_profile or '（未设置）'}`"
+            provider_line = f"当前 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
         else:
-            profile_line = f"feishu-codex 默认 profile：`{local_profile or '（未设置）'}`"
-            provider_line = "当前运行时 provider：读取失败"
+            profile_line = f"默认 profile：`{local_profile or '（未设置）'}`"
+            provider_line = "当前 provider：读取失败"
         header = (
             f"目录：`{display_path(state['working_dir'])}`\n当前线程：`{thread_id[:8]}…` {title}"
             if thread_id
             else f"目录：`{display_path(state['working_dir'])}`\n当前线程：-"
         )
-        self.bot.reply(
+        if state["running"]:
+            next_step = "如需停止当前执行，可点当前执行卡片上的停止按钮。"
+        elif not thread_id:
+            next_step = "直接发送普通文本，会在当前目录自动新建线程。"
+        else:
+            next_step = "发送 `/help` 查看常用命令。"
+        content = (
+            f"{header}\n"
+            f"执行中：{running}\n"
+            f"当前 turn：{turn_id}\n"
+            f"{profile_line}\n"
+            f"{provider_line}\n"
+            f"权限预设：`{permissions_summary}`\n"
+            f"审批策略：`{state['approval_policy']}`\n"
+            f"沙箱策略：`{state['sandbox']}`\n"
+            f"协作模式：`{state['collaboration_mode']}`"
+            + (
+                f"\n\n注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。"
+                if profile_resolution.stale_profile
+                else ""
+            )
+            + f"\n\n{next_step}"
+        )
+        template = "turquoise" if state["running"] else "blue"
+        self.bot.reply_card(
             chat_id,
-            (
-                f"{header}\n执行中：{running}\n当前 turn：{turn_id}\n"
-                f"后端：`{self._backend_mode_label()}` `{self._backend_url()}`\n"
-                f"{profile_line}\n{provider_line}\n"
-                f"权限预设：`{permissions_summary}`\n"
-                f"审批策略：`{state['approval_policy']}`\n"
-                f"沙箱策略：`{state['sandbox']}`\n"
-                f"协作模式：`{state['collaboration_mode']}`\n"
-                "会话视角：飞书 `/session` 仅列当前目录线程；飞书 `/resume` 按后端全局精确匹配（可跨 provider）；"
-                "`fcodex /session`、`fcodex /resume <thread_name>` 复用与飞书一致的共享发现逻辑；"
-                "`fcodex resume <id>` 以及进入 TUI 后的 `/resume` 仍是 upstream 原样；"
-                "`fcodex` shell wrapper 自命令只有 `fcodex /help`、`/profile`、`/rm`、`/session`、`/resume`，并且必须单独使用。\n"
-                "可用 `/profile` 查看或切换 feishu-codex 默认 profile；这不会改动裸 `codex` 的全局配置。\n"
-                + (
-                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。\n"
-                    if profile_resolution.stale_profile
-                    else ""
-                )
-                + (
-                "如需在本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。\n"
-                "发送 `/help` 查看可用命令列表。"
-                )
-            ),
+            build_markdown_card("Codex 当前状态", content, template=template),
         )
 
     def _handle_session_command(self, user_id: str, chat_id: str) -> None:
@@ -584,7 +642,10 @@ class CodexHandler(BotHandler):
                 self.bot.reply(chat_id, "执行中不能切换线程，请等待结束或先执行 `/cancel`。")
                 return
         if not arg:
-            self.bot.reply(chat_id, "用法：`/resume <thread_id 或 thread_name>`（按后端全局精确匹配，可跨 provider）")
+            self.bot.reply(
+                chat_id,
+                "用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。",
+            )
             return
         try:
             thread = self._resolve_resume_target(arg)
@@ -604,38 +665,61 @@ class CodexHandler(BotHandler):
             return
         profile_resolution = self._current_default_profile_resolution(runtime_config)
         local_profile = profile_resolution.effective_profile
+        profiles = {profile.name: profile for profile in runtime_config.profiles}
+
+        def _profile_provider_text(profile_name: str) -> str:
+            if not profile_name:
+                return "跟随 Codex 原生默认"
+            profile = profiles.get(profile_name)
+            if profile and profile.model_provider:
+                return f"`{profile.model_provider}`"
+            return "未显式设置，实际以新线程解析结果为准"
 
         if not arg:
+            example_profile = runtime_config.profiles[0].name if runtime_config.profiles else "name"
             lines = [
-                f"feishu-codex 默认 profile：`{local_profile or '（未设置）'}`",
-                f"当前运行时 provider：`{runtime_config.current_model_provider or '（未设置）'}`",
+                f"当前默认 profile：`{local_profile or '（未设置）'}`",
+                f"默认 profile 对应 provider：{_profile_provider_text(local_profile)}",
+                f"切换方式：`/profile <name>`，例如：`/profile {example_profile}`",
             ]
             if runtime_config.profiles:
-                lines.append("可用 profile：")
+                lines.extend(["", "**可用 profile**"])
                 for profile in runtime_config.profiles:
-                    provider = profile.model_provider or "（未显式设置 provider）"
+                    provider = _profile_provider_text(profile.name)
                     marker = " <- 默认" if profile.name == local_profile else ""
-                    lines.append(f"- `{profile.name}` -> `{provider}`{marker}")
+                    lines.append(f"- `{profile.name}` -> {provider}{marker}")
             else:
                 lines.append("未在当前 Codex 配置中发现可用 profile。")
-            lines.append("说明：这里改的是 feishu-codex 与默认 fcodex 的本地默认 profile，不会改动裸 `codex` 全局配置。")
-            lines.append("说明：`fcodex -p <profile>` 启动或恢复的线程会带显式 profile 覆盖，不受这里影响。")
+            lines.extend(
+                [
+                    "",
+                    "**说明**",
+                    "作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。",
+                    "已打开的 `fcodex` TUI 不会热切换。",
+                    "如用 `fcodex -p <profile>`，以显式 profile 为准。",
+                ]
+            )
             if profile_resolution.stale_profile:
                 lines.append(
                     f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，现已自动清空并回退到 Codex 原生默认。"
                 )
             if self._adapter_config.model_provider:
                 lines.append(
-                    "注意：feishu-codex 自身配置里写死了 "
-                    f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能覆盖本地默认 profile。"
+                    "注意：当前 feishu-codex 配置写死了 "
+                    f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
                 )
-            self.bot.reply(chat_id, "\n".join(lines))
+            self.bot.reply_card(
+                chat_id,
+                build_markdown_card("Codex 默认 Profile", "\n".join(lines)),
+            )
             return
 
         target_profile = arg.strip()
-        profiles = {profile.name: profile for profile in runtime_config.profiles}
         if target_profile not in profiles:
-            self.bot.reply(chat_id, f"未找到 profile：`{target_profile}`")
+            self.bot.reply(
+                chat_id,
+                f"未找到 profile：`{target_profile}`\n用法：`/profile <name>`\n先发 `/profile` 查看可用 profile。",
+            )
             return
 
         try:
@@ -645,22 +729,32 @@ class CodexHandler(BotHandler):
             self.bot.reply(chat_id, f"切换 profile 失败：{exc}")
             return
 
-        provider = profiles[target_profile].model_provider or "（未显式设置 provider）"
         state = self._get_state(user_id, chat_id)
         lines = [
-            f"feishu-codex 默认 profile 已切换为：`{target_profile}`",
-            f"对应 provider：`{provider}`",
+            f"已切换默认 profile：`{target_profile}`",
+            f"默认 profile 对应 provider：{_profile_provider_text(target_profile)}",
+            "再次切换：`/profile <name>`",
         ]
+        lines.extend(
+            [
+                "",
+                "**说明**",
+                "作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。",
+            ]
+        )
         if state["running"]:
-            lines.append("当前执行中的 turn 不回滚；后续 turn 按新 profile 生效。")
-        lines.append("注意：已打开的 `fcodex` 若是用 `-p` 固定 profile，不会被这次切换改掉。")
-        lines.append("注意：这不会改动裸 `codex` 的全局 profile。")
+            lines.append("如果当前正在执行，新 profile 从下一轮生效。")
+        lines.append("已打开的 `fcodex` TUI 不会热切换。")
+        lines.append("如用 `fcodex -p` 固定 profile，该会话不受影响。")
         if self._adapter_config.model_provider:
             lines.append(
-                "注意：feishu-codex 配置里仍写死了 "
-                f"`model_provider: {self._adapter_config.model_provider}`，新建线程可能继续使用该 provider。"
+                "注意：当前 feishu-codex 配置写死了 "
+                f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
             )
-        self.bot.reply(chat_id, "\n".join(lines))
+        self.bot.reply_card(
+            chat_id,
+            build_markdown_card("Codex 默认 Profile", "\n".join(lines)),
+        )
 
     def _handle_rename_command(self, user_id: str, chat_id: str, arg: str) -> None:
         state = self._get_state(user_id, chat_id)
@@ -712,7 +806,7 @@ class CodexHandler(BotHandler):
             self.bot.reply(chat_id, f"归档线程失败：{exc}")
             return
 
-        self._favorites.remove(user_id, thread.thread_id)
+        self._favorites.remove_thread_globally(thread.thread_id)
         if state["current_thread_id"] == thread.thread_id:
             self._clear_thread_binding(user_id, chat_id)
         self.bot.reply(
@@ -741,9 +835,9 @@ class CodexHandler(BotHandler):
             with self._lock:
                 state["approval_policy"] = policy
                 running = state["running"]
-            message = f"审批策略已切换为：`{policy}`"
+            message = f"已切换审批策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
-                message += "，当前执行结束后的下一轮生效。"
+                message += "\n如果当前正在执行，新设置从下一轮生效。"
             self.bot.reply(chat_id, message)
             return
         self.bot.reply_card(
@@ -761,9 +855,9 @@ class CodexHandler(BotHandler):
             with self._lock:
                 state["sandbox"] = policy
                 running = state["running"]
-            message = f"沙箱策略已切换为：`{policy}`"
+            message = f"已切换沙箱策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
-                message += "，当前执行结束后的下一轮生效。"
+                message += "\n如果当前正在执行，新设置从下一轮生效。"
             self.bot.reply(chat_id, message)
             return
         self.bot.reply_card(
@@ -784,11 +878,13 @@ class CodexHandler(BotHandler):
                 state["sandbox"] = config["sandbox"]
                 running = state["running"]
             message = (
-                f"权限预设已切换为：`{config['label']}`"
-                f"（审批：`{config['approval_policy']}`，沙箱：`{config['sandbox']}`）"
+                f"已切换权限预设：`{config['label']}`\n"
+                f"审批：`{config['approval_policy']}`\n"
+                f"沙箱：`{config['sandbox']}`\n"
+                "作用范围：只影响当前飞书会话的后续 turn。"
             )
             if running:
-                message += "，当前执行结束后的下一轮生效。"
+                message += "\n如果当前正在执行，新设置从下一轮生效。"
             self.bot.reply(chat_id, message)
             return
         self.bot.reply_card(
@@ -810,10 +906,10 @@ class CodexHandler(BotHandler):
             with self._lock:
                 state["collaboration_mode"] = mode
                 running = state["running"]
+            message = f"已切换协作模式：`{mode}`\n作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
             if running:
-                self.bot.reply(chat_id, f"协作模式已切换为：`{mode}`，当前执行结束后的下一轮生效。")
-            else:
-                self.bot.reply(chat_id, f"协作模式已切换为：`{mode}`")
+                message += "\n如果当前正在执行，新设置从下一轮生效。"
+            self.bot.reply(chat_id, message)
             return
         self.bot.reply_card(
             chat_id,
@@ -1005,9 +1101,9 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["approval_policy"] = policy
             running = state["running"]
-        toast = f"审批策略已切换为 {policy}"
+        toast = f"已切换审批策略：{policy}"
         if running:
-            toast += "，当前执行结束后的下一轮生效"
+            toast += "；下一轮生效"
         return self.bot.make_card_response(
             card=build_approval_policy_card(policy, running=running),
             toast=toast,
@@ -1024,9 +1120,9 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["sandbox"] = policy
             running = state["running"]
-        toast = f"沙箱策略已切换为 {policy}"
+        toast = f"已切换沙箱策略：{policy}"
         if running:
-            toast += "，当前执行结束后的下一轮生效"
+            toast += "；下一轮生效"
         return self.bot.make_card_response(
             card=build_sandbox_policy_card(policy, running=running),
             toast=toast,
@@ -1045,9 +1141,9 @@ class CodexHandler(BotHandler):
             state["approval_policy"] = config["approval_policy"]
             state["sandbox"] = config["sandbox"]
             running = state["running"]
-        toast = f"权限预设已切换为 {config['label']}"
+        toast = f"已切换权限预设：{config['label']}"
         if running:
-            toast += "，当前执行结束后的下一轮生效"
+            toast += "；下一轮生效"
         return self.bot.make_card_response(
             card=build_permissions_preset_card(
                 config["approval_policy"],
@@ -1068,9 +1164,9 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["collaboration_mode"] = mode
             running = state["running"]
-        toast = f"协作模式已切换为 {mode}"
+        toast = f"已切换协作模式：{mode}"
         if running:
-            toast += "，当前执行结束后的下一轮生效"
+            toast += "；下一轮生效"
         return self.bot.make_card_response(
             card=build_collaboration_mode_card(mode, running=running),
             toast=toast,
@@ -1229,19 +1325,29 @@ class CodexHandler(BotHandler):
                 self.bot.reply(chat_id, "当前线程仍在执行，暂不切换。")
                 return
         self._bind_thread(user_id, chat_id, snapshot.summary)
-        self.bot.reply(
-            chat_id,
-            (
-                f"已恢复线程：`{snapshot.summary.thread_id[:8]}…`\n"
-                f"标题：{snapshot.summary.title}\n"
-                f"目录：`{display_path(snapshot.summary.cwd)}`\n"
-                "提示：如需本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。"
-            ),
+        summary = (
+            f"**已切换到线程**\n"
+            f"thread：`{snapshot.summary.thread_id[:8]}…`\n"
+            f"标题：{snapshot.summary.title}\n"
+            f"目录：`{display_path(snapshot.summary.cwd)}`\n"
+            f"{_LOCAL_THREAD_SAFETY_RULE}"
         )
         if self._show_history_preview_on_resume:
             rounds = self._extract_history_rounds(snapshot)
             if rounds:
-                self.bot.reply_card(chat_id, build_history_preview_card(snapshot.summary.thread_id, rounds))
+                self.bot.reply_card(
+                    chat_id,
+                    build_history_preview_card(
+                        snapshot.summary.thread_id,
+                        rounds,
+                        summary=summary,
+                    ),
+                )
+                return
+        self.bot.reply_card(
+            chat_id,
+            build_markdown_card("Codex 已切换线程", summary, template="green"),
+        )
 
     def _send_thread_snapshot_in_background(self, chat_id: str, thread_id: str) -> None:
         try:
@@ -1340,12 +1446,6 @@ class CodexHandler(BotHandler):
             source=thread.source,
             service_name=thread.service_name,
         )
-
-    def _backend_mode_label(self) -> str:
-        return self._adapter_config.app_server_mode or DEFAULT_APP_SERVER_MODE
-
-    def _backend_url(self) -> str:
-        return self._adapter_config.app_server_url or DEFAULT_APP_SERVER_URL
 
     def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
         threads = self._list_global_threads()
@@ -1950,36 +2050,85 @@ class CodexHandler(BotHandler):
             return text
         return text[-self._card_log_limit :] + "\n\n**[日志已截断，仅保留最近部分]**"
 
-    def _reply_help(self, chat_id: str) -> None:
+    def _reply_help(self, chat_id: str, topic: str = "") -> None:
+        normalized = (topic or "").strip().lower()
+        if normalized in {"", "basic", "basics", "overview"}:
+            self.bot.reply_card(chat_id, build_markdown_card("Codex 帮助", self._help_overview_text()))
+            return
+        if normalized in {"session", "sessions", "resume", "thread", "threads"}:
+            self.bot.reply_card(chat_id, build_markdown_card("Codex 帮助：线程", self._help_session_text()))
+            return
+        if normalized in {
+            "settings",
+            "permission",
+            "permissions",
+            "approval",
+            "sandbox",
+            "mode",
+            "advanced",
+        }:
+            self.bot.reply_card(chat_id, build_markdown_card("Codex 帮助：设置", self._help_settings_text()))
+            return
+        if normalized in {"local", "fcodex", "wrapper"}:
+            self.bot.reply_card(chat_id, build_markdown_card("Codex 帮助：本地继续", self._help_local_text()))
+            return
         self.bot.reply(
             chat_id,
-            (
-                "可用命令：\n"
-                "/new 新建线程\n"
-                "/session 查看当前目录线程\n"
-                "/resume <thread_id|thread_name> 按后端全局精确恢复线程并切换目录\n"
-                "/rm [thread_id|thread_name] 归档线程；省略参数时归档当前线程\n"
-                "/profile 查看或切换 feishu-codex 默认 profile\n"
-                "/cd <path> 切换当前目录并清空当前线程绑定\n"
-                "/pwd 查看当前目录\n"
-                "/rename <title> 重命名当前线程\n"
-                "/star 收藏或取消收藏当前线程\n"
-                "/approval 查看或设置审批策略\n"
-                "/sandbox 查看或设置沙箱策略\n"
-                "/permissions 查看或设置权限预设\n"
-                "/mode 查看或设置协作模式\n"
-                "/status 查看当前状态\n"
-                "/cancel 停止当前执行\n"
-                "/help 查看帮助\n\n"
-                "说明：`/new` 只会先绑定一个新的空线程；发送第一条消息后，该线程才会在 Codex 侧 materialize。\n"
-                "说明：飞书 `/session` 只列当前目录线程，但会跨 provider 汇总；飞书 `/resume` 按后端全局精确匹配，若有多个同名线程会直接报错，并在恢复后切换到线程自己的目录。\n"
-                "说明：飞书 `/rm` 调用的是 Codex 公开的线程归档（archive），会从常规列表中隐藏，不是硬删除。\n"
-                "说明：本地若要与飞书安全共用同一线程，请使用 `fcodex`，不要让裸 `codex` 与飞书同时写同一线程。\n"
-                "说明：`fcodex /session`、`fcodex /resume <thread_name>` 复用与飞书一致的共享发现逻辑；如需先查看线程，可在本地执行 `fcodex /session` 或 `fcodex /session global`。\n"
-                "说明：`fcodex resume <id>` 以及进入 TUI 后的 `/resume` 仍是 upstream 原样，不等同于飞书 `/session`。\n"
-                "说明：`fcodex` shell wrapper 自命令只有 `fcodex /help`、`/profile`、`/rm`、`/session`、`/resume`，并且必须单独使用，不能与裸 `codex` 的 flags 或子命令混用。\n"
-                "说明：`/profile` 切的是 feishu-codex 与默认 `fcodex` 的本地默认 profile，不会改动裸 `codex` 全局配置；`fcodex -p <profile>` 仍以显式参数为准。\n"
-                "说明：更完整的语义与 shared-backend 机制可查看仓库文档：`docs/session-profile-semantics.md`、`docs/fcodex-shared-backend-runtime.md`。\n"
-                "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。"
-            ),
+            "帮助主题仅支持：`session`、`settings`、`local`。\n发送 `/help` 查看概览。",
+        )
+
+    def _help_overview_text(self) -> str:
+        return (
+            "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。\n\n"
+            "**命令**\n"
+            "- `/new` 立即新建线程\n"
+            "- `/session` 查看当前目录线程\n"
+            "- `/resume <thread_id|thread_name>` 恢复指定线程\n"
+            "- `/cd <path>` 切换目录并清空当前线程绑定\n"
+            "- `/status` 查看当前状态\n\n"
+            "**更多命令与帮助**\n"
+            "- `/help session` 查看线程切换、目录切换与归档\n"
+            "- `/help settings` 查看 profile、权限与协作设置\n"
+            "- `/help local` 查看本地 `fcodex` 的用法\n\n"
+            f"{_LOCAL_THREAD_SAFETY_RULE}"
+        )
+
+    def _help_session_text(self) -> str:
+        return (
+            "**线程相关**\n"
+            "- `/new` 立即新建并切换到新线程。\n"
+            "- `/session` 只列当前目录的线程，结果已跨 provider 汇总。\n"
+            "- `/resume <thread_id|thread_name>` 会做全局精确匹配；恢复后会切到线程自己的目录。\n"
+            "- 如果匹配到多个同名线程，`/resume` 会报错，不会替你猜。\n"
+            "- `/cd <path>` 切换目录并清空当前线程绑定；之后发送普通文本，会在新目录自动新建线程。\n"
+            "- `/rename` 改标题，`/star` 收藏当前线程，`/rm` 归档线程而不是硬删除。\n\n"
+            "**本地继续同一线程**\n"
+            "- 可先用 `fcodex /session` 找线程；需要精确恢复时再用 `fcodex /resume`。\n"
+            f"- {_LOCAL_THREAD_SAFETY_RULE}"
+        )
+
+    def _help_settings_text(self) -> str:
+        return (
+            "**设置相关**\n"
+            "- `/profile` 查看或切换默认 profile；它影响 feishu-codex 与新的默认 `fcodex` 启动，不热切换已打开的 `fcodex` TUI。\n"
+            "- 推荐先用 `/permissions`；它会同时设置审批策略和沙箱，只影响当前飞书会话的后续 turn。\n"
+            "- `/approval` 只改审批时机；`/sandbox` 只改文件与网络边界。\n"
+            "- `/mode` 切换协作方式；`plan` 更容易先规划或提问，`default` 更接近直接执行；也只影响当前飞书会话的后续 turn。\n"
+            "- 如果当前正在执行，新设置从下一轮生效。\n\n"
+            "**命令**\n"
+            "- `/profile [name]`\n"
+            "- `/permissions [read-only|default|full-access]`\n"
+            "- `/approval [untrusted|on-failure|on-request|never]`\n"
+            "- `/sandbox [read-only|workspace-write|danger-full-access]`\n"
+            "- `/mode [default|plan]`"
+        )
+
+    def _help_local_text(self) -> str:
+        return (
+            "**本地继续线程时再用 `fcodex`**\n"
+            "- `fcodex` 是 `codex --remote` 的 wrapper，默认连到 feishu-codex 的 shared backend。\n"
+            "- `fcodex /session`、`fcodex /resume <thread_id|thread_name>` 会用共享发现逻辑，跨 provider 找线程。\n"
+            "- 进入 TUI 后，里面的 `/resume` 是 Codex 原生命令，不等同于 `fcodex /resume`。\n"
+            "- 只想开独立的本地会话，直接用裸 `codex`。\n"
+            f"- {_LOCAL_THREAD_SAFETY_RULE}"
         )

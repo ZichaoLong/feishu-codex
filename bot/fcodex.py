@@ -23,6 +23,8 @@ from bot.session_resolution import (
     looks_like_thread_id,
     resolve_resume_name_via_remote_backend,
 )
+from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
+from bot.stores.favorites_store import FavoritesStore
 from bot.stores.profile_state_store import ProfileStateStore
 
 _WRAPPER_COMMANDS = {
@@ -278,7 +280,7 @@ def _resolve_thread_target_via_remote_backend(
     return thread, None
 
 
-def _handle_rm_command(cfg: dict, app_server_url: str, user_args: list[str]) -> int:
+def _handle_rm_command(cfg: dict, app_server_url: str, user_args: list[str], data_dir: pathlib.Path) -> int:
     if len(user_args) != 2:
         print("用法：fcodex /rm <thread_id|thread_name>", file=sys.stderr)
         return 2
@@ -295,6 +297,7 @@ def _handle_rm_command(cfg: dict, app_server_url: str, user_args: list[str]) -> 
         return 2
     finally:
         adapter.stop()
+    FavoritesStore(data_dir).remove_thread_globally(thread.thread_id)
     print(f"已归档线程：`{thread.thread_id[:8]}…` {thread.title}")
     print("说明：这里调用的是 Codex 的线程归档（archive），会从常规列表中隐藏，不是硬删除。")
     return 0
@@ -447,7 +450,7 @@ def _handle_internal_command(
     if cmd == "/profile":
         return _handle_profile_command(cfg, app_server_url, user_args, data_dir)
     if cmd == "/rm":
-        return _handle_rm_command(cfg, app_server_url, user_args)
+        return _handle_rm_command(cfg, app_server_url, user_args, data_dir)
     if cmd in {"/session", "/sessions"}:
         scope = "cwd"
         if len(user_args) == 2:
@@ -488,9 +491,12 @@ def _handle_internal_command(
 def main() -> None:
     cfg = load_config_file("codex")
     codex_command = str(cfg.get("codex_command", "codex")).strip() or "codex"
-    app_server_url = str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL
-    user_args = sys.argv[1:]
     data_dir = _default_data_dir()
+    app_server_url = resolve_effective_app_server_url(
+        str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL,
+        data_dir=data_dir,
+    )
+    user_args = sys.argv[1:]
     handled = _handle_internal_command(cfg, app_server_url, user_args, data_dir=data_dir)
     if isinstance(handled, int):
         raise SystemExit(handled)
