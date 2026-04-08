@@ -98,7 +98,7 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/adapters/codex_app_server.py`：Codex adapter 边界
 - `bot/codex_protocol/client.py`：`codex app-server` 的 websocket JSON-RPC client
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
-- `bot/stores/*.py`：favorites、本地默认 profile、shared backend 运行时发现状态
+- `bot/stores/*.py`：favorites、本地默认 profile、shared backend 运行时发现状态、群聊状态
 
 ## 6. 数据与行为边界
 
@@ -122,6 +122,7 @@ shared backend 与 wrapper 的具体机制，见
 - 飞书与默认 `fcodex` 启动共用的本地默认 profile
 - shared backend 的运行时地址发现状态
 - 每个飞书会话当前绑定到哪个 thread
+- 群聊工作态、群 ACL、群上下文日志与上下文边界状态
 - 审批、重命名、卡片等临时 UI 状态
 
 ### 6.3 Session 与目录语义
@@ -146,6 +147,76 @@ shared backend 与 wrapper 的具体机制，见
 - 在这些原语之上，再叠加飞书侧用户友好的权限预设
 
 整个集成不依赖 Claude 式 shell hook 拦截。
+
+### 6.5 群聊功能合同
+
+以下行为应视为当前实现的正式合同：
+
+#### 默认值
+
+- 新群默认工作态是 `assistant`
+- 新群默认 ACL 是 `admin-only`
+- 群聊管理员来自 `system.yaml.admin_user_ids`
+
+#### 人类成员权限
+
+- 人类成员是否具备某个群里的触发资格，由该群 ACL 决定
+- ACL 只决定“谁有资格”，是否还需要 `@机器人` 由群工作态决定
+- 群 ACL 只管理人类成员，不管理其他机器人
+- ACL 策略包括：
+  - `admin-only`
+  - `allowlist`
+  - `all-members`
+
+#### 群聊工作态
+
+- `assistant`
+  - 接收并缓存群里消息
+  - 只有被 `@机器人` 时才回复
+  - 回复时附带自上次触发边界以来的群上下文
+- `mention-only`
+  - 不缓存群上下文
+  - 只有被 `@机器人` 时才触发
+- `all`
+  - 人类群消息可直接触发
+  - 风险最高，容易刷屏
+
+#### 群命令触发规则
+
+- 私聊命令可直接发送
+- 群聊 `assistant` 和 `mention-only` 工作态下，群命令本身也必须先 `@机器人`
+- 群聊 `all` 工作态下，人类群命令可直接发送
+- 群命令不会写入 `assistant` 上下文日志，也不会推进上下文边界
+
+#### 助理模式上下文
+
+- `assistant` 会把群消息写入本地日志
+- 只有人类成员的有效 `@机器人` 会真正触发回复
+- 由于飞书不会把其他机器人发言实时推给机器人，`assistant` 会在每次有效 `@` 时按配置回捞最近历史消息
+- 历史回捞与实时日志会合并成同一份上下文，而不是两套独立逻辑
+- 下一次有效 `@` 时，上下文由两部分组成：
+  - 本地实时日志中，上次边界之后到本次触发之前的消息
+  - 飞书历史接口返回、但本地日志里尚未出现的缺失消息
+- 历史回捞受 `group_history_fetch_limit` 和 `group_history_fetch_lookback_seconds` 限制
+- 当时间窗内缺失消息数量超过 `group_history_fetch_limit` 时，当前实现保留“最近的缺失消息”，而不是最早的一批
+- 上下文边界同时记录：
+  - 本地日志序号 `seq`
+  - 边界时间戳 `created_at`
+  - 边界时间戳下已消费的 `message_id` 集合
+- 记录边界 `message_id` 集合的目的，是避免下一次有效 `@` 时把“与上次边界同毫秒但尚未消费”的缺失消息误判为旧消息而漏掉
+- 当前实现保证“不漏掉同毫秒未消费消息”和“不重复同毫秒已消费消息”，但不承诺把不同来源、同毫秒消息恢复成绝对全序
+
+#### ACL 拒绝反馈
+
+- 未获授权成员在 `assistant` / `mention-only` 中显式 `@机器人` 时，会收到拒绝提示
+- 未获授权成员在 `all` 中直接发普通消息会静默忽略，以避免刷屏
+- 未获授权成员在 `all` 中显式 `@机器人` 或发群命令时，仍会收到拒绝提示
+
+#### 其他机器人与历史消息
+
+- 其他机器人不会直接触发 `feishu-codex`
+- 如果群消息历史对机器人可见，其他机器人消息可以通过每次有效 `@` 时的历史回捞进入上下文
+- 如果关闭历史回捞，其他机器人消息不会自动进入 `assistant` 上下文
 
 ## 7. 当前仓库结构
 

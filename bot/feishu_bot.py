@@ -5,12 +5,13 @@
 
 import json
 import logging
+import pathlib
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -22,6 +23,11 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
     CallBackCard,
     CallBackToast,
+)
+
+from bot.constants import FC_DATA_DIR
+from bot.stores.group_chat_store import (
+    GroupChatStore,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +46,32 @@ _MERGE_FORWARD_MAX_DEPTH = 10
 # 转发消息聚合：等待留言的超时时间（秒）
 _FORWARD_AGGREGATE_TIMEOUT = 2.0
 
+# 消息上下文缓存
+_MESSAGE_CONTEXT_MAX_SIZE = 1000
+_MESSAGE_CONTEXT_TTL = 600
+
+# chat_id -> chat_type 缓存；用于无 message_id 的群命令入口做兜底判断
+_CHAT_TYPE_CACHE_MAX_SIZE = 1000
+_CHAT_TYPE_CACHE_TTL = 24 * 3600
+
+# 原始消息 -> 预发送执行卡片缓存；用于在耗时预处理前先给用户反馈
+_PENDING_EXECUTION_CARD_MAX_SIZE = 1000
+_PENDING_EXECUTION_CARD_TTL = 600
+
+# 显示名缓存（秒）
+_SENDER_NAME_CACHE_TTL = 6 * 3600
+
+# assistant 模式按需回捞群历史消息的窗口
+_GROUP_HISTORY_FETCH_LIMIT = 50
+_GROUP_HISTORY_FETCH_LOOKBACK_SECONDS = 24 * 3600
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return max(int(default), 0)
+
 
 @dataclass
 class _PendingForward:
@@ -48,6 +80,24 @@ class _PendingForward:
     message_id: str
     chat_type: str
     timer: threading.Timer = field(repr=False)
+
+
+@dataclass
+class _MessageContext:
+    payload: dict[str, Any]
+    created_at: float
+
+
+@dataclass
+class _CachedChatType:
+    chat_type: str
+    created_at: float
+
+
+@dataclass
+class _PendingExecutionCard:
+    card_message_id: str
+    created_at: float
 
 
 def _scan_tables(text: str) -> list[tuple[int, int]]:
@@ -115,21 +165,54 @@ class FeishuBot(ABC):
     3. 业务逻辑层: 子类实现 on_message 和 on_card_action
     """
 
-    # 唤醒模式关键词和模式常量
-    _WAKE_MODE_KEYWORD = "唤醒模式"
-    _WAKE_MODE_ALL = "all"
-    _WAKE_MODE_MENTION = "mention_only"
+    # 群聊工作态常量
+    _GROUP_MODE_ALL = "all"
+    _GROUP_MODE_MENTION = "mention_only"
+    _GROUP_MODE_ASSISTANT = "assistant"
 
-    def __init__(self, app_id: str, app_secret: str, request_timeout_seconds: float = 10.0):
+    def __init__(
+        self,
+        app_id: str,
+        app_secret: str,
+        request_timeout_seconds: float = 10.0,
+        *,
+        data_dir: pathlib.Path | None = None,
+        system_config: dict[str, Any] | None = None,
+    ):
         self.app_id = app_id
         self.app_secret = app_secret
         self.request_timeout_seconds = float(request_timeout_seconds)
         self._seen_messages: OrderedDict[str, float] = OrderedDict()
         self._dedup_lock = threading.Lock()
-        # 唤醒模式：这些群聊中所有消息都直接处理，无需 @机器人
-        self._wake_mode_groups: set[str] = set()
+        self._group_store = GroupChatStore(data_dir or FC_DATA_DIR)
+        self._message_contexts: OrderedDict[str, _MessageContext] = OrderedDict()
+        self._message_context_lock = threading.Lock()
+        self._chat_type_cache: OrderedDict[str, _CachedChatType] = OrderedDict()
+        self._chat_type_cache_lock = threading.Lock()
+        self._pending_execution_cards: OrderedDict[str, _PendingExecutionCard] = OrderedDict()
+        self._pending_execution_cards_lock = threading.Lock()
+        self._sender_name_cache: dict[str, tuple[float, str]] = {}
+        self._sender_name_cache_lock = threading.Lock()
+        config = system_config or {}
+        self._admin_user_ids = {
+            str(item).strip()
+            for item in config.get("admin_user_ids", [])
+            if isinstance(item, str) and str(item).strip()
+        }
+        self._group_history_fetch_limit = _non_negative_int(
+            config.get("group_history_fetch_limit", _GROUP_HISTORY_FETCH_LIMIT),
+            _GROUP_HISTORY_FETCH_LIMIT,
+        )
+        self._group_history_fetch_lookback_seconds = _non_negative_int(
+            config.get(
+                "group_history_fetch_lookback_seconds",
+                _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS,
+            ),
+            _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS,
+        )
         # 机器人自身的 open_id，用于精确判断群消息是否 @了机器人
         self._bot_open_id: Optional[str] = None
+        self._bot_open_id_error_logged = False
         # 转发消息聚合缓冲区：暂存 merge_forward，等待后续留言合并
         self._pending_forwards: dict[tuple[str, str], _PendingForward] = {}
         self._pending_forwards_lock = threading.Lock()
@@ -167,6 +250,199 @@ class FeishuBot(ABC):
                 self._seen_messages.popitem(last=False)
             self._seen_messages[message_id] = now
             return False
+
+    def get_group_mode(self, chat_id: str) -> str:
+        return self._group_store.get_group_mode(chat_id)
+
+    def set_group_mode(self, chat_id: str, mode: str) -> str:
+        return self._group_store.set_group_mode(chat_id, mode)
+
+    def get_group_acl_snapshot(self, chat_id: str) -> dict[str, Any]:
+        return self._group_store.group_snapshot(chat_id)
+
+    def set_group_access_policy(self, chat_id: str, policy: str) -> str:
+        return self._group_store.set_access_policy(chat_id, policy)
+
+    def grant_group_members(self, chat_id: str, user_ids: list[str] | set[str]) -> list[str]:
+        return self._group_store.grant_members(chat_id, user_ids)
+
+    def revoke_group_members(self, chat_id: str, user_ids: list[str] | set[str]) -> list[str]:
+        return self._group_store.revoke_members(chat_id, user_ids)
+
+    def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
+        return bool(user_id and user_id in self._admin_user_ids)
+
+    def is_group_admin(self, user_id: str = "", open_id: str = "") -> bool:
+        return self.is_admin(user_id, open_id)
+
+    def is_group_user_allowed(self, chat_id: str, user_id: str = "", open_id: str = "") -> bool:
+        if self.is_admin(user_id, open_id):
+            return True
+        snapshot = self._group_store.group_snapshot(chat_id)
+        policy = snapshot["access_policy"]
+        if policy == "all-members":
+            return True
+        if policy == "allowlist":
+            return bool(user_id and user_id in set(snapshot["allowlist"]))
+        return False
+
+    def get_message_context(self, message_id: str) -> dict[str, Any]:
+        if not message_id:
+            return {}
+        with self._message_context_lock:
+            self._cleanup_message_contexts()
+            ctx = self._message_contexts.get(message_id)
+            if not ctx:
+                return {}
+            return dict(ctx.payload)
+
+    def remember_chat_type(self, chat_id: str, chat_type: str) -> None:
+        normalized_chat_id = str(chat_id or "").strip()
+        normalized_chat_type = str(chat_type or "").strip()
+        if not normalized_chat_id or not normalized_chat_type:
+            return
+        with self._chat_type_cache_lock:
+            self._cleanup_chat_type_cache()
+            self._chat_type_cache.pop(normalized_chat_id, None)
+            self._chat_type_cache[normalized_chat_id] = _CachedChatType(
+                chat_type=normalized_chat_type,
+                created_at=time.time(),
+            )
+            while len(self._chat_type_cache) > _CHAT_TYPE_CACHE_MAX_SIZE:
+                self._chat_type_cache.popitem(last=False)
+
+    def lookup_chat_type(self, chat_id: str) -> str:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return ""
+        with self._chat_type_cache_lock:
+            self._cleanup_chat_type_cache()
+            cached = self._chat_type_cache.get(normalized_chat_id)
+            if not cached:
+                return ""
+            return cached.chat_type
+
+    def fetch_chat_type(self, chat_id: str) -> str:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return ""
+        try:
+            request = GetChatRequest.builder().chat_id(normalized_chat_id).build()
+            response = self.client.im.v1.chat.get(request)
+        except Exception as exc:
+            logger.warning("查询 chat 类型失败(SDK异常): chat=%s, error=%s", normalized_chat_id, exc)
+            return ""
+        if not response.success():
+            logger.warning("查询 chat 类型失败: chat=%s, code=%s, msg=%s", normalized_chat_id, response.code, response.msg)
+            return ""
+        chat = getattr(getattr(response, "data", None), "chat", None)
+        chat_type = str(getattr(chat, "type", "") or "").strip()
+        if chat_type:
+            self.remember_chat_type(normalized_chat_id, chat_type)
+        return chat_type
+
+    def reserve_execution_card(self, trigger_message_id: str, card_message_id: str) -> None:
+        normalized_trigger_id = str(trigger_message_id or "").strip()
+        normalized_card_id = str(card_message_id or "").strip()
+        if not normalized_trigger_id or not normalized_card_id:
+            return
+        with self._pending_execution_cards_lock:
+            self._cleanup_pending_execution_cards()
+            self._pending_execution_cards.pop(normalized_trigger_id, None)
+            self._pending_execution_cards[normalized_trigger_id] = _PendingExecutionCard(
+                card_message_id=normalized_card_id,
+                created_at=time.time(),
+            )
+            while len(self._pending_execution_cards) > _PENDING_EXECUTION_CARD_MAX_SIZE:
+                self._pending_execution_cards.popitem(last=False)
+
+    def claim_reserved_execution_card(self, trigger_message_id: str) -> str:
+        normalized_trigger_id = str(trigger_message_id or "").strip()
+        if not normalized_trigger_id:
+            return ""
+        with self._pending_execution_cards_lock:
+            self._cleanup_pending_execution_cards()
+            pending = self._pending_execution_cards.pop(normalized_trigger_id, None)
+            if not pending:
+                return ""
+            return pending.card_message_id
+
+    def extract_non_bot_mentions(self, message_id: str) -> list[dict[str, str]]:
+        context = self.get_message_context(message_id)
+        mentions = context.get("mentions") or []
+        if not isinstance(mentions, list):
+            return []
+        members: list[dict[str, str]] = []
+        for mention in mentions:
+            if not isinstance(mention, dict):
+                continue
+            open_id = str(mention.get("open_id", "")).strip()
+            if open_id and self._bot_open_id and open_id == self._bot_open_id:
+                continue
+            user_id = str(mention.get("user_id", "")).strip()
+            if not user_id:
+                continue
+            members.append(
+                {
+                    "user_id": user_id,
+                    "open_id": open_id,
+                    "name": str(mention.get("name", "")).strip(),
+                }
+            )
+        return members
+
+    def lookup_cached_sender_name(self, sender_id: str) -> str:
+        cache_key = str(sender_id or "").strip()
+        if not cache_key:
+            return ""
+        with self._sender_name_cache_lock:
+            cached = self._sender_name_cache.get(cache_key)
+            if not cached:
+                return ""
+            ts, value = cached
+            if time.time() - ts > _SENDER_NAME_CACHE_TTL:
+                self._sender_name_cache.pop(cache_key, None)
+                return ""
+            return value
+
+    def get_sender_display_name(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> str:
+        return self._display_name_for_sender(user_id=user_id, open_id=open_id, sender_type=sender_type)
+
+    def _remember_message_context(self, message_id: str, payload: dict[str, Any]) -> None:
+        if not message_id:
+            return
+        with self._message_context_lock:
+            self._cleanup_message_contexts()
+            self._message_contexts[message_id] = _MessageContext(payload=dict(payload), created_at=time.time())
+            while len(self._message_contexts) > _MESSAGE_CONTEXT_MAX_SIZE:
+                self._message_contexts.popitem(last=False)
+
+    def _cleanup_message_contexts(self) -> None:
+        now = time.time()
+        while self._message_contexts:
+            oldest_id, ctx = next(iter(self._message_contexts.items()))
+            if now - ctx.created_at > _MESSAGE_CONTEXT_TTL:
+                self._message_contexts.pop(oldest_id, None)
+            else:
+                break
+
+    def _cleanup_chat_type_cache(self) -> None:
+        now = time.time()
+        while self._chat_type_cache:
+            oldest_chat_id, cached = next(iter(self._chat_type_cache.items()))
+            if now - cached.created_at > _CHAT_TYPE_CACHE_TTL:
+                self._chat_type_cache.pop(oldest_chat_id, None)
+            else:
+                break
+
+    def _cleanup_pending_execution_cards(self) -> None:
+        now = time.time()
+        while self._pending_execution_cards:
+            oldest_message_id, pending = next(iter(self._pending_execution_cards.items()))
+            if now - pending.created_at > _PENDING_EXECUTION_CARD_TTL:
+                self._pending_execution_cards.pop(oldest_message_id, None)
+            else:
+                break
 
     @staticmethod
     def _extract_text(msg_type: str, content_dict: dict) -> str:
@@ -228,14 +504,120 @@ class FeishuBot(ABC):
         # sticker/image/video/audio 等无文本消息
         return ""
 
-    @staticmethod
-    def _strip_mentions(text: str, mentions: list) -> str:
-        """从消息文本中剥离所有 @提及 占位符（如 @_user_1）"""
+    def _render_message_text(self, msg_type: str, content_dict: dict) -> str:
+        text = self._extract_text(msg_type, content_dict)
+        if text:
+            return text
+
+        if msg_type == "share_user":
+            shared_open_id = str(content_dict.get("user_id", "") or "").strip()
+            if not shared_open_id:
+                return "[个人名片]"
+            shared_name = self._resolve_sender_name(shared_open_id)
+            self._cache_sender_name(shared_open_id, value=shared_name)
+            return f"[个人名片] {shared_name}"
+
+        if msg_type == "share_chat":
+            shared_chat_id = str(content_dict.get("chat_id", "") or "").strip()
+            return f"[群名片] {shared_chat_id}" if shared_chat_id else "[群名片]"
+
+        if msg_type == "hongbao":
+            text = str(content_dict.get("text", "") or "").strip()
+            return text or "[红包]"
+
+        if msg_type in {"share_calendar_event", "calendar", "general_calendar"}:
+            summary = str(content_dict.get("summary", "") or "").strip()
+            return f"[日程] {summary}" if summary else "[日程]"
+
+        if msg_type == "system":
+            template = str(content_dict.get("template", "") or "").strip()
+            return f"[系统消息] {template}" if template else "[系统消息]"
+
+        return ""
+
+    def _normalize_mentions(self, text: str, mentions: list) -> str:
+        """群聊消息中去掉 @机器人，同时保留其他 @成员 的可读文本。"""
+        normalized = text
         for mention in mentions:
-            key = getattr(mention, "key", "")
-            if key:
-                text = text.replace(key, "")
-        return text.strip()
+            if isinstance(mention, dict):
+                key = str(mention.get("key", "") or "").strip()
+                mention_open_id = str(
+                    mention.get("open_id", "")
+                    or mention.get("id", "")
+                    or ""
+                ).strip()
+                mention_name = str(mention.get("name", "") or mention_open_id[:8]).strip()
+            else:
+                key = getattr(mention, "key", "")
+                mid = getattr(mention, "id", None)
+                mention_open_id = ""
+                if isinstance(mid, dict):
+                    mention_open_id = str(mid.get("open_id", "") or mid.get("id", "") or "").strip()
+                elif isinstance(mid, str):
+                    mention_open_id = mid.strip()
+                elif mid:
+                    mention_open_id = str(getattr(mid, "open_id", "") or "").strip()
+                mention_name = str(getattr(mention, "name", "") or mention_open_id[:8]).strip()
+            if not key:
+                continue
+            if self._bot_open_id and mention_open_id == self._bot_open_id:
+                normalized = normalized.replace(key, "")
+            elif self._bot_open_id:
+                normalized = normalized.replace(key, f"@{mention_name}")
+            else:
+                normalized = normalized.replace(key, "")
+        return " ".join(normalized.split())
+
+    @staticmethod
+    def _sender_ids(sender_id: Any) -> tuple[str, str]:
+        if sender_id is None:
+            return "", ""
+        return (
+            str(getattr(sender_id, "user_id", "") or "").strip(),
+            str(getattr(sender_id, "open_id", "") or "").strip(),
+        )
+
+    @staticmethod
+    def _effective_sender_id(user_id: str = "", open_id: str = "") -> str:
+        return str(user_id or "").strip() or str(open_id or "").strip()
+
+    def _cache_sender_name(self, *keys: str, value: str) -> None:
+        normalized_value = str(value or "").strip()
+        if not normalized_value:
+            return
+        now = time.time()
+        with self._sender_name_cache_lock:
+            for key in keys:
+                cache_key = str(key or "").strip()
+                if cache_key:
+                    self._sender_name_cache[cache_key] = (now, normalized_value)
+
+    def _display_name_for_sender(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> str:
+        if sender_type == "app":
+            cache_key = open_id or user_id
+            cached = self.lookup_cached_sender_name(cache_key)
+            if cached:
+                return cached
+            short_id = (open_id or user_id or "unknown")[:8]
+            return f"机器人:{short_id}"
+        cached = self.lookup_cached_sender_name(open_id) or self.lookup_cached_sender_name(user_id)
+        if cached:
+            return cached
+        if open_id:
+            resolved = self._resolve_sender_name(open_id)
+            self._cache_sender_name(open_id, user_id, value=resolved)
+            return resolved
+        if user_id:
+            self._cache_sender_name(user_id, value=user_id[:8])
+            return user_id[:8]
+        return "unknown"
+
+    def _sender_log_fields(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> tuple[str, str, str]:
+        return (
+            self._display_name_for_sender(user_id=user_id, open_id=open_id, sender_type=sender_type),
+            open_id or "-",
+            user_id or "-",
+        )
 
     # ---- 转发消息聚合 ----
 
@@ -282,22 +664,41 @@ class FeishuBot(ABC):
     def _on_forward_timeout(self, sender_id: str, chat_id: str) -> None:
         """超时未收到留言，单独处理暂存的转发消息
 
-        私聊和唤醒模式群聊中，转发消息可独立处理。
-        需要 @唤醒的群聊中，因无 @mention 上下文，静默丢弃（与原有行为一致）。
+        私聊和 `all` 模式群聊中，转发消息可独立处理。
+        `mention_only` 模式群聊中，因无 @mention 上下文，静默丢弃。
+        `assistant` 模式群聊中，直接写入群聊日志，供后续 @机器人 时读取。
         """
         try:
             pending = self._pop_pending_forward(sender_id, chat_id)
             if not pending:
                 return
-            # 群聊（非唤醒模式）中无 @mention，丢弃
+            group_mode = self.get_group_mode(chat_id) if pending.chat_type == "group" else ""
+            if pending.chat_type == "group" and group_mode == self._GROUP_MODE_ASSISTANT:
+                self._append_group_log_entry(
+                    chat_id=chat_id,
+                    message_id=pending.message_id,
+                    created_at=int(time.time() * 1000),
+                    sender_user_id=sender_id,
+                    sender_open_id="",
+                    sender_type="user",
+                    msg_type="merge_forward",
+                    text=f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>",
+                )
+                logger.info(
+                    "转发消息聚合超时，已写入助理模式日志: user=%s, chat=%s",
+                    sender_id,
+                    chat_id,
+                )
+                return
+            # mention_only 群聊中无 @mention，丢弃
             if (pending.chat_type == "group"
-                    and chat_id not in self._wake_mode_groups):
+                    and group_mode != self._GROUP_MODE_ALL):
                 logger.debug(
                     "转发消息聚合超时，群聊无@唤醒，丢弃: user=%s, chat=%s",
                     sender_id, chat_id,
                 )
                 return
-            # 私聊或唤醒模式群聊：单独处理转发内容
+            # 私聊或 all 模式群聊：单独处理转发内容
             text = (f"<forwarded_messages>\n{pending.forwarded_text}"
                     f"\n</forwarded_messages>")
             logger.info(
@@ -331,21 +732,28 @@ class FeishuBot(ABC):
             logger.warning("获取机器人信息异常: %s", e)
             return None
 
+    def _ensure_bot_open_id(self) -> str:
+        if self._bot_open_id is None:
+            self._bot_open_id = self._fetch_bot_open_id() or ""
+        return self._bot_open_id
+
     def _is_bot_mentioned(self, mentions: list) -> bool:
         """判断 mentions 列表中是否包含机器人自身
 
         首次调用时会通过 API 获取并缓存机器人的 open_id。
-        若无法获取 open_id，回退到「有 mention 即视为 @机器人」的宽松策略，
-        避免因 API 异常导致群聊功能完全失效。
+        若无法获取 open_id，则严格返回 False，避免把 @其他人 误判成 @机器人。
         """
         if not mentions:
             return False
-        # 懒加载机器人 open_id（空字符串表示已尝试但获取失败）
-        if self._bot_open_id is None:
-            self._bot_open_id = self._fetch_bot_open_id() or ""
-        # 无法获取 open_id 时回退：有任何 mention 就视为 @机器人（兼容旧行为）
+        self._ensure_bot_open_id()
         if not self._bot_open_id:
-            return True
+            if not self._bot_open_id_error_logged:
+                logger.error(
+                    "无法获取机器人 open_id，群聊 @ 判定已切换为严格失败。"
+                    "请检查 `application:application:self_manage` 权限，以及 bot info API 是否可访问。"
+                )
+                self._bot_open_id_error_logged = True
+            return False
         for mention in mentions:
             mid = getattr(mention, "id", None)
             if mid and getattr(mid, "open_id", None) == self._bot_open_id:
@@ -375,6 +783,379 @@ class FeishuBot(ABC):
         for oid in open_ids:
             name_map[oid] = self._resolve_sender_name(oid)
         return name_map
+
+    @staticmethod
+    def _mention_payloads(mentions: list) -> list[dict[str, str]]:
+        payloads: list[dict[str, str]] = []
+        for mention in mentions:
+            mid = getattr(mention, "id", None)
+            payloads.append(
+                {
+                    "key": str(getattr(mention, "key", "") or "").strip(),
+                    "name": str(getattr(mention, "name", "") or "").strip(),
+                    "user_id": str(getattr(mid, "user_id", "") or "").strip() if mid else "",
+                    "open_id": str(getattr(mid, "open_id", "") or "").strip() if mid else "",
+                }
+            )
+        return payloads
+
+    def _is_self_app_sender(self, *, sender_type: str, open_id: str = "", user_id: str = "") -> bool:
+        if sender_type != "app":
+            return False
+        bot_open_id = self._ensure_bot_open_id()
+        if bot_open_id and open_id == bot_open_id:
+            return True
+        return False
+
+    @staticmethod
+    def _is_group_control_text(text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        return normalized.startswith("/")
+
+    def _append_group_log_entry(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        created_at: int | str | None,
+        sender_user_id: str,
+        sender_open_id: str,
+        sender_type: str,
+        msg_type: str,
+        text: str,
+    ) -> int:
+        sender_name = self._display_name_for_sender(
+            user_id=sender_user_id,
+            open_id=sender_open_id,
+            sender_type=sender_type,
+        )
+        entry = {
+            "message_id": str(message_id or ""),
+            "created_at": int(created_at or 0),
+            "sender_user_id": sender_user_id,
+            "sender_open_id": sender_open_id,
+            "sender_type": sender_type,
+            "sender_name": sender_name,
+            "msg_type": msg_type,
+            "text": text,
+        }
+        return self._group_store.append_message(chat_id, entry)
+
+    def _history_mentions_payloads(self, mentions: list[Any]) -> list[dict[str, str]]:
+        payloads: list[dict[str, str]] = []
+        for mention in mentions:
+            mention_id = str(getattr(mention, "id", "") or "").strip()
+            payloads.append(
+                {
+                    "key": str(getattr(mention, "key", "") or "").strip(),
+                    "name": str(getattr(mention, "name", "") or "").strip(),
+                    "open_id": mention_id,
+                }
+            )
+        return payloads
+
+    def _history_entry_from_message(self, item: Any) -> dict[str, Any] | None:
+        message_id = str(getattr(item, "message_id", "") or "").strip()
+        if not message_id:
+            return None
+
+        msg_type = str(getattr(item, "msg_type", "") or "text").strip()
+        body = getattr(item, "body", None)
+        raw_content = str(getattr(body, "content", "") or "").strip()
+        try:
+            content_dict = json.loads(raw_content) if raw_content else {}
+        except Exception:
+            content_dict = {}
+
+        text = self._render_message_text(msg_type, content_dict)
+        mentions = getattr(item, "mentions", None) or []
+        if text and mentions:
+            text = self._normalize_mentions(text, self._history_mentions_payloads(mentions))
+        if not text:
+            return None
+
+        sender = getattr(item, "sender", None)
+        sender_type = str(getattr(sender, "sender_type", "") or "user").strip()
+        sender_id = str(getattr(sender, "id", "") or "").strip()
+        sender_open_id = sender_id if sender_type in {"user", "app"} else ""
+        sender_name = self._display_name_for_sender(
+            user_id="",
+            open_id=sender_open_id,
+            sender_type=sender_type,
+        )
+        return {
+            "message_id": message_id,
+            "created_at": int(getattr(item, "create_time", 0) or 0),
+            "sender_user_id": "",
+            "sender_open_id": sender_open_id,
+            "sender_type": sender_type,
+            "sender_name": sender_name,
+            "msg_type": msg_type,
+            "text": text,
+        }
+
+    def _fetch_group_history_entries(
+        self,
+        *,
+        chat_id: str,
+        current_message_id: str,
+        current_create_time: int | str | None,
+        existing_message_ids: set[str],
+        after_created_at: int | str | None = None,
+        after_message_ids: set[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        effective_limit = self._group_history_fetch_limit if limit is None else max(int(limit), 0)
+        if effective_limit <= 0 or self._group_history_fetch_lookback_seconds <= 0:
+            return []
+        end_time = int(int(current_create_time or 0) / 1000) if current_create_time else int(time.time())
+        if end_time <= 0:
+            end_time = int(time.time())
+        start_time = max(0, end_time - self._group_history_fetch_lookback_seconds)
+        min_created_at = max(int(after_created_at or 0), 0)
+        if min_created_at > 0:
+            start_time = max(start_time, int(min_created_at / 1000))
+        page_token = ""
+        entries: deque[dict[str, Any]] = deque(maxlen=effective_limit)
+        seen_message_ids = set(existing_message_ids)
+        seen_message_ids.add(str(current_message_id or "").strip())
+        boundary_message_ids = {
+            str(item).strip()
+            for item in (after_message_ids or set())
+            if str(item).strip()
+        }
+
+        while True:
+            builder = (
+                ListMessageRequest.builder()
+                .container_id_type("chat")
+                .container_id(chat_id)
+                .start_time(str(start_time))
+                .end_time(str(end_time))
+                .sort_type("ByCreateTimeAsc")
+                .page_size(50)
+            )
+            if page_token:
+                builder = builder.page_token(page_token)
+            request = builder.build()
+            response = self.client.im.v1.message.list(request)
+            if not response.success():
+                raise RuntimeError(f"code={response.code}, msg={response.msg}")
+
+            body = response.data
+            items = list(getattr(body, "items", None) or [])
+            for item in items:
+                entry = self._history_entry_from_message(item)
+                if not entry:
+                    continue
+                entry_created_at = max(int(entry.get("created_at", 0) or 0), 0)
+                message_id = str(entry.get("message_id", "") or "").strip()
+                if min_created_at > 0 and entry_created_at < min_created_at:
+                    continue
+                if (
+                    min_created_at > 0
+                    and entry_created_at == min_created_at
+                    and message_id in boundary_message_ids
+                ):
+                    continue
+                if not message_id or message_id in seen_message_ids:
+                    continue
+                entries.append(entry)
+                seen_message_ids.add(message_id)
+
+            if not getattr(body, "has_more", False):
+                break
+            page_token = str(getattr(body, "page_token", "") or "").strip()
+            if not page_token:
+                break
+
+        return list(entries)
+
+    def _group_history_fetch_enabled(self) -> bool:
+        return (
+            self._group_history_fetch_limit > 0
+            and self._group_history_fetch_lookback_seconds > 0
+        )
+
+    @staticmethod
+    def _group_context_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+        created_at = max(int(item.get("created_at", 0) or 0), 0)
+        seq = item.get("seq")
+        if isinstance(seq, int):
+            return (created_at, 0, seq, str(item.get("message_id", "") or ""))
+        return (created_at, 1, 0, str(item.get("message_id", "") or ""))
+
+    def _collect_assistant_context_entries(
+        self,
+        *,
+        chat_id: str,
+        current_message_id: str,
+        current_create_time: int | str | None,
+        current_seq: int,
+    ) -> list[dict[str, Any]]:
+        boundary_seq = self._group_store.get_last_boundary_seq(chat_id)
+        boundary_created_at = self._group_store.get_last_boundary_created_at(chat_id)
+        boundary_message_ids = set(self._group_store.get_last_boundary_message_ids(chat_id))
+        local_entries = self._group_store.read_messages_between(
+            chat_id,
+            after_seq=boundary_seq,
+            before_seq=current_seq or None,
+        )
+        if not self._group_history_fetch_enabled():
+            return local_entries
+
+        existing_message_ids = {
+            str(item.get("message_id", "") or "").strip()
+            for item in local_entries
+            if isinstance(item, dict) and str(item.get("message_id", "") or "").strip()
+        }
+        history_entries = self._fetch_group_history_entries(
+            chat_id=chat_id,
+            current_message_id=current_message_id,
+            current_create_time=current_create_time,
+            existing_message_ids=existing_message_ids,
+            after_created_at=boundary_created_at,
+            after_message_ids=boundary_message_ids,
+        )
+        if not history_entries:
+            return local_entries
+        merged_entries = [*local_entries, *history_entries]
+        return sorted(merged_entries, key=self._group_context_sort_key)
+
+    @staticmethod
+    def _collect_boundary_message_ids(
+        *,
+        current_message_id: str,
+        boundary_created_at: int | str | None,
+        context_entries: list[dict[str, Any]],
+    ) -> list[str]:
+        normalized_created_at = max(int(boundary_created_at or 0), 0)
+        if normalized_created_at <= 0:
+            return []
+        message_ids = {
+            str(current_message_id or "").strip(),
+        }
+        for item in context_entries:
+            if max(int(item.get("created_at", 0) or 0), 0) != normalized_created_at:
+                continue
+            message_id = str(item.get("message_id", "") or "").strip()
+            if message_id:
+                message_ids.add(message_id)
+        message_ids.discard("")
+        return sorted(message_ids)
+
+    def _prepare_group_history_execution_card(self, chat_id: str, parent_message_id: str) -> None:
+        normalized_parent_id = str(parent_message_id or "").strip()
+        if not normalized_parent_id:
+            return
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "Codex（准备群聊上下文）"},
+                "template": "turquoise",
+            },
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": "*正在回捞最近的群聊历史并准备上下文，请稍候。*",
+                    }
+                ]
+            },
+        }
+        content = json.dumps(card, ensure_ascii=False)
+        card_message_id = self.reply_to_message(normalized_parent_id, "interactive", content)
+        if not card_message_id:
+            card_message_id = self.send_message_get_id(chat_id, "interactive", content)
+        if card_message_id:
+            self.reserve_execution_card(normalized_parent_id, card_message_id)
+
+    def _notify_group_history_fetch_failed(
+        self,
+        *,
+        chat_id: str,
+        parent_message_id: str,
+        error: Exception,
+    ) -> None:
+        reason = str(error).strip() or type(error).__name__
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "Codex（群聊上下文准备失败）"},
+                "template": "red",
+            },
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": (
+                            "*本次 assistant 响应已停止，因为群历史回捞失败。*\n\n"
+                            f"错误：`{reason}`\n\n"
+                            "建议排查：\n"
+                            "- 检查应用是否已开通 `im:message.group_msg`、`im:message:readonly`\n"
+                            "- 检查群消息历史是否对机器人可见\n"
+                            "- 检查飞书 API / 网络是否异常\n"
+                            "- 如需先继续使用群聊，可临时执行 `@机器人 /groupmode mention-only`"
+                        ),
+                    }
+                ]
+            },
+        }
+        content = json.dumps(card, ensure_ascii=False)
+        reserved_id = self.claim_reserved_execution_card(parent_message_id)
+        if reserved_id and self.patch_message(reserved_id, content):
+            return
+        if parent_message_id:
+            reply_id = self.reply_to_message(parent_message_id, "interactive", content)
+            if reply_id:
+                return
+        self.send_message(chat_id, "interactive", content)
+
+    def _format_group_context_entries(self, entries: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for item in entries:
+            seq = item.get("seq")
+            ts = self._format_ts(item.get("created_at"))
+            sender_name = str(item.get("sender_name", "") or "unknown").strip()
+            sender_type = str(item.get("sender_type", "") or "user").strip()
+            msg_type = str(item.get("msg_type", "") or "text").strip()
+            text = str(item.get("text", "") or "").strip()
+            if sender_type == "app" and not sender_name.startswith("机器人:"):
+                sender_name = f"{sender_name}[机器人]"
+            if isinstance(seq, int) and seq > 0:
+                header = f"[#{seq} {ts}] {sender_name}"
+            else:
+                header = f"[{ts}] {sender_name}"
+            if msg_type and msg_type != "text":
+                header += f" ({msg_type})"
+            if text:
+                parts.append(f"{header}\n{text}")
+            else:
+                parts.append(header)
+        return "\n\n".join(parts).strip()
+
+    def _build_assistant_turn_text(self, context_text: str, current_text: str, log_path: pathlib.Path) -> str:
+        current_prompt = current_text.strip() or "请基于以上群聊上下文，回复最近这段讨论。"
+        context_block = context_text.strip() or "（上次 @ 之后暂无可用群聊消息）"
+        return (
+            "<group_chat_context>\n"
+            "以下是本群自上次 @机器人 之后到本次 @机器人 之前的消息。\n"
+            f"群聊日志文件：`{log_path}`\n\n"
+            f"{context_block}\n"
+            "</group_chat_context>\n\n"
+            f"{current_prompt}"
+        )
+
+    @staticmethod
+    def _group_acl_denied_text() -> str:
+        return (
+            "当前群仅管理员或已授权成员具备触发资格。\n"
+            "是否需要 `@机器人` 取决于当前群工作态：`assistant` / `mention-only` 需要先 `@机器人`，`all` 可直接发消息；管理员可发送 `/acl` 查看或调整当前群的授权策略。"
+        )
 
     @staticmethod
     def _format_ts(ts_ms: str | None) -> str:
@@ -533,15 +1314,21 @@ class FeishuBot(ABC):
         飞书将用户的"转发+留言"拆为两条独立事件（先 merge_forward，后 text）。
         为将它们作为一条指令处理，merge_forward 到达时先暂存到缓冲区，
         等待短时间窗口内同一用户同一会话的后续消息。若后续消息到达则合并处理，
-        超时则单独处理（私聊/唤醒模式群）或丢弃（需@唤醒的群聊）。
+        超时则按当前会话类型处理：私聊直接转发，`assistant` 群聊写入日志，
+        `all` 群聊直接转发，`mention_only` 群聊丢弃。
         """
         message = data.event.message
-        sender_id = data.event.sender.sender_id.user_id
+        sender = data.event.sender
+        sender_type = getattr(sender, "sender_type", "") or "user"
+        sender_user_id, sender_open_id = self._sender_ids(getattr(sender, "sender_id", None))
+        sender_id = self._effective_sender_id(sender_user_id, sender_open_id)
         chat_id = message.chat_id
         message_id = message.message_id
         msg_type = message.message_type
         chat_type = getattr(message, "chat_type", None) or "p2p"
         mentions = getattr(message, "mentions", None) or []
+        group_mode = self.get_group_mode(chat_id) if chat_type == "group" else ""
+        self.remember_chat_type(chat_id, chat_type)
 
         # 消息去重，防止飞书重试导致重复处理
         if self._is_duplicate(message_id):
@@ -562,19 +1349,13 @@ class FeishuBot(ABC):
             if not text:
                 logger.warning("合并转发消息提取文本为空: message_id=%s", message_id)
                 # 仅在非群聊或有权响应时回复提示
-                if chat_type != "group" or chat_id in self._wake_mode_groups:
+                if chat_type != "group" or group_mode == self._GROUP_MODE_ALL:
                     self.reply(chat_id, "合并转发的消息中未包含可识别的文本内容。")
                 return
             logger.info("合并转发提取完成，暂存等待留言: user=%s, message_id=%s, text=%s",
                         sender_id, message_id, text[:200])
             self._buffer_forward(sender_id, chat_id, text, message_id, chat_type)
             return
-
-        # ---- 群聊非 @机器人消息过滤（merge_forward 已在上方绕过） ----
-        if chat_type == "group" and not bot_mentioned:
-            if chat_id not in self._wake_mode_groups:
-                logger.debug("忽略群聊非@机器人消息: chat=%s, user=%s", chat_id, sender_id)
-                return
 
         # ---- 检查是否有待合并的转发消息 ----
         pending = self._pop_pending_forward(sender_id, chat_id)
@@ -588,61 +1369,191 @@ class FeishuBot(ABC):
             )
             return
 
+        sender_name, sender_open_log, sender_user_log = self._sender_log_fields(
+            user_id=sender_user_id,
+            open_id=sender_open_id,
+            sender_type=sender_type,
+        )
         logger.info(
-            "收到原始消息: user=%s, chat_type=%s, msg_type=%s, message_id=%s, content=%s",
-            sender_id, chat_type, msg_type, message_id, message.content,
+            "收到原始消息: name=%s, open_id=%s, user_id=%s, chat_type=%s, msg_type=%s, message_id=%s, content=%s",
+            sender_name, sender_open_log, sender_user_log, chat_type, msg_type, message_id, message.content,
         )
 
+        text = ""
         if msg_type == "file":
             file_key = content_dict.get("file_key", "")
             file_name = content_dict.get("file_name", "")
-            logger.info("收到文件: user=%s, chat_type=%s, message_id=%s, file=%s",
-                       sender_id, chat_type, message_id, file_name)
-            self.on_file_message(sender_id, chat_id, message_id, file_key, file_name)
+            text = f"[文件] {file_name}".strip()
+            logger.info(
+                "收到文件: name=%s, open_id=%s, user_id=%s, chat_type=%s, message_id=%s, file=%s",
+                sender_name, sender_open_log, sender_user_log, chat_type, message_id, file_name,
+            )
         else:
-            text = self._extract_text(msg_type, content_dict)
-            # 群聊消息剥离 @提及 占位符
-            if chat_type == "group" and bot_mentioned:
-                text = self._strip_mentions(text, mentions)
-            if not text:
-                if chat_type == "group" and bot_mentioned:
-                    # 群聊中纯 @机器人无附加文本，视为无指令，触发默认菜单
-                    self.on_message(sender_id, chat_id, "", message_id=message_id)
-                else:
-                    logger.info("忽略空文本消息: user=%s, msg_type=%s, message_id=%s",
-                               sender_id, msg_type, message_id)
-                    self.reply(chat_id, "当前仅支持文本消息，请直接输入文字。")
-                return
-            logger.info("收到消息: user=%s, chat_type=%s, message_id=%s, text=%s",
-                       sender_id, chat_type, message_id, text)
-            # 唤醒模式关键词拦截（仅群聊生效）
-            if text == self._WAKE_MODE_KEYWORD and chat_type == "group":
-                self._send_wake_mode_card(chat_id)
-                return
-            # 合并待处理的转发消息（转发内容在前，留言在后）
-            if pending:
-                text = (f"<forwarded_messages>\n{pending.forwarded_text}"
-                        f"\n</forwarded_messages>\n\n{text}")
-                logger.info(
-                    "转发消息与留言已合并: user=%s, chat=%s, forward_msg=%s",
-                    sender_id, chat_id, pending.message_id,
+            text = self._render_message_text(msg_type, content_dict)
+        if chat_type == "group" and mentions:
+            text = self._normalize_mentions(text, mentions)
+        if pending:
+            text = (
+                f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>"
+                + (f"\n\n{text}" if text else "")
+            ).strip()
+            logger.info(
+                "转发消息与留言已合并: name=%s, open_id=%s, user_id=%s, chat=%s, forward_msg=%s",
+                sender_name,
+                sender_open_log,
+                sender_user_log,
+                chat_id,
+                pending.message_id,
+            )
+
+        is_self_app_sender = self._is_self_app_sender(
+            sender_type=sender_type,
+            open_id=sender_open_id,
+            user_id=sender_user_id,
+        )
+
+        self._remember_message_context(
+            message_id,
+            {
+                "chat_id": chat_id,
+                "chat_type": chat_type,
+                "sender_user_id": sender_user_id,
+                "sender_open_id": sender_open_id,
+                "sender_type": sender_type,
+                "bot_mentioned": bot_mentioned,
+                "message_type": msg_type,
+                "text": text,
+                "mentions": self._mention_payloads(mentions),
+            },
+        )
+
+        if chat_type == "group" and is_self_app_sender:
+            logger.debug("忽略机器人自身消息: chat=%s, message_id=%s", chat_id, message_id)
+            return
+
+        if chat_type == "group":
+            control_text = self._is_group_control_text(text)
+            allowed_to_use = self.is_group_user_allowed(chat_id, sender_user_id, sender_open_id)
+            should_prepare_history = (
+                group_mode == self._GROUP_MODE_ASSISTANT
+                and bot_mentioned
+                and sender_type != "app"
+                and allowed_to_use
+                and not control_text
+                and self._group_history_fetch_enabled()
+            )
+            if should_prepare_history:
+                self._prepare_group_history_execution_card(chat_id, message_id)
+            if group_mode == self._GROUP_MODE_ASSISTANT:
+                log_text = text
+                if bot_mentioned and not log_text and not control_text:
+                    log_text = "[@机器人]"
+                current_seq = 0
+                if log_text and not control_text:
+                    current_seq = self._append_group_log_entry(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        created_at=message.create_time,
+                        sender_user_id=sender_user_id,
+                        sender_open_id=sender_open_id,
+                        sender_type=sender_type,
+                        msg_type=msg_type,
+                        text=log_text,
+                    )
+                if not bot_mentioned:
+                    return
+                if sender_type == "app":
+                    logger.debug("忽略群聊机器人消息触发: chat=%s, message_id=%s", chat_id, message_id)
+                    return
+                if not allowed_to_use:
+                    self.reply(chat_id, self._group_acl_denied_text())
+                    return
+                if control_text:
+                    self.on_message(sender_id, chat_id, text, message_id=message_id)
+                    return
+                try:
+                    context_entries = self._collect_assistant_context_entries(
+                        chat_id=chat_id,
+                        current_message_id=message_id,
+                        current_create_time=message.create_time,
+                        current_seq=current_seq,
+                    )
+                except Exception as exc:
+                    logger.warning("群历史回捞失败: chat=%s, error=%s", chat_id, exc)
+                    self._notify_group_history_fetch_failed(
+                        chat_id=chat_id,
+                        parent_message_id=message_id,
+                        error=exc,
+                    )
+                    return
+                assistant_text = self._build_assistant_turn_text(
+                    self._format_group_context_entries(context_entries),
+                    text,
+                    self._group_store.log_path(chat_id),
                 )
-            self.on_message(sender_id, chat_id, text, message_id=message_id)
+                if current_seq:
+                    boundary_message_ids = self._collect_boundary_message_ids(
+                        current_message_id=message_id,
+                        boundary_created_at=message.create_time,
+                        context_entries=context_entries,
+                    )
+                    self._group_store.set_last_boundary(
+                        chat_id,
+                        seq=current_seq,
+                        created_at=message.create_time,
+                        message_ids=boundary_message_ids,
+                    )
+                self.on_message(sender_id, chat_id, assistant_text, message_id=message_id)
+                return
+
+            if group_mode == self._GROUP_MODE_MENTION and not bot_mentioned:
+                logger.debug("忽略群聊非@机器人消息: chat=%s, user=%s", chat_id, sender_user_id)
+                return
+
+            if sender_type == "app":
+                logger.debug("忽略群聊机器人消息触发: chat=%s, message_id=%s", chat_id, message_id)
+                return
+            if not allowed_to_use:
+                if bot_mentioned or text.startswith("/"):
+                    self.reply(chat_id, self._group_acl_denied_text())
+                return
+        if msg_type == "file":
+            file_key = content_dict.get("file_key", "")
+            file_name = content_dict.get("file_name", "")
+            self.on_file_message(sender_id, chat_id, message_id, file_key, file_name)
+            return
+
+        if not text:
+            if chat_type == "group" and bot_mentioned:
+                self.on_message(sender_id, chat_id, "", message_id=message_id)
+            elif chat_type != "group":
+                logger.info(
+                    "忽略空文本消息: name=%s, open_id=%s, user_id=%s, msg_type=%s, message_id=%s",
+                    sender_name, sender_open_log, sender_user_log, msg_type, message_id,
+                )
+                self.reply(chat_id, "当前仅支持文本消息，请直接输入文字。")
+            return
+
+        logger.info(
+            "收到消息: name=%s, open_id=%s, user_id=%s, chat_type=%s, message_id=%s, text=%s",
+            sender_name, sender_open_log, sender_user_log, chat_type, message_id, text,
+        )
+        self.on_message(sender_id, chat_id, text, message_id=message_id)
 
     def _on_raw_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         """解析卡片按钮点击事件，交给子类处理"""
         try:
             user_id = data.event.operator.user_id
+            operator_open_id = str(getattr(data.event.operator, "open_id", "") or "").strip()
             chat_id = data.event.context.open_chat_id
             message_id = data.event.context.open_message_id
             action_value = data.event.action.value or {}
+            if operator_open_id:
+                action_value["_operator_open_id"] = operator_open_id
             # 表单提交时携带输入框的值，注入 action_value 供处理器读取
             if data.event.action.form_value:
                 action_value["_form_value"] = data.event.action.form_value
             logger.info("卡片点击: user=%s, action=%s", user_id, action_value)
-            # 唤醒模式卡片回调在基类拦截，不交给子类
-            if action_value.get("action") == "set_wake_mode":
-                return self._handle_set_wake_mode(chat_id, action_value)
             return self.on_card_action(user_id, chat_id, message_id, action_value)
         except Exception as e:
             logger.error("处理卡片事件异常: %s", e, exc_info=True)
@@ -879,71 +1790,6 @@ class FeishuBot(ABC):
         if not response.success():
             raise RuntimeError(f"文件下载失败: code={response.code}, msg={response.msg}")
         return response.file.read()
-
-    # ---- 唤醒模式 ----
-
-    def _build_wake_mode_card(self, chat_id: str) -> dict:
-        """构造唤醒模式选择卡片，高亮当前模式"""
-        is_all = chat_id in self._wake_mode_groups
-        current = self._WAKE_MODE_ALL if is_all else self._WAKE_MODE_MENTION
-
-        modes = [
-            (self._WAKE_MODE_ALL, "全部唤醒",
-             "群内所有消息都直接发给机器人，无需 @"),
-            (self._WAKE_MODE_MENTION, "仅@唤醒",
-             "只有 @机器人 的消息才会触发响应"),
-        ]
-
-        elements: list[dict] = []
-        for mode, label, desc in modes:
-            elements.append({"tag": "markdown", "content": f"**{label}**\n{desc}"})
-
-        buttons = []
-        for mode, label, _ in modes:
-            is_current = mode == current
-            buttons.append({
-                "tag": "button",
-                "text": {"tag": "plain_text",
-                         "content": f"{'✓ ' if is_current else ''}{label}"},
-                "type": "primary" if is_current else "default",
-                "value": {"action": "set_wake_mode", "mode": mode},
-            })
-        elements.append({"tag": "action", "actions": buttons})
-
-        current_label = "全部唤醒" if is_all else "仅@唤醒"
-        return {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "唤醒模式"},
-                "template": "blue",
-            },
-            "elements": [
-                {"tag": "markdown",
-                 "content": f"当前模式：**{current_label}**"},
-                {"tag": "hr"},
-                *elements,
-            ],
-        }
-
-    def _send_wake_mode_card(self, chat_id: str) -> None:
-        """发送唤醒模式选择卡片"""
-        card = self._build_wake_mode_card(chat_id)
-        self.reply_card(chat_id, card)
-
-    def _handle_set_wake_mode(
-        self, chat_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        """处理唤醒模式卡片按钮点击"""
-        mode = action_value.get("mode", self._WAKE_MODE_MENTION)
-        if mode == self._WAKE_MODE_ALL:
-            self._wake_mode_groups.add(chat_id)
-            toast = "已切换为「全部唤醒」模式，群内消息无需 @ 即可触发"
-        else:
-            self._wake_mode_groups.discard(chat_id)
-            toast = "已切换为「仅@唤醒」模式"
-        logger.info("唤醒模式切换: chat=%s, mode=%s", chat_id, mode)
-        updated_card = self._build_wake_mode_card(chat_id)
-        return self.make_card_response(card=updated_card, toast=toast)
 
     # ---- 业务逻辑层 (子类实现) ----
 

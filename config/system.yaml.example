@@ -3,3 +3,18 @@ app_secret: "your_cc_bot_app_secret"
 
 # 飞书 HTTP API 请求超时（秒）；默认值：10
 # request_timeout_seconds: 10
+
+# 群聊管理员 user_id 列表；这些人始终具备群聊触发资格，并可使用
+# `/groupmode`、`/acl` 管理群聊。
+# 若群工作态是 `assistant` 或 `mention-only`，他们仍需先 `@机器人`
+# 才会触发对话或群命令。
+# admin_user_ids:
+#   - "u_xxx 这样的 user_id；可先私聊机器人发送 /whoami 获取"
+
+# assistant 模式每次有效被 @ 时，最多回捞多少条历史消息。
+# 设为 0 表示禁用历史回捞。默认值：50
+# group_history_fetch_limit: 50
+
+# assistant 模式每次历史回捞的时间窗口（秒）。
+# 设为 0 表示禁用历史回捞。默认值：86400（24 小时）
+# group_history_fetch_lookback_seconds: 86400

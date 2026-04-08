@@ -611,6 +611,134 @@ def build_collaboration_mode_card(current_mode: str, *, running: bool = False) -
     }
 
 
+def build_group_mode_card(current_mode: str, *, can_manage: bool) -> dict:
+    """构造群聊工作态选择卡片。"""
+    labels = {
+        "assistant": "assistant",
+        "all": "all",
+        "mention_only": "mention-only",
+    }
+    descs = {
+        "assistant": "缓存群聊消息，仅在 `@机器人` 时回复；适合群讨论助手。",
+        "all": "群内消息都会直接触发机器人回复；风险最高，容易刷屏。",
+        "mention_only": "只有 `@机器人` 的消息才会触发响应；不缓存上下文。",
+    }
+    current_desc = descs.get(current_mode, current_mode)
+    content = (
+        f"当前群聊工作态：**{labels.get(current_mode, current_mode)}**\n"
+        f"{current_desc}\n\n"
+        "作用范围：只影响当前群。\n\n"
+        "在 `assistant` / `mention-only` 中，群命令本身也需要先 `@机器人`。"
+    )
+    if not can_manage:
+        content += "\n\n仅管理员可切换工作态。"
+
+    elements = [{"tag": "markdown", "content": content}, {"tag": "hr"}]
+    buttons = []
+    for mode, label in labels.items():
+        elements.append({"tag": "markdown", "content": f"**{label}**\n{descs[mode]}"})
+        if can_manage:
+            buttons.append(
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"{'✓ ' if mode == current_mode else ''}{label}",
+                    },
+                    "type": "primary" if mode == current_mode else "default",
+                    "value": {
+                        "action": "set_group_mode",
+                        "plugin": KEYWORD,
+                        "mode": mode,
+                    },
+                }
+            )
+    if buttons:
+        elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 群聊工作态"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def build_group_acl_card(
+    access_policy: str,
+    *,
+    allowlist_members: list[str],
+    viewer_allowed: bool,
+    can_manage: bool,
+) -> dict:
+    """构造群聊 ACL 状态卡片。"""
+    labels = {
+        "admin-only": "admin-only",
+        "allowlist": "allowlist",
+        "all-members": "all-members",
+    }
+    descs = {
+        "admin-only": "只有管理员具备群聊触发资格。",
+        "allowlist": "管理员和已授权成员具备群聊触发资格。",
+        "all-members": "群内所有成员都具备群聊触发资格。",
+    }
+    current_label = labels.get(access_policy, access_policy)
+    content = (
+        f"当前授权策略：**{current_label}**\n"
+        f"{descs.get(access_policy, access_policy)}\n\n"
+        f"你当前是否可用：**{'是' if viewer_allowed else '否'}**\n\n"
+        "说明：ACL 只决定谁有资格；是否需要 `@机器人` 仍取决于群聊工作态。"
+    )
+    if allowlist_members:
+        shown_members = "\n".join(f"- `{member}`" for member in allowlist_members[:20])
+        if len(allowlist_members) > 20:
+            shown_members += f"\n- 其余 {len(allowlist_members) - 20} 人未展开"
+        content += f"\n\n**当前 allowlist 成员**\n{shown_members}"
+    else:
+        content += "\n\n当前 allowlist 为空。"
+    if can_manage:
+        content += (
+            "\n\n管理员可用：`/acl policy admin-only`、`/acl policy allowlist`、"
+            "`/acl policy all-members`、`/acl grant @成员`、`/acl revoke @成员`\n"
+            "若当前群是 `assistant` / `mention-only`，继续发送这些群命令时仍需先 `@机器人`。"
+        )
+    else:
+        content += "\n\n仅管理员可调整授权策略。"
+
+    elements = [{"tag": "markdown", "content": content}, {"tag": "hr"}]
+    buttons = []
+    for policy, label in labels.items():
+        elements.append({"tag": "markdown", "content": f"**{label}**\n{descs[policy]}"})
+        if can_manage:
+            buttons.append(
+                {
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": f"{'✓ ' if policy == access_policy else ''}{label}",
+                    },
+                    "type": "primary" if policy == access_policy else "default",
+                    "value": {
+                        "action": "set_group_acl_policy",
+                        "plugin": KEYWORD,
+                        "policy": policy,
+                    },
+                }
+            )
+    if buttons:
+        elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
+
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 群聊授权"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
 def build_ask_user_card(
     request_id: str,
     questions: list[dict],

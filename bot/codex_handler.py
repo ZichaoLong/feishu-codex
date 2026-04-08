@@ -28,6 +28,8 @@ from bot.cards import (
     build_collaboration_mode_card,
     build_command_approval_card,
     build_execution_card,
+    build_group_acl_card,
+    build_group_mode_card,
     build_file_change_approval_card,
     build_history_preview_card,
     build_markdown_card,
@@ -239,6 +241,10 @@ class CodexHandler(BotHandler):
             return self._handle_set_permissions_preset(user_id, chat_id, action_value)
         if action == "set_collaboration_mode":
             return self._handle_set_collaboration_mode(user_id, chat_id, action_value)
+        if action == "set_group_mode":
+            return self._handle_set_group_mode_action(user_id, chat_id, action_value)
+        if action == "set_group_acl_policy":
+            return self._handle_set_group_acl_policy_action(user_id, chat_id, action_value)
         if action.startswith("command_") or action.startswith("file_change_") or action.startswith("permissions_"):
             return self._handle_approval_card_action(action_value)
         if action.startswith("answer_user_input_"):
@@ -385,6 +391,9 @@ class CodexHandler(BotHandler):
         if cmd == "/status":
             self._handle_status_command(user_id, chat_id)
             return
+        if cmd == "/whoami":
+            self._handle_whoami_command(user_id, chat_id, message_id=message_id)
+            return
         if cmd == "/profile":
             self._handle_profile_command(user_id, chat_id, arg)
             return
@@ -418,6 +427,12 @@ class CodexHandler(BotHandler):
         if cmd == "/mode":
             self._handle_mode_command(user_id, chat_id, arg)
             return
+        if cmd == "/groupmode":
+            self._handle_groupmode_command(user_id, chat_id, arg, message_id=message_id)
+            return
+        if cmd == "/acl":
+            self._handle_acl_command(user_id, chat_id, arg, message_id=message_id)
+            return
 
         self.bot.reply(chat_id, f"未知命令：`{command}`\n发送 `/help` 查看可用命令。")
 
@@ -447,7 +462,16 @@ class CodexHandler(BotHandler):
             state["pending_local_turn_card"] = True
             self._clear_plan_state(state)
 
-        card_id = self._send_execution_card(chat_id, message_id)
+        card_id = ""
+        if message_id and hasattr(self.bot, "claim_reserved_execution_card"):
+            card_id = str(self.bot.claim_reserved_execution_card(message_id) or "").strip()
+            if card_id:
+                self.bot.patch_message(
+                    card_id,
+                    json.dumps(build_execution_card("", running=True), ensure_ascii=False),
+                )
+        if not card_id:
+            card_id = self._send_execution_card(chat_id, message_id)
         with self._lock:
             state["current_message_id"] = card_id or ""
 
@@ -612,6 +636,33 @@ class CodexHandler(BotHandler):
         self.bot.reply_card(
             chat_id,
             build_markdown_card("Codex 当前状态", content, template=template),
+        )
+
+    def _handle_whoami_command(self, user_id: str, chat_id: str, *, message_id: str = "") -> None:
+        context = self.bot.get_message_context(message_id) if message_id else {}
+        chat_type = str(context.get("chat_type", "")).strip()
+        if chat_type == "group":
+            self.bot.reply(chat_id, "请私聊机器人执行 `/whoami`。")
+            return
+        sender_open_id = str(context.get("sender_open_id", "")).strip()
+        sender_type = str(context.get("sender_type", "user") or "user").strip()
+        name = self.bot.get_sender_display_name(
+            user_id=user_id,
+            open_id=sender_open_id,
+            sender_type=sender_type,
+        )
+        self.bot.reply(
+            chat_id,
+            "\n".join(
+                [
+                    "你的身份信息：",
+                    f"- name: `{name}`",
+                    f"- user_id: `{user_id or '（空）'}`",
+                    f"- open_id: `{sender_open_id or '（空）'}`",
+                    "",
+                    "配置管理员时，优先把 `user_id` 写进 `system.yaml` 的 `admin_user_ids`。",
+                ]
+            ),
         )
 
     def _handle_session_command(self, user_id: str, chat_id: str) -> None:
@@ -919,6 +970,141 @@ class CodexHandler(BotHandler):
             ),
         )
 
+    def _require_group_chat(self, chat_id: str, message_id: str = "") -> dict[str, Any] | None:
+        context = self.bot.get_message_context(message_id) if message_id else {}
+        chat_type = str(context.get("chat_type", "")).strip()
+        if not chat_type and hasattr(self.bot, "lookup_chat_type"):
+            chat_type = str(self.bot.lookup_chat_type(chat_id) or "").strip()
+        if not chat_type and hasattr(self.bot, "fetch_chat_type"):
+            chat_type = str(self.bot.fetch_chat_type(chat_id) or "").strip()
+        if chat_type == "group":
+            if not context:
+                return {"chat_type": "group"}
+            return context
+        self.bot.reply(chat_id, "该命令仅支持群聊使用。")
+        return None
+
+    @staticmethod
+    def _normalize_group_mode(mode: str) -> str:
+        normalized = str(mode or "").strip().lower().replace("-", "_")
+        if normalized == "mention":
+            return "mention_only"
+        return normalized
+
+    def _group_mode_card(self, chat_id: str, *, user_id: str = "", open_id: str = "") -> dict:
+        return build_group_mode_card(
+            self.bot.get_group_mode(chat_id),
+            can_manage=self.bot.is_group_admin(user_id, open_id),
+        )
+
+    def _group_acl_card(self, chat_id: str, *, user_id: str = "", open_id: str = "") -> dict:
+        snapshot = self.bot.get_group_acl_snapshot(chat_id)
+        return build_group_acl_card(
+            snapshot["access_policy"],
+            allowlist_members=list(snapshot["allowlist"]),
+            viewer_allowed=self.bot.is_group_user_allowed(chat_id, user_id, open_id),
+            can_manage=self.bot.is_group_admin(user_id, open_id),
+        )
+
+    def _handle_groupmode_command(self, user_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+        context = self._require_group_chat(chat_id, message_id)
+        if context is None:
+            return
+        sender_open_id = str(context.get("sender_open_id", "")).strip()
+        if not arg:
+            self.bot.reply_card(
+                chat_id,
+                self._group_mode_card(chat_id, user_id=user_id, open_id=sender_open_id),
+            )
+            return
+        if not self.bot.is_group_admin(user_id, sender_open_id):
+            self.bot.reply(chat_id, "仅管理员可切换群聊工作态。")
+            return
+        mode = self._normalize_group_mode(arg)
+        if mode not in {"assistant", "all", "mention_only"}:
+            self.bot.reply(chat_id, "群聊工作态仅支持：`assistant`、`all`、`mention-only`")
+            return
+        self.bot.set_group_mode(chat_id, mode)
+        labels = {
+            "assistant": "assistant",
+            "all": "all",
+            "mention_only": "mention-only",
+        }
+        self.bot.reply(chat_id, f"已切换群聊工作态：`{labels[mode]}`")
+
+    def _acl_target_user_ids(self, message_id: str, raw_arg: str) -> list[str]:
+        targets = {
+            item["user_id"]
+            for item in self.bot.extract_non_bot_mentions(message_id)
+            if item.get("user_id")
+        }
+        for token in str(raw_arg or "").replace(",", " ").split():
+            token = token.strip()
+            if token and not token.startswith("@"):
+                targets.add(token)
+        return sorted(targets)
+
+    def _handle_acl_command(self, user_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+        context = self._require_group_chat(chat_id, message_id)
+        if context is None:
+            return
+        sender_open_id = str(context.get("sender_open_id", "")).strip()
+        if not arg:
+            self.bot.reply_card(
+                chat_id,
+                self._group_acl_card(chat_id, user_id=user_id, open_id=sender_open_id),
+            )
+            return
+
+        cmd, _, rest = arg.partition(" ")
+        subcommand = cmd.strip().lower()
+        payload = rest.strip()
+        is_admin = self.bot.is_group_admin(user_id, sender_open_id)
+        if subcommand in {"admin-only", "allowlist", "all-members"}:
+            payload = subcommand
+            subcommand = "policy"
+
+        if subcommand == "policy":
+            if not is_admin:
+                self.bot.reply(chat_id, "仅管理员可调整群聊授权策略。")
+                return
+            policy = payload.strip().lower()
+            if policy not in {"admin-only", "allowlist", "all-members"}:
+                self.bot.reply(chat_id, "用法：`/acl policy <admin-only|allowlist|all-members>`")
+                return
+            self.bot.set_group_access_policy(chat_id, policy)
+            self.bot.reply(chat_id, f"已切换群聊授权策略：`{policy}`")
+            return
+
+        if subcommand in {"grant", "allow"}:
+            if not is_admin:
+                self.bot.reply(chat_id, "仅管理员可授权成员。")
+                return
+            targets = self._acl_target_user_ids(message_id, payload)
+            if not targets:
+                self.bot.reply(chat_id, "用法：`/acl grant @成员` 或 `/acl grant <user_id>`")
+                return
+            updated = self.bot.grant_group_members(chat_id, targets)
+            self.bot.reply(chat_id, f"已授权 {len(targets)} 人，当前 allowlist 共 {len(updated)} 人。")
+            return
+
+        if subcommand in {"revoke", "remove"}:
+            if not is_admin:
+                self.bot.reply(chat_id, "仅管理员可撤销成员授权。")
+                return
+            targets = self._acl_target_user_ids(message_id, payload)
+            if not targets:
+                self.bot.reply(chat_id, "用法：`/acl revoke @成员` 或 `/acl revoke <user_id>`")
+                return
+            updated = self.bot.revoke_group_members(chat_id, targets)
+            self.bot.reply(chat_id, f"已撤销 {len(targets)} 人，当前 allowlist 共 {len(updated)} 人。")
+            return
+
+        self.bot.reply(
+            chat_id,
+            "用法：`/acl`、`/acl policy <admin-only|allowlist|all-members>`、`/acl grant @成员`、`/acl revoke @成员`",
+        )
+
     def _handle_cancel_action(self, user_id: str, chat_id: str) -> P2CardActionTriggerResponse:
         ok, message = self._cancel_current_turn(user_id, chat_id, from_card=True)
         return self.bot.make_card_response(toast=message, toast_type="success" if ok else "warning")
@@ -1170,6 +1356,38 @@ class CodexHandler(BotHandler):
         return self.bot.make_card_response(
             card=build_collaboration_mode_card(mode, running=running),
             toast=toast,
+            toast_type="success",
+        )
+
+    def _handle_set_group_mode_action(
+        self, user_id: str, chat_id: str, action_value: dict
+    ) -> P2CardActionTriggerResponse:
+        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
+        mode = self._normalize_group_mode(str(action_value.get("mode", "")))
+        if mode not in {"assistant", "all", "mention_only"}:
+            return self.bot.make_card_response(toast="非法群聊工作态", toast_type="warning")
+        if not self.bot.is_group_admin(user_id, operator_open_id):
+            return self.bot.make_card_response(toast="仅管理员可切换群聊工作态。", toast_type="warning")
+        self.bot.set_group_mode(chat_id, mode)
+        return self.bot.make_card_response(
+            card=self._group_mode_card(chat_id, user_id=user_id, open_id=operator_open_id),
+            toast=f"已切换群聊工作态：{mode}",
+            toast_type="success",
+        )
+
+    def _handle_set_group_acl_policy_action(
+        self, user_id: str, chat_id: str, action_value: dict
+    ) -> P2CardActionTriggerResponse:
+        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
+        policy = str(action_value.get("policy", "")).strip().lower()
+        if policy not in {"admin-only", "allowlist", "all-members"}:
+            return self.bot.make_card_response(toast="非法群聊授权策略", toast_type="warning")
+        if not self.bot.is_group_admin(user_id, operator_open_id):
+            return self.bot.make_card_response(toast="仅管理员可调整群聊授权策略。", toast_type="warning")
+        self.bot.set_group_access_policy(chat_id, policy)
+        return self.bot.make_card_response(
+            card=self._group_acl_card(chat_id, user_id=user_id, open_id=operator_open_id),
+            toast=f"已切换群聊授权策略：{policy}",
             toast_type="success",
         )
 
@@ -2069,12 +2287,15 @@ class CodexHandler(BotHandler):
         }:
             self.bot.reply_card(chat_id, build_markdown_card("Codex 帮助：设置", self._help_settings_text()))
             return
+        if normalized in {"group", "groups", "acl"}:
+            self.bot.reply_card(chat_id, build_markdown_card("Codex 帮助：群聊", self._help_group_text()))
+            return
         if normalized in {"local", "fcodex", "wrapper"}:
             self.bot.reply_card(chat_id, build_markdown_card("Codex 帮助：本地继续", self._help_local_text()))
             return
         self.bot.reply(
             chat_id,
-            "帮助主题仅支持：`session`、`settings`、`local`。\n发送 `/help` 查看概览。",
+            "帮助主题仅支持：`session`、`settings`、`group`、`local`。\n发送 `/help` 查看概览。",
         )
 
     def _help_overview_text(self) -> str:
@@ -2086,9 +2307,11 @@ class CodexHandler(BotHandler):
             "- `/resume <thread_id|thread_name>` 恢复指定线程\n"
             "- `/cd <path>` 切换目录并清空当前线程绑定\n"
             "- `/status` 查看当前状态\n\n"
+            "- `/whoami`：私聊查看自己的 `user_id` / `open_id`\n\n"
             "**更多命令与帮助**\n"
             "- `/help session` 查看线程切换、目录切换与归档\n"
             "- `/help settings` 查看 profile、权限与协作设置\n"
+            "- `/help group` 查看群聊工作态、授权策略与上下文规则\n"
             "- `/help local` 查看本地 `fcodex` 的用法\n\n"
             f"{_LOCAL_THREAD_SAFETY_RULE}"
         )
@@ -2121,6 +2344,25 @@ class CodexHandler(BotHandler):
             "- `/approval [untrusted|on-failure|on-request|never]`\n"
             "- `/sandbox [read-only|workspace-write|danger-full-access]`\n"
             "- `/mode [default|plan]`"
+        )
+
+    def _help_group_text(self) -> str:
+        return (
+            "**群聊相关**\n"
+            "- `/groupmode` 查看当前群聊工作态；管理员可切到 `assistant`、`all`、`mention-only`。\n"
+            "- `assistant` 会缓存群聊消息，仅在人类 `@机器人` 时回复；每次有效 `@` 都会回捞最近群历史，把两次 `@` 之间的消息补齐进上下文。\n"
+            "- `/acl` 查看当前群授权；管理员可设置 `admin-only`、`allowlist`、`all-members`。\n"
+            "- 在群聊 `assistant` 和 `mention-only` 工作态下，群命令本身也需要先 `@机器人`；私聊则不需要。\n"
+            "- 群命令不写入 `assistant` 上下文日志，也不会推进上下文边界。\n"
+            "- 由于飞书不会把其他机器人发言实时推给机器人，`assistant` 会在每次有效 `@` 时额外回捞群历史，用来补齐其他机器人和遗漏消息。\n"
+            "- 未获授权成员在 `all` 模式下直接发普通消息会静默忽略；只有显式 `@机器人` 或发群命令时才会收到拒绝提示。\n"
+            "- 管理员授权成员时，推荐在群里直接 `@成员` 使用 `/acl grant` 或 `/acl revoke`。\n\n"
+            "**命令**\n"
+            "- `/groupmode [assistant|all|mention-only]`\n"
+            "- `/acl`\n"
+            "- `/acl policy <admin-only|allowlist|all-members>`\n"
+            "- `/acl grant @成员`\n"
+            "- `/acl revoke @成员`"
         )
 
     def _help_local_text(self) -> str:

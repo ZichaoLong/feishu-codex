@@ -114,8 +114,8 @@ Current module split:
 - `bot/adapters/codex_app_server.py`: Codex adapter boundary
 - `bot/codex_protocol/client.py`: websocket JSON-RPC client for `codex app-server`
 - `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and thin proxy
-- `bot/stores/*.py`: favorites, local default profile, and runtime backend
-  discovery state
+- `bot/stores/*.py`: favorites, local default profile, runtime backend
+  discovery state, and group-chat state
 
 ## 6. Data and Behavioral Boundaries
 
@@ -139,6 +139,7 @@ Codex remains the authority for:
 - local default profile used by Feishu and default `fcodex` launches
 - runtime shared-backend discovery state
 - per-chat thread bindings
+- group-chat mode, group ACL, group context logs, and boundary state
 - transient approval, rename, and card state
 
 ### 6.3 Session and Directory Semantics
@@ -165,6 +166,78 @@ The current project uses Codex-native approval and sandbox concepts:
 - Feishu-facing presets layered on top of those primitives
 
 The integration does not depend on Claude-style shell hook interception.
+
+### 6.5 Group Chat Contract
+
+The following behaviors are part of the current implementation contract:
+
+#### Defaults
+
+- new groups default to `assistant`
+- new groups default to `admin-only`
+- group administrators come from `system.yaml.admin_user_ids`
+
+#### Human-member access
+
+- whether a human member is eligible to trigger the bot in a group is decided
+  by that group's ACL
+- ACL decides "who is eligible"; whether a mention is still required is decided
+  by the group mode
+- group ACL only manages human members, not other bots
+- supported ACL policies are:
+  - `admin-only`
+  - `allowlist`
+  - `all-members`
+
+#### Group modes
+
+- `assistant`
+  - receives and caches group messages
+  - replies only when the bot is mentioned
+  - includes group context since the last trigger boundary
+- `mention-only`
+  - does not cache group context
+  - triggers only on mentions
+- `all`
+  - human group messages can trigger directly
+  - highest spam risk
+
+#### Group-command triggering
+
+- p2p commands can be sent directly
+- in group `assistant` and `mention-only`, group commands themselves must also
+  mention the bot first
+- in group `all`, human group commands can be sent directly
+- group commands do not enter the `assistant` context log and do not advance the
+  assistant boundary
+
+#### Assistant-mode context
+
+- `assistant` writes group messages into a local log
+- only effective human mentions can trigger a reply
+- because Feishu does not push other bots' messages to bots in real time,
+  `assistant` backfills a limited window of recent history on every effective
+  mention
+- history backfill and live group logs are merged into one context pipeline
+- the context boundary tracks both sequence and time so each new effective
+  mention can resume from the previous boundary
+
+#### ACL denial feedback
+
+- unauthorized members in `assistant` / `mention-only` receive a denial message
+  only when they explicitly mention the bot
+- unauthorized members in `all` are silently ignored for plain messages to
+  avoid noise
+- unauthorized members in `all` still receive a denial message when they
+  explicitly mention the bot or send a group command
+
+#### Other bots and history
+
+- other bots cannot directly trigger `feishu-codex`
+- if group history is visible to the bot, messages from other bots can still
+  enter the `assistant` context through the per-mention history backfill
+- if history backfill is disabled, other bots' messages do not automatically
+  enter the `assistant` context
 
 ## 7. Current Repository Structure
 

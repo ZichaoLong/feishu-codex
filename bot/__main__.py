@@ -40,6 +40,7 @@ def main() -> None:
         cfg["app_id"],
         cfg["app_secret"],
         request_timeout_seconds=float(cfg.get("request_timeout_seconds", 10)),
+        system_config=cfg,
     )
     bot.start()
 

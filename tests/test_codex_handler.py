@@ -135,12 +135,19 @@ class _FakeAdapter:
 
 
 class _FakeBot:
-    def __init__(self) -> None:
+    def __init__(self, data_dir: pathlib.Path) -> None:
         self.replies: list[tuple[str, str]] = []
         self.cards: list[tuple[str, dict]] = []
         self.reply_refs: list[tuple[str, str, str]] = []
         self.sent_messages: list[tuple[str, str, str]] = []
         self.patches: list[tuple[str, str]] = []
+        self.message_contexts: dict[str, dict] = {}
+        self.group_modes: dict[str, str] = {}
+        self.group_acls: dict[str, dict] = {}
+        self.chat_types: dict[str, str] = {}
+        self.fetched_chat_types: dict[str, str] = {}
+        self.reserved_execution_cards: dict[str, str] = {}
+        self.admin_user_ids = {"u1"}
 
     def reply(self, chat_id: str, text: str) -> None:
         self.replies.append((chat_id, text))
@@ -163,6 +170,90 @@ class _FakeBot:
     def make_card_response(self, card=None, toast=None, toast_type="info"):
         return {"card": card, "toast": toast, "toast_type": toast_type}
 
+    def get_message_context(self, message_id: str) -> dict:
+        return dict(self.message_contexts.get(message_id, {}))
+
+    def lookup_chat_type(self, chat_id: str) -> str:
+        return self.chat_types.get(chat_id, "")
+
+    def fetch_chat_type(self, chat_id: str) -> str:
+        return self.fetched_chat_types.get(chat_id, "")
+
+    def claim_reserved_execution_card(self, message_id: str) -> str:
+        return self.reserved_execution_cards.pop(message_id, "")
+
+    def get_sender_display_name(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> str:
+        if sender_type == "app":
+            return f"机器人:{(open_id or user_id or 'unknown')[:8]}"
+        if open_id:
+            return {"ou_admin": "Admin", "ou_user": "User", "ou_user2": "Alice"}.get(open_id, open_id[:8])
+        if user_id:
+            return user_id[:8]
+        return "unknown"
+
+    def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
+        return user_id in self.admin_user_ids
+
+    def get_group_mode(self, chat_id: str) -> str:
+        return self.group_modes.get(chat_id, "assistant")
+
+    def set_group_mode(self, chat_id: str, mode: str) -> str:
+        self.group_modes[chat_id] = mode
+        return mode
+
+    def get_group_acl_snapshot(self, chat_id: str) -> dict:
+        acl = self.group_acls.setdefault(
+            chat_id,
+            {"access_policy": "admin-only", "allowlist": []},
+        )
+        return {"access_policy": acl["access_policy"], "allowlist": list(acl["allowlist"])}
+
+    def set_group_access_policy(self, chat_id: str, policy: str) -> str:
+        acl = self.group_acls.setdefault(
+            chat_id,
+            {"access_policy": "admin-only", "allowlist": []},
+        )
+        acl["access_policy"] = policy
+        return policy
+
+    def grant_group_members(self, chat_id: str, user_ids) -> list[str]:
+        acl = self.group_acls.setdefault(
+            chat_id,
+            {"access_policy": "admin-only", "allowlist": []},
+        )
+        merged = sorted(set(acl["allowlist"]) | {item for item in user_ids if item})
+        acl["allowlist"] = merged
+        return merged
+
+    def revoke_group_members(self, chat_id: str, user_ids) -> list[str]:
+        acl = self.group_acls.setdefault(
+            chat_id,
+            {"access_policy": "admin-only", "allowlist": []},
+        )
+        remaining = sorted(set(acl["allowlist"]) - {item for item in user_ids if item})
+        acl["allowlist"] = remaining
+        return remaining
+
+    def is_group_admin(self, user_id: str = "", open_id: str = "") -> bool:
+        return self.is_admin(user_id, open_id)
+
+    def is_group_user_allowed(self, chat_id: str, user_id: str = "", open_id: str = "") -> bool:
+        if self.is_group_admin(user_id, open_id):
+            return True
+        acl = self.group_acls.setdefault(
+            chat_id,
+            {"access_policy": "admin-only", "allowlist": []},
+        )
+        if acl["access_policy"] == "all-members":
+            return True
+        if acl["access_policy"] == "allowlist":
+            return user_id in set(acl["allowlist"])
+        return False
+
+    def extract_non_bot_mentions(self, message_id: str) -> list[dict[str, str]]:
+        context = self.get_message_context(message_id)
+        return list(context.get("mentions", []))
+
 
 class CodexHandlerTests(unittest.TestCase):
     @staticmethod
@@ -182,7 +273,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.addCleanup(config_patch.stop)
         self.addCleanup(adapter_patch.stop)
         handler = CodexHandler(data_dir=data_dir)
-        bot = _FakeBot()
+        bot = _FakeBot(data_dir)
         handler.bot = bot
         return handler, bot
 
@@ -290,6 +381,135 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("更接近直接执行", content)
         self.assertIn("更容易先规划、提问，并展示计划卡片", content)
         self.assertEqual(self._first_action(card)["layout"], "trisection")
+
+    def test_whoami_command_in_p2p_returns_ids(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-p2p"] = {
+            "chat_type": "p2p",
+            "sender_open_id": "ou_user",
+            "sender_type": "user",
+        }
+
+        handler.handle_message("u2", "chat-p2p", "/whoami", message_id="m-p2p")
+
+        reply = bot.replies[-1][1]
+        self.assertIn("name: `User`", reply)
+        self.assertIn("user_id: `u2`", reply)
+        self.assertIn("open_id: `ou_user`", reply)
+        self.assertIn("admin_user_ids", reply)
+
+    def test_whoami_command_in_group_requires_p2p(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+
+        handler.handle_message("u2", "chat-group", "/whoami", message_id="m-group")
+
+        self.assertIn("请私聊机器人执行", bot.replies[-1][1])
+
+    def test_groupmode_command_without_arg_shows_group_mode_card(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        handler.handle_message("u1", "chat-group", "/groupmode", message_id="m-group")
+
+        self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 群聊工作态")
+
+    def test_groupmode_command_can_use_cached_chat_type_without_message_context(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+
+        handler.handle_message("u1", "chat-group", "/groupmode")
+
+        self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 群聊工作态")
+
+    def test_groupmode_command_updates_group_mode_for_admin(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        handler.handle_message("u1", "chat-group", "/groupmode assistant", message_id="m-group")
+
+        self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
+        self.assertIn("已切换群聊工作态：`assistant`", bot.replies[-1][1])
+
+    def test_groupmode_command_rejects_non_admin(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+
+        handler.handle_message("u2", "chat-group", "/groupmode all", message_id="m-group")
+
+        self.assertIn("仅管理员可切换群聊工作态", bot.replies[-1][1])
+        self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
+
+    def test_acl_policy_command_updates_group_policy(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        handler.handle_message("u1", "chat-group", "/acl policy all-members", message_id="m-group")
+
+        self.assertEqual(bot.get_group_acl_snapshot("chat-group")["access_policy"], "all-members")
+        self.assertIn("已切换群聊授权策略：`all-members`", bot.replies[-1][1])
+
+    def test_groupmode_card_action_updates_group_mode(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "u1",
+            "chat-group",
+            "m1",
+            {"action": "set_group_mode", "mode": "assistant", "_operator_open_id": "ou_admin"},
+        )
+
+        self.assertEqual(handler.bot.get_group_mode("chat-group"), "assistant")
+        self.assertEqual(response["toast_type"], "success")
+        self.assertIn("assistant", response["toast"])
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊工作态")
+
+    def test_group_acl_policy_card_action_updates_group_acl(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "u1",
+            "chat-group",
+            "m1",
+            {"action": "set_group_acl_policy", "policy": "all-members", "_operator_open_id": "ou_admin"},
+        )
+
+        self.assertEqual(handler.bot.get_group_acl_snapshot("chat-group")["access_policy"], "all-members")
+        self.assertEqual(response["toast_type"], "success")
+        self.assertIn("all-members", response["toast"])
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊授权")
+        markdown = "\n".join(
+            element.get("content", "")
+            for element in response["card"]["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("/acl policy admin-only", markdown)
+        self.assertIn("/acl policy allowlist", markdown)
+        self.assertIn("/acl policy all-members", markdown)
+
+    def test_acl_grant_uses_message_mentions(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-grant"] = {
+            "chat_type": "group",
+            "sender_open_id": "ou_admin",
+            "mentions": [{"user_id": "u2", "open_id": "ou_user2", "name": "Alice"}],
+        }
+
+        handler.handle_message("u1", "chat-group", "/acl grant", message_id="m-grant")
+
+        snapshot = bot.get_group_acl_snapshot("chat-group")
+        self.assertEqual(snapshot["allowlist"], ["u2"])
+        self.assertIn("已授权 1 人", bot.replies[-1][1])
+
+    def test_group_command_accepts_group_chat_after_api_type_lookup(self) -> None:
+        handler, bot = self._make_handler()
+        bot.fetched_chat_types["oc_group123"] = "group"
+
+        handler.handle_message("u1", "oc_group123", "/groupmode")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[0]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 群聊工作态")
 
     def test_sandbox_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
@@ -654,6 +874,16 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
         self.assertEqual(handler._adapter.start_turn_calls[-1]["profile"], "provider2")
+
+    def test_prompt_reuses_reserved_execution_card(self) -> None:
+        handler, bot = self._make_handler()
+        bot.reserved_execution_cards["m1"] = "reserved-card"
+
+        handler.handle_message("u1", "c1", "hello", message_id="m1")
+
+        self.assertEqual(handler._get_state("u1", "c1")["current_message_id"], "reserved-card")
+        self.assertEqual(len(bot.sent_messages), 0)
+        self.assertEqual(bot.patches[-1][0], "reserved-card")
 
     def test_prompt_after_switching_back_to_default_uses_default_collaboration_mode(self) -> None:
         handler, _ = self._make_handler()
