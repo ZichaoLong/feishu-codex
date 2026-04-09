@@ -72,11 +72,14 @@ app_secret: "..."
 # request_timeout_seconds: 10
 # admin_open_ids:
 #   - "ou_admin_1"
+# bot_open_id: "ou_bot_xxx"
 # group_history_fetch_limit: 50
 # group_history_fetch_lookback_seconds: 86400
 ```
 
 建议至少配置一个群聊管理员。管理员始终属于群里的已授权人类成员，并可通过 `/groupmode`、`/acl` 管理群聊。若群工作态是 `assistant` 或 `mention-only`，管理员也仍需先 `@机器人` 才会触发对话或群命令。管理员配置与群 ACL 统一使用 `open_id`；可先私聊机器人发送 `/whoami` 获取。
+
+如已知机器人自身的 `open_id`，建议同时配置 `bot_open_id`。这样群聊里的 `@机器人` 判定会直接使用显式配置，不依赖运行时自动发现。
 
 如果你使用群聊 `assistant` 模式，还可以调整每次有效 `@机器人` 时的历史回捞窗口：
 
@@ -124,7 +127,7 @@ provider2_api_key=...
 | `im:message:readonly` | 读取消息详情，例如展开合并转发消息 |
 | `im:message:send_as_bot` | 以应用身份发送文本和卡片消息 |
 | `im:message:update` | 更新执行中的卡片内容 |
-| `application:application:self_manage` | 读取机器人自身信息，用于更准确识别群聊里是否真的 @到机器人 |
+| `application:application:self_manage` | 可选；当前实现可用它自动发现机器人自身 `open_id`。若已在 `system.yaml` 配置 `bot_open_id`，可不依赖此项 |
 | `contact:user.basic_profile:readonly` | 在合并转发消息里尽量展示用户名；缺少时会回退成 open_id 前缀 |
 
 可在「权限管理」页面点击「批量开通」，粘贴以下 JSON：
@@ -152,7 +155,9 @@ provider2_api_key=...
 - 上面这组权限覆盖当前 README 所描述的主链路能力
 - 当前 `feishu-codex` 不要求你额外开 `docs`、`drive`、`calendar`、`wiki`、`base` 这些 scope
 - `im:message.group_msg` 主要服务群聊 `assistant` / `all` 工作态；如果你明确只打算使用私聊和群聊 `mention-only`，可按需评估是否保留
-- `application:application:self_manage` 现在也是群聊 `@` 判定的硬前提；拿不到机器人自身 `open_id` 时，`assistant` / `mention-only` 不会再做宽松匹配
+- 群聊严格 `@` 判定需要机器人自身 `open_id`；推荐直接在 `system.yaml` 配置 `bot_open_id`
+- 如果未配置 `bot_open_id`，当前实现会尝试通过 `application:application:self_manage` + bot info API 自动发现
+- 若两条路径都失败，`assistant` / `mention-only` 会严格失败，不再做宽松匹配
 
 在「事件与回调」中，启用 **WebSocket 长连接模式**，并配置：
 

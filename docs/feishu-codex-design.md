@@ -191,6 +191,9 @@ The following behaviors are part of the current implementation contract:
 
 #### Group modes
 
+- strict `@bot` matching depends on the bot's own `open_id`
+- the preferred source is `system.yaml.bot_open_id`
+- if it is not configured explicitly, the current implementation tries runtime auto-discovery
 - `assistant`
   - receives and caches group messages
   - replies only when the bot is mentioned

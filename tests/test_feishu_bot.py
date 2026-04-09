@@ -20,7 +20,8 @@ class _RecordingBot(FeishuBot):
             data_dir=data_dir,
             system_config=config,
         )
-        self._bot_open_id = "ou-bot"
+        if "bot_open_id" not in config:
+            self._bot_open_id = "ou-bot"
         self.received_messages: list[tuple[str, str, str, str]] = []
         self.replies: list[tuple[str, str]] = []
         self.cards: list[tuple[str, dict]] = []
@@ -572,6 +573,31 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(bot.reply_refs[-1][0], "m-1")
         card = json.loads(bot.reply_refs[-1][2])
         self.assertTrue(card["config"]["update_multi"])
+
+    def test_group_mention_can_use_configured_bot_open_id(self) -> None:
+        bot = self._make_bot(system_config={"bot_open_id": "ou-configured"})
+        bot.set_group_mode("chat-1", "assistant")
+        bot.set_group_access_policy("chat-1", "all-members")
+        bot._fetch_bot_open_id = lambda: (_ for _ in ()).throw(AssertionError("should not fetch"))
+
+        bot._handle_raw_message(
+            _message_event(
+                message_id="m-1",
+                chat_id="chat-1",
+                text="@_user_1 请总结",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                mentions=[
+                    {
+                        "key": "@_user_1",
+                        "id": {"user_id": "u-bot", "open_id": "ou-configured"},
+                        "name": "Codex",
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(len(bot.received_messages), 1)
 
     def test_group_mention_is_not_matched_without_bot_open_id(self) -> None:
         bot = self._make_bot()

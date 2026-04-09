@@ -170,6 +170,9 @@ shared backend 与 wrapper 的具体机制，见
 
 #### 群聊工作态
 
+- 严格 `@机器人` 判定依赖机器人自身 `open_id`
+- 该值优先来自 `system.yaml.bot_open_id`
+- 若未显式配置，当前实现会尝试在运行时自动发现
 - `assistant`
   - 接收并缓存群里消息
   - 只有被 `@机器人` 时才回复

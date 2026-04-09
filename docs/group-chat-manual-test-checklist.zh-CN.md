@@ -24,7 +24,8 @@
 1. 确认服务已启动，且日志可跟踪：
    `journalctl --user -u feishu-codex -f`
 2. 确认应用权限至少包含：
-   `im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`、`application:application:self_manage`
+   `im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`
+   如未在 `system.yaml` 配置 `bot_open_id`，还需补 `application:application:self_manage`
 3. 确认事件与回调已启用：
    `im.message.receive_v1`、`card.action.trigger`
 4. 让 `Admin` 私聊机器人执行 `/whoami`，确认已把正确的 `open_id` 写入 `system.yaml.admin_open_ids`

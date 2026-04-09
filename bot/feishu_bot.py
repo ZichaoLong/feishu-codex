@@ -210,8 +210,9 @@ class FeishuBot(ABC):
             ),
             _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS,
         )
+        configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
         # 机器人自身的 open_id，用于精确判断群消息是否 @了机器人
-        self._bot_open_id: Optional[str] = None
+        self._bot_open_id: Optional[str] = configured_bot_open_id or None
         self._bot_open_id_error_logged = False
         # 转发消息聚合缓冲区：暂存 merge_forward，等待后续留言合并
         self._pending_forwards: dict[tuple[str, str], _PendingForward] = {}
@@ -749,7 +750,9 @@ class FeishuBot(ABC):
             if not self._bot_open_id_error_logged:
                 logger.error(
                     "无法获取机器人 open_id，群聊 @ 判定已切换为严格失败。"
-                    "请检查 `application:application:self_manage` 权限，以及 bot info API 是否可访问。"
+                    "请优先在 `system.yaml` 配置 `bot_open_id`；"
+                    "若依赖自动发现，再检查 `application:application:self_manage` 权限"
+                    "以及 bot info API 是否可访问。"
                 )
                 self._bot_open_id_error_logged = True
             return False

@@ -11,6 +11,10 @@ app_secret: "your_cc_bot_app_secret"
 # admin_open_ids:
 #   - "ou_xxx 这样的 open_id；可先私聊机器人发送 /whoami 获取"
 
+# 机器人自身的 open_id。若已知，建议显式配置；这样群聊里是否真的
+# @到了机器人，可直接按该值精确判断，而不依赖运行时自动发现。
+# bot_open_id: "ou_xxx"
+
 # assistant 模式每次有效被 @ 时，最多回捞多少条历史消息。
 # 设为 0 表示禁用历史回捞。默认值：50
 # group_history_fetch_limit: 50
