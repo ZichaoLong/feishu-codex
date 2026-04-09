@@ -7,6 +7,7 @@
 - 验证三种群聊工作态：`assistant`、`mention-only`、`all`
 - 验证群 ACL：`admin-only`、`allowlist`、`all-members`
 - 验证群命令触发规则
+- 验证群共享会话与话题软隔离
 - 验证 `assistant` 模式的上下文日志、boundary 与按次历史回捞
 - 验证其他机器人消息可否通过历史回捞进入上下文
 - 验证外部卡片消息的降级处理边界
@@ -25,13 +26,15 @@
    `journalctl --user -u feishu-codex -f`
 2. 确认应用权限至少包含：
    `im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`
-   如未在 `system.yaml` 配置 `bot_open_id`，还需补 `application:application:self_manage`
+   如需用 `/whoareyou` 实时探测机器人 `open_id`，再补 `application:application:self_manage`
 3. 确认事件与回调已启用：
    `im.message.receive_v1`、`card.action.trigger`
 4. 让 `Admin` 私聊机器人执行 `/whoami`，确认已把正确的 `open_id` 写入 `system.yaml.admin_open_ids`
-5. 准备一个新群，拉入 `Admin`、`MemberA`、`MemberB`、`feishu-codex` 机器人
-6. 如需验证其他机器人历史消息路径，再把 `OtherBot` 拉入群
-7. 如需验证历史回捞，请确认飞书侧已开启“群消息历史可见”或等价配置
+5. 让 `Admin` 私聊机器人执行 `/whoareyou`，把返回的机器人 `open_id` 写入 `system.yaml.bot_open_id`
+6. 如需验证“别人 @我本人时由机器人代答”，再把对应成员的 `open_id` 写入 `system.yaml.trigger_open_ids`
+7. 准备一个新群，拉入 `Admin`、`MemberA`、`MemberB`、`feishu-codex` 机器人
+8. 如需验证其他机器人历史消息路径，再把 `OtherBot` 拉入群
+9. 如需验证历史回捞，请确认飞书侧已开启“群消息历史可见”或等价配置
 
 ## 4. 私聊基础检查
 
@@ -47,6 +50,7 @@
 4. `MemberA` 在群里发送 `@机器人 你好`。预期：收到 ACL 拒绝提示。
 5. `Admin` 在群里发送 `@机器人 /groupmode`。预期：显示当前工作态卡片，默认值为 `assistant`。
 6. `Admin` 在群里发送 `@机器人 /acl`。预期：显示当前 ACL 卡片，默认值为 `admin-only`。
+7. 如已配置 `trigger_open_ids`，让 `MemberA` 发送 `@Alias 你好`。预期：若 `MemberA` 未获授权，则仍收到 ACL 拒绝提示；说明 alias mention 已进入同一触发链路。
 
 ## 6. 群命令触发规则
 
@@ -54,7 +58,7 @@
 2. 在默认 `assistant` 模式下，`Admin` 发送 `@机器人 /groupmode`。预期：正常显示工作态卡片。
 3. 切到 `mention-only` 后，重复上一步。预期：仍然必须 `@机器人` 才生效。
 4. 切到 `all` 后，`Admin` 直接发送 `/groupmode`。预期：可直接生效。
-5. 在没有 `message_id` 上下文缓存的入口下再次触发 `/groupmode`。预期：机器人会通过 chat API 精确确认这是群聊，而不是依赖 `chat_id` 前缀猜测。
+5. 切到 `all` 后，让 `MemberA` 直接发送 `/groupmode` 或 `/new`。预期：收到拒绝提示，因为群里的所有 `/` 命令都只给管理员。
 
 ## 7. ACL 行为
 
@@ -74,6 +78,7 @@
 2. `assistant`：让 `MemberB` 连发两条普通消息，再发 `@机器人 请总结`。预期：回复会基于这两条上下文。
 3. `all`：让 `MemberB` 直接发送普通文本。预期：机器人直接响应，无需 `@`。
 4. `all`：让 `OtherBot` 直接发送普通文本或 `@机器人`。预期：不会直接触发。
+5. 如已配置 `trigger_open_ids`：让 `MemberB` 发送 `@Alias 请总结`。预期：在 `assistant` / `mention-only` 下可等价触发；在 `all` 下仍按当前 ACL 判断。
 
 ## 9. assistant 上下文、boundary 与历史回捞
 
@@ -95,6 +100,9 @@
 8. 重新让 `OtherBot` 在两次人类 `@` 之间发言。预期：机器人仍不会被 `OtherBot` 直接触发，且这条消息不再自动进入上下文。
 9. 在两次有效 `@` 之间制造超过 `group_history_fetch_limit` 的缺失消息。预期：下一次回复中优先保留最近缺失消息，而不是最早的一批。
 10. 如有脚本化测试条件，制造“与上次 boundary 同毫秒、但上次未消费”的缺失消息。预期：下一次回复不会漏掉这条消息，也不会重复带入上次已经消费过的同毫秒消息。
+11. 主聊天流先发一条普通消息；再在某个话题里发一条普通消息；随后在主聊天流 `@机器人`。预期：回复只看主聊天流消息，不把该话题内容自动带进本轮上下文。
+12. 在同一个话题里继续发消息并 `@机器人`。预期：回复只看该话题上下文；执行卡片、ACL 拒绝和长回复 follow-up 都尽量留在这个话题里，而不是跳回主聊天流。
+13. 让 `MemberA` 与 `MemberB` 在同一个群里先后各触发一轮对话。预期：不会因为换了提问人而切成两个隔离的群后端会话；机器人仍表现为同一个群共享助手。
 
 ## 10. 其他机器人与事件边界
 
@@ -137,7 +145,8 @@
 ## 14. 回归重点
 
 - 默认新群是否仍为 `assistant + admin-only`
-- `assistant` 下群命令是否仍必须 `@`
+- `assistant` 下管理员群命令是否仍必须 `@`
+- 群里的所有 `/` 命令是否仍只给管理员
 - `all` 下未授权普通消息是否仍静默忽略
 - 其他机器人是否仍不能直接触发
 - `assistant` 是否会在每次有效人类 `@` 时补历史消息
@@ -145,4 +154,6 @@
 - 同毫秒 boundary 场景下，是否仍不漏掉未消费缺失消息
 - 其他机器人消息是否只能通过历史回捞进入上下文
 - 群命令是否仍不推进上下文 boundary
+- 主聊天流与话题上下文是否仍按 scope 隔离
+- 话题内触发后的回复是否仍留在原话题
 - 重启后群聊状态是否仍保留

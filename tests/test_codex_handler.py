@@ -139,6 +139,8 @@ class _FakeBot:
         self.replies: list[tuple[str, str]] = []
         self.cards: list[tuple[str, dict]] = []
         self.reply_refs: list[tuple[str, str, str]] = []
+        self.reply_parents: list[tuple[str, str, str]] = []
+        self.card_parents: list[tuple[str, dict, str]] = []
         self.sent_messages: list[tuple[str, str, str]] = []
         self.patches: list[tuple[str, str]] = []
         self.message_contexts: dict[str, dict] = {}
@@ -152,13 +154,20 @@ class _FakeBot:
             "app_id": "cli_test_app",
             "open_id": "ou_bot",
             "source": "configured",
+            "configured_open_id": "ou_bot",
+            "discovered_open_id": "ou_bot",
+            "trigger_open_ids": "",
         }
 
-    def reply(self, chat_id: str, text: str) -> None:
+    def reply(self, chat_id: str, text: str, *, parent_message_id: str = "") -> None:
         self.replies.append((chat_id, text))
+        if parent_message_id:
+            self.reply_parents.append((chat_id, text, parent_message_id))
 
-    def reply_card(self, chat_id: str, card: dict) -> None:
+    def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "") -> None:
         self.cards.append((chat_id, card))
+        if parent_message_id:
+            self.card_parents.append((chat_id, card, parent_message_id))
 
     def reply_to_message(self, parent_id: str, msg_type: str, content: str) -> str:
         self.reply_refs.append((parent_id, msg_type, content))
@@ -330,6 +339,23 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._get_state("u1", "c1")["current_message_id"], "plan-card-2")
         self.assertEqual(handler._get_state("u1", "c1")["full_reply_text"], "新的回复")
 
+    def test_group_prompts_share_backend_state_by_chat_id(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+        bot.message_contexts["m-1"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+        bot.message_contexts["m-2"] = {"chat_type": "group", "sender_open_id": "ou_user2"}
+
+        handler.handle_message("u1", "chat-group", "第一轮", message_id="m-1")
+        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"status": "completed"}})
+        handler.handle_message("u2", "chat-group", "第二轮", message_id="m-2")
+
+        self.assertEqual(len(handler._adapter.create_thread_calls), 1)
+        self.assertEqual(
+            [call["thread_id"] for call in handler._adapter.start_turn_calls],
+            ["thread-created", "thread-created"],
+        )
+        self.assertIs(handler._get_state("u1", "chat-group"), handler._get_state("u2", "chat-group"))
+
     def test_local_turn_started_reuses_existing_execution_card(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
@@ -353,6 +379,37 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(len(bot.sent_messages), 0)
         self.assertEqual(handler._get_state("u1", "c1")["current_message_id"], "existing-card")
+
+    def test_group_thread_binding_is_not_treated_as_takeover_for_same_chat(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler._bind_thread("u1", "chat-group", thread)
+        handler._bind_thread("u2", "chat-group", thread)
+
+        self.assertEqual(bot.replies, [])
+
+    def test_group_followup_reply_stays_on_trigger_message(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+        bot.message_contexts["m-thread"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+        handler._card_reply_limit = 5
+
+        handler.handle_message("u1", "chat-group", "thread prompt", message_id="m-thread")
+        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "123456789"})
+        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"status": "completed"}})
+
+        self.assertEqual(bot.reply_parents[-1], ("chat-group", "123456789", "m-thread"))
 
     def test_takeover_notifies_previous_feishu_binding(self) -> None:
         handler, bot = self._make_handler()
@@ -413,7 +470,7 @@ class CodexHandlerTests(unittest.TestCase):
 
     def test_whoami_command_in_group_requires_p2p(self) -> None:
         handler, bot = self._make_handler()
-        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
 
         handler.handle_message("u2", "chat-group", "/whoami", message_id="m-group")
 
@@ -421,24 +478,42 @@ class CodexHandlerTests(unittest.TestCase):
 
     def test_whoareyou_alias_returns_bot_identity(self) -> None:
         handler, bot = self._make_handler()
-        bot.bot_identity = {"app_id": "cli_test_app", "open_id": "ou_bot", "source": "configured"}
+        bot.bot_identity = {
+            "app_id": "cli_test_app",
+            "open_id": "ou_bot",
+            "source": "configured",
+            "configured_open_id": "ou_bot",
+            "discovered_open_id": "ou_bot",
+            "trigger_open_ids": "ou_alias_1,ou_alias_2",
+        }
 
         handler.handle_message("u1", "chat-p2p", "/whoareyou")
 
         reply = bot.replies[-1][1]
         self.assertIn("机器人身份信息", reply)
         self.assertIn("app_id: `cli_test_app`", reply)
-        self.assertIn("open_id: `ou_bot`", reply)
+        self.assertIn("configured bot_open_id: `ou_bot`", reply)
+        self.assertIn("discovered open_id: `ou_bot`", reply)
+        self.assertIn("effective open_id: `ou_bot`", reply)
+        self.assertIn("trigger_open_ids: `ou_alias_1, ou_alias_2`", reply)
         self.assertIn("system.yaml.bot_open_id", reply)
 
     def test_whoareyou_reports_missing_bot_open_id(self) -> None:
         handler, bot = self._make_handler()
-        bot.bot_identity = {"app_id": "cli_test_app", "open_id": "", "source": "unavailable"}
+        bot.bot_identity = {
+            "app_id": "cli_test_app",
+            "open_id": "",
+            "source": "unavailable",
+            "configured_open_id": "",
+            "discovered_open_id": "",
+            "trigger_open_ids": "",
+        }
 
         handler.handle_message("u1", "chat-p2p", "/whoareyou")
 
         reply = bot.replies[-1][1]
-        self.assertIn("open_id: `（空）`", reply)
+        self.assertIn("configured bot_open_id: `（空）`", reply)
+        self.assertIn("discovered open_id: `（空）`", reply)
         self.assertIn("application:application:self_manage", reply)
 
     def test_groupmode_command_without_arg_shows_group_mode_card(self) -> None:
@@ -452,8 +527,9 @@ class CodexHandlerTests(unittest.TestCase):
     def test_groupmode_command_can_use_cached_chat_type_without_message_context(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
+        bot.message_contexts["m-group"] = {"sender_open_id": "ou_admin"}
 
-        handler.handle_message("u1", "chat-group", "/groupmode")
+        handler.handle_message("u1", "chat-group", "/groupmode", message_id="m-group")
 
         self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 群聊工作态")
 
@@ -472,7 +548,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("u2", "chat-group", "/groupmode all", message_id="m-group")
 
-        self.assertIn("仅管理员可切换群聊工作态", bot.replies[-1][1])
+        self.assertIn("群里的 `/` 命令仅管理员可用", bot.replies[-1][1])
         self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
 
     def test_acl_policy_command_updates_group_policy(self) -> None:
@@ -539,8 +615,9 @@ class CodexHandlerTests(unittest.TestCase):
     def test_group_command_accepts_group_chat_after_api_type_lookup(self) -> None:
         handler, bot = self._make_handler()
         bot.fetched_chat_types["oc_group123"] = "group"
+        bot.message_contexts["m-group"] = {"sender_open_id": "ou_admin"}
 
-        handler.handle_message("u1", "oc_group123", "/groupmode")
+        handler.handle_message("u1", "oc_group123", "/groupmode", message_id="m-group")
 
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]

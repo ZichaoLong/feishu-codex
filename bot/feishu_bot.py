@@ -212,8 +212,11 @@ class FeishuBot(ABC):
         )
         configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
         self._configured_bot_open_id = configured_bot_open_id
-        # 机器人自身的 open_id，用于精确判断群消息是否 @了机器人
-        self._bot_open_id: Optional[str] = configured_bot_open_id or None
+        self._configured_trigger_open_ids = {
+            str(item).strip()
+            for item in config.get("trigger_open_ids", [])
+            if isinstance(item, str) and str(item).strip()
+        }
         self._bot_open_id_error_logged = False
         # 转发消息聚合缓冲区：暂存 merge_forward，等待后续留言合并
         self._pending_forwards: dict[tuple[str, str], _PendingForward] = {}
@@ -338,10 +341,11 @@ class FeishuBot(ABC):
             logger.warning("查询 chat 类型失败: chat=%s, code=%s, msg=%s", normalized_chat_id, response.code, response.msg)
             return ""
         data = getattr(response, "data", None)
-        chat_mode = str(getattr(data, "chat_mode", "") or "").strip()
-        if chat_mode:
-            self.remember_chat_type(normalized_chat_id, chat_mode)
-        return chat_mode
+        chat_type = str(getattr(data, "chat_type", "") or "").strip()
+        if chat_type in {"group", "p2p"}:
+            self.remember_chat_type(normalized_chat_id, chat_type)
+            return chat_type
+        return ""
 
     def reserve_execution_card(self, trigger_message_id: str, card_message_id: str) -> None:
         normalized_trigger_id = str(trigger_message_id or "").strip()
@@ -374,12 +378,13 @@ class FeishuBot(ABC):
         mentions = context.get("mentions") or []
         if not isinstance(mentions, list):
             return []
+        trigger_open_ids = self._configured_group_trigger_open_ids()
         members: list[dict[str, str]] = []
         for mention in mentions:
             if not isinstance(mention, dict):
                 continue
             open_id = str(mention.get("open_id", "")).strip()
-            if open_id and self._bot_open_id and open_id == self._bot_open_id:
+            if open_id and open_id in trigger_open_ids:
                 continue
             if not open_id:
                 continue
@@ -536,37 +541,65 @@ class FeishuBot(ABC):
 
         return ""
 
+    @staticmethod
+    def _mention_payload(mention: Any) -> dict[str, str]:
+        if isinstance(mention, dict):
+            key = str(mention.get("key", "") or "").strip()
+            name = str(mention.get("name", "") or "").strip()
+            direct_open_id = str(mention.get("open_id", "") or "").strip()
+            direct_user_id = str(mention.get("user_id", "") or "").strip()
+            mention_id = mention.get("id")
+        else:
+            key = str(getattr(mention, "key", "") or "").strip()
+            name = str(getattr(mention, "name", "") or "").strip()
+            direct_open_id = str(getattr(mention, "open_id", "") or "").strip()
+            direct_user_id = str(getattr(mention, "user_id", "") or "").strip()
+            mention_id = getattr(mention, "id", None)
+
+        open_id = ""
+        user_id = ""
+        if isinstance(mention_id, dict):
+            open_id = str(mention_id.get("open_id", "") or mention_id.get("id", "") or "").strip()
+            user_id = str(mention_id.get("user_id", "") or "").strip()
+        elif isinstance(mention_id, str):
+            open_id = mention_id.strip()
+        elif mention_id is not None:
+            open_id = str(
+                getattr(mention_id, "open_id", "") or getattr(mention_id, "id", "") or ""
+            ).strip()
+            user_id = str(getattr(mention_id, "user_id", "") or "").strip()
+
+        return {
+            "key": key,
+            "name": name,
+            "open_id": direct_open_id or open_id,
+            "user_id": direct_user_id or user_id,
+        }
+
+    def _configured_group_trigger_open_ids(self) -> set[str]:
+        if not self._configured_bot_open_id:
+            return set()
+        return {self._configured_bot_open_id, *self._configured_trigger_open_ids}
+
     def _normalize_mentions(self, text: str, mentions: list) -> str:
-        """群聊消息中去掉 @机器人，同时保留其他 @成员 的可读文本。"""
+        """群聊消息中去掉触发 mention，同时保留其他 @成员 的可读文本。"""
         normalized = text
+        trigger_open_ids = self._configured_group_trigger_open_ids()
         for mention in mentions:
-            if isinstance(mention, dict):
-                key = str(mention.get("key", "") or "").strip()
-                mention_open_id = str(
-                    mention.get("open_id", "")
-                    or mention.get("id", "")
-                    or ""
-                ).strip()
-                mention_name = str(mention.get("name", "") or mention_open_id[:8]).strip()
-            else:
-                key = getattr(mention, "key", "")
-                mid = getattr(mention, "id", None)
-                mention_open_id = ""
-                if isinstance(mid, dict):
-                    mention_open_id = str(mid.get("open_id", "") or mid.get("id", "") or "").strip()
-                elif isinstance(mid, str):
-                    mention_open_id = mid.strip()
-                elif mid:
-                    mention_open_id = str(getattr(mid, "open_id", "") or "").strip()
-                mention_name = str(getattr(mention, "name", "") or mention_open_id[:8]).strip()
+            payload = self._mention_payload(mention)
+            key = payload["key"]
+            mention_open_id = payload["open_id"]
+            mention_name = str(
+                payload["name"]
+                or mention_open_id[:8]
+                or payload["user_id"][:8]
+            ).strip()
             if not key:
                 continue
-            if self._bot_open_id and mention_open_id == self._bot_open_id:
+            if mention_open_id and mention_open_id in trigger_open_ids:
                 normalized = normalized.replace(key, "")
-            elif self._bot_open_id:
-                normalized = normalized.replace(key, f"@{mention_name}")
             else:
-                normalized = normalized.replace(key, "")
+                normalized = normalized.replace(key, f"@{mention_name}")
         return " ".join(normalized.split())
 
     @staticmethod
@@ -667,7 +700,7 @@ class FeishuBot(ABC):
 
         私聊和 `all` 模式群聊中，转发消息可独立处理。
         `mention_only` 模式群聊中，因无 @mention 上下文，静默丢弃。
-        `assistant` 模式群聊中，直接写入群聊日志，供后续 @机器人 时读取。
+        `assistant` 模式群聊中，直接写入群聊日志，供后续有效触发时读取。
         """
         try:
             pending = self._pop_pending_forward(sender_id, chat_id)
@@ -713,7 +746,7 @@ class FeishuBot(ABC):
             logger.error("转发消息超时处理异常: %s", e, exc_info=True)
 
     def _fetch_bot_open_id(self) -> Optional[str]:
-        """调用飞书 API 获取机器人自身的 open_id，用于判断群消息是否 @了机器人"""
+        """调用飞书 API 获取机器人自身的 open_id，仅供 `/whoareyou` 之类的显式探测使用。"""
         try:
             req = lark.BaseRequest.builder() \
                 .http_method(lark.HttpMethod.GET) \
@@ -733,42 +766,41 @@ class FeishuBot(ABC):
             logger.warning("获取机器人信息异常: %s", e)
             return None
 
-    def _ensure_bot_open_id(self) -> str:
-        if self._bot_open_id is None:
-            self._bot_open_id = self._fetch_bot_open_id() or ""
-        return self._bot_open_id
-
     def get_bot_identity(self) -> dict[str, str]:
-        open_id = self._ensure_bot_open_id()
-        source = "configured" if self._configured_bot_open_id else ("auto-discovered" if open_id else "unavailable")
+        discovered_open_id = self._fetch_bot_open_id() or ""
+        open_id = self._configured_bot_open_id or discovered_open_id
+        if self._configured_bot_open_id:
+            source = "configured"
+        elif discovered_open_id:
+            source = "auto-discovered"
+        else:
+            source = "unavailable"
         return {
             "app_id": self.app_id,
             "open_id": open_id,
+            "configured_open_id": self._configured_bot_open_id,
+            "discovered_open_id": discovered_open_id,
             "source": source,
+            "trigger_open_ids": ",".join(sorted(self._configured_trigger_open_ids)),
         }
 
     def _is_bot_mentioned(self, mentions: list) -> bool:
-        """判断 mentions 列表中是否包含机器人自身
-
-        首次调用时会通过 API 获取并缓存机器人的 open_id。
-        若无法获取 open_id，则严格返回 False，避免把 @其他人 误判成 @机器人。
-        """
+        """判断 mentions 列表中是否包含有效触发 open_id。"""
         if not mentions:
             return False
-        self._ensure_bot_open_id()
-        if not self._bot_open_id:
+        trigger_open_ids = self._configured_group_trigger_open_ids()
+        if not trigger_open_ids:
             if not self._bot_open_id_error_logged:
                 logger.error(
-                    "无法获取机器人 open_id，群聊 @ 判定已切换为严格失败。"
-                    "请优先在 `system.yaml` 配置 `bot_open_id`；"
-                    "若依赖自动发现，再检查 `application:application:self_manage` 权限"
+                    "未配置 `system.yaml.bot_open_id`，群聊显式 mention 触发已严格失败。"
+                    "如需获取应填的 open_id，可私聊机器人发送 `/whoareyou`；"
+                    "若 `/whoareyou` 也拿不到，再检查 `application:application:self_manage` 权限"
                     "以及 bot info API 是否可访问。"
                 )
                 self._bot_open_id_error_logged = True
             return False
         for mention in mentions:
-            mid = getattr(mention, "id", None)
-            if mid and getattr(mid, "open_id", None) == self._bot_open_id:
+            if self._mention_payload(mention)["open_id"] in trigger_open_ids:
                 return True
         return False
 
@@ -800,21 +832,13 @@ class FeishuBot(ABC):
     def _mention_payloads(mentions: list) -> list[dict[str, str]]:
         payloads: list[dict[str, str]] = []
         for mention in mentions:
-            mid = getattr(mention, "id", None)
-            payloads.append(
-                {
-                    "key": str(getattr(mention, "key", "") or "").strip(),
-                    "name": str(getattr(mention, "name", "") or "").strip(),
-                    "user_id": str(getattr(mid, "user_id", "") or "").strip() if mid else "",
-                    "open_id": str(getattr(mid, "open_id", "") or "").strip() if mid else "",
-                }
-            )
+            payloads.append(FeishuBot._mention_payload(mention))
         return payloads
 
     def _is_self_app_sender(self, *, sender_type: str, open_id: str = "", user_id: str = "") -> bool:
         if sender_type != "app":
             return False
-        bot_open_id = self._ensure_bot_open_id()
+        bot_open_id = self._configured_bot_open_id
         if bot_open_id and open_id == bot_open_id:
             return True
         return False
@@ -826,6 +850,20 @@ class FeishuBot(ABC):
             return False
         return normalized.startswith("/")
 
+    @staticmethod
+    def _group_scope_key(thread_id: str = "") -> str:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return "main"
+        return f"thread:{normalized_thread_id}"
+
+    @staticmethod
+    def _thread_id_for_scope(scope: str) -> str:
+        normalized_scope = str(scope or "").strip()
+        if normalized_scope.startswith("thread:"):
+            return normalized_scope.removeprefix("thread:")
+        return ""
+
     def _append_group_log_entry(
         self,
         *,
@@ -836,6 +874,7 @@ class FeishuBot(ABC):
         sender_open_id: str,
         sender_type: str,
         msg_type: str,
+        thread_id: str = "",
         text: str,
     ) -> int:
         sender_name = self._display_name_for_sender(
@@ -851,6 +890,7 @@ class FeishuBot(ABC):
             "sender_type": sender_type,
             "sender_name": sender_name,
             "msg_type": msg_type,
+            "thread_id": str(thread_id or "").strip(),
             "text": text,
         }
         return self._group_store.append_message(chat_id, entry)
@@ -858,14 +898,7 @@ class FeishuBot(ABC):
     def _history_mentions_payloads(self, mentions: list[Any]) -> list[dict[str, str]]:
         payloads: list[dict[str, str]] = []
         for mention in mentions:
-            mention_id = str(getattr(mention, "id", "") or "").strip()
-            payloads.append(
-                {
-                    "key": str(getattr(mention, "key", "") or "").strip(),
-                    "name": str(getattr(mention, "name", "") or "").strip(),
-                    "open_id": mention_id,
-                }
-            )
+            payloads.append(self._mention_payload(mention))
         return payloads
 
     def _history_entry_from_message(self, item: Any) -> dict[str, Any] | None:
@@ -905,6 +938,7 @@ class FeishuBot(ABC):
             "sender_type": sender_type,
             "sender_name": sender_name,
             "msg_type": msg_type,
+            "thread_id": str(getattr(item, "thread_id", "") or "").strip(),
             "text": text,
         }
 
@@ -917,17 +951,19 @@ class FeishuBot(ABC):
         existing_message_ids: set[str],
         after_created_at: int | str | None = None,
         after_message_ids: set[str] | None = None,
+        thread_id: str = "",
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         effective_limit = self._group_history_fetch_limit if limit is None else max(int(limit), 0)
         if effective_limit <= 0 or self._group_history_fetch_lookback_seconds <= 0:
             return []
+        min_created_at = max(int(after_created_at or 0), 0)
+        normalized_thread_id = str(thread_id or "").strip()
         end_time = int(int(current_create_time or 0) / 1000) if current_create_time else int(time.time())
         if end_time <= 0:
             end_time = int(time.time())
         start_time = max(0, end_time - self._group_history_fetch_lookback_seconds)
-        min_created_at = max(int(after_created_at or 0), 0)
-        if min_created_at > 0:
+        if min_created_at > 0 and not normalized_thread_id:
             start_time = max(start_time, int(min_created_at / 1000))
         page_token = ""
         entries: deque[dict[str, Any]] = deque(maxlen=effective_limit)
@@ -940,15 +976,25 @@ class FeishuBot(ABC):
         }
 
         while True:
-            builder = (
-                ListMessageRequest.builder()
-                .container_id_type("chat")
-                .container_id(chat_id)
-                .start_time(str(start_time))
-                .end_time(str(end_time))
-                .sort_type("ByCreateTimeAsc")
-                .page_size(50)
-            )
+            builder = ListMessageRequest.builder()
+            if normalized_thread_id:
+                builder = (
+                    builder
+                    .container_id_type("thread")
+                    .container_id(normalized_thread_id)
+                    .sort_type("ByCreateTimeAsc")
+                    .page_size(50)
+                )
+            else:
+                builder = (
+                    builder
+                    .container_id_type("chat")
+                    .container_id(chat_id)
+                    .start_time(str(start_time))
+                    .end_time(str(end_time))
+                    .sort_type("ByCreateTimeAsc")
+                    .page_size(50)
+                )
             if page_token:
                 builder = builder.page_token(page_token)
             request = builder.build()
@@ -961,6 +1007,12 @@ class FeishuBot(ABC):
             for item in items:
                 entry = self._history_entry_from_message(item)
                 if not entry:
+                    continue
+                entry_thread_id = str(entry.get("thread_id", "") or "").strip()
+                if normalized_thread_id:
+                    if entry_thread_id != normalized_thread_id:
+                        continue
+                elif entry_thread_id:
                     continue
                 entry_created_at = max(int(entry.get("created_at", 0) or 0), 0)
                 message_id = str(entry.get("message_id", "") or "").strip()
@@ -1006,14 +1058,17 @@ class FeishuBot(ABC):
         current_message_id: str,
         current_create_time: int | str | None,
         current_seq: int,
+        thread_id: str = "",
     ) -> list[dict[str, Any]]:
-        boundary_seq = self._group_store.get_last_boundary_seq(chat_id)
-        boundary_created_at = self._group_store.get_last_boundary_created_at(chat_id)
-        boundary_message_ids = set(self._group_store.get_last_boundary_message_ids(chat_id))
+        scope = self._group_scope_key(thread_id)
+        boundary_seq = self._group_store.get_last_boundary_seq(chat_id, scope=scope)
+        boundary_created_at = self._group_store.get_last_boundary_created_at(chat_id, scope=scope)
+        boundary_message_ids = set(self._group_store.get_last_boundary_message_ids(chat_id, scope=scope))
         local_entries = self._group_store.read_messages_between(
             chat_id,
             after_seq=boundary_seq,
             before_seq=current_seq or None,
+            scope=scope,
         )
         if not self._group_history_fetch_enabled():
             return local_entries
@@ -1030,6 +1085,7 @@ class FeishuBot(ABC):
             existing_message_ids=existing_message_ids,
             after_created_at=boundary_created_at,
             after_message_ids=boundary_message_ids,
+            thread_id=thread_id,
         )
         if not history_entries:
             return local_entries
@@ -1111,7 +1167,7 @@ class FeishuBot(ABC):
                             "- 检查应用是否已开通 `im:message.group_msg`、`im:message:readonly`\n"
                             "- 检查群消息历史是否对机器人可见\n"
                             "- 检查飞书 API / 网络是否异常\n"
-                            "- 如需先继续使用群聊，可临时执行 `@机器人 /groupmode mention-only`"
+                            "- 如需先继续使用群聊，可临时显式 mention 触发对象后执行 `/groupmode mention-only`"
                         ),
                     }
                 ]
@@ -1150,12 +1206,36 @@ class FeishuBot(ABC):
                 parts.append(header)
         return "\n\n".join(parts).strip()
 
-    def _build_assistant_turn_text(self, context_text: str, current_text: str, log_path: pathlib.Path) -> str:
+    def _build_assistant_turn_text(
+        self,
+        context_text: str,
+        current_text: str,
+        log_path: pathlib.Path,
+        *,
+        thread_id: str = "",
+    ) -> str:
         current_prompt = current_text.strip() or "请基于以上群聊上下文，回复最近这段讨论。"
-        context_block = context_text.strip() or "（上次 @ 之后暂无可用群聊消息）"
+        context_block = context_text.strip() or "（上次有效触发之后暂无可用群聊消息）"
+        normalized_thread_id = str(thread_id or "").strip()
+        if normalized_thread_id:
+            scope_block = (
+                "<group_chat_scope>\n"
+                "当前消息来自群话题内。你仍是本群共享的同一个助手/数字分身。\n"
+                "默认优先依据当前话题上下文回复；如需引用主聊天流或其他话题中已明确的信息，应明确说明那是本群其他讨论中的结论，并只保留与当前话题直接相关的部分。\n"
+                f"当前话题 ID：`{normalized_thread_id}`\n"
+                "</group_chat_scope>\n\n"
+            )
+        else:
+            scope_block = (
+                "<group_chat_scope>\n"
+                "当前消息来自群主聊天流，不是群话题。你仍是本群共享的同一个助手/数字分身。\n"
+                "默认优先依据当前主聊天流上下文回复；如需引用其他话题中已明确的信息，应明确说明那是本群其他讨论中的结论，并避免无关展开。\n"
+                "</group_chat_scope>\n\n"
+            )
         return (
-            "<group_chat_context>\n"
-            "以下是本群自上次 @机器人 之后到本次 @机器人 之前的消息。\n"
+            scope_block
+            + "<group_chat_context>\n"
+            "以下是本群自上次有效触发到本次触发之前的消息。\n"
             f"群聊日志文件：`{log_path}`\n\n"
             f"{context_block}\n"
             "</group_chat_context>\n\n"
@@ -1166,7 +1246,7 @@ class FeishuBot(ABC):
     def _group_acl_denied_text() -> str:
         return (
             "当前群仅管理员或已授权成员具备触发资格。\n"
-            "是否需要 `@机器人` 取决于当前群工作态：`assistant` / `mention-only` 需要先 `@机器人`，`all` 可直接发消息；管理员可发送 `/acl` 查看或调整当前群的授权策略。"
+            "是否需要显式 mention 触发对象取决于当前群工作态：`assistant` / `mention-only` 需要先 mention，`all` 可直接发消息；管理员可发送 `/acl` 查看或调整当前群的授权策略。"
         )
 
     @staticmethod
@@ -1312,7 +1392,7 @@ class FeishuBot(ABC):
     def _on_raw_message(self, data: P2ImMessageReceiveV1) -> None:
         """解析原始消息，根据消息类型分发到对应处理方法
 
-        群聊消息仅处理 @机器人 的消息，非 @消息直接忽略。
+        群聊是否触发，取决于当前工作态与有效 mention 判定。
         """
         try:
             self._handle_raw_message(data)
@@ -1338,6 +1418,9 @@ class FeishuBot(ABC):
         message_id = message.message_id
         msg_type = message.message_type
         chat_type = getattr(message, "chat_type", None) or "p2p"
+        thread_id = str(getattr(message, "thread_id", "") or "").strip()
+        root_id = str(getattr(message, "root_id", "") or "").strip()
+        parent_id = str(getattr(message, "parent_id", "") or "").strip()
         mentions = getattr(message, "mentions", None) or []
         group_mode = self.get_group_mode(chat_id) if chat_type == "group" else ""
         self.remember_chat_type(chat_id, chat_type)
@@ -1347,7 +1430,7 @@ class FeishuBot(ABC):
             logger.info("跳过重复消息: message_id=%s", message_id)
             return
 
-        # 精确判断是否 @了机器人（而非 @其他用户）
+        # 精确判断是否命中了有效触发 mention（机器人自身或配置的 alias）
         bot_mentioned = self._is_bot_mentioned(mentions)
 
         # ---- 合并转发消息：暂存到缓冲区，等待后续留言 ----
@@ -1434,6 +1517,9 @@ class FeishuBot(ABC):
                 "sender_type": sender_type,
                 "bot_mentioned": bot_mentioned,
                 "message_type": msg_type,
+                "thread_id": thread_id,
+                "root_id": root_id,
+                "parent_id": parent_id,
                 "text": text,
                 "mentions": self._mention_payloads(mentions),
             },
@@ -1459,7 +1545,7 @@ class FeishuBot(ABC):
             if group_mode == self._GROUP_MODE_ASSISTANT:
                 log_text = text
                 if bot_mentioned and not log_text and not control_text:
-                    log_text = "[@机器人]"
+                    log_text = "[@触发]"
                 current_seq = 0
                 if log_text and not control_text:
                     current_seq = self._append_group_log_entry(
@@ -1470,6 +1556,7 @@ class FeishuBot(ABC):
                         sender_open_id=sender_open_id,
                         sender_type=sender_type,
                         msg_type=msg_type,
+                        thread_id=thread_id,
                         text=log_text,
                     )
                 if not bot_mentioned:
@@ -1478,7 +1565,7 @@ class FeishuBot(ABC):
                     logger.debug("忽略群聊机器人消息触发: chat=%s, message_id=%s", chat_id, message_id)
                     return
                 if not allowed_to_use:
-                    self.reply(chat_id, self._group_acl_denied_text())
+                    self.reply(chat_id, self._group_acl_denied_text(), parent_message_id=message_id)
                     return
                 if control_text:
                     self.on_message(sender_id, chat_id, text, message_id=message_id)
@@ -1489,6 +1576,7 @@ class FeishuBot(ABC):
                         current_message_id=message_id,
                         current_create_time=message.create_time,
                         current_seq=current_seq,
+                        thread_id=thread_id,
                     )
                 except Exception as exc:
                     logger.warning("群历史回捞失败: chat=%s, error=%s", chat_id, exc)
@@ -1502,6 +1590,7 @@ class FeishuBot(ABC):
                     self._format_group_context_entries(context_entries),
                     text,
                     self._group_store.log_path(chat_id),
+                    thread_id=thread_id,
                 )
                 if current_seq:
                     boundary_message_ids = self._collect_boundary_message_ids(
@@ -1514,12 +1603,13 @@ class FeishuBot(ABC):
                         seq=current_seq,
                         created_at=message.create_time,
                         message_ids=boundary_message_ids,
+                        scope=self._group_scope_key(thread_id),
                     )
                 self.on_message(sender_id, chat_id, assistant_text, message_id=message_id)
                 return
 
             if group_mode == self._GROUP_MODE_MENTION and not bot_mentioned:
-                logger.debug("忽略群聊非@机器人消息: chat=%s, user=%s", chat_id, sender_user_id)
+                logger.debug("忽略群聊非触发 mention 消息: chat=%s, user=%s", chat_id, sender_user_id)
                 return
 
             if sender_type == "app":
@@ -1527,7 +1617,7 @@ class FeishuBot(ABC):
                 return
             if not allowed_to_use:
                 if bot_mentioned or text.startswith("/"):
-                    self.reply(chat_id, self._group_acl_denied_text())
+                    self.reply(chat_id, self._group_acl_denied_text(), parent_message_id=message_id)
                 return
         if msg_type == "file":
             file_key = content_dict.get("file_key", "")
@@ -1708,13 +1798,23 @@ class FeishuBot(ABC):
             return False
         return True
 
-    def reply(self, chat_id: str, text: str) -> None:
+    def reply(self, chat_id: str, text: str, *, parent_message_id: str = "") -> None:
         """发送文本消息"""
-        self.send_message(chat_id, "text", json.dumps({"text": text}))
+        content = json.dumps({"text": text})
+        normalized_parent_id = str(parent_message_id or "").strip()
+        if normalized_parent_id:
+            self.reply_to_message(normalized_parent_id, "text", content)
+            return
+        self.send_message(chat_id, "text", content)
 
-    def reply_card(self, chat_id: str, card: dict) -> None:
+    def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "") -> None:
         """发送交互卡片消息"""
-        self.send_message(chat_id, "interactive", json.dumps(card))
+        content = json.dumps(card)
+        normalized_parent_id = str(parent_message_id or "").strip()
+        if normalized_parent_id:
+            self.reply_to_message(normalized_parent_id, "interactive", content)
+            return
+        self.send_message(chat_id, "interactive", content)
 
     def reply_to_message(
         self, parent_id: str, msg_type: str, content: str,

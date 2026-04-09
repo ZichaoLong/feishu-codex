@@ -14,6 +14,7 @@ DEFAULT_GROUP_MODE = "assistant"
 DEFAULT_ACCESS_POLICY = "admin-only"
 GROUP_MODES = {"mention_only", "assistant", "all"}
 ACCESS_POLICIES = {"admin-only", "allowlist", "all-members"}
+MAIN_SCOPE = "main"
 
 
 class GroupChatStore:
@@ -22,6 +23,11 @@ class GroupChatStore:
     def __init__(self, data_dir: pathlib.Path):
         self._data_dir = data_dir
         self._lock = threading.Lock()
+
+    @staticmethod
+    def normalize_scope(scope: str | None) -> str:
+        normalized = str(scope or "").strip()
+        return normalized or MAIN_SCOPE
 
     def get_group_mode(self, chat_id: str) -> str:
         with self._lock:
@@ -86,38 +92,46 @@ class GroupChatStore:
             self._write_group_state(data, chat_id, group)
             return group["allowlist"]
 
-    def get_last_boundary_seq(self, chat_id: str) -> int:
+    def get_last_boundary_seq(self, chat_id: str, *, scope: str = MAIN_SCOPE) -> int:
         with self._lock:
             group = self._group_state(chat_id)
-            return int(group["last_boundary_seq"])
+            return int(self._boundary_state(group, scope)["seq"])
 
-    def set_last_boundary_seq(self, chat_id: str, seq: int) -> int:
+    def set_last_boundary_seq(self, chat_id: str, seq: int, *, scope: str = MAIN_SCOPE) -> int:
         normalized = max(int(seq), 0)
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            group["last_boundary_seq"] = normalized
+            boundary = self._boundary_state(group, scope)
+            boundary["seq"] = normalized
             self._write_group_state(data, chat_id, group)
         return normalized
 
-    def get_last_boundary_created_at(self, chat_id: str) -> int:
+    def get_last_boundary_created_at(self, chat_id: str, *, scope: str = MAIN_SCOPE) -> int:
         with self._lock:
             group = self._group_state(chat_id)
-            return int(group["last_boundary_created_at"])
+            return int(self._boundary_state(group, scope)["created_at"])
 
-    def get_last_boundary_message_ids(self, chat_id: str) -> list[str]:
+    def get_last_boundary_message_ids(self, chat_id: str, *, scope: str = MAIN_SCOPE) -> list[str]:
         with self._lock:
             group = self._group_state(chat_id)
-            return list(group["last_boundary_message_ids"])
+            return list(self._boundary_state(group, scope)["message_ids"])
 
-    def set_last_boundary_created_at(self, chat_id: str, created_at: int | str | None) -> int:
+    def set_last_boundary_created_at(
+        self,
+        chat_id: str,
+        created_at: int | str | None,
+        *,
+        scope: str = MAIN_SCOPE,
+    ) -> int:
         normalized = max(int(created_at or 0), 0)
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            if int(group["last_boundary_created_at"]) != normalized:
-                group["last_boundary_message_ids"] = []
-            group["last_boundary_created_at"] = normalized
+            boundary = self._boundary_state(group, scope)
+            if int(boundary["created_at"]) != normalized:
+                boundary["message_ids"] = []
+            boundary["created_at"] = normalized
             self._write_group_state(data, chat_id, group)
         return normalized
 
@@ -125,6 +139,8 @@ class GroupChatStore:
         self,
         chat_id: str,
         message_ids: list[str] | set[str],
+        *,
+        scope: str = MAIN_SCOPE,
     ) -> list[str]:
         normalized_message_ids = sorted(
             {
@@ -136,7 +152,8 @@ class GroupChatStore:
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            group["last_boundary_message_ids"] = normalized_message_ids
+            boundary = self._boundary_state(group, scope)
+            boundary["message_ids"] = normalized_message_ids
             self._write_group_state(data, chat_id, group)
         return normalized_message_ids
 
@@ -147,6 +164,7 @@ class GroupChatStore:
         seq: int,
         created_at: int | str | None,
         message_ids: list[str] | set[str] | None = None,
+        scope: str = MAIN_SCOPE,
     ) -> dict[str, Any]:
         normalized_seq = max(int(seq), 0)
         normalized_created_at = max(int(created_at or 0), 0)
@@ -160,9 +178,10 @@ class GroupChatStore:
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            group["last_boundary_seq"] = normalized_seq
-            group["last_boundary_created_at"] = normalized_created_at
-            group["last_boundary_message_ids"] = normalized_message_ids
+            boundary = self._boundary_state(group, scope)
+            boundary["seq"] = normalized_seq
+            boundary["created_at"] = normalized_created_at
+            boundary["message_ids"] = normalized_message_ids
             self._write_group_state(data, chat_id, group)
         return {
             "last_boundary_seq": normalized_seq,
@@ -192,12 +211,14 @@ class GroupChatStore:
         *,
         after_seq: int = 0,
         before_seq: int | None = None,
+        scope: str | None = None,
     ) -> list[dict[str, Any]]:
         path = self._log_path(chat_id)
         if not path.exists():
             return []
         lower = max(int(after_seq), 0)
         upper = int(before_seq) if before_seq is not None else None
+        normalized_scope = self.normalize_scope(scope) if scope is not None else ""
         messages: list[dict[str, Any]] = []
         with self._lock:
             with path.open(encoding="utf-8") as handle:
@@ -218,6 +239,15 @@ class GroupChatStore:
                         continue
                     if upper is not None and seq >= upper:
                         continue
+                    if normalized_scope:
+                        entry_thread_id = str(item.get("thread_id", "") or "").strip()
+                        if normalized_scope == MAIN_SCOPE:
+                            if entry_thread_id:
+                                continue
+                        else:
+                            scope_thread_id = normalized_scope.removeprefix("thread:")
+                            if entry_thread_id != scope_thread_id:
+                                continue
                     messages.append(item)
         return messages
 
@@ -235,6 +265,24 @@ class GroupChatStore:
         safe_chat_id = chat_id.replace("/", "_")
         return self._data_dir / "group_chat_logs" / f"{safe_chat_id}.jsonl"
 
+    def _boundary_state(self, group: dict[str, Any], scope: str | None) -> dict[str, Any]:
+        normalized_scope = self.normalize_scope(scope)
+        boundaries = group.setdefault("boundaries", {})
+        boundary = boundaries.get(normalized_scope, {})
+        sanitized = {
+            "seq": max(int(boundary.get("seq", 0) or 0), 0),
+            "created_at": max(int(boundary.get("created_at", 0) or 0), 0),
+            "message_ids": sorted(
+                {
+                    str(item).strip()
+                    for item in boundary.get("message_ids", [])
+                    if isinstance(item, str) and str(item).strip()
+                }
+            ),
+        }
+        boundaries[normalized_scope] = sanitized
+        return sanitized
+
     def _group_state(self, chat_id: str, *, data: dict[str, Any] | None = None) -> dict[str, Any]:
         source = data if data is not None else self._read_all()
         groups = source.get("groups", {})
@@ -242,6 +290,36 @@ class GroupChatStore:
         allowlist = raw.get("allowlist", [])
         mode = raw.get("mode", DEFAULT_GROUP_MODE)
         access_policy = raw.get("access_policy", DEFAULT_ACCESS_POLICY)
+        raw_boundaries = raw.get("boundaries", {})
+        boundaries: dict[str, dict[str, Any]] = {}
+        if isinstance(raw_boundaries, dict):
+            for scope, boundary in raw_boundaries.items():
+                if not isinstance(boundary, dict):
+                    continue
+                normalized_scope = self.normalize_scope(scope)
+                boundaries[normalized_scope] = {
+                    "seq": max(int(boundary.get("seq", 0) or 0), 0),
+                    "created_at": max(int(boundary.get("created_at", 0) or 0), 0),
+                    "message_ids": sorted(
+                        {
+                            str(item).strip()
+                            for item in boundary.get("message_ids", [])
+                            if isinstance(item, str) and str(item).strip()
+                        }
+                    ),
+                }
+        if MAIN_SCOPE not in boundaries:
+            boundaries[MAIN_SCOPE] = {
+                "seq": max(int(raw.get("last_boundary_seq", 0) or 0), 0),
+                "created_at": max(int(raw.get("last_boundary_created_at", 0) or 0), 0),
+                "message_ids": sorted(
+                    {
+                        str(item).strip()
+                        for item in raw.get("last_boundary_message_ids", [])
+                        if isinstance(item, str) and str(item).strip()
+                    }
+                ),
+            }
         return {
             "mode": mode if mode in GROUP_MODES else DEFAULT_GROUP_MODE,
             "access_policy": access_policy if access_policy in ACCESS_POLICIES else DEFAULT_ACCESS_POLICY,
@@ -252,15 +330,7 @@ class GroupChatStore:
                     if isinstance(item, str) and str(item).strip()
                 }
             ),
-            "last_boundary_seq": max(int(raw.get("last_boundary_seq", 0) or 0), 0),
-            "last_boundary_created_at": max(int(raw.get("last_boundary_created_at", 0) or 0), 0),
-            "last_boundary_message_ids": sorted(
-                {
-                    str(item).strip()
-                    for item in raw.get("last_boundary_message_ids", [])
-                    if isinstance(item, str) and str(item).strip()
-                }
-            ),
+            "boundaries": boundaries,
             "last_log_seq": max(int(raw.get("last_log_seq", 0) or 0), 0),
         }
 
@@ -285,9 +355,15 @@ class GroupChatStore:
             "mode": group["mode"],
             "access_policy": group["access_policy"],
             "allowlist": list(group["allowlist"]),
-            "last_boundary_seq": int(group["last_boundary_seq"]),
-            "last_boundary_created_at": int(group["last_boundary_created_at"]),
-            "last_boundary_message_ids": list(group["last_boundary_message_ids"]),
+            "boundaries": {
+                self.normalize_scope(scope): {
+                    "seq": int(boundary["seq"]),
+                    "created_at": int(boundary["created_at"]),
+                    "message_ids": list(boundary["message_ids"]),
+                }
+                for scope, boundary in group.get("boundaries", {}).items()
+                if isinstance(boundary, dict)
+            },
             "last_log_seq": int(group["last_log_seq"]),
         }
         self._write_all(data)

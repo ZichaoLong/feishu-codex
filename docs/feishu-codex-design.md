@@ -77,7 +77,7 @@ bridge:
    - sends text, cards, and message patches
 2. Application layer
    - command routing
-   - per-user / per-chat runtime state
+   - user-isolated p2p runtime state and group-shared runtime state keyed by `chat_id`
    - card rendering
    - session and resume coordination
 3. Codex adapter and protocol layer
@@ -138,7 +138,7 @@ Codex remains the authority for:
 - favorites / starred state
 - local default profile used by Feishu and default `fcodex` launches
 - runtime shared-backend discovery state
-- per-chat thread bindings
+- p2p thread bindings and group-shared thread bindings keyed by `chat_id`
 - group-chat mode, group ACL, group context logs, and boundary state
 - transient approval, rename, and card state
 
@@ -191,16 +191,24 @@ The following behaviors are part of the current implementation contract:
 
 #### Group modes
 
-- strict `@bot` matching depends on the bot's own `open_id`
-- the preferred source is `system.yaml.bot_open_id`
-- if it is not configured explicitly, the current implementation tries runtime auto-discovery
+- strict explicit-mention matching depends on `system.yaml.bot_open_id`
+- if `system.yaml.trigger_open_ids` is configured, mentions that hit those
+  `open_id`s are also treated as valid triggers
+- `trigger_open_ids` only extends which mentions count as a trigger; it does not
+  bypass ACL and it does not replace `bot_open_id`
+- p2p backend state stays user-isolated; group backend state is shared by
+  `chat_id`
 - `assistant`
   - receives and caches group messages
-  - replies only when the bot is mentioned
+  - replies only when a valid trigger mention is present
   - includes group context since the last trigger boundary
+  - maintains separate context boundaries for the main chat flow and each group
+    thread
+  - still uses one shared group backend session, so the model may remember
+    conclusions established elsewhere in the same group
 - `mention-only`
   - does not cache group context
-  - triggers only on mentions
+  - triggers only on valid trigger mentions
 - `all`
   - human group messages can trigger directly
   - highest spam risk
@@ -208,9 +216,10 @@ The following behaviors are part of the current implementation contract:
 #### Group-command triggering
 
 - p2p commands can be sent directly
-- in group `assistant` and `mention-only`, group commands themselves must also
-  mention the bot first
-- in group `all`, human group commands can be sent directly
+- all group `/` commands are admin-only
+- in group `assistant` and `mention-only`, admin commands themselves must also
+  explicitly mention a trigger target first
+- in group `all`, admins can send group commands directly
 - group commands do not enter the `assistant` context log and do not advance the
   assistant boundary
 
@@ -224,6 +233,9 @@ The following behaviors are part of the current implementation contract:
 - history backfill and live group logs are merged into one context pipeline
 - the context boundary tracks both sequence and time so each new effective
   mention can resume from the previous boundary
+- when the trigger happens inside a group thread, execution cards, ACL denials,
+  and long-text follow-ups should stay in that thread instead of jumping back to
+  the main flow
 
 #### ACL denial feedback
 

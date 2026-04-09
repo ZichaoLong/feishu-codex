@@ -5,15 +5,20 @@ app_secret: "your_cc_bot_app_secret"
 # request_timeout_seconds: 10
 
 # 群聊管理员 open_id 列表；这些人始终具备群聊触发资格，并可使用
-# `/groupmode`、`/acl` 管理群聊。
-# 若群工作态是 `assistant` 或 `mention-only`，他们仍需先 `@机器人`
-# 才会触发对话或群命令。
+# 所有群里的 `/` 命令（包括 `/groupmode`、`/acl`、`/new`、`/session` 等）。
+# 若群工作态是 `assistant` 或 `mention-only`，他们仍需先显式 mention
+# 触发对象，才会触发对话或群命令。
 # admin_open_ids:
 #   - "ou_xxx 这样的 open_id；可先私聊机器人发送 /whoami 获取"
 
-# 机器人自身的 open_id。若已知，建议显式配置；这样群聊里是否真的
-# @到了机器人，可直接按该值精确判断，而不依赖运行时自动发现。
+# 机器人自身的 open_id。群聊能力依赖它做严格 mention 判定；群聊使用时应显式配置。
 # bot_open_id: "ou_xxx"
+
+# 额外的群聊触发 open_id 列表。若群消息 @到了这些 open_id，也会被视为
+# 一次有效触发。常见场景：别人 @你本人，由机器人代答。
+# 仍建议同时配置 `bot_open_id`；未配置 `bot_open_id` 时，这些 alias 不生效。
+# trigger_open_ids:
+#   - "ou_xxx"
 
 # assistant 模式每次有效被 @ 时，最多回捞多少条历史消息。
 # 设为 0 表示禁用历史回捞。默认值：50

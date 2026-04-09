@@ -623,16 +623,16 @@ def build_group_mode_card(current_mode: str, *, can_manage: bool) -> dict:
         "mention_only": "mention-only",
     }
     descs = {
-        "assistant": "缓存群聊消息，仅在 `@机器人` 时回复；适合群讨论助手。",
+        "assistant": "缓存群聊消息，仅在有效 mention 时回复；适合群讨论助手。",
         "all": "群内消息都会直接触发机器人回复；风险最高，容易刷屏。",
-        "mention_only": "只有 `@机器人` 的消息才会触发响应；不缓存上下文。",
+        "mention_only": "只有有效 mention 的消息才会触发响应；不缓存上下文。",
     }
     current_desc = descs.get(current_mode, current_mode)
     content = (
         f"当前群聊工作态：**{labels.get(current_mode, current_mode)}**\n"
         f"{current_desc}\n\n"
         "作用范围：只影响当前群。\n\n"
-        "在 `assistant` / `mention-only` 中，群命令本身也需要先 `@机器人`。"
+        "在 `assistant` / `mention-only` 中，群命令本身也需要先显式 mention 触发对象。"
     )
     if not can_manage:
         content += "\n\n仅管理员可切换工作态。"
@@ -693,7 +693,7 @@ def build_group_acl_card(
         f"当前授权策略：**{current_label}**\n"
         f"{descs.get(access_policy, access_policy)}\n\n"
         f"你当前是否可用：**{'是' if viewer_allowed else '否'}**\n\n"
-        "说明：ACL 只决定谁有资格；是否需要 `@机器人` 仍取决于群聊工作态。"
+        "说明：ACL 只决定谁有资格；是否需要显式 mention 仍取决于群聊工作态。"
     )
     if allowlist_members:
         shown_members = "\n".join(f"- `{member}`" for member in allowlist_members[:20])
@@ -706,7 +706,7 @@ def build_group_acl_card(
         content += (
             "\n\n管理员可用：`/acl policy admin-only`、`/acl policy allowlist`、"
             "`/acl policy all-members`、`/acl grant @成员`、`/acl revoke @成员`\n"
-            "若当前群是 `assistant` / `mention-only`，继续发送这些群命令时仍需先 `@机器人`。"
+            "若当前群是 `assistant` / `mention-only`，继续发送这些群命令时仍需先显式 mention 触发对象。"
         )
     else:
         content += "\n\n仅管理员可调整授权策略。"
