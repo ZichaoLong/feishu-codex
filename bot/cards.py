@@ -11,10 +11,14 @@ _HISTORY_TEXT_MAX = 300
 _PLAN_CONTENT_MAX = 4000
 
 
+def _card_config() -> dict:
+    return {"wide_screen_mode": True, "update_multi": True}
+
+
 def build_markdown_card(title: str, content: str, *, template: str = "blue") -> dict:
     """构造简单说明卡片。"""
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "template": template,
@@ -99,7 +103,7 @@ def build_execution_card(
 
     return {
         "schema": "2.0",
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": header_content},
             "template": template,
@@ -122,7 +126,7 @@ def build_command_approval_card(
         content.append(f"**原因**: {reason}")
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 命令执行审批"},
             "template": "orange",
@@ -195,7 +199,7 @@ def build_file_change_approval_card(
         lines.append(f"**原因**: {reason}")
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 文件修改审批"},
             "template": "orange",
@@ -279,7 +283,7 @@ def build_permissions_approval_card(
         lines.append("*未提供具体权限详情*")
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 额外权限审批"},
             "template": "orange",
@@ -332,7 +336,7 @@ def build_approval_handled_card(title: str, decision: str, detail: str = "") -> 
     if detail:
         content = f"{content}\n{detail}"
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "template": "grey",
@@ -393,7 +397,7 @@ def build_approval_policy_card(current_policy: str, *, running: bool = False) ->
     elements.append({"tag": "action", "actions": buttons})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 审批策略"},
             "template": "blue",
@@ -452,7 +456,7 @@ def build_sandbox_policy_card(current_sandbox: str, *, running: bool = False) ->
     elements.append({"tag": "action", "actions": buttons})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 沙箱策略"},
             "template": "blue",
@@ -546,7 +550,7 @@ def build_permissions_preset_card(
     elements.append({"tag": "action", "actions": buttons})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 权限预设"},
             "template": "blue",
@@ -602,7 +606,7 @@ def build_collaboration_mode_card(current_mode: str, *, running: bool = False) -
     elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 协作模式"},
             "template": "blue",
@@ -657,7 +661,7 @@ def build_group_mode_card(current_mode: str, *, can_manage: bool) -> dict:
         elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 群聊工作态"},
             "template": "blue",
@@ -731,7 +735,7 @@ def build_group_acl_card(
         elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 群聊授权"},
             "template": "blue",
@@ -856,7 +860,7 @@ def build_ask_user_card(
     title = "Codex 需要你的输入" if pending_count <= 1 else f"Codex 需要你的输入（剩余 {pending_count} 题）"
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "template": "blue",
@@ -880,7 +884,7 @@ def build_ask_user_answered_card(
         lines.append(f"**{header}**\n{answer}")
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 用户输入 - 已提交"},
             "template": "grey",
@@ -920,7 +924,7 @@ def build_resume_guard_card(
         "如果希望本地与飞书继续同一个线程，请改用 `fcodex`，不要直接用裸 `codex`。"
     )
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "恢复线程前确认"},
             "template": "orange",
@@ -1003,7 +1007,7 @@ def build_thread_snapshot_card(
         elements.append({"tag": "markdown", "content": "*暂无可展示历史。*"})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": f"线程 {thread_id[:8]}… 快照"},
             "template": "green",
@@ -1119,7 +1123,7 @@ def build_sessions_card(
         elements.append({"tag": "markdown", "content": "*当前目录下暂无可恢复线程。*"})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 当前目录线程"},
             "template": "blue",
@@ -1131,7 +1135,7 @@ def build_sessions_card(
 def build_rename_card(session: dict) -> dict:
     """构造重命名卡片。"""
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "重命名线程"},
             "template": "blue",
@@ -1207,7 +1211,7 @@ def build_history_preview_card(
         elements.append({"tag": "hr"})
 
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": f"线程 {thread_id[:8]}… 最近对话"},
             "template": "green",
@@ -1269,7 +1273,7 @@ def build_plan_card(
 
     title = f"Codex 计划 {turn_id[:8]}…" if turn_id else "Codex 计划"
     return {
-        "config": {"wide_screen_mode": True},
+        "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "template": "green",

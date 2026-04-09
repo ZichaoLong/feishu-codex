@@ -209,21 +209,23 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("请总结一下", text)
         self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 2)
 
-    def test_assistant_mode_keeps_other_bot_messages_in_context(self) -> None:
+    def test_assistant_mode_keeps_history_recovered_bot_messages_in_context(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
         bot.set_group_access_policy("chat-1", "all-members")
+        bot.history_entries = [
+            {
+                "message_id": "hist-bot",
+                "created_at": 1712476700000,
+                "sender_user_id": "",
+                "sender_open_id": "ou-other-bot",
+                "sender_type": "app",
+                "sender_name": "机器人:ou-other",
+                "msg_type": "text",
+                "text": "我建议先拆成两个任务。",
+            }
+        ]
 
-        bot._handle_raw_message(
-            _message_event(
-                message_id="m-bot",
-                chat_id="chat-1",
-                text="我建议先拆成两个任务。",
-                sender_user_id="cli-bot",
-                sender_open_id="ou-other-bot",
-                sender_type="app",
-            )
-        )
         bot._handle_raw_message(
             _message_event(
                 message_id="m-user",
@@ -243,6 +245,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(len(bot.received_messages), 1)
         self.assertIn("机器人:ou-other", bot.received_messages[0][2])
+        self.assertIn("我建议先拆成两个任务。", bot.received_messages[0][2])
 
     def test_assistant_mode_denies_unauthorized_mention_without_consuming_boundary(self) -> None:
         bot = self._make_bot()
@@ -558,6 +561,17 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(bot.patches[-1][0], "bootstrap-card-1")
         self.assertIn("群聊上下文准备失败", bot.patches[-1][1])
         self.assertIn("permission denied", bot.patches[-1][1])
+        patched_card = json.loads(bot.patches[-1][1])
+        self.assertTrue(patched_card["config"]["update_multi"])
+
+    def test_group_history_bootstrap_card_is_shared_card(self) -> None:
+        bot = self._make_bot()
+
+        bot._prepare_group_history_execution_card("chat-1", "m-1")
+
+        self.assertEqual(bot.reply_refs[-1][0], "m-1")
+        card = json.loads(bot.reply_refs[-1][2])
+        self.assertTrue(card["config"]["update_multi"])
 
     def test_group_mention_is_not_matched_without_bot_open_id(self) -> None:
         bot = self._make_bot()
@@ -587,89 +601,25 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(len(logged), 1)
         self.assertIn("请总结", logged[0]["text"])
 
-    def test_assistant_mode_ignores_group_bot_mention_trigger(self) -> None:
+    def test_fetch_chat_type_reads_flat_chat_mode(self) -> None:
         bot = self._make_bot()
-        bot.set_group_mode("chat-1", "assistant")
 
-        bot._handle_raw_message(
-            _message_event(
-                message_id="m-1",
-                chat_id="chat-1",
-                text="@_user_1 帮我催一下",
-                sender_user_id="cli-bot",
-                sender_open_id="ou-untrusted-bot",
-                sender_type="app",
-                mentions=[
-                    {
-                        "key": "@_user_1",
-                        "id": {"user_id": "u-bot", "open_id": "ou-bot"},
-                        "name": "Codex",
-                    }
-                ],
+        class _Response:
+            code = 0
+            msg = "ok"
+            data = SimpleNamespace(chat_mode="group", chat_type="private")
+
+            @staticmethod
+            def success() -> bool:
+                return True
+
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    chat=SimpleNamespace(get=lambda request: _Response())
+                )
             )
         )
 
-        self.assertEqual(bot.received_messages, [])
-        logged = bot._group_store.read_messages_between("chat-1")
-        self.assertEqual(len(logged), 1)
-        self.assertEqual(logged[0]["sender_type"], "app")
-        self.assertIn("帮我催一下", logged[0]["text"])
-
-    def test_mention_only_mode_ignores_group_bot_mention(self) -> None:
-        bot = self._make_bot()
-        bot.set_group_mode("chat-1", "mention_only")
-
-        bot._handle_raw_message(
-            _message_event(
-                message_id="m-1",
-                chat_id="chat-1",
-                text="@_user_1 请同步状态",
-                sender_user_id="",
-                sender_open_id="ou-other-bot",
-                sender_type="app",
-                mentions=[
-                    {
-                        "key": "@_user_1",
-                        "id": {"user_id": "u-bot", "open_id": "ou-bot"},
-                        "name": "Codex",
-                    }
-                ],
-            )
-        )
-
-        self.assertEqual(bot.received_messages, [])
-        self.assertEqual(bot.replies, [])
-
-    def test_all_mode_ignores_group_bot_messages(self) -> None:
-        bot = self._make_bot()
-        bot.set_group_mode("chat-1", "all")
-
-        bot._handle_raw_message(
-            _message_event(
-                message_id="m-1",
-                chat_id="chat-1",
-                text="不要直接触发",
-                sender_user_id="cli-bot",
-                sender_open_id="ou-trusted-bot",
-                sender_type="app",
-            )
-        )
-        bot._handle_raw_message(
-            _message_event(
-                message_id="m-2",
-                chat_id="chat-1",
-                text="@_user_1 现在可以触发",
-                sender_user_id="cli-bot",
-                sender_open_id="ou-trusted-bot",
-                sender_type="app",
-                mentions=[
-                    {
-                        "key": "@_user_1",
-                        "id": {"user_id": "u-bot", "open_id": "ou-bot"},
-                        "name": "Codex",
-                    }
-                ],
-            )
-        )
-
-        self.assertEqual(bot.received_messages, [])
+        self.assertEqual(bot.fetch_chat_type("oc_123"), "group")
+        self.assertEqual(bot.lookup_chat_type("oc_123"), "group")

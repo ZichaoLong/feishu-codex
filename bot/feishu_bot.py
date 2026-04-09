@@ -335,11 +335,11 @@ class FeishuBot(ABC):
         if not response.success():
             logger.warning("查询 chat 类型失败: chat=%s, code=%s, msg=%s", normalized_chat_id, response.code, response.msg)
             return ""
-        chat = getattr(getattr(response, "data", None), "chat", None)
-        chat_type = str(getattr(chat, "type", "") or "").strip()
-        if chat_type:
-            self.remember_chat_type(normalized_chat_id, chat_type)
-        return chat_type
+        data = getattr(response, "data", None)
+        chat_mode = str(getattr(data, "chat_mode", "") or "").strip()
+        if chat_mode:
+            self.remember_chat_type(normalized_chat_id, chat_mode)
+        return chat_mode
 
     def reserve_execution_card(self, trigger_message_id: str, card_message_id: str) -> None:
         normalized_trigger_id = str(trigger_message_id or "").strip()
@@ -1051,7 +1051,7 @@ class FeishuBot(ABC):
             return
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "update_multi": True},
             "header": {
                 "title": {"tag": "plain_text", "content": "Codex（准备群聊上下文）"},
                 "template": "turquoise",
@@ -1082,7 +1082,7 @@ class FeishuBot(ABC):
         reason = str(error).strip() or type(error).__name__
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "update_multi": True},
             "header": {
                 "title": {"tag": "plain_text", "content": "Codex（群聊上下文准备失败）"},
                 "template": "red",

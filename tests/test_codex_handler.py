@@ -382,6 +382,11 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("更容易先规划、提问，并展示计划卡片", content)
         self.assertEqual(self._first_action(card)["layout"], "trisection")
 
+    def test_execution_card_is_patchable_shared_card(self) -> None:
+        card = build_execution_card("", running=True)
+
+        self.assertTrue(card["config"]["update_multi"])
+
     def test_whoami_command_in_p2p_returns_ids(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-p2p"] = {
