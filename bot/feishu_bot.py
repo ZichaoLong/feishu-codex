@@ -211,6 +211,7 @@ class FeishuBot(ABC):
             _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS,
         )
         configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
+        self._configured_bot_open_id = configured_bot_open_id
         # 机器人自身的 open_id，用于精确判断群消息是否 @了机器人
         self._bot_open_id: Optional[str] = configured_bot_open_id or None
         self._bot_open_id_error_logged = False
@@ -736,6 +737,15 @@ class FeishuBot(ABC):
         if self._bot_open_id is None:
             self._bot_open_id = self._fetch_bot_open_id() or ""
         return self._bot_open_id
+
+    def get_bot_identity(self) -> dict[str, str]:
+        open_id = self._ensure_bot_open_id()
+        source = "configured" if self._configured_bot_open_id else ("auto-discovered" if open_id else "unavailable")
+        return {
+            "app_id": self.app_id,
+            "open_id": open_id,
+            "source": source,
+        }
 
     def _is_bot_mentioned(self, mentions: list) -> bool:
         """判断 mentions 列表中是否包含机器人自身

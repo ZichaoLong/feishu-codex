@@ -148,6 +148,11 @@ class _FakeBot:
         self.fetched_chat_types: dict[str, str] = {}
         self.reserved_execution_cards: dict[str, str] = {}
         self.admin_open_ids = {"ou_admin"}
+        self.bot_identity = {
+            "app_id": "cli_test_app",
+            "open_id": "ou_bot",
+            "source": "configured",
+        }
 
     def reply(self, chat_id: str, text: str) -> None:
         self.replies.append((chat_id, text))
@@ -193,6 +198,9 @@ class _FakeBot:
 
     def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
         return open_id in self.admin_open_ids
+
+    def get_bot_identity(self) -> dict[str, str]:
+        return dict(self.bot_identity)
 
     def get_group_mode(self, chat_id: str) -> str:
         return self.group_modes.get(chat_id, "assistant")
@@ -410,6 +418,28 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("u2", "chat-group", "/whoami", message_id="m-group")
 
         self.assertIn("请私聊机器人执行", bot.replies[-1][1])
+
+    def test_whoareyou_alias_returns_bot_identity(self) -> None:
+        handler, bot = self._make_handler()
+        bot.bot_identity = {"app_id": "cli_test_app", "open_id": "ou_bot", "source": "configured"}
+
+        handler.handle_message("u1", "chat-p2p", "/whoareyou")
+
+        reply = bot.replies[-1][1]
+        self.assertIn("机器人身份信息", reply)
+        self.assertIn("app_id: `cli_test_app`", reply)
+        self.assertIn("open_id: `ou_bot`", reply)
+        self.assertIn("system.yaml.bot_open_id", reply)
+
+    def test_whoareyou_reports_missing_bot_open_id(self) -> None:
+        handler, bot = self._make_handler()
+        bot.bot_identity = {"app_id": "cli_test_app", "open_id": "", "source": "unavailable"}
+
+        handler.handle_message("u1", "chat-p2p", "/whoareyou")
+
+        reply = bot.replies[-1][1]
+        self.assertIn("open_id: `（空）`", reply)
+        self.assertIn("application:application:self_manage", reply)
 
     def test_groupmode_command_without_arg_shows_group_mode_card(self) -> None:
         handler, bot = self._make_handler()
@@ -1107,6 +1137,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("/cd <path>", content)
         self.assertIn("/status", content)
         self.assertNotIn("/cancel", content)
+        self.assertIn("/whoareyou", content)
         self.assertIn("/help session", content)
         self.assertIn("/help settings", content)
         self.assertIn("/help local", content)

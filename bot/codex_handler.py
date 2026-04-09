@@ -394,6 +394,9 @@ class CodexHandler(BotHandler):
         if cmd == "/whoami":
             self._handle_whoami_command(user_id, chat_id, message_id=message_id)
             return
+        if cmd == "/whoareyou":
+            self._handle_botinfo_command(chat_id)
+            return
         if cmd == "/profile":
             self._handle_profile_command(user_id, chat_id, arg)
             return
@@ -664,6 +667,31 @@ class CodexHandler(BotHandler):
                 ]
             ),
         )
+
+    def _handle_botinfo_command(self, chat_id: str) -> None:
+        identity = self.bot.get_bot_identity()
+        source_map = {
+            "configured": "`system.yaml.bot_open_id`",
+            "auto-discovered": "运行时自动发现",
+            "unavailable": "未获取到",
+        }
+        source = source_map.get(identity["source"], identity["source"] or "未知")
+        lines = [
+            "机器人身份信息：",
+            f"- app_id: `{identity['app_id'] or '（空）'}`",
+            f"- open_id: `{identity['open_id'] or '（空）'}`",
+            f"- source: {source}",
+        ]
+        if not identity["open_id"]:
+            lines.extend(
+                [
+                    "",
+                    "建议：",
+                    "- 直接把 `open_id` 写进 `system.yaml.bot_open_id`",
+                    "- 如果依赖自动发现，检查 `application:application:self_manage` 权限",
+                ]
+            )
+        self.bot.reply(chat_id, "\n".join(lines))
 
     def _handle_session_command(self, user_id: str, chat_id: str) -> None:
         try:
@@ -2307,7 +2335,8 @@ class CodexHandler(BotHandler):
             "- `/resume <thread_id|thread_name>` 恢复指定线程\n"
             "- `/cd <path>` 切换目录并清空当前线程绑定\n"
             "- `/status` 查看当前状态\n\n"
-            "- `/whoami`：私聊查看自己的 `user_id` / `open_id`\n\n"
+            "- `/whoami`：私聊查看自己的 `user_id` / `open_id`\n"
+            "- `/whoareyou`：查看机器人自己的 `app_id` / `open_id`\n\n"
             "**更多命令与帮助**\n"
             "- `/help session` 查看线程切换、目录切换与归档\n"
             "- `/help settings` 查看 profile、权限与协作设置\n"
