@@ -111,7 +111,8 @@ app_secret: "..."
 如果你使用群聊 `assistant` 模式，还可以调整每次有效触发时的历史回捞窗口：
 
 - `group_history_fetch_limit`：每次最多回捞多少条历史消息，默认 `50`
-- `group_history_fetch_lookback_seconds`：每次回捞的时间窗口，默认 `86400`（24 小时）
+- `group_history_fetch_lookback_seconds`：主聊天流回捞时使用的时间窗口，默认 `86400`（24 小时）
+- 说明：飞书公开接口对 `thread` 容器不支持 `start_time/end_time`；因此话题内回捞当前不承诺严格按该时间窗口裁剪，只保证受上下文边界和条数限制
 - 任一项设为 `0`，即可禁用历史回捞
 
 ## 群聊能力速览
@@ -122,7 +123,7 @@ app_secret: "..."
 - ACL 只决定谁具备群聊触发资格；是否必须显式 mention 由群工作态决定
 - 群里的所有 `/` 命令都只给管理员；在群聊 `assistant` 和 `mention-only` 工作态下，**管理员命令和普通对话都需要先显式 mention 触发对象**
 - 有效 mention 默认只认机器人自身 `bot_open_id`；如配置 `trigger_open_ids`，`@这些人` 也会视为触发
-- 在群聊 `assistant` 工作态下，每次有效人类 `@` 都会额外回捞最近群历史，用来补齐两次 `@` 之间缺失的上下文，包括其他机器人消息；当缺失消息超过 `group_history_fetch_limit` 时，保留最近缺失消息
+- 在群聊 `assistant` 工作态下，每次有效人类 `@` 都会额外回捞最近群历史，用来补齐两次 `@` 之间缺失的上下文，包括其他机器人消息；主聊天流回捞受时间窗和条数限制，话题内回捞当前只保证受边界和条数限制；当缺失消息超过 `group_history_fetch_limit` 时，保留最近缺失消息
 - `assistant` 的主聊天流与群话题使用不同上下文边界：主聊天流只看主聊天流，话题只看当前话题；但底层仍是同一个群共享会话
 - 在群话题内触发时，执行卡片、ACL 拒绝和长回复会尽量留在原话题
 - 在群聊 `all` 工作态下，人类消息和群命令可直接触发；其他机器人不会直接触发
@@ -159,7 +160,8 @@ provider2_api_key=...
 | `im:message:send_as_bot` | 以应用身份发送文本和卡片消息 |
 | `im:message:update` | 更新执行中的卡片内容 |
 | `application:application:self_manage` | 建议开通；`/init` 与 `/whoareyou` 自动探测机器人自身 `open_id` 依赖它 |
-| `contact:user.basic_profile:readonly` | 在合并转发消息里尽量展示用户名；缺少时会回退成 open_id 前缀 |
+| `contact:contact.base:readonly` | 允许调用通讯录用户接口，用于解析用户名 |
+| `contact:user.base:readonly` | 允许返回用户名等基础字段；缺少时会回退成 open_id 前缀 |
 
 可在「权限管理」页面点击「批量开通」，粘贴以下 JSON：
 
@@ -168,7 +170,8 @@ provider2_api_key=...
   "scopes": {
     "tenant": [
       "application:application:self_manage",
-      "contact:user.basic_profile:readonly",
+      "contact:contact.base:readonly",
+      "contact:user.base:readonly",
       "im:message.group_msg",
       "im:message.group_at_msg:readonly",
       "im:message",

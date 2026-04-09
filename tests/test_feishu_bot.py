@@ -730,11 +730,13 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertTrue(captured[0].request_body.reply_in_thread)
 
-    def test_assistant_mode_ignores_group_app_events_before_logging(self) -> None:
+    def test_raw_handler_defensively_ignores_group_app_sender_before_logging(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": ""})
         bot.set_group_mode("chat-1", "assistant")
         bot.set_group_access_policy("chat-1", "all-members")
 
+        # receive_v1 公开协议当前只承诺 sender_type=user；
+        # 这里故意注入 app sender，验证 raw handler 在异常输入下仍 fail-close。
         bot._handle_raw_message(
             _message_event(
                 message_id="m-app",
@@ -951,13 +953,13 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(len(logged), 1)
         self.assertIn("@ZLong", logged[0]["text"])
 
-    def test_fetch_chat_type_prefers_chat_type_over_chat_mode(self) -> None:
+    def test_fetch_chat_type_uses_chat_mode_for_group_detection(self) -> None:
         bot = self._make_bot()
 
         class _Response:
             code = 0
             msg = "ok"
-            data = SimpleNamespace(chat_mode="thread", chat_type="group")
+            data = SimpleNamespace(chat_mode="group", chat_type="private")
 
             @staticmethod
             def success() -> bool:
@@ -974,13 +976,13 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(bot.fetch_chat_type("oc_123"), "group")
         self.assertEqual(bot.lookup_chat_type("oc_123"), "group")
 
-    def test_fetch_chat_type_does_not_use_chat_mode_when_chat_type_missing(self) -> None:
+    def test_fetch_chat_type_normalizes_topic_mode_to_group(self) -> None:
         bot = self._make_bot()
 
         class _Response:
             code = 0
             msg = "ok"
-            data = SimpleNamespace(chat_mode="thread", chat_type="")
+            data = SimpleNamespace(chat_mode="topic", chat_type="public")
 
             @staticmethod
             def success() -> bool:
@@ -994,5 +996,5 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(bot.fetch_chat_type("oc_thread123"), "")
-        self.assertEqual(bot.lookup_chat_type("oc_thread123"), "")
+        self.assertEqual(bot.fetch_chat_type("oc_topic123"), "group")
+        self.assertEqual(bot.lookup_chat_type("oc_topic123"), "group")

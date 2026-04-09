@@ -362,10 +362,13 @@ class FeishuBot(ABC):
             logger.warning("查询 chat 类型失败: chat=%s, code=%s, msg=%s", normalized_chat_id, response.code, response.msg)
             return ""
         data = getattr(response, "data", None)
-        chat_type = str(getattr(data, "chat_type", "") or "").strip()
-        if chat_type in {"group", "p2p"}:
-            self.remember_chat_type(normalized_chat_id, chat_type)
-            return chat_type
+        chat_mode = str(getattr(data, "chat_mode", "") or "").strip()
+        if chat_mode == "p2p":
+            self.remember_chat_type(normalized_chat_id, "p2p")
+            return "p2p"
+        if chat_mode in {"group", "topic"}:
+            self.remember_chat_type(normalized_chat_id, "group")
+            return "group"
         return ""
 
     def reserve_execution_card(self, trigger_message_id: str, card_message_id: str) -> None:
