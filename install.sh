@@ -15,6 +15,7 @@ ENV_DIR="$HOME/.config/environment.d"
 ENV_FILE="$ENV_DIR/90-codex.conf"
 DATA_DIR="$HOME/.local/share/$SERVICE_NAME"
 VENV_DIR="$HOME/.local/share/$SERVICE_NAME/.venv"
+INIT_TOKEN_FILE="$CONFIG_DIR/init.token"
 
 _green()  { echo -e "\033[32m$*\033[0m"; }
 _yellow() { echo -e "\033[33m$*\033[0m"; }
@@ -131,6 +132,24 @@ if [ -f "$CONFIG_DIR/system.yaml" ]; then
 else
     cp "$INSTALL_DIR/config/system.yaml.example" "$CONFIG_DIR/system.yaml"
     _green "  ✓ 已创建 ~/.config/feishu-codex/system.yaml（请填入飞书应用凭证）"
+fi
+
+if [ -s "$INIT_TOKEN_FILE" ]; then
+    chmod 600 "$INIT_TOKEN_FILE" 2>/dev/null || true
+    _yellow "  ~/.config/feishu-codex/init.token 已存在，跳过（保护现有口令）"
+else
+    "$PYTHON" - "$INIT_TOKEN_FILE" <<'PY'
+import os
+import pathlib
+import secrets
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(secrets.token_urlsafe(24) + "\n", encoding="utf-8")
+os.chmod(path, 0o600)
+PY
+    _green "  ✓ 已创建 ~/.config/feishu-codex/init.token"
 fi
 
 if [ -f "$CONFIG_DIR/codex.yaml" ]; then
@@ -269,11 +288,13 @@ case "\${1:-}" in
         echo "配置目录: $CONFIG_DIR"
         echo "  system.yaml — 飞书应用凭证"
         echo "  codex.yaml  — Codex 运行参数"
+        echo "  init.token  — 私聊 `/init <token>` 使用的初始化口令"
         echo ""
-        read -r -p "打开哪个文件？[1] system.yaml  [2] codex.yaml  (Enter 取消) " _choice
+        read -r -p "打开哪个文件？[1] system.yaml  [2] codex.yaml  [3] init.token  (Enter 取消) " _choice
         case "\$_choice" in
             1) exec "\$EDITOR" "$CONFIG_DIR/system.yaml" ;;
             2) exec "\$EDITOR" "$CONFIG_DIR/codex.yaml" ;;
+            3) exec "\$EDITOR" "$CONFIG_DIR/init.token" ;;
             *) echo "已取消。" ;;
         esac
         ;;
@@ -380,13 +401,19 @@ echo ""
 echo "  3. 如需 provider API Key，请写入："
 echo "     \$ nano ~/.config/environment.d/90-codex.conf"
 echo ""
-echo "  4. 启动服务："
+echo "  4. 查看初始化口令："
+echo "     \$ cat ~/.config/feishu-codex/init.token"
+echo ""
+echo "  5. 启动服务："
 echo "     \$ feishu-codex start"
 echo ""
-echo "  5. 查看日志确认连接成功："
+echo "  6. 私聊机器人执行："
+echo "     \$ /init <上一步 token>"
+echo ""
+echo "  7. 查看日志确认连接成功："
 echo "     \$ feishu-codex log"
 echo ""
-echo "  6. 本地若要与飞书安全共用同一线程，请使用："
+echo "  8. 本地若要与飞书安全共用同一线程，请使用："
 echo "     \$ fcodex"
 echo "     或 \$ fcodex resume <thread_id>"
 echo ""

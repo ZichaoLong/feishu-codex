@@ -158,18 +158,19 @@ class _FakeBot:
             "discovered_open_id": "ou_bot",
             "trigger_open_ids": "",
         }
+        self.runtime_bot_open_id = "ou_bot"
 
-    def reply(self, chat_id: str, text: str, *, parent_message_id: str = "") -> None:
+    def reply(self, chat_id: str, text: str, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
         self.replies.append((chat_id, text))
         if parent_message_id:
             self.reply_parents.append((chat_id, text, parent_message_id))
 
-    def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "") -> None:
+    def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
         self.cards.append((chat_id, card))
         if parent_message_id:
             self.card_parents.append((chat_id, card, parent_message_id))
 
-    def reply_to_message(self, parent_id: str, msg_type: str, content: str) -> str:
+    def reply_to_message(self, parent_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> str:
         self.reply_refs.append((parent_id, msg_type, content))
         return "plan-card-1"
 
@@ -207,6 +208,22 @@ class _FakeBot:
 
     def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
         return open_id in self.admin_open_ids
+
+    def add_admin_open_id(self, open_id: str) -> list[str]:
+        if open_id:
+            self.admin_open_ids.add(open_id)
+        return sorted(self.admin_open_ids)
+
+    def list_admin_open_ids(self) -> list[str]:
+        return sorted(self.admin_open_ids)
+
+    def set_configured_bot_open_id(self, open_id: str) -> str:
+        normalized = str(open_id or "").strip()
+        self.runtime_bot_open_id = normalized
+        self.bot_identity["configured_open_id"] = normalized
+        self.bot_identity["open_id"] = normalized or self.bot_identity.get("discovered_open_id", "")
+        self.bot_identity["source"] = "configured" if normalized else "unavailable"
+        return normalized
 
     def get_bot_identity(self) -> dict[str, str]:
         return dict(self.bot_identity)
@@ -516,6 +533,57 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("discovered open_id: `（空）`", reply)
         self.assertIn("application:application:self_manage", reply)
 
+    def test_init_command_requires_p2p(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+
+        handler.handle_message("u2", "chat-group", "/init abc", message_id="m-group")
+
+        self.assertIn("请私聊机器人执行 `/init <token>`", bot.replies[-1][1])
+
+    def test_init_command_with_token_updates_admin_and_bot_open_id(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-p2p"] = {
+            "chat_type": "p2p",
+            "sender_open_id": "ou_user2",
+            "sender_type": "user",
+        }
+        bot.bot_identity = {
+            "app_id": "cli_test_app",
+            "open_id": "ou_bot_new",
+            "source": "auto-discovered",
+            "configured_open_id": "",
+            "discovered_open_id": "ou_bot_new",
+            "trigger_open_ids": "",
+        }
+        with patch("bot.codex_handler.ensure_init_token", return_value="secret-1"), patch(
+            "bot.codex_handler.load_system_config_raw",
+            return_value={"app_id": "cli_test_app", "app_secret": "secret"},
+        ), patch("bot.codex_handler.save_system_config") as save_config:
+            handler.handle_message("u2", "chat-p2p", "/init secret-1", message_id="m-p2p")
+
+        saved = save_config.call_args.args[0]
+        self.assertEqual(saved["admin_open_ids"], ["ou_admin", "ou_user2"])
+        self.assertEqual(saved["bot_open_id"], "ou_bot_new")
+        self.assertIn("ou_user2", bot.admin_open_ids)
+        self.assertEqual(bot.runtime_bot_open_id, "ou_bot_new")
+        reply = bot.replies[-1][1]
+        self.assertIn("初始化结果", reply)
+        self.assertIn("已加入 `Alice`", reply)
+        self.assertIn("`ou_bot_new`", reply)
+
+    def test_init_command_rejects_invalid_token(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-p2p"] = {
+            "chat_type": "p2p",
+            "sender_open_id": "ou_user",
+            "sender_type": "user",
+        }
+        with patch("bot.codex_handler.ensure_init_token", return_value="secret-1"):
+            handler.handle_message("u1", "chat-p2p", "/init bad-token", message_id="m-p2p")
+
+        self.assertIn("初始化口令错误", bot.replies[-1][1])
+
     def test_groupmode_command_without_arg_shows_group_mode_card(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
@@ -610,7 +678,26 @@ class CodexHandlerTests(unittest.TestCase):
 
         snapshot = bot.get_group_acl_snapshot("chat-group")
         self.assertEqual(snapshot["allowlist"], ["ou_user2"])
-        self.assertIn("已授权 1 人", bot.replies[-1][1])
+        self.assertIn("已授权：Alice", bot.replies[-1][1])
+
+    def test_acl_card_shows_readable_allowlist_names(self) -> None:
+        handler, bot = self._make_handler()
+        bot.group_acls["chat-group"] = {
+            "access_policy": "allowlist",
+            "allowlist": ["ou_user2"],
+        }
+        bot.message_contexts["m-acl"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        handler.handle_message("u1", "chat-group", "/acl", message_id="m-acl")
+
+        _, card = bot.cards[-1]
+        markdown = "\n".join(
+            element.get("content", "")
+            for element in card["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("Alice", markdown)
+        self.assertNotIn("ou_user2", markdown)
 
     def test_group_command_accepts_group_chat_after_api_type_lookup(self) -> None:
         handler, bot = self._make_handler()

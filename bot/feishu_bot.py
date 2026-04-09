@@ -79,6 +79,11 @@ class _PendingForward:
     forwarded_text: str
     message_id: str
     chat_type: str
+    sender_user_id: str
+    sender_open_id: str
+    sender_type: str
+    created_at: int
+    thread_id: str
     timer: threading.Timer = field(repr=False)
 
 
@@ -276,6 +281,22 @@ class FeishuBot(ABC):
 
     def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
         return bool(open_id and open_id in self._admin_open_ids)
+
+    def add_admin_open_id(self, open_id: str) -> list[str]:
+        normalized_open_id = str(open_id or "").strip()
+        if normalized_open_id:
+            self._admin_open_ids.add(normalized_open_id)
+        return sorted(self._admin_open_ids)
+
+    def list_admin_open_ids(self) -> list[str]:
+        return sorted(self._admin_open_ids)
+
+    def set_configured_bot_open_id(self, open_id: str) -> str:
+        normalized_open_id = str(open_id or "").strip()
+        self._configured_bot_open_id = normalized_open_id
+        if normalized_open_id:
+            self._bot_open_id_error_logged = False
+        return normalized_open_id
 
     def is_group_admin(self, user_id: str = "", open_id: str = "") -> bool:
         return self.is_admin(user_id, open_id)
@@ -671,6 +692,12 @@ class FeishuBot(ABC):
     def _buffer_forward(
         self, sender_id: str, chat_id: str, forwarded_text: str,
         message_id: str, chat_type: str,
+        *,
+        sender_user_id: str = "",
+        sender_open_id: str = "",
+        sender_type: str = "user",
+        created_at: int = 0,
+        thread_id: str = "",
     ) -> None:
         """暂存合并转发消息，启动超时定时器等待后续留言
 
@@ -690,6 +717,11 @@ class FeishuBot(ABC):
                 forwarded_text=forwarded_text,
                 message_id=message_id,
                 chat_type=chat_type,
+                sender_user_id=str(sender_user_id or "").strip(),
+                sender_open_id=str(sender_open_id or "").strip(),
+                sender_type=str(sender_type or "user").strip() or "user",
+                created_at=max(int(created_at or 0), 0),
+                thread_id=str(thread_id or "").strip(),
                 timer=timer,
             )
         timer.start()
@@ -711,11 +743,12 @@ class FeishuBot(ABC):
                 self._append_group_log_entry(
                     chat_id=chat_id,
                     message_id=pending.message_id,
-                    created_at=int(time.time() * 1000),
-                    sender_user_id=sender_id,
-                    sender_open_id="",
-                    sender_type="user",
+                    created_at=pending.created_at or int(time.time() * 1000),
+                    sender_user_id=pending.sender_user_id,
+                    sender_open_id=pending.sender_open_id,
+                    sender_type=pending.sender_type,
                     msg_type="merge_forward",
+                    thread_id=pending.thread_id,
                     text=f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>",
                 )
                 logger.info(
@@ -793,9 +826,8 @@ class FeishuBot(ABC):
             if not self._bot_open_id_error_logged:
                 logger.error(
                     "未配置 `system.yaml.bot_open_id`，群聊显式 mention 触发已严格失败。"
-                    "如需获取应填的 open_id，可私聊机器人发送 `/whoareyou`；"
-                    "若 `/whoareyou` 也拿不到，再检查 `application:application:self_manage` 权限"
-                    "以及 bot info API 是否可访问。"
+                    "如需自动写入，可私聊机器人执行 `/init <token>`；"
+                    "如需人工诊断，可先执行 `/whoareyou`。"
                 )
                 self._bot_open_id_error_logged = True
             return False
@@ -834,14 +866,6 @@ class FeishuBot(ABC):
         for mention in mentions:
             payloads.append(FeishuBot._mention_payload(mention))
         return payloads
-
-    def _is_self_app_sender(self, *, sender_type: str, open_id: str = "", user_id: str = "") -> bool:
-        if sender_type != "app":
-            return False
-        bot_open_id = self._configured_bot_open_id
-        if bot_open_id and open_id == bot_open_id:
-            return True
-        return False
 
     @staticmethod
     def _is_group_control_text(text: str) -> bool:
@@ -1449,7 +1473,18 @@ class FeishuBot(ABC):
                 return
             logger.info("合并转发提取完成，暂存等待留言: user=%s, message_id=%s, text=%s",
                         sender_id, message_id, text[:200])
-            self._buffer_forward(sender_id, chat_id, text, message_id, chat_type)
+            self._buffer_forward(
+                sender_id,
+                chat_id,
+                text,
+                message_id,
+                chat_type,
+                sender_user_id=sender_user_id,
+                sender_open_id=sender_open_id,
+                sender_type=sender_type,
+                created_at=message.create_time,
+                thread_id=thread_id,
+            )
             return
 
         # ---- 检查是否有待合并的转发消息 ----
@@ -1501,12 +1536,6 @@ class FeishuBot(ABC):
                 pending.message_id,
             )
 
-        is_self_app_sender = self._is_self_app_sender(
-            sender_type=sender_type,
-            open_id=sender_open_id,
-            user_id=sender_user_id,
-        )
-
         self._remember_message_context(
             message_id,
             {
@@ -1525,8 +1554,8 @@ class FeishuBot(ABC):
             },
         )
 
-        if chat_type == "group" and is_self_app_sender:
-            logger.debug("忽略机器人自身消息: chat=%s, message_id=%s", chat_id, message_id)
+        if chat_type == "group" and sender_type == "app":
+            logger.debug("忽略群聊机器人消息事件: chat=%s, message_id=%s", chat_id, message_id)
             return
 
         if chat_type == "group":
@@ -1535,7 +1564,6 @@ class FeishuBot(ABC):
             should_prepare_history = (
                 group_mode == self._GROUP_MODE_ASSISTANT
                 and bot_mentioned
-                and sender_type != "app"
                 and allowed_to_use
                 and not control_text
                 and self._group_history_fetch_enabled()
@@ -1560,9 +1588,6 @@ class FeishuBot(ABC):
                         text=log_text,
                     )
                 if not bot_mentioned:
-                    return
-                if sender_type == "app":
-                    logger.debug("忽略群聊机器人消息触发: chat=%s, message_id=%s", chat_id, message_id)
                     return
                 if not allowed_to_use:
                     self.reply(chat_id, self._group_acl_denied_text(), parent_message_id=message_id)
@@ -1612,9 +1637,6 @@ class FeishuBot(ABC):
                 logger.debug("忽略群聊非触发 mention 消息: chat=%s, user=%s", chat_id, sender_user_id)
                 return
 
-            if sender_type == "app":
-                logger.debug("忽略群聊机器人消息触发: chat=%s, message_id=%s", chat_id, message_id)
-                return
             if not allowed_to_use:
                 if bot_mentioned or text.startswith("/"):
                     self.reply(chat_id, self._group_acl_denied_text(), parent_message_id=message_id)
@@ -1798,33 +1820,70 @@ class FeishuBot(ABC):
             return False
         return True
 
-    def reply(self, chat_id: str, text: str, *, parent_message_id: str = "") -> None:
+    def _should_reply_in_thread(self, parent_message_id: str, explicit_reply_in_thread: bool) -> bool:
+        if explicit_reply_in_thread:
+            return True
+        context = self.get_message_context(parent_message_id)
+        return bool(str(context.get("thread_id", "") or "").strip())
+
+    def reply(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        parent_message_id: str = "",
+        reply_in_thread: bool = False,
+    ) -> None:
         """发送文本消息"""
         content = json.dumps({"text": text})
         normalized_parent_id = str(parent_message_id or "").strip()
         if normalized_parent_id:
-            self.reply_to_message(normalized_parent_id, "text", content)
+            self.reply_to_message(
+                normalized_parent_id,
+                "text",
+                content,
+                reply_in_thread=self._should_reply_in_thread(normalized_parent_id, reply_in_thread),
+            )
             return
         self.send_message(chat_id, "text", content)
 
-    def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "") -> None:
+    def reply_card(
+        self,
+        chat_id: str,
+        card: dict,
+        *,
+        parent_message_id: str = "",
+        reply_in_thread: bool = False,
+    ) -> None:
         """发送交互卡片消息"""
         content = json.dumps(card)
         normalized_parent_id = str(parent_message_id or "").strip()
         if normalized_parent_id:
-            self.reply_to_message(normalized_parent_id, "interactive", content)
+            self.reply_to_message(
+                normalized_parent_id,
+                "interactive",
+                content,
+                reply_in_thread=self._should_reply_in_thread(normalized_parent_id, reply_in_thread),
+            )
             return
         self.send_message(chat_id, "interactive", content)
 
     def reply_to_message(
-        self, parent_id: str, msg_type: str, content: str,
+        self,
+        parent_id: str,
+        msg_type: str,
+        content: str,
+        *,
+        reply_in_thread: bool = False,
     ) -> Optional[str]:
         """引用回复指定消息，返回新消息的 message_id，失败时返回 None"""
+        effective_reply_in_thread = self._should_reply_in_thread(parent_id, reply_in_thread)
         request = ReplyMessageRequest.builder() \
             .message_id(parent_id) \
             .request_body(ReplyMessageRequestBody.builder()
                 .msg_type(msg_type)
                 .content(content)
+                .reply_in_thread(effective_reply_in_thread)
                 .build()) \
             .build()
         try:

@@ -8,6 +8,7 @@ import atexit
 import json
 import logging
 import pathlib
+from secrets import compare_digest
 import threading
 import time
 from dataclasses import replace
@@ -42,7 +43,12 @@ from bot.cards import (
     build_sessions_card,
     build_thread_snapshot_card,
 )
-from bot.config import load_config_file
+from bot.config import (
+    ensure_init_token,
+    load_config_file,
+    load_system_config_raw,
+    save_system_config,
+)
 from bot.constants import (
     DEFAULT_APP_SERVER_MODE,
     DEFAULT_HISTORY_PREVIEW_ROUNDS,
@@ -692,10 +698,129 @@ class CodexHandler(BotHandler):
             return
         self.bot.reply_card(chat_id, card)
 
+    def _group_member_label(self, open_id: str) -> str:
+        normalized_open_id = str(open_id or "").strip()
+        if not normalized_open_id:
+            return "unknown"
+        display_name = self.bot.get_sender_display_name(open_id=normalized_open_id, sender_type="user")
+        normalized_name = str(display_name or "").strip()
+        if normalized_name and normalized_name not in {normalized_open_id, normalized_open_id[:8]}:
+            return normalized_name
+        return normalized_open_id
+
+    def _group_member_labels(self, open_ids: list[str] | set[str]) -> list[str]:
+        normalized_open_ids = sorted({str(item).strip() for item in open_ids if str(item).strip()})
+        return [self._group_member_label(open_id) for open_id in normalized_open_ids]
+
+    def _handle_init_command(
+        self,
+        user_id: str,
+        chat_id: str,
+        arg: str,
+        *,
+        message_id: str = "",
+    ) -> None:
+        context = self.bot.get_message_context(message_id) if message_id else {}
+        chat_type = str(context.get("chat_type", "") or "").strip()
+        if chat_type == "group":
+            self._reply_text(chat_id, "请私聊机器人执行 `/init <token>`。", message_id=message_id)
+            return
+        provided_token = str(arg or "").strip()
+        if not provided_token:
+            self._reply_text(
+                chat_id,
+                "用法：`/init <token>`\n`token` 默认保存在本机配置目录的 `init.token` 文件。",
+                message_id=message_id,
+            )
+            return
+        expected_token = ensure_init_token()
+        if not compare_digest(provided_token, expected_token):
+            self._reply_text(
+                chat_id,
+                "初始化口令错误。请检查本机配置目录中的 `init.token`。",
+                message_id=message_id,
+            )
+            return
+        sender_open_id = str(context.get("sender_open_id", "") or "").strip()
+        sender_type = str(context.get("sender_type", "user") or "user").strip()
+        if not sender_open_id:
+            self._reply_text(
+                chat_id,
+                "初始化失败：当前消息上下文里没有发送者 `open_id`，暂时无法写入管理员配置。",
+                message_id=message_id,
+            )
+            return
+        sender_name = self.bot.get_sender_display_name(
+            user_id=user_id,
+            open_id=sender_open_id,
+            sender_type=sender_type,
+        )
+        config = load_system_config_raw()
+        admin_open_ids = {
+            str(item).strip()
+            for item in config.get("admin_open_ids", [])
+            if isinstance(item, str) and str(item).strip()
+        }
+        admin_open_ids.update(self.bot.list_admin_open_ids())
+        admin_added = sender_open_id not in admin_open_ids
+        admin_open_ids.add(sender_open_id)
+        configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
+        identity = self.bot.get_bot_identity()
+        discovered_bot_open_id = str(
+            identity.get("discovered_open_id", "") or identity.get("open_id", "") or ""
+        ).strip()
+        bot_open_id_written = False
+        if discovered_bot_open_id and discovered_bot_open_id != configured_bot_open_id:
+            configured_bot_open_id = discovered_bot_open_id
+            bot_open_id_written = True
+
+        updated_config = dict(config)
+        updated_config["admin_open_ids"] = sorted(admin_open_ids)
+        if configured_bot_open_id:
+            updated_config["bot_open_id"] = configured_bot_open_id
+
+        try:
+            save_system_config(updated_config)
+        except Exception as exc:
+            logger.exception("保存初始化配置失败")
+            self._reply_text(chat_id, f"初始化失败：保存配置时出错：{exc}", message_id=message_id)
+            return
+
+        self.bot.add_admin_open_id(sender_open_id)
+        if configured_bot_open_id:
+            self.bot.set_configured_bot_open_id(configured_bot_open_id)
+
+        lines = [
+            "初始化结果：",
+            (
+                f"- admin_open_ids：已加入 `{sender_name}`"
+                if admin_added
+                else f"- admin_open_ids：`{sender_name}` 已在管理员列表中"
+            ),
+        ]
+        if configured_bot_open_id:
+            lines.append(
+                f"- bot_open_id：`{configured_bot_open_id}`"
+                + ("（本次已写入）" if bot_open_id_written else "（保持不变）")
+            )
+        else:
+            lines.extend(
+                [
+                    "- bot_open_id：未写入",
+                    "- 请检查 `application:application:self_manage` 权限后重试 `/init <token>`，或手动填写 `system.yaml.bot_open_id`。",
+                ]
+            )
+        lines.append("- 当前命令只会更新管理员和 bot open id，不会改动 `trigger_open_ids`。")
+        self._reply_text(chat_id, "\n".join(lines), message_id=message_id)
+
     def _handle_command(self, user_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
         command, _, arg = text.partition(" ")
         arg = arg.strip()
         cmd = command.lower()
+
+        if cmd == "/init":
+            self._handle_init_command(user_id, chat_id, arg, message_id=message_id)
+            return
 
         if not self._ensure_group_command_admin(user_id, chat_id, message_id):
             return
@@ -1041,9 +1166,9 @@ class CodexHandler(BotHandler):
                     "",
                     "建议：",
                     (
-                        f"- 把 `{candidate_open_id}` 写进 `system.yaml.bot_open_id`"
+                        f"- 直接执行 `/init <token>` 自动写入，或手动把 `{candidate_open_id}` 写进 `system.yaml.bot_open_id`"
                         if candidate_open_id
-                        else "- 先让 `/whoareyou` 成功拿到机器人 open_id，再写进 `system.yaml.bot_open_id`"
+                        else "- 先让 `/init <token>` 或 `/whoareyou` 成功拿到机器人 open_id，再写进 `system.yaml.bot_open_id`"
                     ),
                     "- 如需让“别人 @你本人时由机器人代答”，再把对应人的 open_id 写进 `system.yaml.trigger_open_ids`",
                     "- 如果 `discovered open_id` 为空，检查 `application:application:self_manage` 权限",
@@ -1419,7 +1544,7 @@ class CodexHandler(BotHandler):
         snapshot = self.bot.get_group_acl_snapshot(chat_id)
         return build_group_acl_card(
             snapshot["access_policy"],
-            allowlist_members=list(snapshot["allowlist"]),
+            allowlist_members=self._group_member_labels(snapshot["allowlist"]),
             viewer_allowed=self.bot.is_group_user_allowed(chat_id, user_id, open_id),
             can_manage=self.bot.is_group_admin(user_id, open_id),
         )
@@ -1509,9 +1634,10 @@ class CodexHandler(BotHandler):
                 self._reply_text(chat_id, "用法：`/acl grant @成员` 或 `/acl grant <open_id>`", message_id=message_id)
                 return
             updated = self.bot.grant_group_members(chat_id, targets)
+            labels = self._group_member_labels(targets)
             self._reply_text(
                 chat_id,
-                f"已授权 {len(targets)} 人，当前 allowlist 共 {len(updated)} 人。",
+                f"已授权：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。",
                 message_id=message_id,
             )
             return
@@ -1525,9 +1651,10 @@ class CodexHandler(BotHandler):
                 self._reply_text(chat_id, "用法：`/acl revoke @成员` 或 `/acl revoke <open_id>`", message_id=message_id)
                 return
             updated = self.bot.revoke_group_members(chat_id, targets)
+            labels = self._group_member_labels(targets)
             self._reply_text(
                 chat_id,
-                f"已撤销 {len(targets)} 人，当前 allowlist 共 {len(updated)} 人。",
+                f"已撤销：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。",
                 message_id=message_id,
             )
             return
@@ -2779,6 +2906,7 @@ class CodexHandler(BotHandler):
             "- `/resume <thread_id|thread_name>` 恢复指定线程\n"
             "- `/cd <path>` 切换目录并清空当前线程绑定\n"
             "- `/status` 查看当前状态\n\n"
+            "- `/init <token>`：私聊初始化管理员和 `bot_open_id`\n"
             "- `/whoami`：私聊查看自己的 `user_id` / `open_id`\n"
             "- `/whoareyou`：查看机器人自己的 `app_id` / `open_id`\n\n"
             "**更多命令与帮助**\n"
@@ -2807,11 +2935,13 @@ class CodexHandler(BotHandler):
         return (
             "**设置相关**\n"
             "- `/profile` 查看或切换默认 profile；它影响 feishu-codex 与新的默认 `fcodex` 启动，不热切换已打开的 `fcodex` TUI。\n"
+            "- `/init <token>` 仅私聊可用；会把当前发送者加入 `admin_open_ids`，并尽量自动写入 `bot_open_id`。\n"
             "- 推荐先用 `/permissions`；它会同时设置审批策略和沙箱，只影响当前飞书会话的后续 turn。\n"
             "- `/approval` 只改审批时机；`/sandbox` 只改文件与网络边界。\n"
             "- `/mode` 切换协作方式；`plan` 更容易先规划或提问，`default` 更接近直接执行；也只影响当前飞书会话的后续 turn。\n"
             "- 如果当前正在执行，新设置从下一轮生效。\n\n"
             "**命令**\n"
+            "- `/init <token>`\n"
             "- `/profile [name]`\n"
             "- `/permissions [read-only|default|full-access]`\n"
             "- `/approval [untrusted|on-failure|on-request|never]`\n"

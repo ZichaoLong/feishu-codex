@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from bot.config import load_config
+from bot.config import ensure_init_token, load_config
 from bot.standalone import CodexBot
 
 
@@ -33,6 +33,8 @@ def main() -> None:
             raise ValueError(f"{system_path} 中 app_id 和 app_secret 不能为空")
     else:
         cfg = load_config()
+
+    ensure_init_token()
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 

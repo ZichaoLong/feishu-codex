@@ -696,7 +696,7 @@ def build_group_acl_card(
         "说明：ACL 只决定谁有资格；是否需要显式 mention 仍取决于群聊工作态。"
     )
     if allowlist_members:
-        shown_members = "\n".join(f"- `{member}`" for member in allowlist_members[:20])
+        shown_members = "\n".join(f"- {member}" for member in allowlist_members[:20])
         if len(allowlist_members) > 20:
             shown_members += f"\n- 其余 {len(allowlist_members) - 20} 人未展开"
         content += f"\n\n**当前 allowlist 成员**\n{shown_members}"

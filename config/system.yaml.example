@@ -8,11 +8,16 @@ app_secret: "your_cc_bot_app_secret"
 # 所有群里的 `/` 命令（包括 `/groupmode`、`/acl`、`/new`、`/session` 等）。
 # 若群工作态是 `assistant` 或 `mention-only`，他们仍需先显式 mention
 # 触发对象，才会触发对话或群命令。
+# 也可在服务启动后，私聊机器人执行 `/init <token>` 自动写入。
 # admin_open_ids:
 #   - "ou_xxx 这样的 open_id；可先私聊机器人发送 /whoami 获取"
 
-# 机器人自身的 open_id。群聊能力依赖它做严格 mention 判定；群聊使用时应显式配置。
+# 机器人自身的 open_id。群聊能力依赖它做严格 mention 判定。
+# 若已开通 `application:application:self_manage`，也可通过 `/init <token>` 自动写入。
 # bot_open_id: "ou_xxx"
+
+# 初始化口令不放在 YAML 里；`install.sh` 会在配置目录生成单独的 `init.token` 文件。
+# 首次私聊机器人时，可执行 `/init <token>` 完成管理员和 `bot_open_id` 初始化。
 
 # 额外的群聊触发 open_id 列表。若群消息 @到了这些 open_id，也会被视为
 # 一次有效触发。常见场景：别人 @你本人，由机器人代答。

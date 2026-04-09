@@ -28,6 +28,7 @@ class _RecordingBot(FeishuBot):
         self.card_parents: list[tuple[str, dict, str]] = []
         self.sent_messages: list[tuple[str, str, str]] = []
         self.patches: list[tuple[str, str]] = []
+        self.reply_ref_thread_flags: list[bool] = []
         self.history_entries: list[dict] = []
         self.history_fetch_calls: list[dict] = []
         self.history_fetch_error: Exception | None = None
@@ -38,12 +39,12 @@ class _RecordingBot(FeishuBot):
     def on_card_action(self, user_id: str, chat_id: str, message_id: str, action_value: dict):
         return self.make_card_response()
 
-    def reply(self, chat_id: str, text: str, *, parent_message_id: str = "") -> None:
+    def reply(self, chat_id: str, text: str, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
         self.replies.append((chat_id, text))
         if parent_message_id:
             self.reply_parents.append((chat_id, text, parent_message_id))
 
-    def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "") -> None:
+    def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
         self.cards.append((chat_id, card))
         if parent_message_id:
             self.card_parents.append((chat_id, card, parent_message_id))
@@ -52,8 +53,9 @@ class _RecordingBot(FeishuBot):
         self.sent_messages.append((chat_id, msg_type, content))
         return "bootstrap-card-2"
 
-    def reply_to_message(self, parent_id: str, msg_type: str, content: str) -> str:
+    def reply_to_message(self, parent_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> str:
         self.reply_refs.append((parent_id, msg_type, content))
+        self.reply_ref_thread_flags.append(reply_in_thread)
         return "bootstrap-card-1"
 
     def patch_message(self, message_id: str, content: str) -> bool:
@@ -697,6 +699,90 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(bot.reply_refs[-1][0], "m-1")
         card = json.loads(bot.reply_refs[-1][2])
         self.assertTrue(card["config"]["update_multi"])
+
+    def test_group_reply_to_thread_message_sets_reply_in_thread(self) -> None:
+        bot = self._make_bot()
+        bot._remember_message_context("m-thread", {"thread_id": "th-1"})
+        captured: list = []
+
+        class _Response:
+            @staticmethod
+            def success() -> bool:
+                return True
+
+            data = SimpleNamespace(message_id="reply-1")
+
+        def fake_reply(request):
+            captured.append(request)
+            return _Response()
+
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=SimpleNamespace(reply=fake_reply),
+                )
+            )
+        )
+
+        reply_id = FeishuBot.reply_to_message(bot, "m-thread", "text", json.dumps({"text": "hi"}))
+
+        self.assertEqual(reply_id, "reply-1")
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(captured[0].request_body.reply_in_thread)
+
+    def test_assistant_mode_ignores_group_app_events_before_logging(self) -> None:
+        bot = self._make_bot(system_config={"bot_open_id": ""})
+        bot.set_group_mode("chat-1", "assistant")
+        bot.set_group_access_policy("chat-1", "all-members")
+
+        bot._handle_raw_message(
+            _message_event(
+                message_id="m-app",
+                chat_id="chat-1",
+                text="@_user_1 机器人自己的消息",
+                sender_user_id="",
+                sender_open_id="ou-bot",
+                sender_type="app",
+                mentions=[
+                    {
+                        "key": "@_user_1",
+                        "id": {"open_id": "ou-bot"},
+                        "name": "Codex",
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(bot.received_messages, [])
+        self.assertEqual(bot._group_store.read_messages_between("chat-1"), [])
+
+    def test_forward_timeout_keeps_thread_scope(self) -> None:
+        bot = self._make_bot()
+        bot.set_group_mode("chat-1", "assistant")
+
+        bot._buffer_forward(
+            "u-user",
+            "chat-1",
+            "历史转发",
+            "m-forward",
+            "group",
+            sender_user_id="u-user",
+            sender_open_id="ou-user",
+            sender_type="user",
+            created_at=1712476800000,
+            thread_id="th-1",
+        )
+        with bot._pending_forwards_lock:
+            pending = bot._pending_forwards[("u-user", "chat-1")]
+            pending.timer.cancel()
+        bot._on_forward_timeout("u-user", "chat-1")
+
+        main_entries = bot._group_store.read_messages_between("chat-1", scope="main")
+        thread_entries = bot._group_store.read_messages_between("chat-1", scope="thread:th-1")
+        self.assertEqual(main_entries, [])
+        self.assertEqual(len(thread_entries), 1)
+        self.assertIn("历史转发", thread_entries[0]["text"])
+        self.assertEqual(thread_entries[0]["created_at"], 1712476800000)
 
     def test_group_mention_can_use_configured_bot_open_id(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": "ou-configured"})
