@@ -11,7 +11,7 @@ from bot.feishu_bot import FeishuBot
 
 class _RecordingBot(FeishuBot):
     def __init__(self, data_dir: pathlib.Path, *, system_config: dict | None = None) -> None:
-        config = {"admin_user_ids": ["u-admin"]}
+        config = {"admin_open_ids": ["ou-admin"]}
         if system_config:
             config.update(system_config)
         super().__init__(

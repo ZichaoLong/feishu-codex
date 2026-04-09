@@ -70,13 +70,13 @@
 app_id: "..."
 app_secret: "..."
 # request_timeout_seconds: 10
-# admin_user_ids:
-#   - "u_admin_1"
+# admin_open_ids:
+#   - "ou_admin_1"
 # group_history_fetch_limit: 50
 # group_history_fetch_lookback_seconds: 86400
 ```
 
-建议至少配置一个群聊管理员。管理员始终属于群里的已授权人类成员，并可通过 `/groupmode`、`/acl` 管理群聊。若群工作态是 `assistant` 或 `mention-only`，管理员也仍需先 `@机器人` 才会触发对话或群命令。管理员配置建议只使用 `user_id`；可先私聊机器人发送 `/whoami` 获取。
+建议至少配置一个群聊管理员。管理员始终属于群里的已授权人类成员，并可通过 `/groupmode`、`/acl` 管理群聊。若群工作态是 `assistant` 或 `mention-only`，管理员也仍需先 `@机器人` 才会触发对话或群命令。管理员配置与群 ACL 统一使用 `open_id`；可先私聊机器人发送 `/whoami` 获取。
 
 如果你使用群聊 `assistant` 模式，还可以调整每次有效 `@机器人` 时的历史回捞窗口：
 
@@ -253,7 +253,7 @@ ACL 策略：
 
 典型用法：
 
-1. 在 `system.yaml` 里配置 `admin_user_ids`
+1. 在 `system.yaml` 里配置 `admin_open_ids`
 2. 把机器人拉进群
 3. 管理员在群里执行 `@机器人 /groupmode assistant`
 4. 如需放开人类成员使用范围，再执行 `@机器人 /acl policy allowlist` 或 `@机器人 /acl policy all-members`

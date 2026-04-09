@@ -14,7 +14,7 @@
 
 ## 2. 测试角色
 
-- `Admin`：已写入 `system.yaml.admin_user_ids` 的管理员
+- `Admin`：已写入 `system.yaml.admin_open_ids` 的管理员
 - `MemberA`：普通成员，初始未授权
 - `MemberB`：普通成员，后续用于 `allowlist`
 - `OtherBot`：可选；用于验证“其他机器人消息只能通过历史回捞进入上下文”
@@ -27,14 +27,14 @@
    `im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`、`application:application:self_manage`
 3. 确认事件与回调已启用：
    `im.message.receive_v1`、`card.action.trigger`
-4. 让 `Admin` 私聊机器人执行 `/whoami`，确认已把正确的 `user_id` 写入 `system.yaml.admin_user_ids`
+4. 让 `Admin` 私聊机器人执行 `/whoami`，确认已把正确的 `open_id` 写入 `system.yaml.admin_open_ids`
 5. 准备一个新群，拉入 `Admin`、`MemberA`、`MemberB`、`feishu-codex` 机器人
 6. 如需验证其他机器人历史消息路径，再把 `OtherBot` 拉入群
 7. 如需验证历史回捞，请确认飞书侧已开启“群消息历史可见”或等价配置
 
 ## 4. 私聊基础检查
 
-1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`user_id`、`open_id`。
+1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`user_id`、`open_id`，并提示管理员配置使用 `open_id`。
 2. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/groupmode`、`/acl`，且不再提已废弃的旧群聊命令。
 3. `MemberA` 私聊发送普通文本。预期：仍可正常使用私聊，不受群 ACL 影响。
 

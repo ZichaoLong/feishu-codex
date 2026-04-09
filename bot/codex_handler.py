@@ -660,7 +660,7 @@ class CodexHandler(BotHandler):
                     f"- user_id: `{user_id or '（空）'}`",
                     f"- open_id: `{sender_open_id or '（空）'}`",
                     "",
-                    "配置管理员时，优先把 `user_id` 写进 `system.yaml` 的 `admin_user_ids`。",
+                    "配置管理员时，把 `open_id` 写进 `system.yaml` 的 `admin_open_ids`。",
                 ]
             ),
         )
@@ -1032,11 +1032,11 @@ class CodexHandler(BotHandler):
         }
         self.bot.reply(chat_id, f"已切换群聊工作态：`{labels[mode]}`")
 
-    def _acl_target_user_ids(self, message_id: str, raw_arg: str) -> list[str]:
+    def _acl_target_open_ids(self, message_id: str, raw_arg: str) -> list[str]:
         targets = {
-            item["user_id"]
+            item["open_id"]
             for item in self.bot.extract_non_bot_mentions(message_id)
-            if item.get("user_id")
+            if item.get("open_id")
         }
         for token in str(raw_arg or "").replace(",", " ").split():
             token = token.strip()
@@ -1080,9 +1080,9 @@ class CodexHandler(BotHandler):
             if not is_admin:
                 self.bot.reply(chat_id, "仅管理员可授权成员。")
                 return
-            targets = self._acl_target_user_ids(message_id, payload)
+            targets = self._acl_target_open_ids(message_id, payload)
             if not targets:
-                self.bot.reply(chat_id, "用法：`/acl grant @成员` 或 `/acl grant <user_id>`")
+                self.bot.reply(chat_id, "用法：`/acl grant @成员` 或 `/acl grant <open_id>`")
                 return
             updated = self.bot.grant_group_members(chat_id, targets)
             self.bot.reply(chat_id, f"已授权 {len(targets)} 人，当前 allowlist 共 {len(updated)} 人。")
@@ -1092,9 +1092,9 @@ class CodexHandler(BotHandler):
             if not is_admin:
                 self.bot.reply(chat_id, "仅管理员可撤销成员授权。")
                 return
-            targets = self._acl_target_user_ids(message_id, payload)
+            targets = self._acl_target_open_ids(message_id, payload)
             if not targets:
-                self.bot.reply(chat_id, "用法：`/acl revoke @成员` 或 `/acl revoke <user_id>`")
+                self.bot.reply(chat_id, "用法：`/acl revoke @成员` 或 `/acl revoke <open_id>`")
                 return
             updated = self.bot.revoke_group_members(chat_id, targets)
             self.bot.reply(chat_id, f"已撤销 {len(targets)} 人，当前 allowlist 共 {len(updated)} 人。")

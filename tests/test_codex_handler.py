@@ -147,7 +147,7 @@ class _FakeBot:
         self.chat_types: dict[str, str] = {}
         self.fetched_chat_types: dict[str, str] = {}
         self.reserved_execution_cards: dict[str, str] = {}
-        self.admin_user_ids = {"u1"}
+        self.admin_open_ids = {"ou_admin"}
 
     def reply(self, chat_id: str, text: str) -> None:
         self.replies.append((chat_id, text))
@@ -192,7 +192,7 @@ class _FakeBot:
         return "unknown"
 
     def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
-        return user_id in self.admin_user_ids
+        return open_id in self.admin_open_ids
 
     def get_group_mode(self, chat_id: str) -> str:
         return self.group_modes.get(chat_id, "assistant")
@@ -247,7 +247,7 @@ class _FakeBot:
         if acl["access_policy"] == "all-members":
             return True
         if acl["access_policy"] == "allowlist":
-            return user_id in set(acl["allowlist"])
+            return open_id in set(acl["allowlist"])
         return False
 
     def extract_non_bot_mentions(self, message_id: str) -> list[dict[str, str]]:
@@ -396,7 +396,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("name: `User`", reply)
         self.assertIn("user_id: `u2`", reply)
         self.assertIn("open_id: `ou_user`", reply)
-        self.assertIn("admin_user_ids", reply)
+        self.assertIn("admin_open_ids", reply)
 
     def test_whoami_command_in_group_requires_p2p(self) -> None:
         handler, bot = self._make_handler()
@@ -498,7 +498,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("u1", "chat-group", "/acl grant", message_id="m-grant")
 
         snapshot = bot.get_group_acl_snapshot("chat-group")
-        self.assertEqual(snapshot["allowlist"], ["u2"])
+        self.assertEqual(snapshot["allowlist"], ["ou_user2"])
         self.assertIn("已授权 1 人", bot.replies[-1][1])
 
     def test_group_command_accepts_group_chat_after_api_type_lookup(self) -> None:

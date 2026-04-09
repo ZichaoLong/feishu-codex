@@ -156,7 +156,7 @@ shared backend 与 wrapper 的具体机制，见
 
 - 新群默认工作态是 `assistant`
 - 新群默认 ACL 是 `admin-only`
-- 群聊管理员来自 `system.yaml.admin_user_ids`
+- 群聊管理员来自 `system.yaml.admin_open_ids`
 
 #### 人类成员权限
 

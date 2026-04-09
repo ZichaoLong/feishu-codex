@@ -175,7 +175,7 @@ The following behaviors are part of the current implementation contract:
 
 - new groups default to `assistant`
 - new groups default to `admin-only`
-- group administrators come from `system.yaml.admin_user_ids`
+- group administrators come from `system.yaml.admin_open_ids`
 
 #### Human-member access
 

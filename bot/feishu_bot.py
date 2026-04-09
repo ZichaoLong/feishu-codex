@@ -194,9 +194,9 @@ class FeishuBot(ABC):
         self._sender_name_cache: dict[str, tuple[float, str]] = {}
         self._sender_name_cache_lock = threading.Lock()
         config = system_config or {}
-        self._admin_user_ids = {
+        self._admin_open_ids = {
             str(item).strip()
-            for item in config.get("admin_user_ids", [])
+            for item in config.get("admin_open_ids", [])
             if isinstance(item, str) and str(item).strip()
         }
         self._group_history_fetch_limit = _non_negative_int(
@@ -270,7 +270,7 @@ class FeishuBot(ABC):
         return self._group_store.revoke_members(chat_id, user_ids)
 
     def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
-        return bool(user_id and user_id in self._admin_user_ids)
+        return bool(open_id and open_id in self._admin_open_ids)
 
     def is_group_admin(self, user_id: str = "", open_id: str = "") -> bool:
         return self.is_admin(user_id, open_id)
@@ -283,7 +283,7 @@ class FeishuBot(ABC):
         if policy == "all-members":
             return True
         if policy == "allowlist":
-            return bool(user_id and user_id in set(snapshot["allowlist"]))
+            return bool(open_id and open_id in set(snapshot["allowlist"]))
         return False
 
     def get_message_context(self, message_id: str) -> dict[str, Any]:
@@ -379,13 +379,12 @@ class FeishuBot(ABC):
             open_id = str(mention.get("open_id", "")).strip()
             if open_id and self._bot_open_id and open_id == self._bot_open_id:
                 continue
-            user_id = str(mention.get("user_id", "")).strip()
-            if not user_id:
+            if not open_id:
                 continue
             members.append(
                 {
-                    "user_id": user_id,
                     "open_id": open_id,
+                    "user_id": str(mention.get("user_id", "")).strip(),
                     "name": str(mention.get("name", "")).strip(),
                 }
             )
