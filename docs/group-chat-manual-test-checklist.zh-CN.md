@@ -38,7 +38,7 @@
 
 ## 4. 私聊基础检查
 
-1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`user_id`、`open_id`，并提示管理员配置使用 `open_id`。
+1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`user_id`、`open_id`，并提示管理员配置使用 `open_id`；其中 `user_id` 仅用于排障。
 2. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/groupmode`、`/acl`，且不再提已废弃的旧群聊命令。
 3. `MemberA` 私聊发送普通文本。预期：仍可正常使用私聊，不受群 ACL 影响。
 

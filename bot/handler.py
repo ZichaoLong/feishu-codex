@@ -49,13 +49,13 @@ class BotHandler(ABC):
     # ---- 消息处理（子类实现） ----
 
     @abstractmethod
-    def handle_message(self, user_id: str, chat_id: str, text: str,
+    def handle_message(self, sender_id: str, chat_id: str, text: str,
                        message_id: str = "") -> None:
         """处理路由过来的文本消息"""
         ...
 
     def handle_card_action(
-        self, user_id: str, chat_id: str, message_id: str, action_value: dict
+        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> "P2CardActionTriggerResponse":
         """处理卡片按钮点击，默认无操作，有卡片交互的子类需覆写"""
         from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -64,7 +64,7 @@ class BotHandler(ABC):
         return P2CardActionTriggerResponse()
 
     def handle_file_message(
-        self, user_id: str, chat_id: str, message_id: str,
+        self, sender_id: str, chat_id: str, message_id: str,
         file_key: str, file_name: str
     ) -> None:
         """处理文件消息，默认忽略，需要处理文件的子类覆写此方法"""
@@ -72,10 +72,10 @@ class BotHandler(ABC):
 
     # ---- 会话状态 ----
 
-    def is_user_active(self, user_id: str, chat_id: str = "") -> bool:
-        """用户是否在本处理器的活跃会话中，默认 False（无状态子类）"""
+    def is_sender_active(self, sender_id: str, chat_id: str = "") -> bool:
+        """发送者是否在本处理器的活跃会话中，默认 False（无状态子类）"""
         return False
 
-    def deactivate_user(self, user_id: str, chat_id: str = "") -> None:
-        """清理用户会话状态，默认无操作"""
+    def deactivate_sender(self, sender_id: str, chat_id: str = "") -> None:
+        """清理发送者会话状态，默认无操作"""
         pass

@@ -170,7 +170,8 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared
 
 ### 8.2 当前 UX 限制
 
-当前实现对每个 `thread_id` 只维护一个主要的 `(user_id, chat_id)` 通知绑定。
+当前实现对每个 `thread_id` 只维护一个主要的通知绑定。
+私聊场景下，这个绑定等价于 `(sender_id, chat_id)`；群聊场景下，则是群共享 state key 与 `chat_id`。
 
 这意味着：
 

@@ -193,8 +193,9 @@ divergence that exists between Feishu and bare TUI.
 
 ### 8.2 Current UX limitation
 
-Current implementation keeps one primary `(user_id, chat_id)` notification
-binding per `thread_id`.
+Current implementation keeps one primary notification binding per `thread_id`.
+In p2p chats that binding is effectively `(sender_id, chat_id)`; in group chats
+it is the shared group-state key plus `chat_id`.
 
 Implication:
 

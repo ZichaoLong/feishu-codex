@@ -36,7 +36,7 @@ class _RecordingBot(FeishuBot):
     def on_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
         self.received_messages.append((sender_id, chat_id, text, message_id))
 
-    def on_card_action(self, user_id: str, chat_id: str, message_id: str, action_value: dict):
+    def on_card_action(self, sender_id: str, chat_id: str, message_id: str, action_value: dict):
         return self.make_card_response()
 
     def reply(self, chat_id: str, text: str, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
@@ -869,7 +869,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(
             bot.extract_non_bot_mentions("m-1"),
-            [{"open_id": "ou-target", "user_id": "u-target", "name": "Alice"}],
+            [{"open_id": "ou-target", "name": "Alice"}],
         )
 
     def test_group_normalization_keeps_non_trigger_mentions(self) -> None:

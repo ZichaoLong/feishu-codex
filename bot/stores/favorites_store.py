@@ -9,7 +9,7 @@ import threading
 
 
 class FavoritesStore:
-    """管理 per-user 收藏线程列表。"""
+    """管理按 open_id 归属的收藏线程列表。"""
 
     def __init__(self, data_dir: pathlib.Path):
         self._data_dir = data_dir
@@ -18,20 +18,20 @@ class FavoritesStore:
     def _file_path(self) -> pathlib.Path:
         return self._data_dir / "favorites.json"
 
-    def load_user_favorites(self, user_id: str) -> set[str]:
+    def load_favorites(self, open_id: str) -> set[str]:
         with self._lock:
             data = self._read_all()
-        items = data.get(user_id, [])
+        items = data.get(open_id, [])
         return {item for item in items if isinstance(item, str) and item}
 
-    def is_starred(self, user_id: str, thread_id: str) -> bool:
-        return thread_id in self.load_user_favorites(user_id)
+    def is_starred(self, open_id: str, thread_id: str) -> bool:
+        return thread_id in self.load_favorites(open_id)
 
-    def toggle(self, user_id: str, thread_id: str) -> bool:
+    def toggle(self, open_id: str, thread_id: str) -> bool:
         with self._lock:
             data = self._read_all()
             favorites = {
-                item for item in data.get(user_id, [])
+                item for item in data.get(open_id, [])
                 if isinstance(item, str) and item
             }
             if thread_id in favorites:
@@ -40,21 +40,21 @@ class FavoritesStore:
             else:
                 favorites.add(thread_id)
                 starred = True
-            data[user_id] = sorted(favorites)
+            data[open_id] = sorted(favorites)
             self._write_all(data)
         return starred
 
-    def remove(self, user_id: str, thread_id: str) -> bool:
+    def remove(self, open_id: str, thread_id: str) -> bool:
         with self._lock:
             data = self._read_all()
             favorites = {
-                item for item in data.get(user_id, [])
+                item for item in data.get(open_id, [])
                 if isinstance(item, str) and item
             }
             if thread_id not in favorites:
                 return False
             favorites.remove(thread_id)
-            data[user_id] = sorted(favorites)
+            data[open_id] = sorted(favorites)
             self._write_all(data)
         return True
 
@@ -62,9 +62,9 @@ class FavoritesStore:
         with self._lock:
             data = self._read_all()
             changed = False
-            for user_id in list(data):
+            for open_id in list(data):
                 favorites = {
-                    item for item in data.get(user_id, [])
+                    item for item in data.get(open_id, [])
                     if isinstance(item, str) and item
                 }
                 if thread_id not in favorites:
@@ -72,9 +72,9 @@ class FavoritesStore:
                 favorites.remove(thread_id)
                 changed = True
                 if favorites:
-                    data[user_id] = sorted(favorites)
+                    data[open_id] = sorted(favorites)
                 else:
-                    data.pop(user_id, None)
+                    data.pop(open_id, None)
             if changed:
                 self._write_all(data)
         return changed
@@ -90,10 +90,10 @@ class FavoritesStore:
         if not isinstance(raw, dict):
             return {}
         normalized: dict[str, list[str]] = {}
-        for user_id, items in raw.items():
-            if not isinstance(user_id, str) or not isinstance(items, list):
+        for open_id, items in raw.items():
+            if not isinstance(open_id, str) or not isinstance(items, list):
                 continue
-            normalized[user_id] = [item for item in items if isinstance(item, str) and item]
+            normalized[open_id] = [item for item in items if isinstance(item, str) and item]
         return normalized
 
     def _write_all(self, data: dict[str, list[str]]) -> None:

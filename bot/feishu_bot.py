@@ -279,7 +279,7 @@ class FeishuBot(ABC):
     def revoke_group_members(self, chat_id: str, user_ids: list[str] | set[str]) -> list[str]:
         return self._group_store.revoke_members(chat_id, user_ids)
 
-    def is_admin(self, user_id: str = "", open_id: str = "") -> bool:
+    def is_admin(self, *, open_id: str = "") -> bool:
         return bool(open_id and open_id in self._admin_open_ids)
 
     def add_admin_open_id(self, open_id: str) -> list[str]:
@@ -298,11 +298,11 @@ class FeishuBot(ABC):
             self._bot_open_id_error_logged = False
         return normalized_open_id
 
-    def is_group_admin(self, user_id: str = "", open_id: str = "") -> bool:
-        return self.is_admin(user_id, open_id)
+    def is_group_admin(self, *, open_id: str = "") -> bool:
+        return self.is_admin(open_id=open_id)
 
-    def is_group_user_allowed(self, chat_id: str, user_id: str = "", open_id: str = "") -> bool:
-        if self.is_admin(user_id, open_id):
+    def is_group_user_allowed(self, chat_id: str, *, open_id: str = "") -> bool:
+        if self.is_admin(open_id=open_id):
             return True
         snapshot = self._group_store.group_snapshot(chat_id)
         policy = snapshot["access_policy"]
@@ -415,7 +415,6 @@ class FeishuBot(ABC):
             members.append(
                 {
                     "open_id": open_id,
-                    "user_id": str(mention.get("user_id", "")).strip(),
                     "name": str(mention.get("name", "")).strip(),
                 }
             )
@@ -571,33 +570,27 @@ class FeishuBot(ABC):
             key = str(mention.get("key", "") or "").strip()
             name = str(mention.get("name", "") or "").strip()
             direct_open_id = str(mention.get("open_id", "") or "").strip()
-            direct_user_id = str(mention.get("user_id", "") or "").strip()
             mention_id = mention.get("id")
         else:
             key = str(getattr(mention, "key", "") or "").strip()
             name = str(getattr(mention, "name", "") or "").strip()
             direct_open_id = str(getattr(mention, "open_id", "") or "").strip()
-            direct_user_id = str(getattr(mention, "user_id", "") or "").strip()
             mention_id = getattr(mention, "id", None)
 
         open_id = ""
-        user_id = ""
         if isinstance(mention_id, dict):
             open_id = str(mention_id.get("open_id", "") or mention_id.get("id", "") or "").strip()
-            user_id = str(mention_id.get("user_id", "") or "").strip()
         elif isinstance(mention_id, str):
             open_id = mention_id.strip()
         elif mention_id is not None:
             open_id = str(
                 getattr(mention_id, "open_id", "") or getattr(mention_id, "id", "") or ""
             ).strip()
-            user_id = str(getattr(mention_id, "user_id", "") or "").strip()
 
         return {
             "key": key,
             "name": name,
             "open_id": direct_open_id or open_id,
-            "user_id": direct_user_id or user_id,
         }
 
     def _configured_group_trigger_open_ids(self) -> set[str]:
@@ -616,7 +609,6 @@ class FeishuBot(ABC):
             mention_name = str(
                 payload["name"]
                 or mention_open_id[:8]
-                or payload["user_id"][:8]
             ).strip()
             if not key:
                 continue
@@ -634,10 +626,6 @@ class FeishuBot(ABC):
             str(getattr(sender_id, "user_id", "") or "").strip(),
             str(getattr(sender_id, "open_id", "") or "").strip(),
         )
-
-    @staticmethod
-    def _effective_sender_id(user_id: str = "", open_id: str = "") -> str:
-        return str(user_id or "").strip() or str(open_id or "").strip()
 
     def _cache_sender_name(self, *keys: str, value: str) -> None:
         normalized_value = str(value or "").strip()
@@ -1440,7 +1428,7 @@ class FeishuBot(ABC):
         sender = data.event.sender
         sender_type = getattr(sender, "sender_type", "") or "user"
         sender_user_id, sender_open_id = self._sender_ids(getattr(sender, "sender_id", None))
-        sender_id = self._effective_sender_id(sender_user_id, sender_open_id)
+        sender_id = str(sender_open_id or "").strip()
         chat_id = message.chat_id
         message_id = message.message_id
         msg_type = message.message_type
@@ -1563,7 +1551,7 @@ class FeishuBot(ABC):
 
         if chat_type == "group":
             control_text = self._is_group_control_text(text)
-            allowed_to_use = self.is_group_user_allowed(chat_id, sender_user_id, sender_open_id)
+            allowed_to_use = self.is_group_user_allowed(chat_id, open_id=sender_open_id)
             should_prepare_history = (
                 group_mode == self._GROUP_MODE_ASSISTANT
                 and bot_mentioned
@@ -1681,7 +1669,7 @@ class FeishuBot(ABC):
             if data.event.action.form_value:
                 action_value["_form_value"] = data.event.action.form_value
             logger.info("卡片点击: user=%s, action=%s", user_id, action_value)
-            return self.on_card_action(user_id, chat_id, message_id, action_value)
+            return self.on_card_action(operator_open_id, chat_id, message_id, action_value)
         except Exception as e:
             logger.error("处理卡片事件异常: %s", e, exc_info=True)
             return P2CardActionTriggerResponse()
@@ -1694,7 +1682,7 @@ class FeishuBot(ABC):
             open_id = operator.operator_id.open_id
             event_key = data.event.event_key
             logger.info("菜单点击: user=%s, event_key=%s", user_id, event_key)
-            self.on_bot_menu(user_id, open_id, event_key)
+            self.on_bot_menu(open_id, event_key)
         except Exception as e:
             logger.error("处理菜单事件异常: %s", e, exc_info=True)
 
@@ -1974,7 +1962,7 @@ class FeishuBot(ABC):
         ...
 
     def on_card_action(
-        self, user_id: str, chat_id: str, message_id: str, action_value: dict
+        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
         """处理卡片按钮点击，子类可覆写"""
         return P2CardActionTriggerResponse()
@@ -1986,7 +1974,7 @@ class FeishuBot(ABC):
         """处理收到的文件消息，子类可覆写"""
         pass
 
-    def on_bot_menu(self, user_id: str, open_id: str, event_key: str) -> None:
+    def on_bot_menu(self, open_id: str, event_key: str) -> None:
         """处理机器人菜单点击事件，子类可覆写"""
         pass
 
