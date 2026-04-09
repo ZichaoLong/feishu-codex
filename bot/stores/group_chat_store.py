@@ -66,8 +66,8 @@ class GroupChatStore:
             group = self._group_state(chat_id)
             return set(group["allowlist"])
 
-    def grant_members(self, chat_id: str, user_ids: list[str] | set[str]) -> list[str]:
-        granted = sorted({str(item).strip() for item in user_ids if str(item).strip()})
+    def grant_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
+        granted = sorted({str(item).strip() for item in open_ids if str(item).strip()})
         if not granted:
             return []
         with self._lock:
@@ -79,8 +79,8 @@ class GroupChatStore:
             self._write_group_state(data, chat_id, group)
             return group["allowlist"]
 
-    def revoke_members(self, chat_id: str, user_ids: list[str] | set[str]) -> list[str]:
-        revoked = {str(item).strip() for item in user_ids if str(item).strip()}
+    def revoke_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
+        revoked = {str(item).strip() for item in open_ids if str(item).strip()}
         if not revoked:
             return sorted(self.get_allowlist(chat_id))
         with self._lock:

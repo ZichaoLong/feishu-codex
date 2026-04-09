@@ -26,11 +26,12 @@
    `journalctl --user -u feishu-codex -f`
 2. 确认应用权限至少包含：
    `im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`
+   如需让 `/whoami`、群 ACL 卡片、群上下文里显示可读名字，再补 `contact:contact.base:readonly`、`contact:user.base:readonly`
    如需用 `/whoareyou` 实时探测机器人 `open_id`，再补 `application:application:self_manage`
 3. 确认事件与回调已启用：
    `im.message.receive_v1`、`card.action.trigger`
 4. 让 `Admin` 私聊机器人执行 `/whoami`，确认已把正确的 `open_id` 写入 `system.yaml.admin_open_ids`
-5. 让 `Admin` 私聊机器人执行 `/whoareyou`，把返回的机器人 `open_id` 写入 `system.yaml.bot_open_id`
+5. 让 `Admin` 私聊机器人执行 `/whoareyou`，确认返回里包含 `configured bot_open_id`、`discovered open_id`，并把需要启用的值写入 `system.yaml.bot_open_id`
 6. 如需验证“别人 @我本人时由机器人代答”，再把对应成员的 `open_id` 写入 `system.yaml.trigger_open_ids`
 7. 准备一个新群，拉入 `Admin`、`MemberA`、`MemberB`、`feishu-codex` 机器人
 8. 如需验证其他机器人历史消息路径，再把 `OtherBot` 拉入群
@@ -38,7 +39,7 @@
 
 ## 4. 私聊基础检查
 
-1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`user_id`、`open_id`，并提示管理员配置使用 `open_id`；其中 `user_id` 仅用于排障。
+1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`user_id`、`open_id`，并提示管理员配置使用 `open_id`；其中 `user_id` 仅用于排障。若未开通讯录权限，`name` 允许退化成 open_id 前缀。
 2. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/groupmode`、`/acl`，且不再提已废弃的旧群聊命令。
 3. `MemberA` 私聊发送普通文本。预期：仍可正常使用私聊，不受群 ACL 影响。
 

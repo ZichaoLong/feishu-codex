@@ -192,6 +192,7 @@ The following behaviors are part of the current implementation contract:
 #### Group modes
 
 - strict explicit-mention matching depends on `system.yaml.bot_open_id`
+- realtime discovery from `/whoareyou` and `/init` is only for diagnostics and bootstrap; it does not replace the runtime value read from `system.yaml.bot_open_id`
 - if `system.yaml.trigger_open_ids` is configured, mentions that hit those
   `open_id`s are also treated as valid triggers
 - `trigger_open_ids` only extends which mentions count as a trigger; it does not

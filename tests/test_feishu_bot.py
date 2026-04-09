@@ -953,7 +953,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(len(logged), 1)
         self.assertIn("@ZLong", logged[0]["text"])
 
-    def test_fetch_chat_type_uses_chat_mode_for_group_detection(self) -> None:
+    def test_fetch_runtime_chat_type_uses_chat_mode_for_group_detection(self) -> None:
         bot = self._make_bot()
 
         class _Response:
@@ -973,10 +973,10 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(bot.fetch_chat_type("oc_123"), "group")
+        self.assertEqual(bot.fetch_runtime_chat_type("oc_123"), "group")
         self.assertEqual(bot.lookup_chat_type("oc_123"), "group")
 
-    def test_fetch_chat_type_normalizes_topic_mode_to_group(self) -> None:
+    def test_fetch_runtime_chat_type_normalizes_topic_mode_to_group(self) -> None:
         bot = self._make_bot()
 
         class _Response:
@@ -996,5 +996,5 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(bot.fetch_chat_type("oc_topic123"), "group")
+        self.assertEqual(bot.fetch_runtime_chat_type("oc_topic123"), "group")
         self.assertEqual(bot.lookup_chat_type("oc_topic123"), "group")

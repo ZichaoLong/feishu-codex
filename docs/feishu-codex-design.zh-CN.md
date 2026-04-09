@@ -172,6 +172,7 @@ shared backend 与 wrapper 的具体机制，见
 #### 群聊工作态
 
 - 严格群聊显式 mention 判定依赖 `system.yaml.bot_open_id`
+- `/whoareyou` 与 `/init` 中的实时探测只用于诊断和初始化，不会替代运行时读取的 `system.yaml.bot_open_id`
 - 如配置 `system.yaml.trigger_open_ids`，命中这些 `open_id` 的 mentions 也视为有效触发
 - `trigger_open_ids` 只扩展“哪些 mentions 算触发”，不绕过 ACL，也不替代 `bot_open_id`
 - 私聊底层会话按用户隔离；群聊底层会话按 `chat_id` 共享

@@ -273,11 +273,11 @@ class FeishuBot(ABC):
     def set_group_access_policy(self, chat_id: str, policy: str) -> str:
         return self._group_store.set_access_policy(chat_id, policy)
 
-    def grant_group_members(self, chat_id: str, user_ids: list[str] | set[str]) -> list[str]:
-        return self._group_store.grant_members(chat_id, user_ids)
+    def grant_group_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
+        return self._group_store.grant_members(chat_id, open_ids)
 
-    def revoke_group_members(self, chat_id: str, user_ids: list[str] | set[str]) -> list[str]:
-        return self._group_store.revoke_members(chat_id, user_ids)
+    def revoke_group_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
+        return self._group_store.revoke_members(chat_id, open_ids)
 
     def is_admin(self, *, open_id: str = "") -> bool:
         return bool(open_id and open_id in self._admin_open_ids)
@@ -348,7 +348,7 @@ class FeishuBot(ABC):
                 return ""
             return cached.chat_type
 
-    def fetch_chat_type(self, chat_id: str) -> str:
+    def fetch_runtime_chat_type(self, chat_id: str) -> str:
         normalized_chat_id = str(chat_id or "").strip()
         if not normalized_chat_id:
             return ""
@@ -539,6 +539,7 @@ class FeishuBot(ABC):
             return text
 
         if msg_type == "share_user":
+            # 飞书 `share_user` 消息内容字段名为 `user_id`，但其值实际是 open_id。
             shared_open_id = str(content_dict.get("user_id", "") or "").strip()
             if not shared_open_id:
                 return "[个人名片]"
@@ -790,22 +791,13 @@ class FeishuBot(ABC):
             logger.warning("获取机器人信息异常: %s", e)
             return None
 
-    def get_bot_identity(self) -> dict[str, str]:
+    def get_bot_identity_snapshot(self) -> dict[str, Any]:
         discovered_open_id = self._fetch_bot_open_id() or ""
-        open_id = self._configured_bot_open_id or discovered_open_id
-        if self._configured_bot_open_id:
-            source = "configured"
-        elif discovered_open_id:
-            source = "auto-discovered"
-        else:
-            source = "unavailable"
         return {
             "app_id": self.app_id,
-            "open_id": open_id,
             "configured_open_id": self._configured_bot_open_id,
             "discovered_open_id": discovered_open_id,
-            "source": source,
-            "trigger_open_ids": ",".join(sorted(self._configured_trigger_open_ids)),
+            "trigger_open_ids": sorted(self._configured_trigger_open_ids),
         }
 
     def _is_bot_mentioned(self, mentions: list) -> bool:
@@ -1111,10 +1103,10 @@ class FeishuBot(ABC):
     def _collect_boundary_message_ids(
         *,
         current_message_id: str,
-        boundary_created_at: int | str | None,
+        current_created_at: int | str | None,
         context_entries: list[dict[str, Any]],
     ) -> list[str]:
-        normalized_created_at = max(int(boundary_created_at or 0), 0)
+        normalized_created_at = max(int(current_created_at or 0), 0)
         if normalized_created_at <= 0:
             return []
         message_ids = {
@@ -1258,10 +1250,19 @@ class FeishuBot(ABC):
         )
 
     @staticmethod
-    def _group_acl_denied_text() -> str:
+    def _group_acl_denied_text(group_mode: str) -> str:
+        normalized_mode = str(group_mode or "").strip().lower()
+        if normalized_mode == "all":
+            trigger_rule = "当前群工作态是 `all`：已授权成员可直接发消息触发。"
+        else:
+            trigger_rule = (
+                "当前群工作态是 `assistant` / `mention-only`："
+                "已授权成员仍需先显式 mention 触发对象。"
+            )
         return (
             "当前群仅管理员或已授权成员具备触发资格。\n"
-            "是否需要显式 mention 触发对象取决于当前群工作态：`assistant` / `mention-only` 需要先 mention，`all` 可直接发消息；管理员可发送 `/acl` 查看或调整当前群的授权策略。"
+            f"{trigger_rule}\n"
+            "管理员可发送 `/acl` 查看或调整当前群的授权策略。"
         )
 
     @staticmethod
@@ -1319,14 +1320,14 @@ class FeishuBot(ABC):
             children_map.setdefault(parent_id, []).append(item)
 
         # 批量解析用户姓名（只对 sender_type=user 调 Contact API）
-        user_ids: set[str] = set()
+        sender_open_ids: set[str] = set()
         for item in items[:_MERGE_FORWARD_MAX]:
             sender = getattr(item, "sender", None)
             if sender and getattr(sender, "sender_type", "") == "user":
                 sid = getattr(sender, "id", None)
                 if sid:
-                    user_ids.add(sid)
-        name_map = self._batch_resolve_sender_names(user_ids)
+                    sender_open_ids.add(sid)
+        name_map = self._batch_resolve_sender_names(sender_open_ids)
 
         return self._format_merge_tree(
             merge_message_id, children_map, name_map, depth=0,
@@ -1581,7 +1582,11 @@ class FeishuBot(ABC):
                 if not bot_mentioned:
                     return
                 if not allowed_to_use:
-                    self.reply(chat_id, self._group_acl_denied_text(), parent_message_id=message_id)
+                    self.reply(
+                        chat_id,
+                        self._group_acl_denied_text(group_mode),
+                        parent_message_id=message_id,
+                    )
                     return
                 if control_text:
                     self.on_message(sender_id, chat_id, text, message_id=message_id)
@@ -1611,7 +1616,7 @@ class FeishuBot(ABC):
                 if current_seq:
                     boundary_message_ids = self._collect_boundary_message_ids(
                         current_message_id=message_id,
-                        boundary_created_at=message.create_time,
+                        current_created_at=message.create_time,
                         context_entries=context_entries,
                     )
                     self._group_store.set_last_boundary(
@@ -1630,7 +1635,11 @@ class FeishuBot(ABC):
 
             if not allowed_to_use:
                 if bot_mentioned or text.startswith("/"):
-                    self.reply(chat_id, self._group_acl_denied_text(), parent_message_id=message_id)
+                    self.reply(
+                        chat_id,
+                        self._group_acl_denied_text(group_mode),
+                        parent_message_id=message_id,
+                    )
                 return
         if msg_type == "file":
             file_key = content_dict.get("file_key", "")
@@ -1789,7 +1798,7 @@ class FeishuBot(ABC):
 
         Args:
             message_id: 要加急的消息 ID
-            user_ids: 接收加急通知的用户 user_id 列表
+            user_ids: 接收加急通知的用户 user_id 列表。这里要求真实 user_id，不是 open_id。
 
         Returns:
             是否成功

@@ -11,8 +11,8 @@ import pathlib
 from secrets import compare_digest
 import threading
 import time
-from dataclasses import replace
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Callable
 from uuid import UUID
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -104,6 +104,20 @@ _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
 }
 
 
+@dataclass(frozen=True)
+class _CommandRoute:
+    handler: Callable[[str, str, str, str], None]
+    scope: str = "any"
+    admin_only_in_group: bool = True
+    scope_denied_text: str = ""
+
+
+@dataclass(frozen=True)
+class _ActionRoute:
+    handler: Callable[[str, str, str, dict[str, Any]], P2CardActionTriggerResponse]
+    group_guard: str = "none"
+
+
 def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
     for preset, config in _PERMISSIONS_PRESETS.items():
         if config["approval_policy"] == approval_policy and config["sandbox"] == sandbox:
@@ -165,6 +179,9 @@ class CodexHandler(BotHandler):
             on_request=self._handle_adapter_request,
             app_server_runtime_store=self._app_server_runtime,
         )
+        self._command_routes = self._build_command_routes()
+        self._action_routes = self._build_action_routes()
+        self._prefixed_action_routes = self._build_prefixed_action_routes()
         atexit.register(self.shutdown)
 
     @property
@@ -223,187 +240,25 @@ class CodexHandler(BotHandler):
                     toast="表单已失效或未找到对应问题，请重新触发该请求。",
                     toast_type="warning",
                 )
-        if action == "cancel_turn":
-            if is_group_chat and not self._is_group_turn_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员或当前提问者可停止当前群聊执行。",
-                    toast_type="warning",
-                )
-            return self._handle_cancel_action(sender_id, chat_id)
-        if action == "resume_thread":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_resume_thread_action(sender_id, chat_id, message_id, action_value)
-        if action == "preview_thread_snapshot":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_preview_thread_snapshot_action(sender_id, chat_id, message_id, action_value)
-        if action == "resume_thread_write":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_resume_thread_write_action(sender_id, chat_id, message_id, action_value)
-        if action == "cancel_resume_guard":
-            return self.bot.make_card_response(toast="已取消。")
-        if action == "toggle_star_thread":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_toggle_star_action(sender_id, chat_id, action_value)
-        if action == "show_rename_form":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_show_rename_action(sender_id, chat_id, message_id, action_value)
-        if action == "rename_thread":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_rename_submit_action(sender_id, chat_id, message_id, action_value)
-        if action == "cancel_rename":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            self._clear_pending_rename_form(message_id)
-            return self._handle_sessions_refresh_action(sender_id, chat_id, toast="已取消")
-        if action == "set_approval_policy":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_set_approval_policy(sender_id, chat_id, action_value)
-        if action == "set_sandbox_policy":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_set_sandbox_policy(sender_id, chat_id, action_value)
-        if action == "set_permissions_preset":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_set_permissions_preset(sender_id, chat_id, action_value)
-        if action == "set_collaboration_mode":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_set_collaboration_mode(sender_id, chat_id, action_value)
-        if action == "set_group_mode":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_set_group_mode_action(sender_id, chat_id, action_value)
-        if action == "set_group_acl_policy":
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可操作群共享会话或群设置。",
-                    toast_type="warning",
-                )
-            return self._handle_set_group_acl_policy_action(sender_id, chat_id, action_value)
-        if action.startswith("command_") or action.startswith("file_change_") or action.startswith("permissions_"):
-            if is_group_chat and not self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员可审批群共享会话请求。",
-                    toast_type="warning",
-                )
-            return self._handle_approval_card_action(action_value)
-        if action.startswith("answer_user_input_"):
-            if is_group_chat and not self._is_group_request_actor_or_admin(
-                chat_id,
-                request_key=str(action_value.get("request_id", "")).strip(),
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return self.bot.make_card_response(
-                    toast="仅管理员或当前提问者可提交群里的补充输入。",
-                    toast_type="warning",
-                )
-            return self._handle_user_input_action(action_value)
-        return P2CardActionTriggerResponse()
+        route = self._action_routes.get(action)
+        if route is None:
+            for prefix, prefixed_route in self._prefixed_action_routes:
+                if action.startswith(prefix):
+                    route = prefixed_route
+                    break
+        if route is None:
+            return P2CardActionTriggerResponse()
+        denied = self._check_action_group_guard(
+            route,
+            is_group_chat=is_group_chat,
+            chat_id=chat_id,
+            message_id=message_id,
+            operator_open_id=operator_open_id,
+            action_value=action_value,
+        )
+        if denied is not None:
+            return denied
+        return route.handler(sender_id, chat_id, message_id, action_value)
 
     def _handle_user_input_form_fallback(
         self,
@@ -553,14 +408,12 @@ class CodexHandler(BotHandler):
         chat_type = str(context.get("chat_type", "")).strip()
         if chat_type:
             return chat_type
-        if hasattr(self.bot, "lookup_chat_type"):
-            chat_type = str(self.bot.lookup_chat_type(chat_id) or "").strip()
-            if chat_type:
-                return chat_type
-        if hasattr(self.bot, "fetch_chat_type"):
-            chat_type = str(self.bot.fetch_chat_type(chat_id) or "").strip()
-            if chat_type:
-                return chat_type
+        chat_type = str(self.bot.lookup_chat_type(chat_id) or "").strip()
+        if chat_type:
+            return chat_type
+        chat_type = str(self.bot.fetch_runtime_chat_type(chat_id) or "").strip()
+        if chat_type:
+            return chat_type
         return ""
 
     def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool:
@@ -602,6 +455,23 @@ class CodexHandler(BotHandler):
             "群里的 `/` 命令仅管理员可用；已授权成员请直接提问或显式 mention 触发机器人。",
             message_id=message_id,
         )
+        return False
+
+    def _ensure_command_scope(self, route: _CommandRoute, chat_id: str, message_id: str = "") -> bool:
+        if route.scope == "any":
+            return True
+        chat_type = self._resolve_chat_type(chat_id, message_id)
+        if route.scope == "group" and chat_type == "group":
+            return True
+        if route.scope == "p2p" and chat_type != "group":
+            return True
+        denied_text = route.scope_denied_text
+        if not denied_text:
+            if route.scope == "group":
+                denied_text = "该命令仅支持群聊使用。"
+            else:
+                denied_text = "该命令仅支持私聊使用。"
+        self._reply_text(chat_id, denied_text, message_id=message_id)
         return False
 
     def _is_group_turn_actor(
@@ -678,6 +548,306 @@ class CodexHandler(BotHandler):
         normalized_open_ids = sorted({str(item).strip() for item in open_ids if str(item).strip()})
         return [self._group_member_label(open_id) for open_id in normalized_open_ids]
 
+    def _build_command_routes(self) -> dict[str, _CommandRoute]:
+        return {
+            "/help": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._reply_help(
+                    chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/h": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._reply_help(
+                    chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/init": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_init_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+                scope="p2p",
+                scope_denied_text="请私聊机器人执行 `/init <token>`。",
+            ),
+            "/pwd": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._reply_text(
+                    chat_id,
+                    f"当前目录：`{display_path(self._get_state(sender_id, chat_id)['working_dir'])}`",
+                    message_id=message_id,
+                ),
+            ),
+            "/cd": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_cd_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/new": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_new_command(
+                    sender_id, chat_id, message_id=message_id
+                ),
+            ),
+            "/status": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_status_command(
+                    sender_id, chat_id, message_id=message_id
+                ),
+            ),
+            "/whoami": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_whoami_command(
+                    sender_id, chat_id, message_id=message_id
+                ),
+                scope="p2p",
+                scope_denied_text="请私聊机器人执行 `/whoami`。",
+            ),
+            "/whoareyou": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_botinfo_command(
+                    chat_id, message_id=message_id
+                ),
+            ),
+            "/profile": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_profile_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/cancel": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._cancel_current_turn(
+                    sender_id, chat_id, message_id=message_id
+                ),
+            ),
+            "/session": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_session_command(
+                    sender_id, chat_id, message_id=message_id
+                ),
+            ),
+            "/resume": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_resume_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/rm": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_rm_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/rename": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_rename_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/star": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_star_command(
+                    sender_id, chat_id, message_id=message_id
+                ),
+            ),
+            "/approval": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_approval_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/sandbox": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_sandbox_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/permissions": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_permissions_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/mode": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_mode_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+            ),
+            "/groupmode": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_groupmode_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+                scope="group",
+            ),
+            "/acl": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_acl_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+                scope="group",
+            ),
+        }
+
+    def _build_action_routes(self) -> dict[str, _ActionRoute]:
+        return {
+            "cancel_turn": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_cancel_action(
+                    sender_id, chat_id
+                ),
+                group_guard="turn_actor",
+            ),
+            "resume_thread": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_resume_thread_action(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "preview_thread_snapshot": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_preview_thread_snapshot_action(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "resume_thread_write": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_resume_thread_write_action(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "cancel_resume_guard": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self.bot.make_card_response(
+                    toast="已取消。"
+                ),
+            ),
+            "toggle_star_thread": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_toggle_star_action(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "show_rename_form": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_rename_action(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "rename_thread": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_rename_submit_action(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "cancel_rename": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_cancel_rename_action(
+                    sender_id, chat_id, message_id
+                ),
+                group_guard="group_admin",
+            ),
+            "set_approval_policy": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_approval_policy(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "set_sandbox_policy": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_sandbox_policy(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "set_permissions_preset": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_permissions_preset(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "set_collaboration_mode": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_collaboration_mode(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "set_group_mode": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_group_mode_action(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "set_group_acl_policy": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_group_acl_policy_action(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+        }
+
+    def _build_prefixed_action_routes(self) -> list[tuple[str, _ActionRoute]]:
+        approval_route = _ActionRoute(
+            handler=lambda sender_id, chat_id, message_id, action_value: self._handle_approval_card_action(
+                action_value
+            ),
+            group_guard="approval_admin",
+        )
+        return [
+            ("command_", approval_route),
+            ("file_change_", approval_route),
+            ("permissions_", approval_route),
+            (
+                "answer_user_input_",
+                _ActionRoute(
+                    handler=lambda sender_id, chat_id, message_id, action_value: self._handle_user_input_action(
+                        action_value
+                    ),
+                    group_guard="request_actor_or_admin",
+                ),
+            ),
+        ]
+
+    def _check_action_group_guard(
+        self,
+        route: _ActionRoute,
+        *,
+        is_group_chat: bool,
+        chat_id: str,
+        message_id: str,
+        operator_open_id: str,
+        action_value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse | None:
+        if not is_group_chat or route.group_guard == "none":
+            return None
+        if route.group_guard == "group_admin":
+            if self._is_group_admin_actor(
+                chat_id,
+                message_id=message_id,
+                operator_open_id=operator_open_id,
+            ):
+                return None
+            return self.bot.make_card_response(
+                toast="仅管理员可操作群共享会话或群设置。",
+                toast_type="warning",
+            )
+        if route.group_guard == "turn_actor":
+            if self._is_group_turn_actor(
+                chat_id,
+                message_id=message_id,
+                operator_open_id=operator_open_id,
+            ):
+                return None
+            return self.bot.make_card_response(
+                toast="仅管理员或当前提问者可停止当前群聊执行。",
+                toast_type="warning",
+            )
+        if route.group_guard == "approval_admin":
+            if self._is_group_admin_actor(
+                chat_id,
+                message_id=message_id,
+                operator_open_id=operator_open_id,
+            ):
+                return None
+            return self.bot.make_card_response(
+                toast="仅管理员可审批群共享会话请求。",
+                toast_type="warning",
+            )
+        if route.group_guard == "request_actor_or_admin":
+            if self._is_group_request_actor_or_admin(
+                chat_id,
+                request_key=str(action_value.get("request_id", "")).strip(),
+                message_id=message_id,
+                operator_open_id=operator_open_id,
+            ):
+                return None
+            return self.bot.make_card_response(
+                toast="仅管理员或当前提问者可提交群里的补充输入。",
+                toast_type="warning",
+            )
+        logger.warning("未知卡片群权限守卫: %s", route.group_guard)
+        return self.bot.make_card_response(
+            toast="当前卡片动作配置异常。",
+            toast_type="warning",
+        )
+
     def _handle_init_command(
         self,
         sender_id: str,
@@ -687,10 +857,6 @@ class CodexHandler(BotHandler):
         message_id: str = "",
     ) -> None:
         context = self.bot.get_message_context(message_id) if message_id else {}
-        chat_type = str(context.get("chat_type", "") or "").strip()
-        if chat_type == "group":
-            self._reply_text(chat_id, "请私聊机器人执行 `/init <token>`。", message_id=message_id)
-            return
         provided_token = str(arg or "").strip()
         if not provided_token:
             self._reply_text(
@@ -732,10 +898,8 @@ class CodexHandler(BotHandler):
         admin_added = sender_open_id not in admin_open_ids
         admin_open_ids.add(sender_open_id)
         configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
-        identity = self.bot.get_bot_identity()
-        discovered_bot_open_id = str(
-            identity.get("discovered_open_id", "") or identity.get("open_id", "") or ""
-        ).strip()
+        identity = self.bot.get_bot_identity_snapshot()
+        discovered_bot_open_id = str(identity.get("discovered_open_id", "") or "").strip()
         bot_open_id_written = False
         if discovered_bot_open_id and discovered_bot_open_id != configured_bot_open_id:
             configured_bot_open_id = discovered_bot_open_id
@@ -784,76 +948,17 @@ class CodexHandler(BotHandler):
         command, _, arg = text.partition(" ")
         arg = arg.strip()
         cmd = command.lower()
-
-        if cmd == "/init":
-            self._handle_init_command(sender_id, chat_id, arg, message_id=message_id)
+        route = self._command_routes.get(cmd)
+        if route is None:
+            self._reply_text(chat_id, f"未知命令：`{command}`\n发送 `/help` 查看可用命令。", message_id=message_id)
             return
-
-        if not self._ensure_group_command_admin(chat_id, message_id):
+        # 先做 scope guard，保证群/私聊专属命令优先返回精确拒绝文本；
+        # 只有 scope 允许通过后，才需要进入“群里是否仅管理员可用”的判断。
+        if not self._ensure_command_scope(route, chat_id, message_id):
             return
-
-        if cmd in ("/help", "/h"):
-            self._reply_help(chat_id, arg, message_id=message_id)
+        if route.admin_only_in_group and not self._ensure_group_command_admin(chat_id, message_id):
             return
-        if cmd == "/pwd":
-            self._reply_text(chat_id, f"当前目录：`{display_path(self._get_state(sender_id, chat_id)['working_dir'])}`", message_id=message_id)
-            return
-        if cmd == "/cd":
-            self._handle_cd_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/new":
-            self._handle_new_command(sender_id, chat_id, message_id=message_id)
-            return
-        if cmd == "/status":
-            self._handle_status_command(sender_id, chat_id, message_id=message_id)
-            return
-        if cmd == "/whoami":
-            self._handle_whoami_command(sender_id, chat_id, message_id=message_id)
-            return
-        if cmd == "/whoareyou":
-            self._handle_botinfo_command(chat_id, message_id=message_id)
-            return
-        if cmd == "/profile":
-            self._handle_profile_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/cancel":
-            self._cancel_current_turn(sender_id, chat_id, message_id=message_id)
-            return
-        if cmd == "/session":
-            self._handle_session_command(sender_id, chat_id, message_id=message_id)
-            return
-        if cmd == "/resume":
-            self._handle_resume_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/rm":
-            self._handle_rm_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/rename":
-            self._handle_rename_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/star":
-            self._handle_star_command(sender_id, chat_id, message_id=message_id)
-            return
-        if cmd == "/approval":
-            self._handle_approval_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/sandbox":
-            self._handle_sandbox_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/permissions":
-            self._handle_permissions_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/mode":
-            self._handle_mode_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/groupmode":
-            self._handle_groupmode_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-        if cmd == "/acl":
-            self._handle_acl_command(sender_id, chat_id, arg, message_id=message_id)
-            return
-
-        self._reply_text(chat_id, f"未知命令：`{command}`\n发送 `/help` 查看可用命令。", message_id=message_id)
+        route.handler(sender_id, chat_id, arg, message_id)
 
     def _handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
         state = self._get_state(sender_id, chat_id)
@@ -1068,10 +1173,6 @@ class CodexHandler(BotHandler):
 
     def _handle_whoami_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
         context = self.bot.get_message_context(message_id) if message_id else {}
-        chat_type = str(context.get("chat_type", "")).strip()
-        if chat_type == "group":
-            self._reply_text(chat_id, "请私聊机器人执行 `/whoami`。", message_id=message_id)
-            return
         sender_user_id = str(context.get("sender_user_id", "")).strip()
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         sender_type = str(context.get("sender_type", "user") or "user").strip()
@@ -1096,47 +1197,43 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_botinfo_command(self, chat_id: str, *, message_id: str = "") -> None:
-        identity = self.bot.get_bot_identity()
-        source_map = {
-            "configured": "`system.yaml.bot_open_id`",
-            "auto-discovered": "`/whoareyou` 实时探测",
-            "unavailable": "未获取到",
-        }
-        source = source_map.get(identity["source"], identity["source"] or "未知")
-        configured_open_id = identity.get("configured_open_id", "")
-        discovered_open_id = identity.get("discovered_open_id", "")
+        identity = self.bot.get_bot_identity_snapshot()
+        configured_open_id = str(identity.get("configured_open_id", "") or "").strip()
+        discovered_open_id = str(identity.get("discovered_open_id", "") or "").strip()
         trigger_open_ids = [
-            item for item in str(identity.get("trigger_open_ids", "") or "").split(",")
-            if item
+            str(item).strip()
+            for item in (identity.get("trigger_open_ids") or [])
+            if str(item).strip()
         ]
         lines = [
             "机器人身份信息：",
-            f"- app_id: `{identity['app_id'] or '（空）'}`",
+            f"- app_id: `{identity.get('app_id', '') or '（空）'}`",
             f"- configured bot_open_id: `{configured_open_id or '（空）'}`",
             f"- discovered open_id: `{discovered_open_id or '（空）'}`",
-            f"- effective open_id: `{identity['open_id'] or '（空）'}`",
-            f"- source: {source}",
+            f"- runtime mention matching: `{'enabled' if configured_open_id else 'disabled'}`",
             f"- trigger_open_ids: `{', '.join(trigger_open_ids) or '（空）'}`",
+            "- 运行时权威值：`system.yaml.bot_open_id`",
         ]
         if configured_open_id and discovered_open_id and configured_open_id != discovered_open_id:
             lines.extend(
                 [
                     "",
                     "警告：",
+                    "- 当前运行时仍只按 `system.yaml.bot_open_id` 判定 mention；实时探测值仅用于诊断和初始化。",
                     "- 当前配置值与实时探测值不一致，请优先核对 `system.yaml.bot_open_id` 是否写错。",
                 ]
             )
         if not configured_open_id:
-            candidate_open_id = identity["open_id"] or discovered_open_id
             lines.extend(
                 [
                     "",
                     "建议：",
                     (
-                        f"- 直接执行 `/init <token>` 自动写入，或手动把 `{candidate_open_id}` 写进 `system.yaml.bot_open_id`"
-                        if candidate_open_id
-                        else "- 先让 `/init <token>` 或 `/whoareyou` 成功拿到机器人 open_id，再写进 `system.yaml.bot_open_id`"
+                        f"- 直接执行 `/init <token>` 自动写入，或手动把 `{discovered_open_id}` 写进 `system.yaml.bot_open_id`"
+                        if discovered_open_id
+                        else "- 先让 `/whoareyou` 能看到 `discovered open_id`，再手动写入 `system.yaml.bot_open_id`；如需自动写入，再执行 `/init <token>`"
                     ),
+                    "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/whoareyou` 的实时探测结果不会自动生效。",
                     "- 如需让“别人 @你本人时由机器人代答”，再把对应人的 open_id 写进 `system.yaml.trigger_open_ids`",
                     "- 如果 `discovered open_id` 为空，检查 `application:application:self_manage` 权限",
                 ]
@@ -1480,19 +1577,12 @@ class CodexHandler(BotHandler):
             message_id=message_id,
         )
 
-    def _require_group_chat(self, chat_id: str, message_id: str = "") -> dict[str, Any] | None:
+    def _group_command_context(self, message_id: str = "") -> dict[str, Any]:
+        """Return message context for a command that has already passed group scope checks."""
         context = self.bot.get_message_context(message_id) if message_id else {}
-        chat_type = str(context.get("chat_type", "")).strip()
-        if not chat_type and hasattr(self.bot, "lookup_chat_type"):
-            chat_type = str(self.bot.lookup_chat_type(chat_id) or "").strip()
-        if not chat_type and hasattr(self.bot, "fetch_chat_type"):
-            chat_type = str(self.bot.fetch_chat_type(chat_id) or "").strip()
-        if chat_type == "group":
-            if not context:
-                return {"chat_type": "group"}
+        if context:
             return context
-        self._reply_text(chat_id, "该命令仅支持群聊使用。", message_id=message_id)
-        return None
+        return {"chat_type": "group"}
 
     @staticmethod
     def _normalize_group_mode(mode: str) -> str:
@@ -1517,9 +1607,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_groupmode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        context = self._require_group_chat(chat_id, message_id)
-        if context is None:
-            return
+        context = self._group_command_context(message_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
             self._reply_card(
@@ -1527,9 +1615,6 @@ class CodexHandler(BotHandler):
                 self._group_mode_card(chat_id, open_id=sender_open_id),
                 message_id=message_id,
             )
-            return
-        if not self.bot.is_group_admin(open_id=sender_open_id):
-            self._reply_text(chat_id, "仅管理员可切换群聊工作态。", message_id=message_id)
             return
         mode = self._normalize_group_mode(arg)
         if mode not in {"assistant", "all", "mention_only"}:
@@ -1556,9 +1641,7 @@ class CodexHandler(BotHandler):
         return sorted(targets)
 
     def _handle_acl_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        context = self._require_group_chat(chat_id, message_id)
-        if context is None:
-            return
+        context = self._group_command_context(message_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
             self._reply_card(
@@ -1571,15 +1654,11 @@ class CodexHandler(BotHandler):
         cmd, _, rest = arg.partition(" ")
         subcommand = cmd.strip().lower()
         payload = rest.strip()
-        is_admin = self.bot.is_group_admin(open_id=sender_open_id)
         if subcommand in {"admin-only", "allowlist", "all-members"}:
             payload = subcommand
             subcommand = "policy"
 
         if subcommand == "policy":
-            if not is_admin:
-                self._reply_text(chat_id, "仅管理员可调整群聊授权策略。", message_id=message_id)
-                return
             policy = payload.strip().lower()
             if policy not in {"admin-only", "allowlist", "all-members"}:
                 self._reply_text(
@@ -1593,9 +1672,6 @@ class CodexHandler(BotHandler):
             return
 
         if subcommand in {"grant", "allow"}:
-            if not is_admin:
-                self._reply_text(chat_id, "仅管理员可授权成员。", message_id=message_id)
-                return
             targets = self._acl_target_open_ids(message_id, payload)
             if not targets:
                 self._reply_text(chat_id, "用法：`/acl grant @成员` 或 `/acl grant <open_id>`", message_id=message_id)
@@ -1610,9 +1686,6 @@ class CodexHandler(BotHandler):
             return
 
         if subcommand in {"revoke", "remove"}:
-            if not is_admin:
-                self._reply_text(chat_id, "仅管理员可撤销成员授权。", message_id=message_id)
-                return
             targets = self._acl_target_open_ids(message_id, payload)
             if not targets:
                 self._reply_text(chat_id, "用法：`/acl revoke @成员` 或 `/acl revoke <open_id>`", message_id=message_id)
@@ -1787,6 +1860,12 @@ class CodexHandler(BotHandler):
             if state["current_thread_id"] == thread_id:
                 state["current_thread_name"] = new_title
         return self._handle_sessions_refresh_action(sender_id, chat_id, toast="已重命名。")
+
+    def _handle_cancel_rename_action(
+        self, sender_id: str, chat_id: str, message_id: str
+    ) -> P2CardActionTriggerResponse:
+        self._clear_pending_rename_form(message_id)
+        return self._handle_sessions_refresh_action(sender_id, chat_id, toast="已取消")
 
     def _clear_pending_rename_form(self, message_id: str) -> None:
         if not message_id:
@@ -2900,6 +2979,7 @@ class CodexHandler(BotHandler):
             "**设置相关**\n"
             "- `/profile` 查看或切换默认 profile；它影响 feishu-codex 与新的默认 `fcodex` 启动，不热切换已打开的 `fcodex` TUI。\n"
             "- `/init <token>` 仅私聊可用；会把当前发送者加入 `admin_open_ids`，并尽量自动写入 `bot_open_id`。\n"
+            "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/whoareyou` 的实时探测结果仅用于诊断和初始化。\n"
             "- 推荐先用 `/permissions`；它会同时设置审批策略和沙箱，只影响当前飞书会话的后续 turn。\n"
             "- `/approval` 只改审批时机；`/sandbox` 只改文件与网络边界。\n"
             "- `/mode` 切换协作方式；`plan` 更容易先规划或提问，`default` 更接近直接执行；也只影响当前飞书会话的后续 turn。\n"
@@ -2920,6 +3000,7 @@ class CodexHandler(BotHandler):
             "- 私聊底层会话按人隔离；群聊底层会话按 `chat_id` 共享。\n"
             "- `assistant` 会缓存群聊消息，仅在人类有效 mention 时回复；每次有效触发都会回捞最近群历史，把两次触发之间的消息补齐进上下文。\n"
             "- `assistant` 的主聊天流与群话题使用不同上下文边界：主聊天流只看主聊天流，话题只看当前话题；但底层仍是同一个群共享会话。\n"
+            "- 主聊天流历史回捞受 `group_history_fetch_lookback_seconds` 和 `group_history_fetch_limit` 共同限制；话题内回捞当前只保证受边界和 `group_history_fetch_limit` 限制。\n"
             "- `/acl` 查看当前群授权；管理员可设置 `admin-only`、`allowlist`、`all-members`。\n"
             "- 群里的所有 `/` 命令都只给管理员；在 `assistant` / `mention-only` 下还要先显式 mention 触发对象，在 `all` 下管理员可直接发送。\n"
             "- 有效 mention 默认只认机器人自身 `bot_open_id`；如配置 `trigger_open_ids`，`@这些人` 也会视为触发。\n"

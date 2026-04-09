@@ -152,11 +152,9 @@ class _FakeBot:
         self.admin_open_ids = {"ou_admin"}
         self.bot_identity = {
             "app_id": "cli_test_app",
-            "open_id": "ou_bot",
-            "source": "configured",
             "configured_open_id": "ou_bot",
             "discovered_open_id": "ou_bot",
-            "trigger_open_ids": "",
+            "trigger_open_ids": [],
         }
         self.runtime_bot_open_id = "ou_bot"
 
@@ -191,7 +189,7 @@ class _FakeBot:
     def lookup_chat_type(self, chat_id: str) -> str:
         return self.chat_types.get(chat_id, "")
 
-    def fetch_chat_type(self, chat_id: str) -> str:
+    def fetch_runtime_chat_type(self, chat_id: str) -> str:
         return self.fetched_chat_types.get(chat_id, "")
 
     def claim_reserved_execution_card(self, message_id: str) -> str:
@@ -221,11 +219,9 @@ class _FakeBot:
         normalized = str(open_id or "").strip()
         self.runtime_bot_open_id = normalized
         self.bot_identity["configured_open_id"] = normalized
-        self.bot_identity["open_id"] = normalized or self.bot_identity.get("discovered_open_id", "")
-        self.bot_identity["source"] = "configured" if normalized else "unavailable"
         return normalized
 
-    def get_bot_identity(self) -> dict[str, str]:
+    def get_bot_identity_snapshot(self) -> dict[str, object]:
         return dict(self.bot_identity)
 
     def get_group_mode(self, chat_id: str) -> str:
@@ -250,21 +246,21 @@ class _FakeBot:
         acl["access_policy"] = policy
         return policy
 
-    def grant_group_members(self, chat_id: str, user_ids) -> list[str]:
+    def grant_group_members(self, chat_id: str, open_ids) -> list[str]:
         acl = self.group_acls.setdefault(
             chat_id,
             {"access_policy": "admin-only", "allowlist": []},
         )
-        merged = sorted(set(acl["allowlist"]) | {item for item in user_ids if item})
+        merged = sorted(set(acl["allowlist"]) | {item for item in open_ids if item})
         acl["allowlist"] = merged
         return merged
 
-    def revoke_group_members(self, chat_id: str, user_ids) -> list[str]:
+    def revoke_group_members(self, chat_id: str, open_ids) -> list[str]:
         acl = self.group_acls.setdefault(
             chat_id,
             {"access_policy": "admin-only", "allowlist": []},
         )
-        remaining = sorted(set(acl["allowlist"]) - {item for item in user_ids if item})
+        remaining = sorted(set(acl["allowlist"]) - {item for item in open_ids if item})
         acl["allowlist"] = remaining
         return remaining
 
@@ -469,7 +465,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertTrue(card["config"]["update_multi"])
 
-    def test_whoami_command_in_p2p_returns_ids(self) -> None:
+    def test_whoami_command_in_p2p_returns_identity_and_admin_config_hint(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-p2p"] = {
             "chat_type": "p2p",
@@ -498,11 +494,9 @@ class CodexHandlerTests(unittest.TestCase):
         handler, bot = self._make_handler()
         bot.bot_identity = {
             "app_id": "cli_test_app",
-            "open_id": "ou_bot",
-            "source": "configured",
             "configured_open_id": "ou_bot",
             "discovered_open_id": "ou_bot",
-            "trigger_open_ids": "ou_alias_1,ou_alias_2",
+            "trigger_open_ids": ["ou_alias_1", "ou_alias_2"],
         }
 
         handler.handle_message("ou_user", "chat-p2p", "/whoareyou")
@@ -512,7 +506,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("app_id: `cli_test_app`", reply)
         self.assertIn("configured bot_open_id: `ou_bot`", reply)
         self.assertIn("discovered open_id: `ou_bot`", reply)
-        self.assertIn("effective open_id: `ou_bot`", reply)
+        self.assertIn("runtime mention matching: `enabled`", reply)
         self.assertIn("trigger_open_ids: `ou_alias_1, ou_alias_2`", reply)
         self.assertIn("system.yaml.bot_open_id", reply)
 
@@ -520,11 +514,9 @@ class CodexHandlerTests(unittest.TestCase):
         handler, bot = self._make_handler()
         bot.bot_identity = {
             "app_id": "cli_test_app",
-            "open_id": "",
-            "source": "unavailable",
             "configured_open_id": "",
             "discovered_open_id": "",
-            "trigger_open_ids": "",
+            "trigger_open_ids": [],
         }
 
         handler.handle_message("ou_user", "chat-p2p", "/whoareyou")
@@ -532,6 +524,7 @@ class CodexHandlerTests(unittest.TestCase):
         reply = bot.replies[-1][1]
         self.assertIn("configured bot_open_id: `（空）`", reply)
         self.assertIn("discovered open_id: `（空）`", reply)
+        self.assertIn("runtime mention matching: `disabled`", reply)
         self.assertIn("application:application:self_manage", reply)
 
     def test_init_command_requires_p2p(self) -> None:
