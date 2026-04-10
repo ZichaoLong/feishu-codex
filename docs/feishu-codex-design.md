@@ -176,6 +176,9 @@ The following behaviors are part of the current implementation contract:
 - new groups default to `assistant`
 - new groups default to `admin-only`
 - group administrators come from `system.yaml.admin_open_ids`
+- runtime identity decisions use `open_id` only; `user_id` is retained only for
+  logs and `/whoami` diagnostics, and requires
+  `contact:user.employee_id:readonly` if you want it to be populated reliably
 
 #### Human-member access
 

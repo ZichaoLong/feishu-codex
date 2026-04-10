@@ -11,7 +11,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, NotRequired, Optional, TypedDict
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -87,9 +87,55 @@ class _PendingForward:
     timer: threading.Timer = field(repr=False)
 
 
+class MentionPayload(TypedDict):
+    key: str
+    name: str
+    open_id: str
+
+
+class MentionMember(TypedDict):
+    open_id: str
+    name: str
+
+
+class MessageContextPayload(TypedDict, total=False):
+    chat_id: str
+    chat_type: str
+    sender_user_id: str
+    sender_open_id: str
+    sender_type: str
+    bot_mentioned: bool
+    message_type: str
+    thread_id: str
+    root_id: str
+    parent_id: str
+    text: str
+    mentions: list[MentionPayload]
+
+
+class GroupMessageEntry(TypedDict):
+    message_id: str
+    created_at: int
+    sender_user_id: str
+    sender_open_id: str
+    sender_type: str
+    sender_name: str
+    msg_type: str
+    thread_id: str
+    text: str
+    seq: NotRequired[int]
+
+
+class BotIdentitySnapshot(TypedDict):
+    app_id: str
+    configured_open_id: str
+    discovered_open_id: str
+    trigger_open_ids: list[str]
+
+
 @dataclass
 class _MessageContext:
-    payload: dict[str, Any]
+    payload: MessageContextPayload
     created_at: float
 
 
@@ -312,7 +358,7 @@ class FeishuBot(ABC):
             return bool(open_id and open_id in set(snapshot["allowlist"]))
         return False
 
-    def get_message_context(self, message_id: str) -> dict[str, Any]:
+    def get_message_context(self, message_id: str) -> MessageContextPayload:
         if not message_id:
             return {}
         with self._message_context_lock:
@@ -397,13 +443,13 @@ class FeishuBot(ABC):
                 return ""
             return pending.card_message_id
 
-    def extract_non_bot_mentions(self, message_id: str) -> list[dict[str, str]]:
+    def extract_non_bot_mentions(self, message_id: str) -> list[MentionMember]:
         context = self.get_message_context(message_id)
         mentions = context.get("mentions") or []
         if not isinstance(mentions, list):
             return []
         trigger_open_ids = self._configured_group_trigger_open_ids()
-        members: list[dict[str, str]] = []
+        members: list[MentionMember] = []
         for mention in mentions:
             if not isinstance(mention, dict):
                 continue
@@ -437,12 +483,12 @@ class FeishuBot(ABC):
     def get_sender_display_name(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> str:
         return self._display_name_for_sender(user_id=user_id, open_id=open_id, sender_type=sender_type)
 
-    def _remember_message_context(self, message_id: str, payload: dict[str, Any]) -> None:
+    def _remember_message_context(self, message_id: str, payload: MessageContextPayload) -> None:
         if not message_id:
             return
         with self._message_context_lock:
             self._cleanup_message_contexts()
-            self._message_contexts[message_id] = _MessageContext(payload=dict(payload), created_at=time.time())
+            self._message_contexts[message_id] = _MessageContext(payload=payload.copy(), created_at=time.time())
             while len(self._message_contexts) > _MESSAGE_CONTEXT_MAX_SIZE:
                 self._message_contexts.popitem(last=False)
 
@@ -566,7 +612,7 @@ class FeishuBot(ABC):
         return ""
 
     @staticmethod
-    def _mention_payload(mention: Any) -> dict[str, str]:
+    def _mention_payload(mention: Any) -> MentionPayload:
         if isinstance(mention, dict):
             key = str(mention.get("key", "") or "").strip()
             name = str(mention.get("name", "") or "").strip()
@@ -791,7 +837,7 @@ class FeishuBot(ABC):
             logger.warning("获取机器人信息异常: %s", e)
             return None
 
-    def get_bot_identity_snapshot(self) -> dict[str, Any]:
+    def get_bot_identity_snapshot(self) -> BotIdentitySnapshot:
         discovered_open_id = self._fetch_bot_open_id() or ""
         return {
             "app_id": self.app_id,
@@ -844,8 +890,8 @@ class FeishuBot(ABC):
         return name_map
 
     @staticmethod
-    def _mention_payloads(mentions: list) -> list[dict[str, str]]:
-        payloads: list[dict[str, str]] = []
+    def _mention_payloads(mentions: list) -> list[MentionPayload]:
+        payloads: list[MentionPayload] = []
         for mention in mentions:
             payloads.append(FeishuBot._mention_payload(mention))
         return payloads
@@ -889,7 +935,7 @@ class FeishuBot(ABC):
             open_id=sender_open_id,
             sender_type=sender_type,
         )
-        entry = {
+        entry: GroupMessageEntry = {
             "message_id": str(message_id or ""),
             "created_at": int(created_at or 0),
             "sender_user_id": sender_user_id,
@@ -902,13 +948,13 @@ class FeishuBot(ABC):
         }
         return self._group_store.append_message(chat_id, entry)
 
-    def _history_mentions_payloads(self, mentions: list[Any]) -> list[dict[str, str]]:
-        payloads: list[dict[str, str]] = []
+    def _history_mentions_payloads(self, mentions: list[Any]) -> list[MentionPayload]:
+        payloads: list[MentionPayload] = []
         for mention in mentions:
             payloads.append(self._mention_payload(mention))
         return payloads
 
-    def _history_entry_from_message(self, item: Any) -> dict[str, Any] | None:
+    def _history_entry_from_message(self, item: Any) -> GroupMessageEntry | None:
         message_id = str(getattr(item, "message_id", "") or "").strip()
         if not message_id:
             return None
@@ -960,7 +1006,7 @@ class FeishuBot(ABC):
         after_message_ids: set[str] | None = None,
         thread_id: str = "",
         limit: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[GroupMessageEntry]:
         effective_limit = self._group_history_fetch_limit if limit is None else max(int(limit), 0)
         if effective_limit <= 0 or self._group_history_fetch_lookback_seconds <= 0:
             return []
@@ -973,7 +1019,7 @@ class FeishuBot(ABC):
         if min_created_at > 0 and not normalized_thread_id:
             start_time = max(start_time, int(min_created_at / 1000))
         page_token = ""
-        entries: deque[dict[str, Any]] = deque(maxlen=effective_limit)
+        entries: deque[GroupMessageEntry] = deque(maxlen=effective_limit)
         seen_message_ids = set(existing_message_ids)
         seen_message_ids.add(str(current_message_id or "").strip())
         boundary_message_ids = {
@@ -1051,7 +1097,7 @@ class FeishuBot(ABC):
         )
 
     @staticmethod
-    def _group_context_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+    def _group_context_sort_key(item: GroupMessageEntry) -> tuple[int, int, int, str]:
         created_at = max(int(item.get("created_at", 0) or 0), 0)
         seq = item.get("seq")
         if isinstance(seq, int):
@@ -1066,7 +1112,7 @@ class FeishuBot(ABC):
         current_create_time: int | str | None,
         current_seq: int,
         thread_id: str = "",
-    ) -> list[dict[str, Any]]:
+    ) -> list[GroupMessageEntry]:
         scope = self._group_scope_key(thread_id)
         boundary_seq = self._group_store.get_last_boundary_seq(chat_id, scope=scope)
         boundary_created_at = self._group_store.get_last_boundary_created_at(chat_id, scope=scope)
@@ -1104,7 +1150,7 @@ class FeishuBot(ABC):
         *,
         current_message_id: str,
         current_created_at: int | str | None,
-        context_entries: list[dict[str, Any]],
+        context_entries: list[GroupMessageEntry],
     ) -> list[str]:
         normalized_created_at = max(int(current_created_at or 0), 0)
         if normalized_created_at <= 0:
@@ -1190,7 +1236,7 @@ class FeishuBot(ABC):
                 return
         self.send_message(chat_id, "interactive", content)
 
-    def _format_group_context_entries(self, entries: list[dict[str, Any]]) -> str:
+    def _format_group_context_entries(self, entries: list[GroupMessageEntry]) -> str:
         parts: list[str] = []
         for item in entries:
             seq = item.get("seq")
@@ -1266,7 +1312,7 @@ class FeishuBot(ABC):
         )
 
     @staticmethod
-    def _format_ts(ts_ms: str | None) -> str:
+    def _format_ts(ts_ms: int | str | None) -> str:
         """将毫秒时间戳转为可读时间字符串"""
         if not ts_ms:
             return "未知时间"

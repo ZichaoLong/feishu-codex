@@ -12,7 +12,7 @@ from secrets import compare_digest
 import threading
 import time
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
 from uuid import UUID
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -85,6 +85,7 @@ _LOCAL_THREAD_SAFETY_RULE = (
     "如需在本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。"
 )
 _GROUP_SHARED_STATE_KEY = "__group__"
+StateBinding: TypeAlias = tuple[str, str]
 _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
     "read-only": {
         "label": "Read Only",
@@ -142,8 +143,8 @@ class CodexHandler(BotHandler):
         self._data_dir = data_dir or FC_DATA_DIR
         self._config_dir = config_dir
         self._lock = threading.RLock()
-        self._states: dict[tuple[str, str], dict[str, Any]] = {}
-        self._thread_bindings: dict[str, tuple[str, str]] = {}
+        self._states: dict[StateBinding, dict[str, Any]] = {}
+        self._thread_bindings: dict[str, StateBinding] = {}
         self._pending_requests: dict[str, dict[str, Any]] = {}
         self._pending_rename_forms: dict[str, dict[str, str]] = {}
 
@@ -205,7 +206,7 @@ class CodexHandler(BotHandler):
             raise
 
     def handle_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         cleaned = (text or "").strip()
         with self._lock:
             if not state["active"]:
@@ -348,11 +349,11 @@ class CodexHandler(BotHandler):
         payload["thread_id"] = pending["thread_id"]
         return self._handle_rename_submit_action(sender_id, chat_id, message_id, payload)
 
-    def is_sender_active(self, sender_id: str, chat_id: str = "") -> bool:
-        return self._get_state(sender_id, chat_id).get("active", False)
+    def is_sender_active(self, sender_id: str, chat_id: str = "", message_id: str = "") -> bool:
+        return self._get_state(sender_id, chat_id, message_id).get("active", False)
 
-    def deactivate_sender(self, sender_id: str, chat_id: str = "") -> None:
-        key = self._state_binding(sender_id, chat_id)
+    def deactivate_sender(self, sender_id: str, chat_id: str = "", message_id: str = "") -> None:
+        key = self._state_binding(sender_id, chat_id, message_id)
         with self._lock:
             state = self._states.pop(key, None)
             if not state:
@@ -368,39 +369,58 @@ class CodexHandler(BotHandler):
         except Exception:
             logger.exception("停止 Codex adapter 失败")
 
-    def _get_state(self, sender_id: str, chat_id: str) -> dict[str, Any]:
-        key = self._state_binding(sender_id, chat_id)
+    def _build_default_state(self) -> dict[str, Any]:
+        return {
+            "active": False,
+            "working_dir": self._default_working_dir,
+            "current_thread_id": "",
+            "current_thread_name": "",
+            "current_turn_id": "",
+            "running": False,
+            "cancelled": False,
+            "current_message_id": "",
+            "current_prompt_message_id": "",
+            "current_actor_open_id": "",
+            "full_reply_text": "",
+            "full_log_text": "",
+            "started_at": 0.0,
+            "last_patch_at": 0.0,
+            "patch_timer": None,
+            "followup_sent": False,
+            "pending_local_turn_card": False,
+            "approval_policy": self._adapter_config.approval_policy,
+            "sandbox": self._adapter_config.sandbox,
+            "collaboration_mode": self._adapter_config.collaboration_mode,
+            "model": self._adapter_config.model,
+            "reasoning_effort": self._adapter_config.reasoning_effort,
+            "plan_message_id": "",
+            "plan_turn_id": "",
+            "plan_explanation": "",
+            "plan_steps": [],
+            "plan_text": "",
+        }
+
+    def _existing_state_binding_locked(self, sender_id: str, chat_id: str) -> StateBinding | None:
+        group_binding = (_GROUP_SHARED_STATE_KEY, chat_id)
+        if group_binding in self._states:
+            return group_binding
+        sender_binding = (sender_id, chat_id)
+        if sender_binding in self._states:
+            return sender_binding
+        return None
+
+    def _get_state(self, sender_id: str, chat_id: str, message_id: str = "") -> dict[str, Any]:
         with self._lock:
+            existing = self._existing_state_binding_locked(sender_id, chat_id)
+            if existing is not None:
+                return self._states[existing]
+        key = self._state_binding(sender_id, chat_id, message_id)
+        with self._lock:
+            existing = self._existing_state_binding_locked(sender_id, chat_id)
+            if existing is not None:
+                return self._states[existing]
             if key not in self._states:
-                self._states[key] = {
-                    "active": False,
-                    "working_dir": self._default_working_dir,
-                    "current_thread_id": "",
-                    "current_thread_name": "",
-                    "current_turn_id": "",
-                    "running": False,
-                    "cancelled": False,
-                    "current_message_id": "",
-                    "current_prompt_message_id": "",
-                    "current_actor_open_id": "",
-                    "full_reply_text": "",
-                    "full_log_text": "",
-                    "started_at": 0.0,
-                    "last_patch_at": 0.0,
-                    "patch_timer": None,
-                    "followup_sent": False,
-                    "pending_local_turn_card": False,
-                    "approval_policy": self._adapter_config.approval_policy,
-                    "sandbox": self._adapter_config.sandbox,
-                    "collaboration_mode": self._adapter_config.collaboration_mode,
-                    "model": self._adapter_config.model,
-                    "reasoning_effort": self._adapter_config.reasoning_effort,
-                    "plan_message_id": "",
-                    "plan_turn_id": "",
-                    "plan_explanation": "",
-                    "plan_steps": [],
-                    "plan_text": "",
-                }
+                self._states[key] = self._build_default_state()
             return self._states[key]
 
     def _resolve_chat_type(self, chat_id: str, message_id: str = "") -> str:
@@ -419,8 +439,14 @@ class CodexHandler(BotHandler):
     def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool:
         return self._resolve_chat_type(chat_id, message_id) == "group"
 
-    def _state_binding(self, sender_id: str, chat_id: str) -> tuple[str, str]:
-        if self._is_group_chat(chat_id):
+    def _state_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> StateBinding:
+        if sender_id == _GROUP_SHARED_STATE_KEY:
+            return (_GROUP_SHARED_STATE_KEY, chat_id)
+        with self._lock:
+            existing = self._existing_state_binding_locked(sender_id, chat_id)
+            if existing is not None:
+                return existing
+        if self._is_group_chat(chat_id, message_id):
             return (_GROUP_SHARED_STATE_KEY, chat_id)
         return (sender_id, chat_id)
 
@@ -489,7 +515,7 @@ class CodexHandler(BotHandler):
             operator_open_id=operator_open_id,
         ):
             return True
-        state = self._get_state(_GROUP_SHARED_STATE_KEY, chat_id)
+        state = self._get_state(_GROUP_SHARED_STATE_KEY, chat_id, message_id)
         actor_open_id = self._group_actor_open_id(message_id, operator_open_id)
         with self._lock:
             current_actor_open_id = str(state.get("current_actor_open_id", "")).strip()
@@ -570,7 +596,7 @@ class CodexHandler(BotHandler):
             "/pwd": _CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._reply_text(
                     chat_id,
-                    f"当前目录：`{display_path(self._get_state(sender_id, chat_id)['working_dir'])}`",
+                    f"当前目录：`{display_path(self._get_state(sender_id, chat_id, message_id)['working_dir'])}`",
                     message_id=message_id,
                 ),
             ),
@@ -961,14 +987,14 @@ class CodexHandler(BotHandler):
         route.handler(sender_id, chat_id, arg, message_id)
 
     def _handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
                 self._reply_text(chat_id, "当前线程仍在执行，请等待结束或先执行 `/cancel`。", message_id=message_id)
                 return
 
         try:
-            thread_id = self._ensure_thread(sender_id, chat_id)
+            thread_id = self._ensure_thread(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("创建线程失败")
             self._reply_text(chat_id, f"创建线程失败：{exc}", message_id=message_id)
@@ -1023,7 +1049,7 @@ class CodexHandler(BotHandler):
                 self._reply_text(chat_id, f"启动失败：{exc}", message_id=message_id)
 
     def _handle_cd_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
                 self._reply_card(
@@ -1072,7 +1098,7 @@ class CodexHandler(BotHandler):
             )
             return
 
-        self._clear_thread_binding(sender_id, chat_id)
+        self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
         with self._lock:
             state["working_dir"] = target
         self._reply_card(
@@ -1089,7 +1115,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_new_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
                 self._reply_text(chat_id, "执行中不能新建线程，请等待结束或先执行 `/cancel`。", message_id=message_id)
@@ -1105,7 +1131,7 @@ class CodexHandler(BotHandler):
             logger.exception("新建线程失败")
             self._reply_text(chat_id, f"新建线程失败：{exc}", message_id=message_id)
             return
-        self._bind_thread(sender_id, chat_id, snapshot.summary)
+        self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
         self._reply_card(
             chat_id,
             build_markdown_card(
@@ -1121,7 +1147,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         thread_id = state["current_thread_id"]
         title = state["current_thread_name"] or "（未绑定线程）"
         running = "是" if state["running"] else "否"
@@ -1191,6 +1217,7 @@ class CodexHandler(BotHandler):
                     f"- open_id: `{sender_open_id or '（空）'}`",
                     "",
                     "配置管理员时，把 `open_id` 写进 `system.yaml` 的 `admin_open_ids`。",
+                    "其中 `user_id` 仅用于排障；若未开 `contact:user.employee_id:readonly`，这里允许为空。",
                 ]
             ),
             message_id=message_id,
@@ -1242,17 +1269,18 @@ class CodexHandler(BotHandler):
 
     def _handle_session_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
         try:
-            threads = self._list_current_dir_threads(sender_id, chat_id)
+            threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("获取线程列表失败")
             self._reply_text(chat_id, f"获取线程列表失败：{exc}", message_id=message_id)
             return
 
-        sessions, counts = self._build_session_rows(sender_id, chat_id, threads)
+        sessions, counts = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         card = build_sessions_card(
             sessions,
-            self._get_state(sender_id, chat_id)["current_thread_id"],
-            self._get_state(sender_id, chat_id)["working_dir"],
+            state["current_thread_id"],
+            state["working_dir"],
             counts["total_all"],
             shown_starred_count=counts["shown_starred"],
             total_starred_count=counts["total_starred"],
@@ -1262,7 +1290,7 @@ class CodexHandler(BotHandler):
         self._reply_card(chat_id, card, message_id=message_id)
 
     def _handle_resume_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
                 self._reply_text(chat_id, "执行中不能切换线程，请等待结束或先执行 `/cancel`。", message_id=message_id)
@@ -1365,7 +1393,7 @@ class CodexHandler(BotHandler):
             self._reply_text(chat_id, f"切换 profile 失败：{exc}", message_id=message_id)
             return
 
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         lines = [
             f"已切换默认 profile：`{target_profile}`",
             f"默认 profile 对应 provider：{_profile_provider_text(target_profile)}",
@@ -1394,7 +1422,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_rename_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         if not state["current_thread_id"]:
             self._reply_text(chat_id, "当前没有绑定线程，无法重命名。", message_id=message_id)
             return
@@ -1412,7 +1440,7 @@ class CodexHandler(BotHandler):
         self._reply_text(chat_id, f"已重命名为：{arg}", message_id=message_id)
 
     def _handle_rm_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
                 self._reply_text(chat_id, "执行中不能归档线程，请等待结束或先执行 `/cancel`。", message_id=message_id)
@@ -1449,7 +1477,7 @@ class CodexHandler(BotHandler):
 
         self._favorites.remove_thread_globally(thread.thread_id)
         if state["current_thread_id"] == thread.thread_id:
-            self._clear_thread_binding(sender_id, chat_id)
+            self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
         self._reply_text(
             chat_id,
             (
@@ -1460,7 +1488,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_star_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         if not state["current_thread_id"]:
             self._reply_text(chat_id, "当前没有绑定线程，无法收藏。", message_id=message_id)
             return
@@ -1468,7 +1496,7 @@ class CodexHandler(BotHandler):
         self._reply_text(chat_id, "已收藏当前线程。" if starred else "已取消收藏当前线程。", message_id=message_id)
 
     def _handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in _APPROVAL_POLICIES:
@@ -1493,7 +1521,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_sandbox_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in _SANDBOX_POLICIES:
@@ -1518,7 +1546,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_permissions_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         if arg:
             preset = arg.strip().lower()
             config = _PERMISSIONS_PRESETS.get(preset)
@@ -1554,7 +1582,7 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         if arg:
             mode = arg.strip().lower()
             if mode not in {"default", "plan"}:
@@ -1717,7 +1745,7 @@ class CodexHandler(BotHandler):
         from_card: bool = False,
         message_id: str = "",
     ) -> tuple[bool, str]:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         thread_id = state["current_thread_id"]
         turn_id = state["current_turn_id"]
         if not state["running"] or not thread_id or not turn_id:
@@ -1757,7 +1785,7 @@ class CodexHandler(BotHandler):
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
                 return self.bot.make_card_response(
@@ -1807,7 +1835,7 @@ class CodexHandler(BotHandler):
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
                 return self.bot.make_card_response(
@@ -1854,7 +1882,7 @@ class CodexHandler(BotHandler):
             logger.exception("卡片重命名失败")
             return self.bot.make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
 
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             self._pending_rename_forms.pop(message_id, None)
             if state["current_thread_id"] == thread_id:
@@ -1882,10 +1910,11 @@ class CodexHandler(BotHandler):
             logger.exception("刷新线程列表失败")
             return self.bot.make_card_response(toast=f"刷新失败：{exc}", toast_type="warning")
         sessions, counts = self._build_session_rows(sender_id, chat_id, threads)
+        state = self._get_state(sender_id, chat_id)
         card = build_sessions_card(
             sessions,
-            self._get_state(sender_id, chat_id)["current_thread_id"],
-            self._get_state(sender_id, chat_id)["working_dir"],
+            state["current_thread_id"],
+            state["working_dir"],
             counts["total_all"],
             shown_starred_count=counts["shown_starred"],
             total_starred_count=counts["total_starred"],
@@ -2122,8 +2151,8 @@ class CodexHandler(BotHandler):
             toast_type="success",
         )
 
-    def _ensure_thread(self, sender_id: str, chat_id: str) -> str:
-        state = self._get_state(sender_id, chat_id)
+    def _ensure_thread(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
+        state = self._get_state(sender_id, chat_id, message_id)
         if state["current_thread_id"]:
             return state["current_thread_id"]
         snapshot = self._adapter.create_thread(
@@ -2132,7 +2161,7 @@ class CodexHandler(BotHandler):
             approval_policy=state["approval_policy"] or None,
             sandbox=state["sandbox"] or None,
         )
-        self._bind_thread(sender_id, chat_id, snapshot.summary)
+        self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
         return snapshot.summary.thread_id
 
     def _resume_thread_in_background(
@@ -2145,7 +2174,7 @@ class CodexHandler(BotHandler):
         summary: ThreadSummary | None = None,
         message_id: str = "",
     ) -> None:
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         try:
             snapshot = self._resume_snapshot_by_id(
                 thread_id,
@@ -2160,7 +2189,7 @@ class CodexHandler(BotHandler):
             if state["running"]:
                 self._reply_text(chat_id, "当前线程仍在执行，暂不切换。", message_id=message_id)
                 return
-        self._bind_thread(sender_id, chat_id, snapshot.summary)
+        self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
         summary = (
             f"**已切换到线程**\n"
             f"thread：`{snapshot.summary.thread_id[:8]}…`\n"
@@ -2304,9 +2333,16 @@ class CodexHandler(BotHandler):
     def _is_transport_disconnect(exc: Exception) -> bool:
         return isinstance(exc, CodexRpcError) and exc.error.get("message") == "Codex websocket disconnected"
 
-    def _bind_thread(self, sender_id: str, chat_id: str, thread: ThreadSummary) -> None:
-        state = self._get_state(sender_id, chat_id)
-        state_binding = self._state_binding(sender_id, chat_id)
+    def _bind_thread(
+        self,
+        sender_id: str,
+        chat_id: str,
+        thread: ThreadSummary,
+        *,
+        message_id: str = "",
+    ) -> None:
+        state = self._get_state(sender_id, chat_id, message_id)
+        state_binding = self._state_binding(sender_id, chat_id, message_id)
         takeover_binding: tuple[str, str] | None = None
         with self._lock:
             old_thread_id = state["current_thread_id"]
@@ -2332,9 +2368,9 @@ class CodexHandler(BotHandler):
                 ),
             )
 
-    def _clear_thread_binding(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_state(sender_id, chat_id)
-        state_binding = self._state_binding(sender_id, chat_id)
+    def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
+        state = self._get_state(sender_id, chat_id, message_id)
+        state_binding = self._state_binding(sender_id, chat_id, message_id)
         with self._lock:
             thread_id = state["current_thread_id"]
             if thread_id and self._thread_bindings.get(thread_id) == state_binding:
@@ -2350,6 +2386,8 @@ class CodexHandler(BotHandler):
         sender_id: str,
         chat_id: str,
         threads: list[ThreadSummary],
+        *,
+        message_id: str = "",
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         starred_ids = self._favorites.load_favorites(sender_id)
         rows = [
@@ -2365,7 +2403,7 @@ class CodexHandler(BotHandler):
         ]
         rows.sort(key=lambda item: item["updated_at"], reverse=True)
 
-        state = self._get_state(sender_id, chat_id)
+        state = self._get_state(sender_id, chat_id, message_id)
         current_id = state["current_thread_id"]
         if current_id and all(item["thread_id"] != current_id for item in rows):
             rows.insert(
@@ -2406,19 +2444,26 @@ class CodexHandler(BotHandler):
         }
         return deduped, counts
 
-    def _find_thread_session(self, sender_id: str, chat_id: str, thread_id: str) -> dict[str, Any] | None:
-        threads = self._list_current_dir_threads(sender_id, chat_id)
-        rows, _ = self._build_session_rows(sender_id, chat_id, threads)
+    def _find_thread_session(
+        self,
+        sender_id: str,
+        chat_id: str,
+        thread_id: str,
+        *,
+        message_id: str = "",
+    ) -> dict[str, Any] | None:
+        threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
+        rows, _ = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
         return next((item for item in rows if item["thread_id"] == thread_id), None)
 
     @staticmethod
     def _all_model_providers_filter() -> list[str]:
         return []
 
-    def _list_current_dir_threads(self, sender_id: str, chat_id: str) -> list[ThreadSummary]:
+    def _list_current_dir_threads(self, sender_id: str, chat_id: str, *, message_id: str = "") -> list[ThreadSummary]:
         return list_current_dir_threads(
             self._adapter,
-            cwd=self._get_state(sender_id, chat_id)["working_dir"],
+            cwd=self._get_state(sender_id, chat_id, message_id)["working_dir"],
             limit=self._thread_list_query_limit,
         )
 
@@ -2950,7 +2995,7 @@ class CodexHandler(BotHandler):
             "- `/cd <path>` 切换目录并清空当前线程绑定\n"
             "- `/status` 查看当前状态\n\n"
             "- `/init <token>`：私聊初始化管理员和 `bot_open_id`\n"
-            "- `/whoami`：私聊查看自己的 `user_id` / `open_id`（`user_id` 仅用于排障）\n"
+            "- `/whoami`：私聊查看自己的 `open_id`，以及 best-effort 的 `user_id`（仅用于排障）\n"
             "- `/whoareyou`：查看机器人自己的 `app_id` / `open_id`\n\n"
             "**更多命令与帮助**\n"
             "- `/help session` 查看线程切换、目录切换与归档\n"

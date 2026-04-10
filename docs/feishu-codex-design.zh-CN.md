@@ -158,6 +158,7 @@ shared backend 与 wrapper 的具体机制，见
 - 新群默认 ACL 是 `admin-only`
 - 群聊管理员来自 `system.yaml.admin_open_ids`
 - 运行时身份判定统一使用 `open_id`；`user_id` 仅保留在日志与 `/whoami` 里做排障展示
+- 若希望 `/whoami` 和日志稳定返回 `user_id`，需要额外开 `contact:user.employee_id:readonly`
 
 #### 人类成员权限
 

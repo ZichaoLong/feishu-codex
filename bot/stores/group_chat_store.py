@@ -8,13 +8,33 @@ import json
 import os
 import pathlib
 import threading
-from typing import Any
+from typing import Any, TypedDict
 
 DEFAULT_GROUP_MODE = "assistant"
 DEFAULT_ACCESS_POLICY = "admin-only"
 GROUP_MODES = {"mention_only", "assistant", "all"}
 ACCESS_POLICIES = {"admin-only", "allowlist", "all-members"}
 MAIN_SCOPE = "main"
+GROUP_CHAT_STORE_SCHEMA_VERSION = 1
+
+
+class BoundaryState(TypedDict):
+    seq: int
+    created_at: int
+    message_ids: list[str]
+
+
+class GroupState(TypedDict):
+    mode: str
+    access_policy: str
+    allowlist: list[str]
+    boundaries: dict[str, BoundaryState]
+    last_log_seq: int
+
+
+class GroupChatStoreData(TypedDict):
+    schema_version: int
+    groups: dict[str, GroupState]
 
 
 class GroupChatStore:
@@ -77,7 +97,7 @@ class GroupChatStore:
             allowlist.update(granted)
             group["allowlist"] = sorted(allowlist)
             self._write_group_state(data, chat_id, group)
-            return group["allowlist"]
+            return list(group["allowlist"])
 
     def revoke_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
         revoked = {str(item).strip() for item in open_ids if str(item).strip()}
@@ -90,7 +110,7 @@ class GroupChatStore:
             allowlist.difference_update(revoked)
             group["allowlist"] = sorted(allowlist)
             self._write_group_state(data, chat_id, group)
-            return group["allowlist"]
+            return list(group["allowlist"])
 
     def get_last_boundary_seq(self, chat_id: str, *, scope: str = MAIN_SCOPE) -> int:
         with self._lock:
@@ -142,13 +162,7 @@ class GroupChatStore:
         *,
         scope: str = MAIN_SCOPE,
     ) -> list[str]:
-        normalized_message_ids = sorted(
-            {
-                str(item).strip()
-                for item in message_ids
-                if isinstance(item, str) and str(item).strip()
-            }
-        )
+        normalized_message_ids = self._normalize_string_list(message_ids)
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
@@ -168,13 +182,7 @@ class GroupChatStore:
     ) -> dict[str, Any]:
         normalized_seq = max(int(seq), 0)
         normalized_created_at = max(int(created_at or 0), 0)
-        normalized_message_ids = sorted(
-            {
-                str(item).strip()
-                for item in (message_ids or [])
-                if isinstance(item, str) and str(item).strip()
-            }
-        )
+        normalized_message_ids = self._normalize_string_list(message_ids or [])
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
@@ -251,9 +259,9 @@ class GroupChatStore:
                     messages.append(item)
         return messages
 
-    def group_snapshot(self, chat_id: str) -> dict[str, Any]:
+    def group_snapshot(self, chat_id: str) -> GroupState:
         with self._lock:
-            return self._group_state(chat_id)
+            return self._clone_group_state(self._group_state(chat_id))
 
     def log_path(self, chat_id: str) -> pathlib.Path:
         return self._log_path(chat_id)
@@ -265,115 +273,186 @@ class GroupChatStore:
         safe_chat_id = chat_id.replace("/", "_")
         return self._data_dir / "group_chat_logs" / f"{safe_chat_id}.jsonl"
 
-    def _boundary_state(self, group: dict[str, Any], scope: str | None) -> dict[str, Any]:
-        normalized_scope = self.normalize_scope(scope)
-        boundaries = group.setdefault("boundaries", {})
-        boundary = boundaries.get(normalized_scope, {})
-        sanitized = {
-            "seq": max(int(boundary.get("seq", 0) or 0), 0),
-            "created_at": max(int(boundary.get("created_at", 0) or 0), 0),
-            "message_ids": sorted(
-                {
-                    str(item).strip()
-                    for item in boundary.get("message_ids", [])
-                    if isinstance(item, str) and str(item).strip()
-                }
-            ),
-        }
-        boundaries[normalized_scope] = sanitized
-        return sanitized
-
-    def _group_state(self, chat_id: str, *, data: dict[str, Any] | None = None) -> dict[str, Any]:
-        source = data if data is not None else self._read_all()
-        groups = source.get("groups", {})
-        raw = groups.get(chat_id, {})
-        allowlist = raw.get("allowlist", [])
-        mode = raw.get("mode", DEFAULT_GROUP_MODE)
-        access_policy = raw.get("access_policy", DEFAULT_ACCESS_POLICY)
-        raw_boundaries = raw.get("boundaries", {})
-        boundaries: dict[str, dict[str, Any]] = {}
-        if isinstance(raw_boundaries, dict):
-            for scope, boundary in raw_boundaries.items():
-                if not isinstance(boundary, dict):
-                    continue
-                normalized_scope = self.normalize_scope(scope)
-                boundaries[normalized_scope] = {
-                    "seq": max(int(boundary.get("seq", 0) or 0), 0),
-                    "created_at": max(int(boundary.get("created_at", 0) or 0), 0),
-                    "message_ids": sorted(
-                        {
-                            str(item).strip()
-                            for item in boundary.get("message_ids", [])
-                            if isinstance(item, str) and str(item).strip()
-                        }
-                    ),
-                }
-        if MAIN_SCOPE not in boundaries:
-            boundaries[MAIN_SCOPE] = {
-                "seq": max(int(raw.get("last_boundary_seq", 0) or 0), 0),
-                "created_at": max(int(raw.get("last_boundary_created_at", 0) or 0), 0),
-                "message_ids": sorted(
-                    {
-                        str(item).strip()
-                        for item in raw.get("last_boundary_message_ids", [])
-                        if isinstance(item, str) and str(item).strip()
-                    }
-                ),
+    @staticmethod
+    def _normalize_string_list(values: Any) -> list[str]:
+        if not isinstance(values, (list, set, tuple)):
+            raise ValueError("expected string list")
+        return sorted(
+            {
+                str(item).strip()
+                for item in values
+                if isinstance(item, str) and str(item).strip()
             }
+        )
+
+    @staticmethod
+    def _default_boundary_state() -> BoundaryState:
         return {
-            "mode": mode if mode in GROUP_MODES else DEFAULT_GROUP_MODE,
-            "access_policy": access_policy if access_policy in ACCESS_POLICIES else DEFAULT_ACCESS_POLICY,
-            "allowlist": sorted(
-                {
-                    str(item).strip()
-                    for item in allowlist
-                    if isinstance(item, str) and str(item).strip()
-                }
-            ),
-            "boundaries": boundaries,
-            "last_log_seq": max(int(raw.get("last_log_seq", 0) or 0), 0),
+            "seq": 0,
+            "created_at": 0,
+            "message_ids": [],
         }
 
-    def _read_all(self) -> dict[str, Any]:
+    @classmethod
+    def _default_group_state(cls) -> GroupState:
+        return {
+            "mode": DEFAULT_GROUP_MODE,
+            "access_policy": DEFAULT_ACCESS_POLICY,
+            "allowlist": [],
+            "boundaries": {MAIN_SCOPE: cls._default_boundary_state()},
+            "last_log_seq": 0,
+        }
+
+    @classmethod
+    def _default_store_data(cls) -> GroupChatStoreData:
+        return {
+            "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
+            "groups": {},
+        }
+
+    def _boundary_state(self, group: GroupState, scope: str | None) -> BoundaryState:
+        normalized_scope = self.normalize_scope(scope)
+        boundary = group["boundaries"].get(normalized_scope)
+        if boundary is None:
+            boundary = self._default_boundary_state()
+            group["boundaries"][normalized_scope] = boundary
+        return boundary
+
+    def _group_state(self, chat_id: str, *, data: GroupChatStoreData | None = None) -> GroupState:
+        source = data if data is not None else self._read_all()
+        raw = source["groups"].get(chat_id)
+        if raw is None:
+            return self._default_group_state()
+        return self._clone_group_state(raw)
+
+    def _read_all(self) -> GroupChatStoreData:
         path = self._state_path()
         if not path.exists():
-            return {"groups": {}}
+            return self._default_store_data()
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {"groups": {}}
-        if not isinstance(raw, dict):
-            return {"groups": {}}
-        groups = raw.get("groups", {})
-        if not isinstance(groups, dict):
-            groups = {}
-        return {"groups": groups}
+        except Exception as exc:
+            raise ValueError(f"invalid {path.name}: failed to parse JSON") from exc
+        return self._validate_store_data(raw)
 
-    def _write_group_state(self, data: dict[str, Any], chat_id: str, group: dict[str, Any]) -> None:
-        groups = data.setdefault("groups", {})
-        groups[chat_id] = {
-            "mode": group["mode"],
-            "access_policy": group["access_policy"],
-            "allowlist": list(group["allowlist"]),
-            "boundaries": {
-                self.normalize_scope(scope): {
-                    "seq": int(boundary["seq"]),
-                    "created_at": int(boundary["created_at"]),
-                    "message_ids": list(boundary["message_ids"]),
-                }
-                for scope, boundary in group.get("boundaries", {}).items()
-                if isinstance(boundary, dict)
-            },
-            "last_log_seq": int(group["last_log_seq"]),
+    def _validate_store_data(self, raw: Any) -> GroupChatStoreData:
+        if not isinstance(raw, dict):
+            raise ValueError("invalid group_chat_state.json: root must be an object")
+        schema_version = raw.get("schema_version")
+        if schema_version != GROUP_CHAT_STORE_SCHEMA_VERSION:
+            raise ValueError(
+                "invalid group_chat_state.json: "
+                f"schema_version must be {GROUP_CHAT_STORE_SCHEMA_VERSION}"
+            )
+        raw_groups = raw.get("groups")
+        if not isinstance(raw_groups, dict):
+            raise ValueError("invalid group_chat_state.json: groups must be an object")
+        groups: dict[str, GroupState] = {}
+        for chat_id, raw_group in raw_groups.items():
+            if not isinstance(chat_id, str) or not chat_id.strip():
+                raise ValueError("invalid group_chat_state.json: group chat_id must be a non-empty string")
+            groups[chat_id] = self._validate_group_state(raw_group, chat_id=chat_id)
+        return {
+            "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
+            "groups": groups,
         }
+
+    def _validate_group_state(self, raw_group: Any, *, chat_id: str) -> GroupState:
+        if not isinstance(raw_group, dict):
+            raise ValueError(f"invalid group_chat_state.json: group {chat_id} must be an object")
+        mode = str(raw_group.get("mode", "") or "").strip()
+        if mode not in GROUP_MODES:
+            raise ValueError(f"invalid group_chat_state.json: group {chat_id} has invalid mode")
+        access_policy = str(raw_group.get("access_policy", "") or "").strip()
+        if access_policy not in ACCESS_POLICIES:
+            raise ValueError(f"invalid group_chat_state.json: group {chat_id} has invalid access_policy")
+        try:
+            allowlist = self._normalize_string_list(raw_group.get("allowlist", []))
+        except ValueError as exc:
+            raise ValueError(f"invalid group_chat_state.json: group {chat_id} allowlist must be a string list") from exc
+        raw_boundaries = raw_group.get("boundaries")
+        if not isinstance(raw_boundaries, dict):
+            raise ValueError(f"invalid group_chat_state.json: group {chat_id} boundaries must be an object")
+        boundaries: dict[str, BoundaryState] = {}
+        for scope, raw_boundary in raw_boundaries.items():
+            normalized_scope = self.normalize_scope(scope)
+            boundaries[normalized_scope] = self._validate_boundary_state(
+                raw_boundary,
+                chat_id=chat_id,
+                scope=normalized_scope,
+            )
+        if MAIN_SCOPE not in boundaries:
+            raise ValueError(f"invalid group_chat_state.json: group {chat_id} is missing main boundary")
+        try:
+            last_log_seq = max(int(raw_group.get("last_log_seq", 0) or 0), 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid group_chat_state.json: group {chat_id} has invalid last_log_seq") from exc
+        return {
+            "mode": mode,
+            "access_policy": access_policy,
+            "allowlist": allowlist,
+            "boundaries": boundaries,
+            "last_log_seq": last_log_seq,
+        }
+
+    def _validate_boundary_state(self, raw_boundary: Any, *, chat_id: str, scope: str) -> BoundaryState:
+        if not isinstance(raw_boundary, dict):
+            raise ValueError(
+                f"invalid group_chat_state.json: group {chat_id} boundary {scope} must be an object"
+            )
+        try:
+            seq = max(int(raw_boundary.get("seq", 0) or 0), 0)
+            created_at = max(int(raw_boundary.get("created_at", 0) or 0), 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"invalid group_chat_state.json: group {chat_id} boundary {scope} has invalid counters"
+            ) from exc
+        try:
+            message_ids = self._normalize_string_list(raw_boundary.get("message_ids", []))
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid group_chat_state.json: group {chat_id} boundary {scope} message_ids must be a string list"
+            ) from exc
+        return {
+            "seq": seq,
+            "created_at": created_at,
+            "message_ids": message_ids,
+        }
+
+    def _write_group_state(self, data: GroupChatStoreData, chat_id: str, group: GroupState) -> None:
+        data["groups"][chat_id] = self._clone_group_state(group)
         self._write_all(data)
 
-    def _write_all(self, data: dict[str, Any]) -> None:
+    def _write_all(self, data: GroupChatStoreData) -> None:
+        payload: GroupChatStoreData = {
+            "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
+            "groups": {
+                chat_id: self._clone_group_state(group)
+                for chat_id, group in data["groups"].items()
+            },
+        }
         path = self._state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".json.tmp")
         tmp_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         os.replace(str(tmp_path), str(path))
+
+    @staticmethod
+    def _clone_group_state(group: GroupState) -> GroupState:
+        return {
+            "mode": group["mode"],
+            "access_policy": group["access_policy"],
+            "allowlist": list(group["allowlist"]),
+            "boundaries": {
+                scope: {
+                    "seq": int(boundary["seq"]),
+                    "created_at": int(boundary["created_at"]),
+                    "message_ids": list(boundary["message_ids"]),
+                }
+                for scope, boundary in group["boundaries"].items()
+            },
+            "last_log_seq": int(group["last_log_seq"]),
+        }

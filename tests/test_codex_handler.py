@@ -704,6 +704,16 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[0]
         self.assertEqual(card["header"]["title"]["content"], "Codex 群聊工作态")
 
+    def test_group_command_binds_shared_state_from_message_context_before_chat_cache(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-status"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        handler.handle_message("ou_user", "chat-group", "/status", message_id="m-status")
+
+        self.assertIn(("__group__", "chat-group"), handler._states)
+        self.assertNotIn(("ou_user", "chat-group"), handler._states)
+        self.assertIs(handler._get_state("ou_user", "chat-group"), handler._get_state("ou_user2", "chat-group"))
+
     def test_sandbox_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
 

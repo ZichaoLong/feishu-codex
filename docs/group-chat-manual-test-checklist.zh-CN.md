@@ -27,6 +27,7 @@
 2. 确认应用权限至少包含：
    `im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`
    如需让 `/whoami`、群 ACL 卡片、群上下文里显示可读名字，再补 `contact:contact.base:readonly`、`contact:user.base:readonly`
+   如需让 `/whoami` 和日志里稳定看到 `user_id`，再补 `contact:user.employee_id:readonly`；缺少时 `user_id` 允许为空
    如需用 `/whoareyou` 实时探测机器人 `open_id`，再补 `application:application:self_manage`
 3. 确认事件与回调已启用：
    `im.message.receive_v1`、`card.action.trigger`
@@ -39,7 +40,7 @@
 
 ## 4. 私聊基础检查
 
-1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`user_id`、`open_id`，并提示管理员配置使用 `open_id`；其中 `user_id` 仅用于排障。若未开通讯录权限，`name` 允许退化成 open_id 前缀。
+1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`open_id`，以及仅用于排障的 `user_id`；若未开 `contact:user.employee_id:readonly`，`user_id` 允许为空。若未开通讯录权限，`name` 允许退化成 open_id 前缀。
 2. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/groupmode`、`/acl`，且不再提已废弃的旧群聊命令。
 3. `MemberA` 私聊发送普通文本。预期：仍可正常使用私聊，不受群 ACL 影响。
 
@@ -138,7 +139,7 @@
 
 ## 13. 日志与可观测性
 
-1. 群聊发送一条普通文本。预期：日志里可看到 `name/open_id/user_id/chat_type/msg_type/message_id`。
+1. 群聊发送一条普通文本。预期：日志里可看到 `name/open_id/user_id/chat_type/msg_type/message_id`；若未开 `contact:user.employee_id:readonly`，`user_id` 允许为 `-`。
 2. 发送一张外部卡片。预期：日志里 `msg_type=interactive`。
 3. `assistant` 模式下有效 `@` 时观察日志。预期：能看到历史回捞成功或失败日志。
 4. 让 `OtherBot` 发言后再由人类 `@机器人`。预期：日志里能看到这次人类触发前的上下文准备过程，但不会出现“其他机器人直接触发成功”的记录。
