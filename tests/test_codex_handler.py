@@ -629,10 +629,10 @@ class CodexHandlerTests(unittest.TestCase):
             "discovered_open_id": "ou_bot_new",
             "trigger_open_ids": "",
         }
-        with patch("bot.codex_handler.ensure_init_token", return_value="secret-1"), patch(
-            "bot.codex_handler.load_system_config_raw",
+        with patch("bot.codex_settings_domain.ensure_init_token", return_value="secret-1"), patch(
+            "bot.codex_settings_domain.load_system_config_raw",
             return_value={"app_id": "cli_test_app", "app_secret": "secret"},
-        ), patch("bot.codex_handler.save_system_config") as save_config:
+        ), patch("bot.codex_settings_domain.save_system_config") as save_config:
             handler.handle_message("ou_user2", "chat-p2p", "/init secret-1", message_id="m-p2p")
 
         saved = save_config.call_args.args[0]
@@ -652,7 +652,7 @@ class CodexHandlerTests(unittest.TestCase):
             "sender_open_id": "ou_user",
             "sender_type": "user",
         }
-        with patch("bot.codex_handler.ensure_init_token", return_value="secret-1"):
+        with patch("bot.codex_settings_domain.ensure_init_token", return_value="secret-1"):
             handler.handle_message("ou_user", "chat-p2p", "/init bad-token", message_id="m-p2p")
 
         self.assertIn("初始化口令错误", bot.replies[-1][1])

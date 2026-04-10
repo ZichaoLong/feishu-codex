@@ -8,11 +8,10 @@ import atexit
 import json
 import logging
 import pathlib
-from secrets import compare_digest
 import threading
 import time
 from dataclasses import dataclass, replace
-from typing import Any, Callable, TypeAlias
+from typing import Any, Callable, TypedDict, TypeAlias
 from uuid import UUID
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -23,38 +22,18 @@ from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerC
 from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummary
 from bot.cards import (
     build_approval_handled_card,
-    build_approval_policy_card,
     build_ask_user_answered_card,
     build_ask_user_card,
-    build_collaboration_mode_card,
     build_command_approval_card,
     build_execution_card,
-    build_group_acl_card,
-    build_group_mode_card,
-    build_help_dashboard_card,
-    build_help_topic_actions_card,
-    build_help_topic_card,
     build_file_change_approval_card,
     build_history_preview_card,
     build_markdown_card,
     build_plan_card,
-    build_permissions_preset_card,
     build_permissions_approval_card,
-    build_resume_guard_card,
-    build_resume_guard_handled_card,
-    build_rename_card,
-    build_sandbox_policy_card,
-    build_sessions_card,
-    build_sessions_closed_card,
-    build_sessions_pending_card,
     build_thread_snapshot_card,
 )
-from bot.config import (
-    ensure_init_token,
-    load_config_file,
-    load_system_config_raw,
-    save_system_config,
-)
+from bot.config import load_config_file
 from bot.constants import (
     DEFAULT_APP_SERVER_MODE,
     DEFAULT_HISTORY_PREVIEW_ROUNDS,
@@ -67,13 +46,14 @@ from bot.constants import (
     display_path,
     resolve_working_dir,
 )
-from bot.feishu_types import GroupAclSnapshot, MessageContextPayload
 from bot.handler import BotHandler
 from bot.codex_protocol.client import CodexRpcError
+from bot.codex_group_domain import CodexGroupDomain
+from bot.codex_help_domain import CodexHelpDomain
+from bot.codex_session_ui_domain import CodexSessionUiDomain
+from bot.codex_settings_domain import CodexSettingsDomain
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
 from bot.session_resolution import (
-    format_thread_match,
-    list_current_dir_threads,
     list_global_threads,
     looks_like_thread_id,
     resolve_resume_target_by_name,
@@ -126,6 +106,61 @@ class _ActionRoute:
     group_guard: str = "none"
 
 
+class _PlanStepState(TypedDict):
+    step: str
+    status: str
+
+
+class _RuntimeState(TypedDict):
+    active: bool
+    working_dir: str
+    current_thread_id: str
+    current_thread_name: str
+    current_turn_id: str
+    running: bool
+    cancelled: bool
+    pending_cancel: bool
+    current_message_id: str
+    current_prompt_message_id: str
+    current_actor_open_id: str
+    full_reply_text: str
+    full_log_text: str
+    started_at: float
+    last_patch_at: float
+    patch_timer: threading.Timer | None
+    followup_sent: bool
+    pending_local_turn_card: bool
+    approval_policy: str
+    sandbox: str
+    collaboration_mode: str
+    model: str
+    reasoning_effort: str
+    plan_message_id: str
+    plan_turn_id: str
+    plan_explanation: str
+    plan_steps: list[_PlanStepState]
+    plan_text: str
+
+
+class _PendingRenameFormState(TypedDict):
+    thread_id: str
+
+
+class _PendingRequestState(TypedDict):
+    rpc_request_id: int | str
+    method: str
+    params: dict[str, Any]
+    thread_id: str
+    turn_id: str
+    title: str
+    message_id: str
+    questions: list[dict[str, Any]]
+    answers: dict[str, str]
+    chat_id: str
+    sender_id: str
+    actor_open_id: str
+
+
 def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
     for preset, config in _PERMISSIONS_PRESETS.items():
         if config["approval_policy"] == approval_policy and config["sandbox"] == sandbox:
@@ -150,10 +185,10 @@ class CodexHandler(BotHandler):
         self._data_dir = data_dir or FC_DATA_DIR
         self._config_dir = config_dir
         self._lock = threading.RLock()
-        self._states: dict[StateBinding, dict[str, Any]] = {}
+        self._states: dict[StateBinding, _RuntimeState] = {}
         self._thread_bindings: dict[str, StateBinding] = {}
-        self._pending_requests: dict[str, dict[str, Any]] = {}
-        self._pending_rename_forms: dict[str, dict[str, str]] = {}
+        self._pending_requests: dict[str, _PendingRequestState] = {}
+        self._pending_rename_forms: dict[str, _PendingRenameFormState] = {}
 
         self._default_working_dir = resolve_working_dir(
             str(cfg.get("default_working_dir", "")),
@@ -187,6 +222,19 @@ class CodexHandler(BotHandler):
             on_request=self._handle_adapter_request,
             app_server_runtime_store=self._app_server_runtime,
         )
+        self._settings_domain = CodexSettingsDomain(
+            self,
+            approval_policies=_APPROVAL_POLICIES,
+            sandbox_policies=_SANDBOX_POLICIES,
+            permissions_presets=_PERMISSIONS_PRESETS,
+        )
+        self._group_domain = CodexGroupDomain(self)
+        self._help_domain = CodexHelpDomain(
+            self,
+            plugin_keyword=KEYWORD,
+            local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
+        )
+        self._session_ui_domain = CodexSessionUiDomain(self)
         self._command_routes = self._build_command_routes()
         self._action_routes = self._build_action_routes()
         self._prefixed_action_routes = self._build_prefixed_action_routes()
@@ -220,7 +268,7 @@ class CodexHandler(BotHandler):
                 state["active"] = True
 
         if not cleaned or cleaned.upper() == KEYWORD:
-            self._reply_help(chat_id)
+            self._help_domain.reply_help(chat_id)
             return
 
         if cleaned.startswith("/"):
@@ -279,12 +327,12 @@ class CodexHandler(BotHandler):
         if not message_id or not isinstance(form_value, dict) or not form_value:
             return None
 
-        pending_request: tuple[str, dict[str, Any]] | None = None
+        pending_request: tuple[str, _PendingRequestState] | None = None
         with self._lock:
             for request_key, pending in self._pending_requests.items():
-                if pending.get("method") != "item/tool/requestUserInput":
+                if pending["method"] != "item/tool/requestUserInput":
                     continue
-                if pending.get("message_id") != message_id:
+                if pending["message_id"] != message_id:
                     continue
                 pending_request = (request_key, pending)
                 break
@@ -304,7 +352,7 @@ class CodexHandler(BotHandler):
                 toast_type="warning",
             )
         matched_question_id = ""
-        for question in pending.get("questions") or []:
+        for question in pending["questions"]:
             qid = str(question.get("id", "")).strip()
             if not qid:
                 continue
@@ -354,10 +402,10 @@ class CodexHandler(BotHandler):
         payload = dict(action_value)
         payload["action"] = "rename_thread"
         payload["thread_id"] = pending["thread_id"]
-        return self._handle_rename_submit_action(sender_id, chat_id, message_id, payload)
+        return self._session_ui_domain.handle_rename_submit_action(sender_id, chat_id, message_id, payload)
 
     def is_sender_active(self, sender_id: str, chat_id: str = "", message_id: str = "") -> bool:
-        return self._get_state(sender_id, chat_id, message_id).get("active", False)
+        return self._get_state(sender_id, chat_id, message_id)["active"]
 
     def deactivate_sender(self, sender_id: str, chat_id: str = "", message_id: str = "") -> None:
         key = self._state_binding(sender_id, chat_id, message_id)
@@ -365,7 +413,7 @@ class CodexHandler(BotHandler):
             state = self._states.pop(key, None)
             if not state:
                 return
-            thread_id = state.get("current_thread_id", "")
+            thread_id = state["current_thread_id"]
             if thread_id and self._thread_bindings.get(thread_id) == key:
                 self._thread_bindings.pop(thread_id, None)
 
@@ -376,7 +424,7 @@ class CodexHandler(BotHandler):
         except Exception:
             logger.exception("停止 Codex adapter 失败")
 
-    def _build_default_state(self) -> dict[str, Any]:
+    def _build_default_state(self) -> _RuntimeState:
         return {
             "active": False,
             "working_dir": self._default_working_dir,
@@ -417,7 +465,7 @@ class CodexHandler(BotHandler):
             return sender_binding
         return None
 
-    def _get_state(self, sender_id: str, chat_id: str, message_id: str = "") -> dict[str, Any]:
+    def _get_state(self, sender_id: str, chat_id: str, message_id: str = "") -> _RuntimeState:
         with self._lock:
             existing = self._existing_state_binding_locked(sender_id, chat_id)
             if existing is not None:
@@ -526,7 +574,7 @@ class CodexHandler(BotHandler):
         state = self._get_state(_GROUP_SHARED_STATE_KEY, chat_id, message_id)
         actor_open_id = self._group_actor_open_id(message_id, operator_open_id)
         with self._lock:
-            current_actor_open_id = str(state.get("current_actor_open_id", "")).strip()
+            current_actor_open_id = state["current_actor_open_id"].strip()
         return bool(current_actor_open_id and actor_open_id and current_actor_open_id == actor_open_id)
 
     def _is_group_request_actor_or_admin(
@@ -534,7 +582,7 @@ class CodexHandler(BotHandler):
         chat_id: str,
         *,
         request_key: str,
-        pending: dict[str, Any] | None = None,
+        pending: _PendingRequestState | None = None,
         message_id: str = "",
         operator_open_id: str = "",
     ) -> bool:
@@ -553,7 +601,7 @@ class CodexHandler(BotHandler):
         if not request:
             return False
         actor_open_id = self._group_actor_open_id(message_id, operator_open_id)
-        request_actor_open_id = str(request.get("actor_open_id", "")).strip()
+        request_actor_open_id = request["actor_open_id"].strip()
         return bool(request_actor_open_id and actor_open_id and request_actor_open_id == actor_open_id)
 
     def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None:
@@ -568,34 +616,20 @@ class CodexHandler(BotHandler):
             return
         self.bot.reply_card(chat_id, card)
 
-    def _group_member_label(self, open_id: str) -> str:
-        normalized_open_id = str(open_id or "").strip()
-        if not normalized_open_id:
-            return "unknown"
-        display_name = self.bot.get_sender_display_name(open_id=normalized_open_id, sender_type="user")
-        normalized_name = str(display_name or "").strip()
-        if normalized_name and normalized_name not in {normalized_open_id, normalized_open_id[:8]}:
-            return normalized_name
-        return normalized_open_id
-
-    def _group_member_labels(self, open_ids: list[str] | set[str]) -> list[str]:
-        normalized_open_ids = sorted({str(item).strip() for item in open_ids if str(item).strip()})
-        return [self._group_member_label(open_id) for open_id in normalized_open_ids]
-
     def _build_command_routes(self) -> dict[str, _CommandRoute]:
         return {
             "/help": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._reply_help(
+                handler=lambda sender_id, chat_id, arg, message_id: self._help_domain.reply_help(
                     chat_id, arg, message_id=message_id
                 ),
             ),
             "/h": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._reply_help(
+                handler=lambda sender_id, chat_id, arg, message_id: self._help_domain.reply_help(
                     chat_id, arg, message_id=message_id
                 ),
             ),
             "/init": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_init_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_init_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
                 scope="p2p",
@@ -624,19 +658,19 @@ class CodexHandler(BotHandler):
                 ),
             ),
             "/whoami": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_whoami_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_whoami_command(
                     sender_id, chat_id, message_id=message_id
                 ),
                 scope="p2p",
                 scope_denied_text="请私聊机器人执行 `/whoami`。",
             ),
             "/whoareyou": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_botinfo_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_botinfo_command(
                     chat_id, message_id=message_id
                 ),
             ),
             "/profile": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_profile_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_profile_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
@@ -646,60 +680,46 @@ class CodexHandler(BotHandler):
                 ),
             ),
             "/session": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_session_command(
-                    sender_id, chat_id, message_id=message_id
-                ),
+                handler=self._session_ui_domain.handle_session_command,
             ),
             "/resume": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_resume_command(
-                    sender_id, chat_id, arg, message_id=message_id
-                ),
+                handler=self._session_ui_domain.handle_resume_command,
             ),
             "/rm": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_rm_command(
-                    sender_id, chat_id, arg, message_id=message_id
-                ),
+                handler=self._session_ui_domain.handle_rm_command,
             ),
             "/rename": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_rename_command(
-                    sender_id, chat_id, arg, message_id=message_id
-                ),
+                handler=self._session_ui_domain.handle_rename_command,
             ),
             "/star": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_star_command(
-                    sender_id, chat_id, message_id=message_id
-                ),
+                handler=self._session_ui_domain.handle_star_command,
             ),
             "/approval": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_approval_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_approval_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
             "/sandbox": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_sandbox_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_sandbox_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
             "/permissions": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_permissions_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_permissions_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
             "/mode": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_mode_command(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_mode_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
             "/groupmode": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_groupmode_command(
-                    sender_id, chat_id, arg, message_id=message_id
-                ),
+                handler=self._group_domain.handle_groupmode_command,
                 scope="group",
             ),
             "/acl": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_acl_command(
-                    sender_id, chat_id, arg, message_id=message_id
-                ),
+                handler=self._group_domain.handle_acl_command,
                 scope="group",
             ),
         }
@@ -713,128 +733,100 @@ class CodexHandler(BotHandler):
                 group_guard="turn_actor",
             ),
             "resume_thread": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_resume_thread_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_resume_thread_action,
                 group_guard="group_admin",
             ),
             "preview_thread_snapshot": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_preview_thread_snapshot_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_preview_thread_snapshot_action,
                 group_guard="group_admin",
             ),
             "resume_thread_write": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_resume_thread_write_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_resume_thread_write_action,
                 group_guard="group_admin",
             ),
             "cancel_resume_guard": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_cancel_resume_guard_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_cancel_resume_guard_action,
             ),
             "close_sessions_card": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_close_sessions_card_action(),
+                handler=self._session_ui_domain.handle_close_sessions_card_action,
                 group_guard="group_admin",
             ),
             "reopen_sessions_card": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_reopen_sessions_card_action(
-                    sender_id, chat_id, message_id
-                ),
+                handler=self._session_ui_domain.handle_reopen_sessions_card_action,
                 group_guard="group_admin",
             ),
             "show_help_topic": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_help_topic_action(
-                    action_value
-                ),
+                handler=self._help_domain.handle_show_help_topic_action,
             ),
             "show_help_overview": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_help_overview_action(),
+                handler=self._help_domain.handle_show_help_overview_action,
             ),
             "show_permissions_card": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_permissions_card_action(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_show_permissions_card_action(
                     sender_id, chat_id
                 ),
                 group_guard="group_admin",
             ),
             "show_mode_card": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_mode_card_action(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_show_mode_card_action(
                     sender_id, chat_id
                 ),
                 group_guard="group_admin",
             ),
             "show_group_mode_card": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_group_mode_card_action(
-                    chat_id, message_id, action_value
-                ),
+                handler=self._group_domain.handle_show_group_mode_card_action,
                 group_guard="group_admin",
             ),
             "toggle_star_thread": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_toggle_star_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_toggle_star_action,
                 group_guard="group_admin",
             ),
             "archive_thread": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_archive_thread_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_archive_thread_action,
                 group_guard="group_admin",
             ),
             "show_rename_form": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_rename_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_show_rename_action,
                 group_guard="group_admin",
             ),
             "rename_thread": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_rename_submit_action(
-                    sender_id, chat_id, message_id, action_value
-                ),
+                handler=self._session_ui_domain.handle_rename_submit_action,
                 group_guard="group_admin",
             ),
             "cancel_rename": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_cancel_rename_action(
-                    sender_id, chat_id, message_id
-                ),
+                handler=self._session_ui_domain.handle_cancel_rename_action,
                 group_guard="group_admin",
             ),
             "set_approval_policy": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_approval_policy(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_approval_policy(
                     sender_id, chat_id, action_value
                 ),
                 group_guard="group_admin",
             ),
             "set_sandbox_policy": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_sandbox_policy(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_sandbox_policy(
                     sender_id, chat_id, action_value
                 ),
                 group_guard="group_admin",
             ),
             "set_permissions_preset": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_permissions_preset(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_permissions_preset(
                     sender_id, chat_id, action_value
                 ),
                 group_guard="group_admin",
             ),
             "set_collaboration_mode": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_collaboration_mode(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_collaboration_mode(
                     sender_id, chat_id, action_value
                 ),
                 group_guard="group_admin",
             ),
             "set_group_mode": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_group_mode_action(
-                    sender_id, chat_id, action_value
-                ),
+                handler=self._group_domain.handle_set_group_mode_action,
                 group_guard="group_admin",
             ),
             "set_group_acl_policy": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_set_group_acl_policy_action(
-                    sender_id, chat_id, action_value
-                ),
+                handler=self._group_domain.handle_set_group_acl_policy_action,
                 group_guard="group_admin",
             ),
         }
@@ -923,102 +915,6 @@ class CodexHandler(BotHandler):
             toast="当前卡片动作配置异常。",
             toast_type="warning",
         )
-
-    def _handle_init_command(
-        self,
-        sender_id: str,
-        chat_id: str,
-        arg: str,
-        *,
-        message_id: str = "",
-    ) -> None:
-        context = self.bot.get_message_context(message_id) if message_id else {}
-        provided_token = str(arg or "").strip()
-        if not provided_token:
-            self._reply_text(
-                chat_id,
-                "用法：`/init <token>`\n`token` 默认保存在本机配置目录的 `init.token` 文件。",
-                message_id=message_id,
-            )
-            return
-        expected_token = ensure_init_token()
-        if not compare_digest(provided_token, expected_token):
-            self._reply_text(
-                chat_id,
-                "初始化口令错误。请检查本机配置目录中的 `init.token`。",
-                message_id=message_id,
-            )
-            return
-        sender_open_id = str(context.get("sender_open_id", "") or "").strip()
-        sender_user_id = str(context.get("sender_user_id", "") or "").strip()
-        sender_type = str(context.get("sender_type", "user") or "user").strip()
-        if not sender_open_id:
-            self._reply_text(
-                chat_id,
-                "初始化失败：当前消息上下文里没有发送者 `open_id`，暂时无法写入管理员配置。",
-                message_id=message_id,
-            )
-            return
-        sender_name = self.bot.get_sender_display_name(
-            user_id=sender_user_id,
-            open_id=sender_open_id,
-            sender_type=sender_type,
-        )
-        config = load_system_config_raw()
-        admin_open_ids = {
-            str(item).strip()
-            for item in config.get("admin_open_ids", [])
-            if isinstance(item, str) and str(item).strip()
-        }
-        admin_open_ids.update(self.bot.list_admin_open_ids())
-        admin_added = sender_open_id not in admin_open_ids
-        admin_open_ids.add(sender_open_id)
-        configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
-        identity = self.bot.get_bot_identity_snapshot()
-        discovered_bot_open_id = str(identity.get("discovered_open_id", "") or "").strip()
-        bot_open_id_written = False
-        if discovered_bot_open_id and discovered_bot_open_id != configured_bot_open_id:
-            configured_bot_open_id = discovered_bot_open_id
-            bot_open_id_written = True
-
-        updated_config = dict(config)
-        updated_config["admin_open_ids"] = sorted(admin_open_ids)
-        if configured_bot_open_id:
-            updated_config["bot_open_id"] = configured_bot_open_id
-
-        try:
-            save_system_config(updated_config)
-        except Exception as exc:
-            logger.exception("保存初始化配置失败")
-            self._reply_text(chat_id, f"初始化失败：保存配置时出错：{exc}", message_id=message_id)
-            return
-
-        self.bot.add_admin_open_id(sender_open_id)
-        if configured_bot_open_id:
-            self.bot.set_configured_bot_open_id(configured_bot_open_id)
-
-        lines = [
-            "初始化结果：",
-            (
-                f"- admin_open_ids：已加入 `{sender_name}`"
-                if admin_added
-                else f"- admin_open_ids：`{sender_name}` 已在管理员列表中"
-            ),
-        ]
-        if configured_bot_open_id:
-            lines.append(
-                f"- bot_open_id：`{configured_bot_open_id}`"
-                + ("（本次已写入）" if bot_open_id_written else "（保持不变）")
-            )
-        else:
-            lines.extend(
-                [
-                    "- bot_open_id：未写入",
-                    "- 请检查 `application:application:self_manage` 权限后重试 `/init <token>`，或手动填写 `system.yaml.bot_open_id`。",
-                ]
-            )
-        lines.append("- 当前命令只会更新管理员和 bot open id，不会改动 `trigger_open_ids`。")
-        self._reply_text(chat_id, "\n".join(lines), message_id=message_id)
 
     def _handle_command(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
         command, _, arg = text.partition(" ")
@@ -1266,529 +1162,6 @@ class CodexHandler(BotHandler):
             message_id=message_id,
         )
 
-    def _handle_whoami_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
-        context = self.bot.get_message_context(message_id) if message_id else {}
-        sender_user_id = str(context.get("sender_user_id", "")).strip()
-        sender_open_id = str(context.get("sender_open_id", "")).strip()
-        sender_type = str(context.get("sender_type", "user") or "user").strip()
-        name = self.bot.get_sender_display_name(
-            user_id=sender_user_id,
-            open_id=sender_open_id,
-            sender_type=sender_type,
-        )
-        self._reply_text(
-            chat_id,
-            "\n".join(
-                [
-                    "你的身份信息：",
-                    f"- name: `{name}`",
-                    f"- user_id: `{sender_user_id or '（空）'}`",
-                    f"- open_id: `{sender_open_id or '（空）'}`",
-                    "",
-                    "配置管理员时，把 `open_id` 写进 `system.yaml` 的 `admin_open_ids`。",
-                    "其中 `user_id` 仅用于排障；若未开 `contact:user.employee_id:readonly`，这里允许为空。",
-                ]
-            ),
-            message_id=message_id,
-        )
-
-    def _handle_botinfo_command(self, chat_id: str, *, message_id: str = "") -> None:
-        identity = self.bot.get_bot_identity_snapshot()
-        configured_open_id = str(identity.get("configured_open_id", "") or "").strip()
-        discovered_open_id = str(identity.get("discovered_open_id", "") or "").strip()
-        trigger_open_ids = [
-            str(item).strip()
-            for item in (identity.get("trigger_open_ids") or [])
-            if str(item).strip()
-        ]
-        lines = [
-            "机器人身份信息：",
-            f"- app_id: `{identity.get('app_id', '') or '（空）'}`",
-            f"- configured bot_open_id: `{configured_open_id or '（空）'}`",
-            f"- discovered open_id: `{discovered_open_id or '（空）'}`",
-            f"- runtime mention matching: `{'enabled' if configured_open_id else 'disabled'}`",
-            f"- trigger_open_ids: `{', '.join(trigger_open_ids) or '（空）'}`",
-            "- 运行时权威值：`system.yaml.bot_open_id`",
-        ]
-        if configured_open_id and discovered_open_id and configured_open_id != discovered_open_id:
-            lines.extend(
-                [
-                    "",
-                    "警告：",
-                    "- 当前运行时仍只按 `system.yaml.bot_open_id` 判定 mention；实时探测值仅用于诊断和初始化。",
-                    "- 当前配置值与实时探测值不一致，请优先核对 `system.yaml.bot_open_id` 是否写错。",
-                ]
-            )
-        if not configured_open_id:
-            lines.extend(
-                [
-                    "",
-                    "建议：",
-                    (
-                        f"- 直接执行 `/init <token>` 自动写入，或手动把 `{discovered_open_id}` 写进 `system.yaml.bot_open_id`"
-                        if discovered_open_id
-                        else "- 先让 `/whoareyou` 能看到 `discovered open_id`，再手动写入 `system.yaml.bot_open_id`；如需自动写入，再执行 `/init <token>`"
-                    ),
-                    "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/whoareyou` 的实时探测结果不会自动生效。",
-                    "- 如需让“别人 @你本人时由机器人代答”，再把对应人的 open_id 写进 `system.yaml.trigger_open_ids`",
-                    "- 如果 `discovered open_id` 为空，检查 `application:application:self_manage` 权限",
-                ]
-            )
-        self._reply_text(chat_id, "\n".join(lines), message_id=message_id)
-
-    def _handle_session_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
-        try:
-            card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
-        except Exception as exc:
-            logger.exception("获取线程列表失败")
-            self._reply_text(chat_id, f"获取线程列表失败：{exc}", message_id=message_id)
-            return
-        self._reply_card(chat_id, card, message_id=message_id)
-
-    def _handle_resume_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if state["running"]:
-                self._reply_text(chat_id, "执行中不能切换线程，请等待结束或先执行 `/cancel`。", message_id=message_id)
-                return
-        if not arg:
-            self._reply_text(
-                chat_id,
-                "用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。",
-                message_id=message_id,
-            )
-            return
-        try:
-            thread = self._resolve_resume_target(arg)
-        except Exception as exc:
-            logger.exception("解析恢复目标失败")
-            self._reply_text(chat_id, f"恢复线程失败：{exc}", message_id=message_id)
-            return
-        if self._is_loaded_in_current_backend(thread):
-            self._resume_thread_in_background(
-                sender_id,
-                chat_id,
-                thread.thread_id,
-                original_arg=arg,
-                summary=thread,
-                message_id=message_id,
-            )
-            return
-        self._reply_card(chat_id, self._build_resume_guard(thread), message_id=message_id)
-
-    def _handle_profile_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        runtime_config = self._safe_read_runtime_config()
-        if runtime_config is None:
-            self._reply_text(chat_id, "读取 Codex 运行时配置失败，无法查看或切换 profile。", message_id=message_id)
-            return
-        profile_resolution = self._current_default_profile_resolution(runtime_config)
-        local_profile = profile_resolution.effective_profile
-        profiles = {profile.name: profile for profile in runtime_config.profiles}
-
-        def _profile_provider_text(profile_name: str) -> str:
-            if not profile_name:
-                return "跟随 Codex 原生默认"
-            profile = profiles.get(profile_name)
-            if profile and profile.model_provider:
-                return f"`{profile.model_provider}`"
-            return "未显式设置，实际以新线程解析结果为准"
-
-        if not arg:
-            example_profile = runtime_config.profiles[0].name if runtime_config.profiles else "name"
-            lines = [
-                f"当前默认 profile：`{local_profile or '（未设置）'}`",
-                f"默认 profile 对应 provider：{_profile_provider_text(local_profile)}",
-                f"切换方式：`/profile <name>`，例如：`/profile {example_profile}`",
-            ]
-            if runtime_config.profiles:
-                lines.extend(["", "**可用 profile**"])
-                for profile in runtime_config.profiles:
-                    provider = _profile_provider_text(profile.name)
-                    marker = " <- 默认" if profile.name == local_profile else ""
-                    lines.append(f"- `{profile.name}` -> {provider}{marker}")
-            else:
-                lines.append("未在当前 Codex 配置中发现可用 profile。")
-            lines.extend(
-                [
-                    "",
-                    "**说明**",
-                    "作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。",
-                    "已打开的 `fcodex` TUI 不会热切换。",
-                    "如用 `fcodex -p <profile>`，以显式 profile 为准。",
-                ]
-            )
-            if profile_resolution.stale_profile:
-                lines.append(
-                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，现已自动清空并回退到 Codex 原生默认。"
-                )
-            if self._adapter_config.model_provider:
-                lines.append(
-                    "注意：当前 feishu-codex 配置写死了 "
-                    f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
-                )
-            self._reply_card(
-                chat_id,
-                build_markdown_card("Codex 默认 Profile", "\n".join(lines)),
-                message_id=message_id,
-            )
-            return
-
-        target_profile = arg.strip()
-        if target_profile not in profiles:
-            self._reply_text(
-                chat_id,
-                f"未找到 profile：`{target_profile}`\n用法：`/profile <name>`\n先发 `/profile` 查看可用 profile。",
-                message_id=message_id,
-            )
-            return
-
-        try:
-            self._profile_state.save_default_profile(target_profile)
-        except Exception as exc:
-            logger.exception("保存 feishu-codex 默认 profile 失败")
-            self._reply_text(chat_id, f"切换 profile 失败：{exc}", message_id=message_id)
-            return
-
-        state = self._get_state(sender_id, chat_id, message_id)
-        lines = [
-            f"已切换默认 profile：`{target_profile}`",
-            f"默认 profile 对应 provider：{_profile_provider_text(target_profile)}",
-            "再次切换：`/profile <name>`",
-        ]
-        lines.extend(
-            [
-                "",
-                "**说明**",
-                "作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。",
-            ]
-        )
-        if state["running"]:
-            lines.append("如果当前正在执行，新 profile 从下一轮生效。")
-        lines.append("已打开的 `fcodex` TUI 不会热切换。")
-        lines.append("如用 `fcodex -p` 固定 profile，该会话不受影响。")
-        if self._adapter_config.model_provider:
-            lines.append(
-                "注意：当前 feishu-codex 配置写死了 "
-                f"`model_provider: {self._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
-            )
-        self._reply_card(
-            chat_id,
-            build_markdown_card("Codex 默认 Profile", "\n".join(lines)),
-            message_id=message_id,
-        )
-
-    def _handle_rename_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        if not state["current_thread_id"]:
-            self._reply_text(chat_id, "当前没有绑定线程，无法重命名。", message_id=message_id)
-            return
-        if not arg:
-            self._reply_text(chat_id, "用法：`/rename <新标题>`", message_id=message_id)
-            return
-        try:
-            self._adapter.rename_thread(state["current_thread_id"], arg)
-        except Exception as exc:
-            logger.exception("重命名线程失败")
-            self._reply_text(chat_id, f"重命名失败：{exc}", message_id=message_id)
-            return
-        with self._lock:
-            state["current_thread_name"] = arg
-        self._reply_text(chat_id, f"已重命名为：{arg}", message_id=message_id)
-
-    def _handle_rm_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if state["running"]:
-                self._reply_text(chat_id, "执行中不能归档线程，请等待结束或先执行 `/cancel`。", message_id=message_id)
-                return
-        target = arg.strip() if arg else ""
-        if target:
-            try:
-                thread = self._resolve_resume_target(target)
-            except Exception as exc:
-                logger.exception("解析归档目标失败")
-                self._reply_text(chat_id, f"归档线程失败：{exc}", message_id=message_id)
-                return
-        else:
-            if not state["current_thread_id"]:
-                self._reply_text(
-                    chat_id,
-                    "用法：`/rm [thread_id 或 thread_name]`；省略参数时归档当前线程。",
-                    message_id=message_id,
-                )
-                return
-            try:
-                thread = self._read_thread_summary(state["current_thread_id"], original_arg=state["current_thread_id"])
-            except Exception as exc:
-                logger.exception("读取当前线程失败")
-                self._reply_text(chat_id, f"归档线程失败：{exc}", message_id=message_id)
-                return
-
-        try:
-            self._adapter.archive_thread(thread.thread_id)
-        except Exception as exc:
-            logger.exception("归档线程失败")
-            self._reply_text(chat_id, f"归档线程失败：{exc}", message_id=message_id)
-            return
-
-        self._favorites.remove_thread_globally(thread.thread_id)
-        if state["current_thread_id"] == thread.thread_id:
-            self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
-        self._reply_text(
-            chat_id,
-            (
-                f"已归档线程：`{thread.thread_id[:8]}…` {thread.title}\n"
-                "说明：这里调用的是 Codex 的线程归档（archive），会从常规列表中隐藏，不是硬删除。"
-            ),
-            message_id=message_id,
-        )
-
-    def _handle_star_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        if not state["current_thread_id"]:
-            self._reply_text(chat_id, "当前没有绑定线程，无法收藏。", message_id=message_id)
-            return
-        starred = self._favorites.toggle(sender_id, state["current_thread_id"])
-        self._reply_text(chat_id, "已收藏当前线程。" if starred else "已取消收藏当前线程。", message_id=message_id)
-
-    def _handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        if arg:
-            policy = arg.strip().lower()
-            if policy not in _APPROVAL_POLICIES:
-                self._reply_text(
-                    chat_id,
-                    "审批策略仅支持：`untrusted`、`on-failure`、`on-request`、`never`",
-                    message_id=message_id,
-                )
-                return
-            with self._lock:
-                state["approval_policy"] = policy
-                running = state["running"]
-            message = f"已切换审批策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
-            if running:
-                message += "\n如果当前正在执行，新设置从下一轮生效。"
-            self._reply_text(chat_id, message, message_id=message_id)
-            return
-        self._reply_card(
-            chat_id,
-            build_approval_policy_card(state["approval_policy"], running=state["running"]),
-            message_id=message_id,
-        )
-
-    def _handle_sandbox_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        if arg:
-            policy = arg.strip().lower()
-            if policy not in _SANDBOX_POLICIES:
-                self._reply_text(
-                    chat_id,
-                    "沙箱策略仅支持：`read-only`、`workspace-write`、`danger-full-access`",
-                    message_id=message_id,
-                )
-                return
-            with self._lock:
-                state["sandbox"] = policy
-                running = state["running"]
-            message = f"已切换沙箱策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
-            if running:
-                message += "\n如果当前正在执行，新设置从下一轮生效。"
-            self._reply_text(chat_id, message, message_id=message_id)
-            return
-        self._reply_card(
-            chat_id,
-            build_sandbox_policy_card(state["sandbox"], running=state["running"]),
-            message_id=message_id,
-        )
-
-    def _handle_permissions_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        if arg:
-            preset = arg.strip().lower()
-            config = _PERMISSIONS_PRESETS.get(preset)
-            if config is None:
-                self._reply_text(
-                    chat_id,
-                    "权限预设仅支持：`read-only`、`default`、`full-access`",
-                    message_id=message_id,
-                )
-                return
-            with self._lock:
-                state["approval_policy"] = config["approval_policy"]
-                state["sandbox"] = config["sandbox"]
-                running = state["running"]
-            message = (
-                f"已切换权限预设：`{config['label']}`\n"
-                f"审批：`{config['approval_policy']}`\n"
-                f"沙箱：`{config['sandbox']}`\n"
-                "作用范围：只影响当前飞书会话的后续 turn。"
-            )
-            if running:
-                message += "\n如果当前正在执行，新设置从下一轮生效。"
-            self._reply_text(chat_id, message, message_id=message_id)
-            return
-        self._reply_card(
-            chat_id,
-            build_permissions_preset_card(
-                state["approval_policy"],
-                state["sandbox"],
-                running=state["running"],
-            ),
-            message_id=message_id,
-        )
-
-    def _handle_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        state = self._get_state(sender_id, chat_id, message_id)
-        if arg:
-            mode = arg.strip().lower()
-            if mode not in {"default", "plan"}:
-                self._reply_text(chat_id, "协作模式仅支持：`default`、`plan`", message_id=message_id)
-                return
-            with self._lock:
-                state["collaboration_mode"] = mode
-                running = state["running"]
-            message = f"已切换协作模式：`{mode}`\n作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
-            if running:
-                message += "\n如果当前正在执行，新设置从下一轮生效。"
-            self._reply_text(chat_id, message, message_id=message_id)
-            return
-        self._reply_card(
-            chat_id,
-            build_collaboration_mode_card(
-                state["collaboration_mode"],
-                running=state["running"],
-            ),
-            message_id=message_id,
-        )
-
-    def _group_command_context(self, message_id: str = "") -> MessageContextPayload:
-        """Return message context for a command that has already passed group scope checks."""
-        context = self.bot.get_message_context(message_id) if message_id else {}
-        if context:
-            return context
-        return {"chat_type": "group"}
-
-    @staticmethod
-    def _normalize_group_mode(mode: str) -> str:
-        normalized = str(mode or "").strip().lower().replace("-", "_")
-        if normalized == "mention":
-            return "mention_only"
-        return normalized
-
-    def _group_mode_card(self, chat_id: str, *, open_id: str = "") -> dict:
-        return build_group_mode_card(
-            self.bot.get_group_mode(chat_id),
-            can_manage=self.bot.is_group_admin(open_id=open_id),
-        )
-
-    def _group_acl_card(self, chat_id: str, *, open_id: str = "") -> dict:
-        snapshot: GroupAclSnapshot = self.bot.get_group_acl_snapshot(chat_id)
-        return build_group_acl_card(
-            snapshot["access_policy"],
-            allowlist_members=self._group_member_labels(snapshot["allowlist"]),
-            viewer_allowed=self.bot.is_group_user_allowed(chat_id, open_id=open_id),
-            can_manage=self.bot.is_group_admin(open_id=open_id),
-        )
-
-    def _handle_groupmode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        context = self._group_command_context(message_id)
-        sender_open_id = str(context.get("sender_open_id", "")).strip()
-        if not arg:
-            self._reply_card(
-                chat_id,
-                self._group_mode_card(chat_id, open_id=sender_open_id),
-                message_id=message_id,
-            )
-            return
-        mode = self._normalize_group_mode(arg)
-        if mode not in {"assistant", "all", "mention_only"}:
-            self._reply_text(chat_id, "群聊工作态仅支持：`assistant`、`all`、`mention-only`", message_id=message_id)
-            return
-        self.bot.set_group_mode(chat_id, mode)
-        labels = {
-            "assistant": "assistant",
-            "all": "all",
-            "mention_only": "mention-only",
-        }
-        self._reply_text(chat_id, f"已切换群聊工作态：`{labels[mode]}`", message_id=message_id)
-
-    def _acl_target_open_ids(self, message_id: str, raw_arg: str) -> list[str]:
-        targets = {
-            item["open_id"]
-            for item in self.bot.extract_non_bot_mentions(message_id)
-            if item.get("open_id")
-        }
-        for token in str(raw_arg or "").replace(",", " ").split():
-            token = token.strip()
-            if token and not token.startswith("@"):
-                targets.add(token)
-        return sorted(targets)
-
-    def _handle_acl_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
-        context = self._group_command_context(message_id)
-        sender_open_id = str(context.get("sender_open_id", "")).strip()
-        if not arg:
-            self._reply_card(
-                chat_id,
-                self._group_acl_card(chat_id, open_id=sender_open_id),
-                message_id=message_id,
-            )
-            return
-
-        cmd, _, rest = arg.partition(" ")
-        subcommand = cmd.strip().lower()
-        payload = rest.strip()
-        if subcommand in {"admin-only", "allowlist", "all-members"}:
-            payload = subcommand
-            subcommand = "policy"
-
-        if subcommand == "policy":
-            policy = payload.strip().lower()
-            if policy not in {"admin-only", "allowlist", "all-members"}:
-                self._reply_text(
-                    chat_id,
-                    "用法：`/acl policy <admin-only|allowlist|all-members>`",
-                    message_id=message_id,
-                )
-                return
-            self.bot.set_group_access_policy(chat_id, policy)
-            self._reply_text(chat_id, f"已切换群聊授权策略：`{policy}`", message_id=message_id)
-            return
-
-        if subcommand in {"grant", "allow"}:
-            targets = self._acl_target_open_ids(message_id, payload)
-            if not targets:
-                self._reply_text(chat_id, "用法：`/acl grant @成员` 或 `/acl grant <open_id>`", message_id=message_id)
-                return
-            updated = self.bot.grant_group_members(chat_id, targets)
-            labels = self._group_member_labels(targets)
-            self._reply_text(
-                chat_id,
-                f"已授权：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。",
-                message_id=message_id,
-            )
-            return
-
-        if subcommand in {"revoke", "remove"}:
-            targets = self._acl_target_open_ids(message_id, payload)
-            if not targets:
-                self._reply_text(chat_id, "用法：`/acl revoke @成员` 或 `/acl revoke <open_id>`", message_id=message_id)
-                return
-            updated = self.bot.revoke_group_members(chat_id, targets)
-            labels = self._group_member_labels(targets)
-            self._reply_text(
-                chat_id,
-                f"已撤销：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。",
-                message_id=message_id,
-            )
-            return
-
-        self._reply_text(
-            chat_id,
-            "用法：`/acl`、`/acl policy <admin-only|allowlist|all-members>`、`/acl grant @成员`、`/acl revoke @成员`",
-            message_id=message_id,
-        )
-
     def _handle_cancel_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
         ok, message = self._cancel_current_turn(sender_id, chat_id, from_card=True)
         return self.bot.make_card_response(toast=message, toast_type="success" if ok else "warning")
@@ -1843,411 +1216,8 @@ class CodexHandler(BotHandler):
     def _interrupt_running_turn(self, *, thread_id: str, turn_id: str) -> None:
         self._adapter.interrupt_turn(thread_id=thread_id, turn_id=turn_id)
 
-    def _handle_toggle_star_action(
-        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        thread_id = str(action_value.get("thread_id", ""))
-        if not thread_id:
-            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
-        starred = self._favorites.toggle(sender_id, thread_id)
-        return self._handle_sessions_refresh_action(
-            sender_id,
-            chat_id,
-            message_id=message_id,
-            toast="已收藏线程。" if starred else "已取消收藏。",
-        )
-
-    def _handle_close_sessions_card_action(self) -> P2CardActionTriggerResponse:
-        return self.bot.make_card_response(card=build_sessions_closed_card(), toast="已收起。", toast_type="success")
-
-    def _handle_reopen_sessions_card_action(
-        self, sender_id: str, chat_id: str, message_id: str
-    ) -> P2CardActionTriggerResponse:
-        return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已展开。")
-
-    def _handle_resume_thread_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-        action_value: dict,
-    ) -> P2CardActionTriggerResponse:
-        state = self._get_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if state["running"]:
-                return self.bot.make_card_response(
-                    toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
-                    toast_type="warning",
-                )
-        thread_id = str(action_value.get("thread_id", "")).strip()
-        if not thread_id:
-            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
-        try:
-            thread = self._read_thread_summary(thread_id, original_arg=thread_id)
-        except Exception as exc:
-            logger.exception("查询恢复目标失败")
-            return self.bot.make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
-        if self._is_loaded_in_current_backend(thread):
-            threading.Thread(
-                target=self._resume_thread_in_background,
-                args=(sender_id, chat_id, thread_id),
-                kwargs={
-                    "original_arg": thread_id,
-                    "summary": thread,
-                    "message_id": message_id,
-                    "refresh_session_message_id": message_id,
-                },
-                daemon=True,
-            ).start()
-            return self.bot.make_card_response(
-                card=build_sessions_pending_card(thread.thread_id, title=thread.title),
-                toast="正在恢复线程…",
-                toast_type="success",
-            )
-        return self.bot.make_card_response(card=self._build_resume_guard(thread, return_to_sessions=True))
-
-    def _handle_preview_thread_snapshot_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-        action_value: dict,
-    ) -> P2CardActionTriggerResponse:
-        thread_id = str(action_value.get("thread_id", "")).strip()
-        if not thread_id:
-            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
-        return_to_sessions = bool(action_value.get("return_to_sessions"))
-        thread = self._find_thread_summary(thread_id)
-        if thread is None:
-            return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
-        threading.Thread(
-            target=self._send_thread_snapshot_in_background,
-            args=(chat_id, thread_id),
-            kwargs={"message_id": message_id},
-            daemon=True,
-        ).start()
-        if return_to_sessions:
-            return self._handle_sessions_refresh_action(
-                sender_id,
-                chat_id,
-                message_id=message_id,
-                toast="正在加载快照…",
-            )
-        return self.bot.make_card_response(
-            card=self._build_resume_guard_handled(
-                thread,
-                decision="已选择“查看快照”",
-                detail="快照会作为新消息发送；当前确认卡已结束，不会继续写入该线程。",
-                template="green",
-            ),
-            toast="正在加载快照…",
-            toast_type="success",
-        )
-
-    def _handle_resume_thread_write_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-        action_value: dict,
-    ) -> P2CardActionTriggerResponse:
-        state = self._get_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if state["running"]:
-                return self.bot.make_card_response(
-                    toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
-                    toast_type="warning",
-                )
-        thread_id = str(action_value.get("thread_id", "")).strip()
-        if not thread_id:
-            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
-        return_to_sessions = bool(action_value.get("return_to_sessions"))
-        thread = self._find_thread_summary(thread_id)
-        if thread is None:
-            return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
-        threading.Thread(
-            target=self._resume_thread_in_background,
-            args=(sender_id, chat_id, thread_id),
-            kwargs={
-                "original_arg": thread_id,
-                "message_id": message_id,
-                "refresh_session_message_id": message_id if return_to_sessions else "",
-            },
-            daemon=True,
-        ).start()
-        if return_to_sessions:
-            return self.bot.make_card_response(
-                card=build_sessions_pending_card(thread.thread_id, title=thread.title),
-                toast="正在恢复线程并继续写入…",
-                toast_type="success",
-            )
-        return self.bot.make_card_response(
-            card=self._build_resume_guard_handled(
-                thread,
-                decision="已选择“恢复并继续写入”",
-                detail="恢复请求已提交到 feishu-codex backend；后续结果会通过新的状态消息返回。",
-                template="orange",
-            ),
-            toast="正在恢复线程并继续写入…",
-            toast_type="success",
-        )
-
-    def _handle_show_rename_action(
-        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        thread_id = str(action_value.get("thread_id", ""))
-        try:
-            session = self._find_thread_session(sender_id, chat_id, thread_id)
-        except Exception as exc:
-            logger.exception("查询重命名目标失败")
-            return self.bot.make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
-        if not session:
-            return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
-        with self._lock:
-            self._pending_rename_forms[message_id] = {"thread_id": thread_id}
-        return self.bot.make_card_response(card=build_rename_card(session))
-
-    def _handle_rename_submit_action(
-        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        thread_id = str(action_value.get("thread_id", ""))
-        form_value = action_value.get("_form_value") or {}
-        new_title = str(form_value.get("rename_title", "")).strip()
-        if not new_title:
-            return self.bot.make_card_response(toast="标题不能为空", toast_type="warning")
-        try:
-            self._adapter.rename_thread(thread_id, new_title)
-        except Exception as exc:
-            logger.exception("卡片重命名失败")
-            return self.bot.make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
-
-        state = self._get_state(sender_id, chat_id, message_id)
-        with self._lock:
-            self._pending_rename_forms.pop(message_id, None)
-            if state["current_thread_id"] == thread_id:
-                state["current_thread_name"] = new_title
-        return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已重命名。")
-
-    def _handle_cancel_rename_action(
-        self, sender_id: str, chat_id: str, message_id: str
-    ) -> P2CardActionTriggerResponse:
-        self._clear_pending_rename_form(message_id)
-        return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已取消")
-
-    def _handle_cancel_resume_guard_action(
-        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        thread_id = str(action_value.get("thread_id", "")).strip()
-        if not thread_id:
-            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
-        if action_value.get("return_to_sessions"):
-            return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已取消")
-        thread = self._find_thread_summary(thread_id)
-        if thread is None:
-            return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
-        return self.bot.make_card_response(
-            card=self._build_resume_guard_handled(
-                thread,
-                decision="已取消本次恢复",
-                detail="当前不会查看快照，也不会在 feishu-codex backend 中恢复该线程。",
-                template="grey",
-            ),
-            toast="已取消。",
-            toast_type="success",
-        )
-
-    def _handle_archive_thread_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-        action_value: dict,
-    ) -> P2CardActionTriggerResponse:
-        state = self._get_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if state["running"]:
-                return self.bot.make_card_response(
-                    toast="执行中不能归档线程，请等待结束或先执行 /cancel。",
-                    toast_type="warning",
-                )
-        thread_id = str(action_value.get("thread_id", "")).strip()
-        if not thread_id:
-            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
-        try:
-            thread = self._read_thread_summary(thread_id, original_arg=thread_id)
-        except Exception as exc:
-            logger.exception("读取归档目标失败")
-            return self.bot.make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
-        try:
-            self._adapter.archive_thread(thread.thread_id)
-        except Exception as exc:
-            logger.exception("归档线程失败")
-            return self.bot.make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
-        self._favorites.remove_thread_globally(thread.thread_id)
-        if state["current_thread_id"] == thread.thread_id:
-            self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
-        return self._handle_sessions_refresh_action(
-            sender_id,
-            chat_id,
-            message_id=message_id,
-            toast=f"已归档线程：{thread.thread_id[:8]}…",
-        )
-
-    def _clear_pending_rename_form(self, message_id: str) -> None:
-        if not message_id:
-            return
-        with self._lock:
-            self._pending_rename_forms.pop(message_id, None)
-
-    def _handle_sessions_refresh_action(
-        self, sender_id: str, chat_id: str, *, message_id: str = "", toast: str
-    ) -> P2CardActionTriggerResponse:
-        try:
-            card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
-        except Exception as exc:
-            logger.exception("刷新线程列表失败")
-            return self.bot.make_card_response(toast=f"刷新失败：{exc}", toast_type="warning")
-        return self.bot.make_card_response(card=card, toast=toast, toast_type="success")
-
-    def _render_sessions_card(self, sender_id: str, chat_id: str, *, message_id: str = "") -> dict:
-        threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
-        sessions, counts = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
-        state = self._get_state(sender_id, chat_id, message_id)
-        return build_sessions_card(
-            sessions,
-            state["current_thread_id"],
-            state["working_dir"],
-            counts["total_all"],
-            shown_starred_count=counts["shown_starred"],
-            total_starred_count=counts["total_starred"],
-            shown_unstarred_count=counts["shown_unstarred"],
-            total_unstarred_count=counts["total_unstarred"],
-        )
-
     def _refresh_sessions_card_message(self, sender_id: str, chat_id: str, message_id: str) -> None:
-        normalized_message_id = str(message_id or "").strip()
-        if not normalized_message_id:
-            return
-        try:
-            card = self._render_sessions_card(sender_id, chat_id, message_id=normalized_message_id)
-        except Exception:
-            logger.exception("刷新会话卡片失败")
-            return
-        self.bot.patch_message(normalized_message_id, json.dumps(card, ensure_ascii=False))
-
-    def _handle_set_approval_policy(
-        self, sender_id: str, chat_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        policy = str(action_value.get("policy", "")).strip().lower()
-        if policy not in _APPROVAL_POLICIES:
-            return self.bot.make_card_response(toast="非法审批策略", toast_type="warning")
-        state = self._get_state(sender_id, chat_id)
-        with self._lock:
-            state["approval_policy"] = policy
-            running = state["running"]
-        toast = f"已切换审批策略：{policy}"
-        if running:
-            toast += "；下一轮生效"
-        return self.bot.make_card_response(
-            card=build_approval_policy_card(policy, running=running),
-            toast=toast,
-            toast_type="success",
-        )
-
-    def _handle_set_sandbox_policy(
-        self, sender_id: str, chat_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        policy = str(action_value.get("policy", "")).strip().lower()
-        if policy not in _SANDBOX_POLICIES:
-            return self.bot.make_card_response(toast="非法沙箱策略", toast_type="warning")
-        state = self._get_state(sender_id, chat_id)
-        with self._lock:
-            state["sandbox"] = policy
-            running = state["running"]
-        toast = f"已切换沙箱策略：{policy}"
-        if running:
-            toast += "；下一轮生效"
-        return self.bot.make_card_response(
-            card=build_sandbox_policy_card(policy, running=running),
-            toast=toast,
-            toast_type="success",
-        )
-
-    def _handle_set_permissions_preset(
-        self, sender_id: str, chat_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        preset = str(action_value.get("preset", "")).strip().lower()
-        config = _PERMISSIONS_PRESETS.get(preset)
-        if config is None:
-            return self.bot.make_card_response(toast="非法权限预设", toast_type="warning")
-        state = self._get_state(sender_id, chat_id)
-        with self._lock:
-            state["approval_policy"] = config["approval_policy"]
-            state["sandbox"] = config["sandbox"]
-            running = state["running"]
-        toast = f"已切换权限预设：{config['label']}"
-        if running:
-            toast += "；下一轮生效"
-        return self.bot.make_card_response(
-            card=build_permissions_preset_card(
-                config["approval_policy"],
-                config["sandbox"],
-                running=running,
-            ),
-            toast=toast,
-            toast_type="success",
-        )
-
-    def _handle_set_collaboration_mode(
-        self, sender_id: str, chat_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        mode = str(action_value.get("mode", "")).strip().lower()
-        if mode not in {"default", "plan"}:
-            return self.bot.make_card_response(toast="非法协作模式", toast_type="warning")
-        state = self._get_state(sender_id, chat_id)
-        with self._lock:
-            state["collaboration_mode"] = mode
-            running = state["running"]
-        toast = f"已切换协作模式：{mode}"
-        if running:
-            toast += "；下一轮生效"
-        return self.bot.make_card_response(
-            card=build_collaboration_mode_card(mode, running=running),
-            toast=toast,
-            toast_type="success",
-        )
-
-    def _handle_set_group_mode_action(
-        self, sender_id: str, chat_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
-        mode = self._normalize_group_mode(str(action_value.get("mode", "")))
-        if mode not in {"assistant", "all", "mention_only"}:
-            return self.bot.make_card_response(toast="非法群聊工作态", toast_type="warning")
-        if not self.bot.is_group_admin(open_id=operator_open_id):
-            return self.bot.make_card_response(toast="仅管理员可切换群聊工作态。", toast_type="warning")
-        self.bot.set_group_mode(chat_id, mode)
-        return self.bot.make_card_response(
-            card=self._group_mode_card(chat_id, open_id=operator_open_id),
-            toast=f"已切换群聊工作态：{mode}",
-            toast_type="success",
-        )
-
-    def _handle_set_group_acl_policy_action(
-        self, sender_id: str, chat_id: str, action_value: dict
-    ) -> P2CardActionTriggerResponse:
-        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
-        policy = str(action_value.get("policy", "")).strip().lower()
-        if policy not in {"admin-only", "allowlist", "all-members"}:
-            return self.bot.make_card_response(toast="非法群聊授权策略", toast_type="warning")
-        if not self.bot.is_group_admin(open_id=operator_open_id):
-            return self.bot.make_card_response(toast="仅管理员可调整群聊授权策略。", toast_type="warning")
-        self.bot.set_group_access_policy(chat_id, policy)
-        return self.bot.make_card_response(
-            card=self._group_acl_card(chat_id, open_id=operator_open_id),
-            toast=f"已切换群聊授权策略：{policy}",
-            toast_type="success",
-        )
+        self._session_ui_domain.refresh_sessions_card_message(sender_id, chat_id, message_id)
 
     def _handle_approval_card_action(self, action_value: dict) -> P2CardActionTriggerResponse:
         request_key = str(action_value.get("request_id", ""))
@@ -2524,37 +1494,6 @@ class CodexHandler(BotHandler):
     def _is_loaded_in_current_backend(thread: ThreadSummary) -> bool:
         return thread.status not in {"", "notLoaded"}
 
-    def _build_resume_guard(self, thread: ThreadSummary, *, return_to_sessions: bool = False) -> dict:
-        return build_resume_guard_card(
-            thread.thread_id,
-            title=thread.title,
-            cwd=thread.cwd,
-            updated_at=thread.updated_at,
-            source=thread.source,
-            service_name=thread.service_name,
-            return_to_sessions=return_to_sessions,
-        )
-
-    def _build_resume_guard_handled(
-        self,
-        thread: ThreadSummary,
-        *,
-        decision: str,
-        detail: str,
-        template: str,
-    ) -> dict:
-        return build_resume_guard_handled_card(
-            thread.thread_id,
-            title=thread.title,
-            cwd=thread.cwd,
-            updated_at=thread.updated_at,
-            source=thread.source,
-            service_name=thread.service_name,
-            decision=decision,
-            detail=detail,
-            template=template,
-        )
-
     def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
         threads = self._list_global_threads()
         for thread in threads:
@@ -2621,101 +1560,11 @@ class CodexHandler(BotHandler):
             state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
 
-    def _build_session_rows(
-        self,
-        sender_id: str,
-        chat_id: str,
-        threads: list[ThreadSummary],
-        *,
-        message_id: str = "",
-    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-        starred_ids = self._favorites.load_favorites(sender_id)
-        rows = [
-            {
-                "thread_id": thread.thread_id,
-                "cwd": thread.cwd,
-                "title": thread.title,
-                "updated_at": thread.updated_at,
-                "model_provider": thread.model_provider or "",
-                "starred": thread.thread_id in starred_ids,
-            }
-            for thread in threads
-        ]
-        rows.sort(key=lambda item: item["updated_at"], reverse=True)
-
-        state = self._get_state(sender_id, chat_id, message_id)
-        current_id = state["current_thread_id"]
-        if current_id and all(item["thread_id"] != current_id for item in rows):
-            rows.insert(
-                0,
-                {
-                    "thread_id": current_id,
-                    "cwd": state["working_dir"],
-                    "title": state["current_thread_name"] or "（当前未持久化线程）",
-                    "updated_at": int(time.time()),
-                    "model_provider": "",
-                    "starred": current_id in starred_ids,
-                },
-            )
-
-        starred = [item for item in rows if item["starred"]]
-        unstarred = [item for item in rows if not item["starred"]]
-
-        display = starred[: self._session_starred_limit] + unstarred[: self._session_recent_limit]
-        if current_id:
-            current = next((item for item in rows if item["thread_id"] == current_id), None)
-            if current and all(item["thread_id"] != current_id for item in display):
-                display.insert(0, current)
-
-        deduped: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for item in display:
-            if item["thread_id"] in seen:
-                continue
-            deduped.append(item)
-            seen.add(item["thread_id"])
-
-        counts = {
-            "shown_starred": sum(1 for item in deduped if item["starred"]),
-            "total_starred": len(starred),
-            "shown_unstarred": sum(1 for item in deduped if not item["starred"]),
-            "total_unstarred": len(unstarred),
-            "total_all": len(rows),
-        }
-        return deduped, counts
-
-    def _find_thread_session(
-        self,
-        sender_id: str,
-        chat_id: str,
-        thread_id: str,
-        *,
-        message_id: str = "",
-    ) -> dict[str, Any] | None:
-        threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
-        rows, _ = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
-        return next((item for item in rows if item["thread_id"] == thread_id), None)
-
-    @staticmethod
-    def _all_model_providers_filter() -> list[str]:
-        return []
-
-    def _list_current_dir_threads(self, sender_id: str, chat_id: str, *, message_id: str = "") -> list[ThreadSummary]:
-        return list_current_dir_threads(
-            self._adapter,
-            cwd=self._get_state(sender_id, chat_id, message_id)["working_dir"],
-            limit=self._thread_list_query_limit,
-        )
-
     def _list_global_threads(self) -> list[ThreadSummary]:
         return list_global_threads(
             self._adapter,
             limit=self._thread_list_query_limit,
         )
-
-    @staticmethod
-    def _format_thread_match(thread: ThreadSummary) -> str:
-        return format_thread_match(thread)
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None:
         try:
@@ -2805,8 +1654,8 @@ class CodexHandler(BotHandler):
         request_key = str(request_id)
         state = self._get_state(*binding)
         with self._lock:
-            prompt_message_id = str(state.get("current_prompt_message_id", "")).strip()
-            actor_open_id = str(state.get("current_actor_open_id", "")).strip()
+            prompt_message_id = state["current_prompt_message_id"].strip()
+            actor_open_id = state["current_actor_open_id"].strip()
 
         if method == "item/commandExecution/requestApproval":
             card = build_command_approval_card(
@@ -2926,12 +1775,12 @@ class CodexHandler(BotHandler):
         previous_execution_card: dict[str, Any] | None = None
         should_interrupt_started_turn = False
         with self._lock:
-            external_turn = not state.get("pending_local_turn_card", False)
+            external_turn = not state["pending_local_turn_card"]
             state["current_turn_id"] = turn_id
             if turn_id and state["pending_cancel"]:
                 should_interrupt_started_turn = True
             if external_turn:
-                previous_message_id = str(state.get("current_message_id", "")).strip()
+                previous_message_id = state["current_message_id"].strip()
                 if previous_message_id:
                     previous_execution_card = {
                         "message_id": previous_message_id,
@@ -3128,13 +1977,13 @@ class CodexHandler(BotHandler):
 
     def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         state = self._get_state(sender_id, chat_id)
-        message_id = state.get("current_message_id", "")
+        message_id = state["current_message_id"]
         if not message_id:
             return
         now = time.monotonic()
         with self._lock:
             last_patch = state["last_patch_at"]
-            timer = state.get("patch_timer")
+            timer = state["patch_timer"]
             if now - last_patch >= self._stream_patch_interval_ms / 1000:
                 state["last_patch_at"] = now
                 state["patch_timer"] = None
@@ -3154,18 +2003,18 @@ class CodexHandler(BotHandler):
     def _flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
         state = self._get_state(sender_id, chat_id)
         with self._lock:
-            timer = state.get("patch_timer")
+            timer = state["patch_timer"]
             if timer is not None:
                 timer.cancel()
                 state["patch_timer"] = None
-            message_id = state.get("current_message_id", "")
+            message_id = state["current_message_id"]
             if not message_id:
                 return
             reply_text = state["full_reply_text"]
             log_text = state["full_log_text"]
             running = state["running"]
             cancelled = state["cancelled"]
-            prompt_message_id = str(state.get("current_prompt_message_id", "")).strip()
+            prompt_message_id = state["current_prompt_message_id"].strip()
             elapsed = int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0
             state["last_patch_at"] = time.monotonic()
 
@@ -3187,14 +2036,14 @@ class CodexHandler(BotHandler):
                 return
             reply_text = state["full_reply_text"]
             current_message_id = state["current_message_id"]
-            prompt_message_id = str(state.get("current_prompt_message_id", "")).strip()
+            prompt_message_id = state["current_prompt_message_id"].strip()
             need_followup = not current_message_id or len(reply_text) > self._card_reply_limit
             if not reply_text or not need_followup:
                 return
             state["followup_sent"] = True
         self._reply_text(chat_id, reply_text, message_id=prompt_message_id)
 
-    def _clear_plan_state(self, state: dict[str, Any]) -> None:
+    def _clear_plan_state(self, state: _RuntimeState) -> None:
         state["plan_message_id"] = ""
         state["plan_turn_id"] = ""
         state["plan_explanation"] = ""
@@ -3204,12 +2053,12 @@ class CodexHandler(BotHandler):
     def _flush_plan_card(self, sender_id: str, chat_id: str) -> None:
         state = self._get_state(sender_id, chat_id)
         with self._lock:
-            plan_message_id = state.get("plan_message_id", "")
-            parent_message_id = state.get("current_message_id", "")
-            turn_id = state.get("plan_turn_id", "")
-            explanation = state.get("plan_explanation", "")
-            plan_steps = list(state.get("plan_steps") or [])
-            plan_text = state.get("plan_text", "")
+            plan_message_id = state["plan_message_id"]
+            parent_message_id = state["current_message_id"]
+            turn_id = state["plan_turn_id"]
+            explanation = state["plan_explanation"]
+            plan_steps = list(state["plan_steps"])
+            plan_text = state["plan_text"]
         if not explanation and not plan_steps and not plan_text:
             return
 
@@ -3225,7 +2074,7 @@ class CodexHandler(BotHandler):
             if self.bot.patch_message(plan_message_id, content):
                 return
             with self._lock:
-                if state.get("plan_message_id") == plan_message_id:
+                if state["plan_message_id"] == plan_message_id:
                     state["plan_message_id"] = ""
 
         new_message_id: str | None = None
@@ -3246,242 +2095,3 @@ class CodexHandler(BotHandler):
         if len(text) <= self._card_log_limit:
             return text
         return text[-self._card_log_limit :] + "\n\n**[日志已截断，仅保留最近部分]**"
-
-    def _normalize_help_topic(self, topic: str) -> str:
-        normalized = (topic or "").strip().lower()
-        if normalized in {"", "basic", "basics", "overview"}:
-            return "overview"
-        if normalized in {"session", "sessions", "resume", "thread", "threads"}:
-            return "session"
-        if normalized in {
-            "settings",
-            "permission",
-            "permissions",
-            "approval",
-            "sandbox",
-            "mode",
-            "advanced",
-        }:
-            return "settings"
-        if normalized in {"group", "groups", "acl"}:
-            return "group"
-        if normalized in {"local", "fcodex", "wrapper"}:
-            return "local"
-        return ""
-
-    def _build_help_card(self, topic: str) -> dict | None:
-        normalized = self._normalize_help_topic(topic)
-        if normalized == "overview":
-            return build_help_dashboard_card(self._help_overview_text())
-        if normalized == "session":
-            return build_help_topic_card("Codex 帮助：线程", self._help_session_text())
-        if normalized == "settings":
-            return build_help_topic_actions_card(
-                "Codex 帮助：设置",
-                self._help_settings_text(),
-                actions=[
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "/permissions"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_permissions_card",
-                            "plugin": KEYWORD,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "/mode"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_mode_card",
-                            "plugin": KEYWORD,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "返回帮助"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_help_overview",
-                            "plugin": KEYWORD,
-                        },
-                    },
-                ],
-                layout="trisection",
-            )
-        if normalized == "group":
-            return build_help_topic_actions_card(
-                "Codex 帮助：群聊",
-                self._help_group_text(),
-                actions=[
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "/groupmode"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_group_mode_card",
-                            "plugin": KEYWORD,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "返回帮助"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_help_overview",
-                            "plugin": KEYWORD,
-                        },
-                    },
-                ],
-            )
-        if normalized == "local":
-            return build_markdown_card("Codex 帮助：本地继续", self._help_local_text())
-        return None
-
-    def _handle_show_help_topic_action(self, action_value: dict) -> P2CardActionTriggerResponse:
-        card = self._build_help_card(str(action_value.get("topic", "")))
-        if card is None:
-            return self.bot.make_card_response(toast="未知帮助主题。", toast_type="warning")
-        return self.bot.make_card_response(card=card)
-
-    def _handle_show_help_overview_action(self) -> P2CardActionTriggerResponse:
-        return self.bot.make_card_response(card=build_help_dashboard_card(self._help_overview_text()))
-
-    def _handle_show_permissions_card_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-    ) -> P2CardActionTriggerResponse:
-        state = self._get_state(sender_id, chat_id)
-        return self.bot.make_card_response(
-            card=build_permissions_preset_card(
-                state["approval_policy"],
-                state["sandbox"],
-                running=state["running"],
-            )
-        )
-
-    def _handle_show_mode_card_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-    ) -> P2CardActionTriggerResponse:
-        state = self._get_state(sender_id, chat_id)
-        return self.bot.make_card_response(
-            card=build_collaboration_mode_card(
-                state["collaboration_mode"],
-                running=state["running"],
-            )
-        )
-
-    def _handle_show_group_mode_card_action(
-        self,
-        chat_id: str,
-        message_id: str,
-        action_value: dict,
-    ) -> P2CardActionTriggerResponse:
-        if not self._is_group_chat(chat_id, message_id):
-            return self.bot.make_card_response(toast="该命令仅支持群聊使用。", toast_type="warning")
-        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
-        return self.bot.make_card_response(card=self._group_mode_card(chat_id, open_id=operator_open_id))
-
-    def _reply_help(self, chat_id: str, topic: str = "", *, message_id: str = "") -> None:
-        card = self._build_help_card(topic)
-        if card is not None:
-            self._reply_card(chat_id, card, message_id=message_id)
-            return
-        self._reply_text(
-            chat_id,
-            "帮助主题仅支持：`session`、`settings`、`group`、`local`。\n发送 `/help` 查看概览。",
-            message_id=message_id,
-        )
-
-    def _help_overview_text(self) -> str:
-        return (
-            "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。\n\n"
-            "**命令**\n"
-            "- `/new` 立即新建线程\n"
-            "- `/session` 查看当前目录线程\n"
-            "- `/resume <thread_id|thread_name>` 恢复指定线程\n"
-            "- `/cd <path>` 切换目录并清空当前线程绑定\n"
-            "- `/status` 查看当前状态\n\n"
-            "- `/init <token>`：私聊初始化管理员和 `bot_open_id`\n"
-            "- `/whoami`：私聊查看自己的 `open_id`，以及 best-effort 的 `user_id`（仅用于排障）\n"
-            "- `/whoareyou`：查看机器人自己的 `app_id` / `open_id`\n\n"
-            "**更多命令与帮助**\n"
-            "- 下方按钮可直接切到 `session`、`settings`、`group`\n"
-            "- `/help session` 查看线程切换、目录切换与归档\n"
-            "- `/help settings` 查看 profile、权限与协作设置\n"
-            "- `/help group` 查看群聊工作态、授权策略与上下文规则\n"
-            "- `/help local` 查看本地 `fcodex` 的用法\n\n"
-            f"{_LOCAL_THREAD_SAFETY_RULE}"
-        )
-
-    def _help_session_text(self) -> str:
-        return (
-            "**线程相关**\n"
-            "- `/new` 立即新建并切换到新线程。\n"
-            "- `/session` 只列当前目录的线程，结果已跨 provider 汇总。\n"
-            "- `/resume <thread_id|thread_name>` 会做全局精确匹配；恢复后会切到线程自己的目录。\n"
-            "- 如果匹配到多个同名线程，`/resume` 会报错，不会替你猜。\n"
-            "- `/cd <path>` 切换目录并清空当前线程绑定；之后发送普通文本，会在新目录自动新建线程。\n"
-            "- `/rename` 改标题，`/star` 收藏当前线程，`/rm` 归档线程而不是硬删除。\n\n"
-            "**本地继续同一线程**\n"
-            "- 可先用 `fcodex /session` 找线程；需要精确恢复时再用 `fcodex /resume`。\n"
-            f"- {_LOCAL_THREAD_SAFETY_RULE}"
-        )
-
-    def _help_settings_text(self) -> str:
-        return (
-            "**设置相关**\n"
-            "- `/profile` 查看或切换默认 profile；它影响 feishu-codex 与新的默认 `fcodex` 启动，不热切换已打开的 `fcodex` TUI。\n"
-            "- `/init <token>` 仅私聊可用；会把当前发送者加入 `admin_open_ids`，并尽量自动写入 `bot_open_id`。\n"
-            "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/whoareyou` 的实时探测结果仅用于诊断和初始化。\n"
-            "- 推荐先用 `/permissions`；它会同时设置审批策略和沙箱，只影响当前飞书会话的后续 turn。\n"
-            "- `/approval` 只改审批时机；`/sandbox` 只改文件与网络边界。\n"
-            "- `/mode` 切换协作方式；`plan` 更容易先规划或提问，`default` 更接近直接执行；也只影响当前飞书会话的后续 turn。\n"
-            "- 如果当前正在执行，新设置从下一轮生效。\n\n"
-            "**命令**\n"
-            "- `/init <token>`\n"
-            "- `/profile [name]`\n"
-            "- `/permissions [read-only|default|full-access]`\n"
-            "- `/approval [untrusted|on-failure|on-request|never]`\n"
-            "- `/sandbox [read-only|workspace-write|danger-full-access]`\n"
-            "- `/mode [default|plan]`"
-        )
-
-    def _help_group_text(self) -> str:
-        return (
-            "**群聊相关**\n"
-            "- `/groupmode` 查看当前群聊工作态；管理员可切到 `assistant`、`all`、`mention-only`。\n"
-            "- 私聊底层会话按人隔离；群聊底层会话按 `chat_id` 共享。\n"
-            "- `assistant` 会缓存群聊消息，仅在人类有效 mention 时回复；每次有效触发都会回捞最近群历史，把两次触发之间的消息补齐进上下文。\n"
-            "- `assistant` 的主聊天流与群话题使用不同上下文边界：主聊天流只看主聊天流，话题只看当前话题；但底层仍是同一个群共享会话。\n"
-            "- 主聊天流历史回捞受 `group_history_fetch_lookback_seconds` 和 `group_history_fetch_limit` 共同限制；话题内回捞当前只保证受边界和 `group_history_fetch_limit` 限制。\n"
-            "- `group_history_fetch_lookback_seconds` 同时也是历史回捞总开关的一部分；任一项设为 `0`，主聊天流和话题回捞都会一起关闭。\n"
-            "- `/acl` 查看当前群授权；管理员可设置 `admin-only`、`allowlist`、`all-members`。\n"
-            "- 群里的所有 `/` 命令都只给管理员；在 `assistant` / `mention-only` 下还要先显式 mention 触发对象，在 `all` 下管理员可直接发送。\n"
-            "- 有效 mention 默认只认机器人自身 `bot_open_id`；如配置 `trigger_open_ids`，`@这些人` 也会视为触发。\n"
-            "- 群命令不写入 `assistant` 上下文日志，也不会推进上下文边界。\n"
-            "- 由于飞书不会把其他机器人发言实时推给机器人，`assistant` 会在每次有效触发时额外回捞群历史，用来补齐其他机器人和遗漏消息。\n"
-            "- 在话题内触发时，执行卡片、ACL 拒绝和长回复会尽量留在原话题。\n"
-            "- 未获授权成员在 `all` 模式下直接发普通消息会静默忽略；只有显式 mention 触发对象或发群命令时才会收到拒绝提示。\n"
-            "- 管理员授权成员时，推荐在群里直接 `@成员` 使用 `/acl grant` 或 `/acl revoke`。\n\n"
-            "**命令**\n"
-            "- `/groupmode [assistant|all|mention-only]`\n"
-            "- `/acl`\n"
-            "- `/acl policy <admin-only|allowlist|all-members>`\n"
-            "- `/acl grant @成员`\n"
-            "- `/acl revoke @成员`"
-        )
-
-    def _help_local_text(self) -> str:
-        return (
-            "**本地继续线程时再用 `fcodex`**\n"
-            "- `fcodex` 是 `codex --remote` 的 wrapper，默认连到 feishu-codex 的 shared backend。\n"
-            "- `fcodex /session`、`fcodex /resume <thread_id|thread_name>` 会用共享发现逻辑，跨 provider 找线程。\n"
-            "- 进入 TUI 后，里面的 `/resume` 是 Codex 原生命令，不等同于 `fcodex /resume`。\n"
-            "- 只想开独立的本地会话，直接用裸 `codex`。\n"
-            f"- {_LOCAL_THREAD_SAFETY_RULE}"
-        )
