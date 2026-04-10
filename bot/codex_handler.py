@@ -38,9 +38,12 @@ from bot.cards import (
     build_permissions_preset_card,
     build_permissions_approval_card,
     build_resume_guard_card,
+    build_resume_guard_handled_card,
     build_rename_card,
     build_sandbox_policy_card,
     build_sessions_card,
+    build_sessions_closed_card,
+    build_sessions_pending_card,
     build_thread_snapshot_card,
 )
 from bot.config import (
@@ -61,6 +64,7 @@ from bot.constants import (
     display_path,
     resolve_working_dir,
 )
+from bot.feishu_types import GroupAclSnapshot, MessageContextPayload
 from bot.handler import BotHandler
 from bot.codex_protocol.client import CodexRpcError
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
@@ -378,6 +382,7 @@ class CodexHandler(BotHandler):
             "current_turn_id": "",
             "running": False,
             "cancelled": False,
+            "pending_cancel": False,
             "current_message_id": "",
             "current_prompt_message_id": "",
             "current_actor_open_id": "",
@@ -723,13 +728,29 @@ class CodexHandler(BotHandler):
                 group_guard="group_admin",
             ),
             "cancel_resume_guard": _ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self.bot.make_card_response(
-                    toast="已取消。"
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_cancel_resume_guard_action(
+                    sender_id, chat_id, message_id, action_value
                 ),
+            ),
+            "close_sessions_card": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_close_sessions_card_action(),
+                group_guard="group_admin",
+            ),
+            "reopen_sessions_card": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_reopen_sessions_card_action(
+                    sender_id, chat_id, message_id
+                ),
+                group_guard="group_admin",
             ),
             "toggle_star_thread": _ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._handle_toggle_star_action(
-                    sender_id, chat_id, action_value
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "archive_thread": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_archive_thread_action(
+                    sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",
             ),
@@ -1003,6 +1024,7 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["running"] = True
             state["cancelled"] = False
+            state["pending_cancel"] = False
             state["current_turn_id"] = ""
             state["current_prompt_message_id"] = str(message_id or "").strip()
             state["current_actor_open_id"] = self._group_actor_open_id(message_id)
@@ -1028,7 +1050,7 @@ class CodexHandler(BotHandler):
             state["current_message_id"] = card_id or ""
 
         try:
-            self._adapter.start_turn(
+            start_response = self._adapter.start_turn(
                 thread_id=thread_id,
                 text=text,
                 cwd=state["working_dir"],
@@ -1043,10 +1065,28 @@ class CodexHandler(BotHandler):
             logger.exception("启动 turn 失败")
             with self._lock:
                 state["running"] = False
+                state["pending_cancel"] = False
                 state["full_reply_text"] = f"启动失败：{exc}"
             self._flush_execution_card(sender_id, chat_id, immediate=True)
             if not card_id:
                 self._reply_text(chat_id, f"启动失败：{exc}", message_id=message_id)
+            return
+
+        turn_id = self._extract_turn_id_from_start_response(start_response)
+        should_interrupt_started_turn = False
+        with self._lock:
+            if turn_id and not state["current_turn_id"]:
+                state["current_turn_id"] = turn_id
+            if turn_id and state["pending_cancel"]:
+                should_interrupt_started_turn = True
+        if should_interrupt_started_turn:
+            try:
+                self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
+            except Exception:
+                logger.exception("延迟取消 turn 失败")
+            else:
+                with self._lock:
+                    state["pending_cancel"] = False
 
     def _handle_cd_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
         state = self._get_state(sender_id, chat_id, message_id)
@@ -1269,24 +1309,11 @@ class CodexHandler(BotHandler):
 
     def _handle_session_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
         try:
-            threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
+            card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("获取线程列表失败")
             self._reply_text(chat_id, f"获取线程列表失败：{exc}", message_id=message_id)
             return
-
-        sessions, counts = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
-        state = self._get_state(sender_id, chat_id, message_id)
-        card = build_sessions_card(
-            sessions,
-            state["current_thread_id"],
-            state["working_dir"],
-            counts["total_all"],
-            shown_starred_count=counts["shown_starred"],
-            total_starred_count=counts["total_starred"],
-            shown_unstarred_count=counts["shown_unstarred"],
-            total_unstarred_count=counts["total_unstarred"],
-        )
         self._reply_card(chat_id, card, message_id=message_id)
 
     def _handle_resume_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
@@ -1605,7 +1632,7 @@ class CodexHandler(BotHandler):
             message_id=message_id,
         )
 
-    def _group_command_context(self, message_id: str = "") -> dict[str, Any]:
+    def _group_command_context(self, message_id: str = "") -> MessageContextPayload:
         """Return message context for a command that has already passed group scope checks."""
         context = self.bot.get_message_context(message_id) if message_id else {}
         if context:
@@ -1626,7 +1653,7 @@ class CodexHandler(BotHandler):
         )
 
     def _group_acl_card(self, chat_id: str, *, open_id: str = "") -> dict:
-        snapshot = self.bot.get_group_acl_snapshot(chat_id)
+        snapshot: GroupAclSnapshot = self.bot.get_group_acl_snapshot(chat_id)
         return build_group_acl_card(
             snapshot["access_policy"],
             allowlist_members=self._group_member_labels(snapshot["allowlist"]),
@@ -1748,12 +1775,19 @@ class CodexHandler(BotHandler):
         state = self._get_state(sender_id, chat_id, message_id)
         thread_id = state["current_thread_id"]
         turn_id = state["current_turn_id"]
-        if not state["running"] or not thread_id or not turn_id:
+        if not state["running"] or not thread_id:
             if not from_card:
                 self._reply_text(chat_id, "当前没有正在执行的 turn。", message_id=message_id)
             return False, "当前没有正在执行的 turn。"
+        if not turn_id:
+            with self._lock:
+                state["cancelled"] = True
+                state["pending_cancel"] = True
+            if not from_card:
+                self._reply_text(chat_id, "已请求停止当前执行。", message_id=message_id)
+            return True, "已请求停止当前执行。"
         try:
-            self._adapter.interrupt_turn(thread_id=thread_id, turn_id=turn_id)
+            self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
         except Exception as exc:
             logger.exception("取消 turn 失败")
             if not from_card:
@@ -1761,12 +1795,27 @@ class CodexHandler(BotHandler):
             return False, f"取消失败：{exc}"
         with self._lock:
             state["cancelled"] = True
+            state["pending_cancel"] = False
         if not from_card:
             self._reply_text(chat_id, "已请求停止当前执行。", message_id=message_id)
         return True, "已请求停止当前执行。"
 
+    @staticmethod
+    def _extract_turn_id_from_start_response(response: Any) -> str:
+        if not isinstance(response, dict):
+            return ""
+        turn = response.get("turn")
+        if isinstance(turn, dict):
+            turn_id = str(turn.get("id", "") or "").strip()
+            if turn_id:
+                return turn_id
+        return str(response.get("turnId", "") or "").strip()
+
+    def _interrupt_running_turn(self, *, thread_id: str, turn_id: str) -> None:
+        self._adapter.interrupt_turn(thread_id=thread_id, turn_id=turn_id)
+
     def _handle_toggle_star_action(
-        self, sender_id: str, chat_id: str, action_value: dict
+        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
         thread_id = str(action_value.get("thread_id", ""))
         if not thread_id:
@@ -1775,8 +1824,17 @@ class CodexHandler(BotHandler):
         return self._handle_sessions_refresh_action(
             sender_id,
             chat_id,
+            message_id=message_id,
             toast="已收藏线程。" if starred else "已取消收藏。",
         )
+
+    def _handle_close_sessions_card_action(self) -> P2CardActionTriggerResponse:
+        return self.bot.make_card_response(card=build_sessions_closed_card(), toast="已收起。", toast_type="success")
+
+    def _handle_reopen_sessions_card_action(
+        self, sender_id: str, chat_id: str, message_id: str
+    ) -> P2CardActionTriggerResponse:
+        return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已展开。")
 
     def _handle_resume_thread_action(
         self,
@@ -1804,11 +1862,20 @@ class CodexHandler(BotHandler):
             threading.Thread(
                 target=self._resume_thread_in_background,
                 args=(sender_id, chat_id, thread_id),
-                kwargs={"original_arg": thread_id, "summary": thread, "message_id": message_id},
+                kwargs={
+                    "original_arg": thread_id,
+                    "summary": thread,
+                    "message_id": message_id,
+                    "refresh_session_message_id": message_id,
+                },
                 daemon=True,
             ).start()
-            return self.bot.make_card_response(toast="正在恢复线程…")
-        return self.bot.make_card_response(card=self._build_resume_guard(thread))
+            return self.bot.make_card_response(
+                card=build_sessions_pending_card(thread.thread_id, title=thread.title),
+                toast="正在恢复线程…",
+                toast_type="success",
+            )
+        return self.bot.make_card_response(card=self._build_resume_guard(thread, return_to_sessions=True))
 
     def _handle_preview_thread_snapshot_action(
         self,
@@ -1820,13 +1887,33 @@ class CodexHandler(BotHandler):
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
             return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+        return_to_sessions = bool(action_value.get("return_to_sessions"))
+        thread = self._find_thread_summary(thread_id)
+        if thread is None:
+            return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
         threading.Thread(
             target=self._send_thread_snapshot_in_background,
             args=(chat_id, thread_id),
             kwargs={"message_id": message_id},
             daemon=True,
         ).start()
-        return self.bot.make_card_response(toast="正在加载快照…")
+        if return_to_sessions:
+            return self._handle_sessions_refresh_action(
+                sender_id,
+                chat_id,
+                message_id=message_id,
+                toast="正在加载快照…",
+            )
+        return self.bot.make_card_response(
+            card=self._build_resume_guard_handled(
+                thread,
+                decision="已选择“查看快照”",
+                detail="快照会作为新消息发送；当前确认卡已结束，不会继续写入该线程。",
+                template="green",
+            ),
+            toast="正在加载快照…",
+            toast_type="success",
+        )
 
     def _handle_resume_thread_write_action(
         self,
@@ -1845,13 +1932,36 @@ class CodexHandler(BotHandler):
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
             return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+        return_to_sessions = bool(action_value.get("return_to_sessions"))
+        thread = self._find_thread_summary(thread_id)
+        if thread is None:
+            return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
         threading.Thread(
             target=self._resume_thread_in_background,
             args=(sender_id, chat_id, thread_id),
-            kwargs={"original_arg": thread_id, "message_id": message_id},
+            kwargs={
+                "original_arg": thread_id,
+                "message_id": message_id,
+                "refresh_session_message_id": message_id if return_to_sessions else "",
+            },
             daemon=True,
         ).start()
-        return self.bot.make_card_response(toast="正在恢复线程并继续写入…")
+        if return_to_sessions:
+            return self.bot.make_card_response(
+                card=build_sessions_pending_card(thread.thread_id, title=thread.title),
+                toast="正在恢复线程并继续写入…",
+                toast_type="success",
+            )
+        return self.bot.make_card_response(
+            card=self._build_resume_guard_handled(
+                thread,
+                decision="已选择“恢复并继续写入”",
+                detail="恢复请求已提交到 feishu-codex backend；后续结果会通过新的状态消息返回。",
+                template="orange",
+            ),
+            toast="正在恢复线程并继续写入…",
+            toast_type="success",
+        )
 
     def _handle_show_rename_action(
         self, sender_id: str, chat_id: str, message_id: str, action_value: dict
@@ -1887,13 +1997,72 @@ class CodexHandler(BotHandler):
             self._pending_rename_forms.pop(message_id, None)
             if state["current_thread_id"] == thread_id:
                 state["current_thread_name"] = new_title
-        return self._handle_sessions_refresh_action(sender_id, chat_id, toast="已重命名。")
+        return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已重命名。")
 
     def _handle_cancel_rename_action(
         self, sender_id: str, chat_id: str, message_id: str
     ) -> P2CardActionTriggerResponse:
         self._clear_pending_rename_form(message_id)
-        return self._handle_sessions_refresh_action(sender_id, chat_id, toast="已取消")
+        return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已取消")
+
+    def _handle_cancel_resume_guard_action(
+        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
+    ) -> P2CardActionTriggerResponse:
+        thread_id = str(action_value.get("thread_id", "")).strip()
+        if not thread_id:
+            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+        if action_value.get("return_to_sessions"):
+            return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已取消")
+        thread = self._find_thread_summary(thread_id)
+        if thread is None:
+            return self.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
+        return self.bot.make_card_response(
+            card=self._build_resume_guard_handled(
+                thread,
+                decision="已取消本次恢复",
+                detail="当前不会查看快照，也不会在 feishu-codex backend 中恢复该线程。",
+                template="grey",
+            ),
+            toast="已取消。",
+            toast_type="success",
+        )
+
+    def _handle_archive_thread_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
+        state = self._get_state(sender_id, chat_id, message_id)
+        with self._lock:
+            if state["running"]:
+                return self.bot.make_card_response(
+                    toast="执行中不能归档线程，请等待结束或先执行 /cancel。",
+                    toast_type="warning",
+                )
+        thread_id = str(action_value.get("thread_id", "")).strip()
+        if not thread_id:
+            return self.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+        try:
+            thread = self._read_thread_summary(thread_id, original_arg=thread_id)
+        except Exception as exc:
+            logger.exception("读取归档目标失败")
+            return self.bot.make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
+        try:
+            self._adapter.archive_thread(thread.thread_id)
+        except Exception as exc:
+            logger.exception("归档线程失败")
+            return self.bot.make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
+        self._favorites.remove_thread_globally(thread.thread_id)
+        if state["current_thread_id"] == thread.thread_id:
+            self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
+        return self._handle_sessions_refresh_action(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+            toast=f"已归档线程：{thread.thread_id[:8]}…",
+        )
 
     def _clear_pending_rename_form(self, message_id: str) -> None:
         if not message_id:
@@ -1902,16 +2071,20 @@ class CodexHandler(BotHandler):
             self._pending_rename_forms.pop(message_id, None)
 
     def _handle_sessions_refresh_action(
-        self, sender_id: str, chat_id: str, *, toast: str
+        self, sender_id: str, chat_id: str, *, message_id: str = "", toast: str
     ) -> P2CardActionTriggerResponse:
         try:
-            threads = self._list_current_dir_threads(sender_id, chat_id)
+            card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("刷新线程列表失败")
             return self.bot.make_card_response(toast=f"刷新失败：{exc}", toast_type="warning")
-        sessions, counts = self._build_session_rows(sender_id, chat_id, threads)
-        state = self._get_state(sender_id, chat_id)
-        card = build_sessions_card(
+        return self.bot.make_card_response(card=card, toast=toast, toast_type="success")
+
+    def _render_sessions_card(self, sender_id: str, chat_id: str, *, message_id: str = "") -> dict:
+        threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
+        sessions, counts = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
+        state = self._get_state(sender_id, chat_id, message_id)
+        return build_sessions_card(
             sessions,
             state["current_thread_id"],
             state["working_dir"],
@@ -1921,7 +2094,17 @@ class CodexHandler(BotHandler):
             shown_unstarred_count=counts["shown_unstarred"],
             total_unstarred_count=counts["total_unstarred"],
         )
-        return self.bot.make_card_response(card=card, toast=toast, toast_type="success")
+
+    def _refresh_sessions_card_message(self, sender_id: str, chat_id: str, message_id: str) -> None:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return
+        try:
+            card = self._render_sessions_card(sender_id, chat_id, message_id=normalized_message_id)
+        except Exception:
+            logger.exception("刷新会话卡片失败")
+            return
+        self.bot.patch_message(normalized_message_id, json.dumps(card, ensure_ascii=False))
 
     def _handle_set_approval_policy(
         self, sender_id: str, chat_id: str, action_value: dict
@@ -2173,6 +2356,7 @@ class CodexHandler(BotHandler):
         original_arg: str | None = None,
         summary: ThreadSummary | None = None,
         message_id: str = "",
+        refresh_session_message_id: str = "",
     ) -> None:
         state = self._get_state(sender_id, chat_id, message_id)
         try:
@@ -2184,12 +2368,18 @@ class CodexHandler(BotHandler):
         except Exception as exc:
             logger.exception("恢复线程失败")
             self._reply_text(chat_id, f"恢复线程失败：{exc}", message_id=message_id)
+            if refresh_session_message_id:
+                self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
             return
         with self._lock:
             if state["running"]:
                 self._reply_text(chat_id, "当前线程仍在执行，暂不切换。", message_id=message_id)
+                if refresh_session_message_id:
+                    self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
                 return
         self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
+        if refresh_session_message_id:
+            self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
         summary = (
             f"**已切换到线程**\n"
             f"thread：`{snapshot.summary.thread_id[:8]}…`\n"
@@ -2305,7 +2495,7 @@ class CodexHandler(BotHandler):
     def _is_loaded_in_current_backend(thread: ThreadSummary) -> bool:
         return thread.status not in {"", "notLoaded"}
 
-    def _build_resume_guard(self, thread: ThreadSummary) -> dict:
+    def _build_resume_guard(self, thread: ThreadSummary, *, return_to_sessions: bool = False) -> dict:
         return build_resume_guard_card(
             thread.thread_id,
             title=thread.title,
@@ -2313,6 +2503,27 @@ class CodexHandler(BotHandler):
             updated_at=thread.updated_at,
             source=thread.source,
             service_name=thread.service_name,
+            return_to_sessions=return_to_sessions,
+        )
+
+    def _build_resume_guard_handled(
+        self,
+        thread: ThreadSummary,
+        *,
+        decision: str,
+        detail: str,
+        template: str,
+    ) -> dict:
+        return build_resume_guard_handled_card(
+            thread.thread_id,
+            title=thread.title,
+            cwd=thread.cwd,
+            updated_at=thread.updated_at,
+            source=thread.source,
+            service_name=thread.service_name,
+            decision=decision,
+            detail=detail,
+            template=template,
         )
 
     def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
@@ -2683,10 +2894,23 @@ class CodexHandler(BotHandler):
         state = self._get_state(*binding)
         turn = params.get("turn") or {}
         turn_id = turn.get("id", "")
+        previous_execution_card: dict[str, Any] | None = None
+        should_interrupt_started_turn = False
         with self._lock:
             external_turn = not state.get("pending_local_turn_card", False)
             state["current_turn_id"] = turn_id
+            if turn_id and state["pending_cancel"]:
+                should_interrupt_started_turn = True
             if external_turn:
+                previous_message_id = str(state.get("current_message_id", "")).strip()
+                if previous_message_id:
+                    previous_execution_card = {
+                        "message_id": previous_message_id,
+                        "reply_text": state["full_reply_text"],
+                        "log_text": state["full_log_text"],
+                        "cancelled": bool(state["cancelled"]),
+                        "elapsed": int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0,
+                    }
                 state["cancelled"] = False
                 state["current_message_id"] = ""
                 state["current_prompt_message_id"] = ""
@@ -2700,10 +2924,27 @@ class CodexHandler(BotHandler):
             state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
         if external_turn:
+            if previous_execution_card is not None:
+                self._patch_execution_card_message(
+                    previous_execution_card["message_id"],
+                    log_text=previous_execution_card["log_text"],
+                    reply_text=previous_execution_card["reply_text"],
+                    running=False,
+                    elapsed=previous_execution_card["elapsed"],
+                    cancelled=previous_execution_card["cancelled"],
+                )
             card_id = self._send_execution_card(binding[1], "")
             with self._lock:
                 if state["current_turn_id"] == turn_id:
                     state["current_message_id"] = card_id or ""
+        if should_interrupt_started_turn:
+            try:
+                self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
+            except Exception:
+                logger.exception("turn 启动后自动取消失败")
+            else:
+                with self._lock:
+                    state["pending_cancel"] = False
         self._schedule_execution_card_update(*binding)
 
     def _handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
@@ -2808,6 +3049,7 @@ class CodexHandler(BotHandler):
             state["running"] = False
             state["current_turn_id"] = ""
             state["pending_local_turn_card"] = False
+            state["pending_cancel"] = False
             if status == "interrupted":
                 state["cancelled"] = True
             if error and not state["full_reply_text"]:
@@ -2832,6 +3074,28 @@ class CodexHandler(BotHandler):
         if parent_message_id:
             return self.bot.reply_to_message(parent_message_id, "interactive", content)
         return self.bot.send_message_get_id(chat_id, "interactive", content)
+
+    def _patch_execution_card_message(
+        self,
+        message_id: str,
+        *,
+        log_text: str,
+        reply_text: str,
+        running: bool,
+        elapsed: int,
+        cancelled: bool,
+    ) -> bool:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return False
+        card = build_execution_card(
+            self._card_log_text(log_text),
+            self._card_reply_text(reply_text),
+            running=running,
+            elapsed=elapsed,
+            cancelled=cancelled and not running,
+        )
+        return self.bot.patch_message(normalized_message_id, json.dumps(card, ensure_ascii=False))
 
     def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         state = self._get_state(sender_id, chat_id)
@@ -2876,14 +3140,14 @@ class CodexHandler(BotHandler):
             elapsed = int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0
             state["last_patch_at"] = time.monotonic()
 
-        card = build_execution_card(
-            self._card_log_text(log_text),
-            self._card_reply_text(reply_text),
+        ok = self._patch_execution_card_message(
+            message_id,
+            log_text=log_text,
+            reply_text=reply_text,
             running=running,
             elapsed=elapsed,
-            cancelled=cancelled and not running,
+            cancelled=cancelled,
         )
-        ok = self.bot.patch_message(message_id, json.dumps(card, ensure_ascii=False))
         if not ok and immediate and reply_text:
             self._reply_text(chat_id, reply_text, message_id=prompt_message_id)
 
@@ -3046,6 +3310,7 @@ class CodexHandler(BotHandler):
             "- `assistant` 会缓存群聊消息，仅在人类有效 mention 时回复；每次有效触发都会回捞最近群历史，把两次触发之间的消息补齐进上下文。\n"
             "- `assistant` 的主聊天流与群话题使用不同上下文边界：主聊天流只看主聊天流，话题只看当前话题；但底层仍是同一个群共享会话。\n"
             "- 主聊天流历史回捞受 `group_history_fetch_lookback_seconds` 和 `group_history_fetch_limit` 共同限制；话题内回捞当前只保证受边界和 `group_history_fetch_limit` 限制。\n"
+            "- `group_history_fetch_lookback_seconds` 同时也是历史回捞总开关的一部分；任一项设为 `0`，主聊天流和话题回捞都会一起关闭。\n"
             "- `/acl` 查看当前群授权；管理员可设置 `admin-only`、`allowlist`、`all-members`。\n"
             "- 群里的所有 `/` 命令都只给管理员；在 `assistant` / `mention-only` 下还要先显式 mention 触发对象，在 `all` 下管理员可直接发送。\n"
             "- 有效 mention 默认只认机器人自身 `bot_open_id`；如配置 `trigger_open_ids`，`@这些人` 也会视为触发。\n"

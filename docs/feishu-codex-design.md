@@ -206,10 +206,13 @@ The following behaviors are part of the current implementation contract:
   - receives and caches group messages
   - replies only when a valid trigger mention is present
   - includes group context since the last trigger boundary
-  - main-flow (`chat` container) history recovery is constrained by
-    `group_history_fetch_limit` and `group_history_fetch_lookback_seconds`
-  - thread (`thread` container) history recovery does not currently promise a
-    strict `group_history_fetch_lookback_seconds` cutoff, because the public
+- main-flow (`chat` container) history recovery is constrained by
+  `group_history_fetch_limit` and `group_history_fetch_lookback_seconds`
+- `group_history_fetch_limit` and `group_history_fetch_lookback_seconds` also
+  act as the global recovery switch; setting either to `0` disables both
+  main-flow and thread recovery
+- thread (`thread` container) history recovery does not currently promise a
+  strict `group_history_fetch_lookback_seconds` cutoff, because the public
     Feishu API does not support `start_time` / `end_time` for thread containers
   - maintains separate context boundaries for the main chat flow and each group
     thread

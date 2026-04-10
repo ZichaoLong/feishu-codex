@@ -8,7 +8,9 @@ import json
 import os
 import pathlib
 import threading
-from typing import Any, TypedDict
+from typing import Any
+
+from bot.feishu_types import BoundaryState, GroupChatStoreData, GroupMessageEntry, GroupState
 
 DEFAULT_GROUP_MODE = "assistant"
 DEFAULT_ACCESS_POLICY = "admin-only"
@@ -16,25 +18,6 @@ GROUP_MODES = {"mention_only", "assistant", "all"}
 ACCESS_POLICIES = {"admin-only", "allowlist", "all-members"}
 MAIN_SCOPE = "main"
 GROUP_CHAT_STORE_SCHEMA_VERSION = 1
-
-
-class BoundaryState(TypedDict):
-    seq: int
-    created_at: int
-    message_ids: list[str]
-
-
-class GroupState(TypedDict):
-    mode: str
-    access_policy: str
-    allowlist: list[str]
-    boundaries: dict[str, BoundaryState]
-    last_log_seq: int
-
-
-class GroupChatStoreData(TypedDict):
-    schema_version: int
-    groups: dict[str, GroupState]
 
 
 class GroupChatStore:
@@ -197,7 +180,7 @@ class GroupChatStore:
             "last_boundary_message_ids": normalized_message_ids,
         }
 
-    def append_message(self, chat_id: str, entry: dict[str, Any]) -> int:
+    def append_message(self, chat_id: str, entry: GroupMessageEntry) -> int:
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
@@ -205,7 +188,7 @@ class GroupChatStore:
             group["last_log_seq"] = next_seq
             self._write_group_state(data, chat_id, group)
 
-            payload = dict(entry)
+            payload: GroupMessageEntry = dict(entry)
             payload["seq"] = next_seq
             path = self._log_path(chat_id)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,14 +203,14 @@ class GroupChatStore:
         after_seq: int = 0,
         before_seq: int | None = None,
         scope: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[GroupMessageEntry]:
         path = self._log_path(chat_id)
         if not path.exists():
             return []
         lower = max(int(after_seq), 0)
         upper = int(before_seq) if before_seq is not None else None
         normalized_scope = self.normalize_scope(scope) if scope is not None else ""
-        messages: list[dict[str, Any]] = []
+        messages: list[GroupMessageEntry] = []
         with self._lock:
             with path.open(encoding="utf-8") as handle:
                 for line in handle:

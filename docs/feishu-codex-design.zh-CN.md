@@ -208,6 +208,7 @@ shared backend 与 wrapper 的具体机制，见
   - 本地实时日志中，上次边界之后到本次触发之前的消息
   - 飞书历史接口返回、但本地日志里尚未出现的缺失消息
 - 主聊天流（`chat` 容器）的历史回捞受 `group_history_fetch_limit` 和 `group_history_fetch_lookback_seconds` 限制
+- `group_history_fetch_limit` 和 `group_history_fetch_lookback_seconds` 同时也是“是否启用任何历史回捞”的总开关；任一项为 `0` 都会关闭主聊天流和话题回捞
 - 话题内（`thread` 容器）的历史回捞当前不承诺严格受 `group_history_fetch_lookback_seconds` 限制；因为飞书公开接口对 `thread` 容器不支持 `start_time/end_time`，当前实现只保证受上下文边界和 `group_history_fetch_limit` 约束
 - 当时间窗内缺失消息数量超过 `group_history_fetch_limit` 时，当前实现保留“最近的缺失消息”，而不是最早的一批
 - 上下文边界同时记录：

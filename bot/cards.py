@@ -908,6 +908,7 @@ def build_resume_guard_card(
     updated_at: int,
     source: str,
     service_name: str | None,
+    return_to_sessions: bool = False,
 ) -> dict:
     """构造外部线程恢复风险卡片。"""
     origin_text = _thread_origin_text(source, service_name)
@@ -943,6 +944,7 @@ def build_resume_guard_card(
                             "action": "preview_thread_snapshot",
                             "plugin": KEYWORD,
                             "thread_id": thread_id,
+                            "return_to_sessions": return_to_sessions,
                         },
                     },
                     {
@@ -953,6 +955,7 @@ def build_resume_guard_card(
                             "action": "resume_thread_write",
                             "plugin": KEYWORD,
                             "thread_id": thread_id,
+                            "return_to_sessions": return_to_sessions,
                         },
                     },
                     {
@@ -963,11 +966,45 @@ def build_resume_guard_card(
                             "action": "cancel_resume_guard",
                             "plugin": KEYWORD,
                             "thread_id": thread_id,
+                            "return_to_sessions": return_to_sessions,
                         },
                     },
                 ],
             },
         ],
+    }
+
+
+def build_resume_guard_handled_card(
+    thread_id: str,
+    *,
+    title: str,
+    cwd: str,
+    updated_at: int,
+    source: str,
+    service_name: str | None,
+    decision: str,
+    detail: str,
+    template: str = "grey",
+) -> dict:
+    """构造已处理的线程恢复确认卡片。"""
+    origin_text = _thread_origin_text(source, service_name)
+    content = (
+        f"**{shorten(title, 160)}**\n"
+        f"thread: `{thread_id[:8]}…`\n"
+        f"目录：`{display_path(cwd)}`\n"
+        f"更新时间：`{format_timestamp(updated_at)}`\n"
+        f"来源：{origin_text}\n\n"
+        f"**已处理**：{decision}\n"
+        f"{detail}"
+    )
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "恢复线程前确认（已处理）"},
+            "template": template,
+        },
+        "elements": [{"tag": "markdown", "content": content}],
     }
 
 
@@ -1064,10 +1101,10 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
                 },
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": "重命名"},
+                    "text": {"tag": "plain_text", "content": "归档"},
                     "type": "default",
                     "value": {
-                        "action": "show_rename_form",
+                        "action": "archive_thread",
                         "plugin": KEYWORD,
                         "thread_id": thread_id,
                     },
@@ -1113,6 +1150,20 @@ def build_sessions_card(
                 "如需在本地继续同一线程，请使用 `fcodex`；详情见 `/help local`。"
             ),
         },
+        {
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "收起"},
+                    "type": "default",
+                    "value": {
+                        "action": "close_sessions_card",
+                        "plugin": KEYWORD,
+                    },
+                }
+            ],
+        },
         {"tag": "hr"},
     ]
 
@@ -1129,6 +1180,51 @@ def build_sessions_card(
             "template": "blue",
         },
         "elements": elements,
+    }
+
+
+def build_sessions_closed_card() -> dict:
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 当前目录线程（已收起）"},
+            "template": "grey",
+        },
+        "elements": [
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "展开会话列表"},
+                        "type": "primary",
+                        "value": {
+                            "action": "reopen_sessions_card",
+                            "plugin": KEYWORD,
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def build_sessions_pending_card(thread_id: str, *, title: str) -> dict:
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 当前目录线程"},
+            "template": "blue",
+        },
+        "elements": [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"正在恢复线程：`{thread_id[:8]}…` {shorten(title or '（无标题）', 120)}\n"
+                    "完成后会自动刷新当前会话列表。"
+                ),
+            }
+        ],
     }
 
 

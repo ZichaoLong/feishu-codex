@@ -235,7 +235,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
                 "message_id": "hist-bot",
                 "created_at": 1712476700000,
                 "sender_user_id": "",
-                "sender_open_id": "ou-other-bot",
+                "sender_principal_id": "ou-other-bot",
                 "sender_type": "app",
                 "sender_name": "机器人:ou-other",
                 "msg_type": "text",
@@ -307,7 +307,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
                 "message_id": "hist-1",
                 "created_at": 1712476700000,
                 "sender_user_id": "",
-                "sender_open_id": "ou-old-bot",
+                "sender_principal_id": "ou-old-bot",
                 "sender_type": "app",
                 "sender_name": "机器人:ou-old-b",
                 "msg_type": "text",
@@ -345,7 +345,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
                 "message_id": "hist-2",
                 "created_at": 1712476900000,
                 "sender_user_id": "",
-                "sender_open_id": "ou-next-bot",
+                "sender_principal_id": "ou-next-bot",
                 "sender_type": "app",
                 "sender_name": "机器人:ou-next-",
                 "msg_type": "text",
@@ -402,7 +402,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
                 "message_id": "hist-same-ms",
                 "created_at": 1712476800000,
                 "sender_user_id": "",
-                "sender_open_id": "ou-old-bot",
+                "sender_principal_id": "ou-old-bot",
                 "sender_type": "app",
                 "sender_name": "机器人:ou-old-b",
                 "msg_type": "text",
@@ -522,7 +522,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
                 "message_id": "hist-1",
                 "created_at": 1712476700000,
                 "sender_user_id": "",
-                "sender_open_id": "ou-old-user",
+                "sender_principal_id": "ou-old-user",
                 "sender_type": "user",
                 "msg_type": "text",
                 "text": "不应被回捞",
@@ -998,3 +998,21 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(bot.fetch_runtime_chat_type("oc_topic123"), "group")
         self.assertEqual(bot.lookup_chat_type("oc_topic123"), "group")
+
+    def test_history_entry_uses_sender_principal_id_for_app_sender(self) -> None:
+        bot = self._make_bot()
+
+        entry = bot._history_entry_from_message(
+            _history_item(
+                message_id="hist-app",
+                created_at=1712476800000,
+                text="来自其他机器人的历史消息",
+                sender_id="cli_a1b2c3",
+                sender_type="app",
+            )
+        )
+
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry["sender_principal_id"], "cli_a1b2c3")
+        self.assertEqual(entry["sender_type"], "app")

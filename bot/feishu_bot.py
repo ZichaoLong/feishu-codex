@@ -11,7 +11,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, NotRequired, Optional, TypedDict
+from typing import Any, Optional
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import *
@@ -26,6 +26,14 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.constants import FC_DATA_DIR
+from bot.feishu_types import (
+    BotIdentitySnapshot,
+    GroupAclSnapshot,
+    GroupMessageEntry,
+    MentionMember,
+    MentionPayload,
+    MessageContextPayload,
+)
 from bot.stores.group_chat_store import (
     GroupChatStore,
 )
@@ -85,53 +93,6 @@ class _PendingForward:
     created_at: int
     thread_id: str
     timer: threading.Timer = field(repr=False)
-
-
-class MentionPayload(TypedDict):
-    key: str
-    name: str
-    open_id: str
-
-
-class MentionMember(TypedDict):
-    open_id: str
-    name: str
-
-
-class MessageContextPayload(TypedDict, total=False):
-    chat_id: str
-    chat_type: str
-    sender_user_id: str
-    sender_open_id: str
-    sender_type: str
-    bot_mentioned: bool
-    message_type: str
-    thread_id: str
-    root_id: str
-    parent_id: str
-    text: str
-    mentions: list[MentionPayload]
-
-
-class GroupMessageEntry(TypedDict):
-    message_id: str
-    created_at: int
-    sender_user_id: str
-    sender_open_id: str
-    sender_type: str
-    sender_name: str
-    msg_type: str
-    thread_id: str
-    text: str
-    seq: NotRequired[int]
-
-
-class BotIdentitySnapshot(TypedDict):
-    app_id: str
-    configured_open_id: str
-    discovered_open_id: str
-    trigger_open_ids: list[str]
-
 
 @dataclass
 class _MessageContext:
@@ -313,8 +274,12 @@ class FeishuBot(ABC):
     def set_group_mode(self, chat_id: str, mode: str) -> str:
         return self._group_store.set_group_mode(chat_id, mode)
 
-    def get_group_acl_snapshot(self, chat_id: str) -> dict[str, Any]:
-        return self._group_store.group_snapshot(chat_id)
+    def get_group_acl_snapshot(self, chat_id: str) -> GroupAclSnapshot:
+        snapshot = self._group_store.group_snapshot(chat_id)
+        return {
+            "access_policy": snapshot["access_policy"],
+            "allowlist": list(snapshot["allowlist"]),
+        }
 
     def set_group_access_policy(self, chat_id: str, policy: str) -> str:
         return self._group_store.set_access_policy(chat_id, policy)
@@ -481,7 +446,11 @@ class FeishuBot(ABC):
             return value
 
     def get_sender_display_name(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> str:
-        return self._display_name_for_sender(user_id=user_id, open_id=open_id, sender_type=sender_type)
+        return self._display_name_for_sender_identity(
+            user_id=user_id,
+            sender_principal_id=open_id,
+            sender_type=sender_type,
+        )
 
     def _remember_message_context(self, message_id: str, payload: MessageContextPayload) -> None:
         if not message_id:
@@ -685,30 +654,46 @@ class FeishuBot(ABC):
                 if cache_key:
                     self._sender_name_cache[cache_key] = (now, normalized_value)
 
-    def _display_name_for_sender(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> str:
+    def _display_name_for_sender_identity(
+        self,
+        *,
+        user_id: str = "",
+        sender_principal_id: str = "",
+        sender_type: str = "user",
+    ) -> str:
         if sender_type == "app":
-            cache_key = open_id or user_id
+            cache_key = sender_principal_id or user_id
             cached = self.lookup_cached_sender_name(cache_key)
             if cached:
                 return cached
-            short_id = (open_id or user_id or "unknown")[:8]
+            short_id = (sender_principal_id or user_id or "unknown")[:8]
             return f"机器人:{short_id}"
-        cached = self.lookup_cached_sender_name(open_id) or self.lookup_cached_sender_name(user_id)
+        cached = self.lookup_cached_sender_name(sender_principal_id) or self.lookup_cached_sender_name(user_id)
         if cached:
             return cached
-        if open_id:
-            resolved = self._resolve_sender_name(open_id)
-            self._cache_sender_name(open_id, user_id, value=resolved)
+        if sender_principal_id:
+            resolved = self._resolve_sender_name(sender_principal_id)
+            self._cache_sender_name(sender_principal_id, user_id, value=resolved)
             return resolved
         if user_id:
             self._cache_sender_name(user_id, value=user_id[:8])
             return user_id[:8]
         return "unknown"
 
-    def _sender_log_fields(self, *, user_id: str = "", open_id: str = "", sender_type: str = "user") -> tuple[str, str, str]:
+    def _sender_log_fields(
+        self,
+        *,
+        user_id: str = "",
+        sender_principal_id: str = "",
+        sender_type: str = "user",
+    ) -> tuple[str, str, str]:
         return (
-            self._display_name_for_sender(user_id=user_id, open_id=open_id, sender_type=sender_type),
-            open_id or "-",
+            self._display_name_for_sender_identity(
+                user_id=user_id,
+                sender_principal_id=sender_principal_id,
+                sender_type=sender_type,
+            ),
+            sender_principal_id or "-",
             user_id or "-",
         )
 
@@ -930,16 +915,16 @@ class FeishuBot(ABC):
         thread_id: str = "",
         text: str,
     ) -> int:
-        sender_name = self._display_name_for_sender(
+        sender_name = self._display_name_for_sender_identity(
             user_id=sender_user_id,
-            open_id=sender_open_id,
+            sender_principal_id=sender_open_id,
             sender_type=sender_type,
         )
         entry: GroupMessageEntry = {
             "message_id": str(message_id or ""),
             "created_at": int(created_at or 0),
             "sender_user_id": sender_user_id,
-            "sender_open_id": sender_open_id,
+            "sender_principal_id": sender_open_id,
             "sender_type": sender_type,
             "sender_name": sender_name,
             "msg_type": msg_type,
@@ -977,17 +962,17 @@ class FeishuBot(ABC):
         sender = getattr(item, "sender", None)
         sender_type = str(getattr(sender, "sender_type", "") or "user").strip()
         sender_id = str(getattr(sender, "id", "") or "").strip()
-        sender_open_id = sender_id if sender_type in {"user", "app"} else ""
-        sender_name = self._display_name_for_sender(
+        sender_principal_id = sender_id if sender_type in {"user", "app"} else ""
+        sender_name = self._display_name_for_sender_identity(
             user_id="",
-            open_id=sender_open_id,
+            sender_principal_id=sender_principal_id,
             sender_type=sender_type,
         )
         return {
             "message_id": message_id,
             "created_at": int(getattr(item, "create_time", 0) or 0),
             "sender_user_id": "",
-            "sender_open_id": sender_open_id,
+            "sender_principal_id": sender_principal_id,
             "sender_type": sender_type,
             "sender_name": sender_name,
             "msg_type": msg_type,
@@ -1090,7 +1075,14 @@ class FeishuBot(ABC):
 
         return list(entries)
 
-    def _group_history_fetch_enabled(self) -> bool:
+    def _history_recovery_enabled(self) -> bool:
+        """Whether assistant mode should perform any history recovery at all.
+
+        `group_history_fetch_limit` and `group_history_fetch_lookback_seconds`
+        jointly act as the global recovery switch. For thread containers the
+        Feishu API does not support start/end time filters, but setting either
+        value to 0 still disables all recovery paths for consistency.
+        """
         return (
             self._group_history_fetch_limit > 0
             and self._group_history_fetch_lookback_seconds > 0
@@ -1123,7 +1115,7 @@ class FeishuBot(ABC):
             before_seq=current_seq or None,
             scope=scope,
         )
-        if not self._group_history_fetch_enabled():
+        if not self._history_recovery_enabled():
             return local_entries
 
         existing_message_ids = {
@@ -1539,7 +1531,7 @@ class FeishuBot(ABC):
 
         sender_name, sender_open_log, sender_user_log = self._sender_log_fields(
             user_id=sender_user_id,
-            open_id=sender_open_id,
+            sender_principal_id=sender_open_id,
             sender_type=sender_type,
         )
         logger.info(
@@ -1604,7 +1596,7 @@ class FeishuBot(ABC):
                 and bot_mentioned
                 and allowed_to_use
                 and not control_text
-                and self._group_history_fetch_enabled()
+                and self._history_recovery_enabled()
             )
             if should_prepare_history:
                 self._prepare_group_history_execution_card(chat_id, message_id)

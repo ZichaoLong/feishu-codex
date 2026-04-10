@@ -288,7 +288,7 @@ case "\${1:-}" in
         echo "配置目录: $CONFIG_DIR"
         echo "  system.yaml — 飞书应用凭证"
         echo "  codex.yaml  — Codex 运行参数"
-        echo "  init.token  — 私聊 `/init <token>` 使用的初始化口令"
+        echo "  init.token  — 私聊 \`/init <token>\` 使用的初始化口令"
         echo ""
         read -r -p "打开哪个文件？[1] system.yaml  [2] codex.yaml  [3] init.token  (Enter 取消) " _choice
         case "\$_choice" in
