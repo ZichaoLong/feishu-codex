@@ -9,6 +9,10 @@ import threading
 from secrets import compare_digest
 from typing import Any, Protocol
 
+from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    P2CardActionTriggerResponse,
+)
+
 from bot.adapters.base import RuntimeConfigSummary
 from bot.cards import (
     CommandResult,
@@ -370,7 +374,7 @@ class CodexSettingsDomain:
             running=state["running"],
         ))
 
-    def handle_set_approval_policy(self, sender_id: str, chat_id: str, action_value: dict) -> dict:
+    def handle_set_approval_policy(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
         owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._approval_policies:
@@ -388,7 +392,7 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_set_sandbox_policy(self, sender_id: str, chat_id: str, action_value: dict) -> dict:
+    def handle_set_sandbox_policy(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
         owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._sandbox_policies:
@@ -406,7 +410,7 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_set_permissions_preset(self, sender_id: str, chat_id: str, action_value: dict) -> dict:
+    def handle_set_permissions_preset(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
         owner = self._owner
         preset = str(action_value.get("preset", "")).strip().lower()
         config = self._permissions_presets.get(preset)
@@ -430,7 +434,7 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_set_collaboration_mode(self, sender_id: str, chat_id: str, action_value: dict) -> dict:
+    def handle_set_collaboration_mode(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
         owner = self._owner
         mode = str(action_value.get("mode", "")).strip().lower()
         if mode not in {"default", "plan"}:
@@ -448,7 +452,7 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_show_permissions_card_action(self, sender_id: str, chat_id: str) -> dict:
+    def handle_show_permissions_card_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id)
         return make_card_response(
@@ -459,7 +463,7 @@ class CodexSettingsDomain:
             )
         )
 
-    def handle_show_mode_card_action(self, sender_id: str, chat_id: str) -> dict:
+    def handle_show_mode_card_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id)
         return make_card_response(

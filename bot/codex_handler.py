@@ -269,11 +269,7 @@ class CodexHandler(BotHandler):
                 state["active"] = True
 
         if not cleaned or cleaned.upper() == KEYWORD:
-            result = self._help_domain.reply_help(chat_id)
-            if result.card is not None:
-                self._reply_card(chat_id, result.card)
-            elif result.text:
-                self._reply_text(chat_id, result.text)
+            self._dispatch_command_result(chat_id, self._help_domain.reply_help(chat_id))
             return
 
         if cleaned.startswith("/"):
@@ -935,10 +931,13 @@ class CodexHandler(BotHandler):
             return
         result = route.handler(sender_id, chat_id, arg, message_id)
         if result is not None:
-            if result.card is not None:
-                self._reply_card(chat_id, result.card, message_id=message_id)
-            elif result.text:
-                self._reply_text(chat_id, result.text, message_id=message_id)
+            self._dispatch_command_result(chat_id, result, message_id=message_id)
+
+    def _dispatch_command_result(self, chat_id: str, result: CommandResult, *, message_id: str = "") -> None:
+        if result.card is not None:
+            self._reply_card(chat_id, result.card, message_id=message_id)
+        elif result.text:
+            self._reply_text(chat_id, result.text, message_id=message_id)
 
     def _handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
         state = self._get_state(sender_id, chat_id, message_id)

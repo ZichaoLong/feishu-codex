@@ -12,6 +12,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 from bot.cards import CommandResult, build_group_acl_card, build_group_mode_card, make_card_response
 from bot.feishu_types import GroupAclSnapshot, MessageContextPayload
+from bot.stores.group_chat_store import ACCESS_POLICIES, GROUP_MODES
 
 
 class _GroupDomainOwner(Protocol):
@@ -83,7 +84,7 @@ class CodexGroupDomain:
         if not arg:
             return CommandResult(card=self._group_mode_card(chat_id, open_id=sender_open_id))
         mode = self._normalize_group_mode(arg)
-        if mode not in {"assistant", "all", "mention_only"}:
+        if mode not in GROUP_MODES:
             return CommandResult(text="群聊工作态仅支持：`assistant`、`all`、`mention-only`")
         self._owner.bot.set_group_mode(chat_id, mode)
         labels = {
@@ -127,7 +128,7 @@ class CodexGroupDomain:
 
         if subcommand == "policy":
             policy = payload.strip().lower()
-            if policy not in {"admin-only", "allowlist", "all-members"}:
+            if policy not in ACCESS_POLICIES:
                 return CommandResult(text="用法：`/acl policy <admin-only|allowlist|all-members>`")
             self._owner.bot.set_group_access_policy(chat_id, policy)
             return CommandResult(text=f"已切换群聊授权策略：`{policy}`")
@@ -178,7 +179,7 @@ class CodexGroupDomain:
         del message_id
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
         mode = self._normalize_group_mode(str(action_value.get("mode", "")))
-        if mode not in {"assistant", "all", "mention_only"}:
+        if mode not in GROUP_MODES:
             return make_card_response(toast="非法群聊工作态", toast_type="warning")
         if not self._owner.bot.is_group_admin(open_id=operator_open_id):
             return make_card_response(toast="仅管理员可切换群聊工作态。", toast_type="warning")
@@ -200,7 +201,7 @@ class CodexGroupDomain:
         del message_id
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
         policy = str(action_value.get("policy", "")).strip().lower()
-        if policy not in {"admin-only", "allowlist", "all-members"}:
+        if policy not in ACCESS_POLICIES:
             return make_card_response(toast="非法群聊授权策略", toast_type="warning")
         if not self._owner.bot.is_group_admin(open_id=operator_open_id):
             return make_card_response(toast="仅管理员可调整群聊授权策略。", toast_type="warning")
