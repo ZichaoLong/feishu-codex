@@ -11,11 +11,13 @@ from typing import Any, Protocol
 
 from bot.adapters.base import RuntimeConfigSummary
 from bot.cards import (
+    CommandResult,
     build_approval_policy_card,
     build_collaboration_mode_card,
     build_markdown_card,
     build_permissions_preset_card,
     build_sandbox_policy_card,
+    make_card_response,
 )
 from bot.config import ensure_init_token, load_system_config_raw, save_system_config
 from bot.profile_resolution import DefaultProfileResolution
@@ -30,10 +32,6 @@ class _SettingsDomainOwner(Protocol):
     _adapter_config: Any
 
     def _get_state(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
-
-    def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
-
-    def _reply_card(self, chat_id: str, card: dict, *, message_id: str = "") -> None: ...
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None: ...
 
@@ -64,35 +62,20 @@ class CodexSettingsDomain:
         arg: str,
         *,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult:
         owner = self._owner
         context = owner.bot.get_message_context(message_id) if message_id else {}
         provided_token = str(arg or "").strip()
         if not provided_token:
-            owner._reply_text(
-                chat_id,
-                "用法：`/init <token>`\n`token` 默认保存在本机配置目录的 `init.token` 文件。",
-                message_id=message_id,
-            )
-            return
+            return CommandResult(text="用法：`/init <token>`\n`token` 默认保存在本机配置目录的 `init.token` 文件。")
         expected_token = ensure_init_token()
         if not compare_digest(provided_token, expected_token):
-            owner._reply_text(
-                chat_id,
-                "初始化口令错误。请检查本机配置目录中的 `init.token`。",
-                message_id=message_id,
-            )
-            return
+            return CommandResult(text="初始化口令错误。请检查本机配置目录中的 `init.token`。")
         sender_open_id = str(context.get("sender_open_id", "") or "").strip()
         sender_user_id = str(context.get("sender_user_id", "") or "").strip()
         sender_type = str(context.get("sender_type", "user") or "user").strip()
         if not sender_open_id:
-            owner._reply_text(
-                chat_id,
-                "初始化失败：当前消息上下文里没有发送者 `open_id`，暂时无法写入管理员配置。",
-                message_id=message_id,
-            )
-            return
+            return CommandResult(text="初始化失败：当前消息上下文里没有发送者 `open_id`，暂时无法写入管理员配置。")
         sender_name = owner.bot.get_sender_display_name(
             user_id=sender_user_id,
             open_id=sender_open_id,
@@ -124,8 +107,7 @@ class CodexSettingsDomain:
             save_system_config(updated_config)
         except Exception as exc:
             logger.exception("保存初始化配置失败")
-            owner._reply_text(chat_id, f"初始化失败：保存配置时出错：{exc}", message_id=message_id)
-            return
+            return CommandResult(text=f"初始化失败：保存配置时出错：{exc}")
 
         owner.bot.add_admin_open_id(sender_open_id)
         if configured_bot_open_id:
@@ -152,9 +134,9 @@ class CodexSettingsDomain:
                 ]
             )
         lines.append("- 当前命令只会更新管理员和 bot open id，不会改动 `trigger_open_ids`。")
-        owner._reply_text(chat_id, "\n".join(lines), message_id=message_id)
+        return CommandResult(text="\n".join(lines))
 
-    def handle_whoami_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
+    def handle_whoami_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
         context = owner.bot.get_message_context(message_id) if message_id else {}
         sender_user_id = str(context.get("sender_user_id", "")).strip()
@@ -165,23 +147,19 @@ class CodexSettingsDomain:
             open_id=sender_open_id,
             sender_type=sender_type,
         )
-        owner._reply_text(
-            chat_id,
-            "\n".join(
-                [
-                    "你的身份信息：",
-                    f"- name: `{name}`",
-                    f"- user_id: `{sender_user_id or '（空）'}`",
-                    f"- open_id: `{sender_open_id or '（空）'}`",
-                    "",
-                    "配置管理员时，把 `open_id` 写进 `system.yaml` 的 `admin_open_ids`。",
-                    "其中 `user_id` 仅用于排障；若未开 `contact:user.employee_id:readonly`，这里允许为空。",
-                ]
-            ),
-            message_id=message_id,
-        )
+        return CommandResult(text="\n".join(
+            [
+                "你的身份信息：",
+                f"- name: `{name}`",
+                f"- user_id: `{sender_user_id or '（空）'}`",
+                f"- open_id: `{sender_open_id or '（空）'}`",
+                "",
+                "配置管理员时，把 `open_id` 写进 `system.yaml` 的 `admin_open_ids`。",
+                "其中 `user_id` 仅用于排障；若未开 `contact:user.employee_id:readonly`，这里允许为空。",
+            ]
+        ))
 
-    def handle_botinfo_command(self, chat_id: str, *, message_id: str = "") -> None:
+    def handle_botinfo_command(self, chat_id: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
         identity = owner.bot.get_bot_identity_snapshot()
         configured_open_id = str(identity.get("configured_open_id", "") or "").strip()
@@ -224,14 +202,13 @@ class CodexSettingsDomain:
                     "- 如果 `discovered open_id` 为空，检查 `application:application:self_manage` 权限",
                 ]
             )
-        owner._reply_text(chat_id, "\n".join(lines), message_id=message_id)
+        return CommandResult(text="\n".join(lines))
 
-    def handle_profile_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+    def handle_profile_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
         runtime_config = owner._safe_read_runtime_config()
         if runtime_config is None:
-            owner._reply_text(chat_id, "读取 Codex 运行时配置失败，无法查看或切换 profile。", message_id=message_id)
-            return
+            return CommandResult(text="读取 Codex 运行时配置失败，无法查看或切换 profile。")
         profile_resolution = owner._current_default_profile_resolution(runtime_config)
         local_profile = profile_resolution.effective_profile
         profiles = {profile.name: profile for profile in runtime_config.profiles}
@@ -277,28 +254,19 @@ class CodexSettingsDomain:
                     "注意：当前 feishu-codex 配置写死了 "
                     f"`model_provider: {owner._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
                 )
-            owner._reply_card(
-                chat_id,
-                build_markdown_card("Codex 默认 Profile", "\n".join(lines)),
-                message_id=message_id,
-            )
-            return
+            return CommandResult(card=build_markdown_card("Codex 默认 Profile", "\n".join(lines)))
 
         target_profile = arg.strip()
         if target_profile not in profiles:
-            owner._reply_text(
-                chat_id,
-                f"未找到 profile：`{target_profile}`\n用法：`/profile <name>`\n先发 `/profile` 查看可用 profile。",
-                message_id=message_id,
+            return CommandResult(
+                text=f"未找到 profile：`{target_profile}`\n用法：`/profile <name>`\n先发 `/profile` 查看可用 profile。"
             )
-            return
 
         try:
             owner._profile_state.save_default_profile(target_profile)
         except Exception as exc:
             logger.exception("保存 feishu-codex 默认 profile 失败")
-            owner._reply_text(chat_id, f"切换 profile 失败：{exc}", message_id=message_id)
-            return
+            return CommandResult(text=f"切换 profile 失败：{exc}")
 
         state = owner._get_state(sender_id, chat_id, message_id)
         lines = [
@@ -322,77 +290,48 @@ class CodexSettingsDomain:
                 "注意：当前 feishu-codex 配置写死了 "
                 f"`model_provider: {owner._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
             )
-        owner._reply_card(
-            chat_id,
-            build_markdown_card("Codex 默认 Profile", "\n".join(lines)),
-            message_id=message_id,
-        )
+        return CommandResult(card=build_markdown_card("Codex 默认 Profile", "\n".join(lines)))
 
-    def handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+    def handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in self._approval_policies:
-                owner._reply_text(
-                    chat_id,
-                    "审批策略仅支持：`untrusted`、`on-failure`、`on-request`、`never`",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="审批策略仅支持：`untrusted`、`on-failure`、`on-request`、`never`")
             with owner._lock:
                 state["approval_policy"] = policy
                 running = state["running"]
             message = f"已切换审批策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
-            owner._reply_text(chat_id, message, message_id=message_id)
-            return
-        owner._reply_card(
-            chat_id,
-            build_approval_policy_card(state["approval_policy"], running=state["running"]),
-            message_id=message_id,
-        )
+            return CommandResult(text=message)
+        return CommandResult(card=build_approval_policy_card(state["approval_policy"], running=state["running"]))
 
-    def handle_sandbox_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+    def handle_sandbox_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in self._sandbox_policies:
-                owner._reply_text(
-                    chat_id,
-                    "沙箱策略仅支持：`read-only`、`workspace-write`、`danger-full-access`",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="沙箱策略仅支持：`read-only`、`workspace-write`、`danger-full-access`")
             with owner._lock:
                 state["sandbox"] = policy
                 running = state["running"]
             message = f"已切换沙箱策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
-            owner._reply_text(chat_id, message, message_id=message_id)
-            return
-        owner._reply_card(
-            chat_id,
-            build_sandbox_policy_card(state["sandbox"], running=state["running"]),
-            message_id=message_id,
-        )
+            return CommandResult(text=message)
+        return CommandResult(card=build_sandbox_policy_card(state["sandbox"], running=state["running"]))
 
-    def handle_permissions_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+    def handle_permissions_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id, message_id)
         if arg:
             preset = arg.strip().lower()
             config = self._permissions_presets.get(preset)
             if config is None:
-                owner._reply_text(
-                    chat_id,
-                    "权限预设仅支持：`read-only`、`default`、`full-access`",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="权限预设仅支持：`read-only`、`default`、`full-access`")
             with owner._lock:
                 state["approval_policy"] = config["approval_policy"]
                 state["sandbox"] = config["sandbox"]
@@ -405,48 +344,37 @@ class CodexSettingsDomain:
             )
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
-            owner._reply_text(chat_id, message, message_id=message_id)
-            return
-        owner._reply_card(
-            chat_id,
-            build_permissions_preset_card(
-                state["approval_policy"],
-                state["sandbox"],
-                running=state["running"],
-            ),
-            message_id=message_id,
-        )
+            return CommandResult(text=message)
+        return CommandResult(card=build_permissions_preset_card(
+            state["approval_policy"],
+            state["sandbox"],
+            running=state["running"],
+        ))
 
-    def handle_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+    def handle_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id, message_id)
         if arg:
             mode = arg.strip().lower()
             if mode not in {"default", "plan"}:
-                owner._reply_text(chat_id, "协作模式仅支持：`default`、`plan`", message_id=message_id)
-                return
+                return CommandResult(text="协作模式仅支持：`default`、`plan`")
             with owner._lock:
                 state["collaboration_mode"] = mode
                 running = state["running"]
             message = f"已切换协作模式：`{mode}`\n作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
-            owner._reply_text(chat_id, message, message_id=message_id)
-            return
-        owner._reply_card(
-            chat_id,
-            build_collaboration_mode_card(
-                state["collaboration_mode"],
-                running=state["running"],
-            ),
-            message_id=message_id,
-        )
+            return CommandResult(text=message)
+        return CommandResult(card=build_collaboration_mode_card(
+            state["collaboration_mode"],
+            running=state["running"],
+        ))
 
     def handle_set_approval_policy(self, sender_id: str, chat_id: str, action_value: dict) -> dict:
         owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._approval_policies:
-            return owner.bot.make_card_response(toast="非法审批策略", toast_type="warning")
+            return make_card_response(toast="非法审批策略", toast_type="warning")
         state = owner._get_state(sender_id, chat_id)
         with owner._lock:
             state["approval_policy"] = policy
@@ -454,7 +382,7 @@ class CodexSettingsDomain:
         toast = f"已切换审批策略：{policy}"
         if running:
             toast += "；下一轮生效"
-        return owner.bot.make_card_response(
+        return make_card_response(
             card=build_approval_policy_card(policy, running=running),
             toast=toast,
             toast_type="success",
@@ -464,7 +392,7 @@ class CodexSettingsDomain:
         owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._sandbox_policies:
-            return owner.bot.make_card_response(toast="非法沙箱策略", toast_type="warning")
+            return make_card_response(toast="非法沙箱策略", toast_type="warning")
         state = owner._get_state(sender_id, chat_id)
         with owner._lock:
             state["sandbox"] = policy
@@ -472,7 +400,7 @@ class CodexSettingsDomain:
         toast = f"已切换沙箱策略：{policy}"
         if running:
             toast += "；下一轮生效"
-        return owner.bot.make_card_response(
+        return make_card_response(
             card=build_sandbox_policy_card(policy, running=running),
             toast=toast,
             toast_type="success",
@@ -483,7 +411,7 @@ class CodexSettingsDomain:
         preset = str(action_value.get("preset", "")).strip().lower()
         config = self._permissions_presets.get(preset)
         if config is None:
-            return owner.bot.make_card_response(toast="非法权限预设", toast_type="warning")
+            return make_card_response(toast="非法权限预设", toast_type="warning")
         state = owner._get_state(sender_id, chat_id)
         with owner._lock:
             state["approval_policy"] = config["approval_policy"]
@@ -492,7 +420,7 @@ class CodexSettingsDomain:
         toast = f"已切换权限预设：{config['label']}"
         if running:
             toast += "；下一轮生效"
-        return owner.bot.make_card_response(
+        return make_card_response(
             card=build_permissions_preset_card(
                 config["approval_policy"],
                 config["sandbox"],
@@ -506,7 +434,7 @@ class CodexSettingsDomain:
         owner = self._owner
         mode = str(action_value.get("mode", "")).strip().lower()
         if mode not in {"default", "plan"}:
-            return owner.bot.make_card_response(toast="非法协作模式", toast_type="warning")
+            return make_card_response(toast="非法协作模式", toast_type="warning")
         state = owner._get_state(sender_id, chat_id)
         with owner._lock:
             state["collaboration_mode"] = mode
@@ -514,7 +442,7 @@ class CodexSettingsDomain:
         toast = f"已切换协作模式：{mode}"
         if running:
             toast += "；下一轮生效"
-        return owner.bot.make_card_response(
+        return make_card_response(
             card=build_collaboration_mode_card(mode, running=running),
             toast=toast,
             toast_type="success",
@@ -523,7 +451,7 @@ class CodexSettingsDomain:
     def handle_show_permissions_card_action(self, sender_id: str, chat_id: str) -> dict:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id)
-        return owner.bot.make_card_response(
+        return make_card_response(
             card=build_permissions_preset_card(
                 state["approval_policy"],
                 state["sandbox"],
@@ -534,7 +462,7 @@ class CodexSettingsDomain:
     def handle_show_mode_card_action(self, sender_id: str, chat_id: str) -> dict:
         owner = self._owner
         state = owner._get_state(sender_id, chat_id)
-        return owner.bot.make_card_response(
+        return make_card_response(
             card=build_collaboration_mode_card(
                 state["collaboration_mode"],
                 running=state["running"],

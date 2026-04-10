@@ -291,6 +291,19 @@ class _FakeBot:
 
 class CodexHandlerTests(unittest.TestCase):
     @staticmethod
+    def _unpack_card_response(response) -> dict:
+        """Unpack P2CardActionTriggerResponse into a plain dict for assertions."""
+        if isinstance(response, dict):
+            return response
+        result: dict = {}
+        if getattr(response, "card", None):
+            result["card"] = response.card.data
+        if getattr(response, "toast", None):
+            result["toast"] = response.toast.content
+            result["toast_type"] = response.toast.type
+        return result
+
+    @staticmethod
     def _first_action(card: dict) -> dict:
         return next(
             element for element in card["elements"] if isinstance(element, dict) and element.get("tag") == "action"
@@ -710,12 +723,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_groupmode_card_action_updates_group_mode(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "chat-group",
             "m1",
             {"action": "set_group_mode", "mode": "assistant", "_operator_open_id": "ou_admin"},
-        )
+        ))
 
         self.assertEqual(handler.bot.get_group_mode("chat-group"), "assistant")
         self.assertEqual(response["toast_type"], "success")
@@ -726,12 +739,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_group_acl_policy_card_action_updates_group_acl(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "chat-group",
             "m1",
             {"action": "set_group_acl_policy", "policy": "all-members", "_operator_open_id": "ou_admin"},
-        )
+        ))
 
         self.assertEqual(handler.bot.get_group_acl_snapshot("chat-group")["access_policy"], "all-members")
         self.assertEqual(response["toast_type"], "success")
@@ -861,12 +874,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_mode_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "m1",
             {"action": "set_collaboration_mode", "mode": "plan"},
-        )
+        ))
 
         self.assertEqual(handler._get_state("ou_user", "c1")["collaboration_mode"], "plan")
         self.assertEqual(response["toast_type"], "success")
@@ -877,12 +890,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_sandbox_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "m1",
             {"action": "set_sandbox_policy", "policy": "read-only"},
-        )
+        ))
 
         self.assertEqual(handler._get_state("ou_user", "c1")["sandbox"], "read-only")
         self.assertEqual(response["toast_type"], "success")
@@ -892,12 +905,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_permissions_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "m1",
             {"action": "set_permissions_preset", "preset": "full-access"},
-        )
+        ))
 
         state = handler._get_state("ou_user", "c1")
         self.assertEqual(state["approval_policy"], "never")
@@ -1358,12 +1371,12 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-guard",
             {"action": "preview_thread_snapshot", "thread_id": "thread-1"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认（已处理）")
         self.assertIn("已选择“查看快照”", response["card"]["elements"][0]["content"])
@@ -1384,12 +1397,12 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-guard",
             {"action": "resume_thread_write", "thread_id": "thread-1"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认（已处理）")
         self.assertIn("已选择“恢复并继续写入”", response["card"]["elements"][0]["content"])
@@ -1410,12 +1423,12 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-guard",
             {"action": "cancel_resume_guard", "thread_id": "thread-1"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认（已处理）")
         self.assertIn("已取消本次恢复", response["card"]["elements"][0]["content"])
@@ -1436,12 +1449,12 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-session",
             {"action": "cancel_resume_guard", "thread_id": "thread-1", "return_to_sessions": True},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
 
@@ -1461,12 +1474,12 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-session",
             {"action": "preview_thread_snapshot", "thread_id": "thread-1", "return_to_sessions": True},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
 
@@ -1515,12 +1528,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_close_sessions_card_action_returns_closed_card(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-session",
             {"action": "close_sessions_card"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程（已收起）")
         action = self._first_action(response["card"])
@@ -1540,12 +1553,12 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-session",
             {"action": "reopen_sessions_card"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
 
@@ -1663,12 +1676,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_help_topic_action_returns_topic_card(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
             {"action": "show_help_topic", "topic": "settings"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：设置")
         self.assertEqual(
@@ -1679,24 +1692,24 @@ class CodexHandlerTests(unittest.TestCase):
     def test_help_settings_shortcut_can_open_permissions_card(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
             {"action": "show_permissions_card"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 权限预设")
 
     def test_help_settings_shortcut_can_open_mode_card(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
             {"action": "show_mode_card"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 协作模式")
 
@@ -1704,24 +1717,24 @@ class CodexHandlerTests(unittest.TestCase):
         handler, _ = self._make_handler()
         handler.bot.message_contexts["msg-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "chat-group",
             "msg-group",
             {"action": "show_group_mode_card", "_operator_open_id": "ou_admin"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊工作态")
 
     def test_help_back_action_returns_overview_dashboard(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
             {"action": "show_help_overview"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助")
         action = self._first_action(response["card"])
@@ -1732,12 +1745,12 @@ class CodexHandlerTests(unittest.TestCase):
         handler, _ = self._make_handler()
         handler.bot.message_contexts["msg-help-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "chat-group",
             "msg-help-group",
             {"action": "show_help_overview", "_operator_open_id": "ou_user"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助")
 
@@ -1839,12 +1852,12 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-1",
             {"action": "resume_thread", "thread_id": "thread-1"},
-        )
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认")
 
@@ -1862,12 +1875,12 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-rename",
             {"action": "show_rename_form", "thread_id": "thread-1"},
-        )
+        ))
 
         self.assertEqual(handler._pending_rename_forms["msg-rename"]["thread_id"], "thread-1")
         self.assertEqual(response["card"]["header"]["title"]["content"], "重命名线程")
@@ -1894,12 +1907,12 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.rename_thread = fake_rename_thread
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-rename",
             {"_form_value": {"rename_title": "new-title"}},
-        )
+        ))
 
         self.assertEqual(renamed, {"thread_id": "thread-1", "name": "new-title"})
         self.assertNotIn("msg-rename", handler._pending_rename_forms)
@@ -1909,12 +1922,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_form_value_only_callback_without_pending_rename_returns_warning(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-rename",
             {"_form_value": {"rename_title": "new-title"}},
-        )
+        ))
 
         self.assertEqual(response["toast_type"], "warning")
         self.assertEqual(response["toast"], "重命名表单已失效，请重新打开。")
@@ -1951,14 +1964,14 @@ class CodexHandlerTests(unittest.TestCase):
             "answers": {},
         }
 
-        response = handler._handle_user_input_action(
+        response = self._unpack_card_response(handler._handle_user_input_action(
             {
                 "request_id": "req-1",
                 "action": "answer_user_input_custom",
                 "question_id": "q1",
                 "_form_value": {"user_input_q1": "自定义"},
             }
-        )
+        ))
 
         self.assertEqual(response["toast_type"], "warning")
         self.assertEqual(response["toast"], "该问题仅支持选择预设选项")
@@ -1989,12 +2002,12 @@ class CodexHandlerTests(unittest.TestCase):
             "answers": {},
         }
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-1",
             {"_form_value": {"user_input_q1": "创建 c.txt"}},
-        )
+        ))
 
         self.assertEqual(response["toast_type"], "success")
         self.assertEqual(response["toast"], "已提交回答。")
@@ -2007,12 +2020,12 @@ class CodexHandlerTests(unittest.TestCase):
     def test_form_value_only_callback_without_pending_request_returns_warning(self) -> None:
         handler, _ = self._make_handler()
 
-        response = handler.handle_card_action(
+        response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "missing-msg",
             {"_form_value": {"user_input_q1": "创建 c.txt"}},
-        )
+        ))
 
         self.assertEqual(response["toast_type"], "warning")
         self.assertEqual(response["toast"], "表单已失效或未找到对应问题，请重新触发该请求。")

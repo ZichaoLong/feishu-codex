@@ -16,12 +16,14 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 from bot.adapters.base import ThreadSummary
 from bot.cards import (
+    CommandResult,
     build_rename_card,
     build_resume_guard_card,
     build_resume_guard_handled_card,
     build_sessions_card,
     build_sessions_closed_card,
     build_sessions_pending_card,
+    make_card_response,
 )
 from bot.session_resolution import list_current_dir_threads
 
@@ -39,10 +41,6 @@ class _SessionUiDomainOwner(Protocol):
     _thread_list_query_limit: int
 
     def _get_state(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
-
-    def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
-
-    def _reply_card(self, chat_id: str, card: dict, *, message_id: str = "") -> None: ...
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None: ...
 
@@ -79,15 +77,14 @@ class CodexSessionUiDomain:
         chat_id: str,
         arg: str,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult:
         del arg
         try:
             card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("获取线程列表失败")
-            self._owner._reply_text(chat_id, f"获取线程列表失败：{exc}", message_id=message_id)
-            return
-        self._owner._reply_card(chat_id, card, message_id=message_id)
+            return CommandResult(text=f"获取线程列表失败：{exc}")
+        return CommandResult(card=card)
 
     def handle_resume_command(
         self,
@@ -95,29 +92,20 @@ class CodexSessionUiDomain:
         chat_id: str,
         arg: str,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult | None:
         state = self._owner._get_state(sender_id, chat_id, message_id)
         with self._owner._lock:
             if state["running"]:
-                self._owner._reply_text(
-                    chat_id,
-                    "执行中不能切换线程，请等待结束或先执行 `/cancel`。",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="执行中不能切换线程，请等待结束或先执行 `/cancel`。")
         if not arg:
-            self._owner._reply_text(
-                chat_id,
-                "用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。",
-                message_id=message_id,
+            return CommandResult(
+                text="用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。"
             )
-            return
         try:
             thread = self._owner._resolve_resume_target(arg)
         except Exception as exc:
             logger.exception("解析恢复目标失败")
-            self._owner._reply_text(chat_id, f"恢复线程失败：{exc}", message_id=message_id)
-            return
+            return CommandResult(text=f"恢复线程失败：{exc}")
         if self._owner._is_loaded_in_current_backend(thread):
             self._owner._resume_thread_in_background(
                 sender_id,
@@ -127,8 +115,8 @@ class CodexSessionUiDomain:
                 summary=thread,
                 message_id=message_id,
             )
-            return
-        self._owner._reply_card(chat_id, self._build_resume_guard(thread), message_id=message_id)
+            return None
+        return CommandResult(card=self._build_resume_guard(thread))
 
     def handle_rename_command(
         self,
@@ -136,23 +124,20 @@ class CodexSessionUiDomain:
         chat_id: str,
         arg: str,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult:
         state = self._owner._get_state(sender_id, chat_id, message_id)
         if not state["current_thread_id"]:
-            self._owner._reply_text(chat_id, "当前没有绑定线程，无法重命名。", message_id=message_id)
-            return
+            return CommandResult(text="当前没有绑定线程，无法重命名。")
         if not arg:
-            self._owner._reply_text(chat_id, "用法：`/rename <新标题>`", message_id=message_id)
-            return
+            return CommandResult(text="用法：`/rename <新标题>`")
         try:
             self._owner._adapter.rename_thread(state["current_thread_id"], arg)
         except Exception as exc:
             logger.exception("重命名线程失败")
-            self._owner._reply_text(chat_id, f"重命名失败：{exc}", message_id=message_id)
-            return
+            return CommandResult(text=f"重命名失败：{exc}")
         with self._owner._lock:
             state["current_thread_name"] = arg
-        self._owner._reply_text(chat_id, f"已重命名为：{arg}", message_id=message_id)
+        return CommandResult(text=f"已重命名为：{arg}")
 
     def handle_rm_command(
         self,
@@ -160,32 +145,21 @@ class CodexSessionUiDomain:
         chat_id: str,
         arg: str,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult:
         state = self._owner._get_state(sender_id, chat_id, message_id)
         with self._owner._lock:
             if state["running"]:
-                self._owner._reply_text(
-                    chat_id,
-                    "执行中不能归档线程，请等待结束或先执行 `/cancel`。",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="执行中不能归档线程，请等待结束或先执行 `/cancel`。")
         target = arg.strip() if arg else ""
         if target:
             try:
                 thread = self._owner._resolve_resume_target(target)
             except Exception as exc:
                 logger.exception("解析归档目标失败")
-                self._owner._reply_text(chat_id, f"归档线程失败：{exc}", message_id=message_id)
-                return
+                return CommandResult(text=f"归档线程失败：{exc}")
         else:
             if not state["current_thread_id"]:
-                self._owner._reply_text(
-                    chat_id,
-                    "用法：`/rm [thread_id 或 thread_name]`；省略参数时归档当前线程。",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="用法：`/rm [thread_id 或 thread_name]`；省略参数时归档当前线程。")
             try:
                 thread = self._owner._read_thread_summary(
                     state["current_thread_id"],
@@ -193,27 +167,21 @@ class CodexSessionUiDomain:
                 )
             except Exception as exc:
                 logger.exception("读取当前线程失败")
-                self._owner._reply_text(chat_id, f"归档线程失败：{exc}", message_id=message_id)
-                return
+                return CommandResult(text=f"归档线程失败：{exc}")
 
         try:
             self._owner._adapter.archive_thread(thread.thread_id)
         except Exception as exc:
             logger.exception("归档线程失败")
-            self._owner._reply_text(chat_id, f"归档线程失败：{exc}", message_id=message_id)
-            return
+            return CommandResult(text=f"归档线程失败：{exc}")
 
         self._owner._favorites.remove_thread_globally(thread.thread_id)
         if state["current_thread_id"] == thread.thread_id:
             self._owner._clear_thread_binding(sender_id, chat_id, message_id=message_id)
-        self._owner._reply_text(
-            chat_id,
-            (
-                f"已归档线程：`{thread.thread_id[:8]}…` {thread.title}\n"
-                "说明：这里调用的是 Codex 的线程归档（archive），会从常规列表中隐藏，不是硬删除。"
-            ),
-            message_id=message_id,
-        )
+        return CommandResult(text=(
+            f"已归档线程：`{thread.thread_id[:8]}…` {thread.title}\n"
+            "说明：这里调用的是 Codex 的线程归档（archive），会从常规列表中隐藏，不是硬删除。"
+        ))
 
     def handle_star_command(
         self,
@@ -221,14 +189,13 @@ class CodexSessionUiDomain:
         chat_id: str,
         arg: str,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult:
         del arg
         state = self._owner._get_state(sender_id, chat_id, message_id)
         if not state["current_thread_id"]:
-            self._owner._reply_text(chat_id, "当前没有绑定线程，无法收藏。", message_id=message_id)
-            return
+            return CommandResult(text="当前没有绑定线程，无法收藏。")
         starred = self._owner._favorites.toggle(sender_id, state["current_thread_id"])
-        self._owner._reply_text(chat_id, "已收藏当前线程。" if starred else "已取消收藏当前线程。", message_id=message_id)
+        return CommandResult(text="已收藏当前线程。" if starred else "已取消收藏当前线程。")
 
     def handle_toggle_star_action(
         self,
@@ -239,7 +206,7 @@ class CodexSessionUiDomain:
     ) -> P2CardActionTriggerResponse:
         thread_id = str(action_value.get("thread_id", ""))
         if not thread_id:
-            return self._owner.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+            return make_card_response(toast="缺少 thread_id", toast_type="warning")
         starred = self._owner._favorites.toggle(sender_id, thread_id)
         return self._handle_sessions_refresh_action(
             sender_id,
@@ -259,7 +226,7 @@ class CodexSessionUiDomain:
         del chat_id
         del message_id
         del action_value
-        return self._owner.bot.make_card_response(
+        return make_card_response(
             card=build_sessions_closed_card(),
             toast="已收起。",
             toast_type="success",
@@ -285,18 +252,18 @@ class CodexSessionUiDomain:
         state = self._owner._get_state(sender_id, chat_id, message_id)
         with self._owner._lock:
             if state["running"]:
-                return self._owner.bot.make_card_response(
+                return make_card_response(
                     toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
                     toast_type="warning",
                 )
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
-            return self._owner.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+            return make_card_response(toast="缺少 thread_id", toast_type="warning")
         try:
             thread = self._owner._read_thread_summary(thread_id, original_arg=thread_id)
         except Exception as exc:
             logger.exception("查询恢复目标失败")
-            return self._owner.bot.make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
+            return make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
         if self._owner._is_loaded_in_current_backend(thread):
             threading.Thread(
                 target=self._owner._resume_thread_in_background,
@@ -309,12 +276,12 @@ class CodexSessionUiDomain:
                 },
                 daemon=True,
             ).start()
-            return self._owner.bot.make_card_response(
+            return make_card_response(
                 card=build_sessions_pending_card(thread.thread_id, title=thread.title),
                 toast="正在恢复线程…",
                 toast_type="success",
             )
-        return self._owner.bot.make_card_response(
+        return make_card_response(
             card=self._build_resume_guard(thread, return_to_sessions=True)
         )
 
@@ -327,11 +294,11 @@ class CodexSessionUiDomain:
     ) -> P2CardActionTriggerResponse:
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
-            return self._owner.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+            return make_card_response(toast="缺少 thread_id", toast_type="warning")
         return_to_sessions = bool(action_value.get("return_to_sessions"))
         thread = self._owner._find_thread_summary(thread_id)
         if thread is None:
-            return self._owner.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
+            return make_card_response(toast="未找到对应线程", toast_type="warning")
         threading.Thread(
             target=self._owner._send_thread_snapshot_in_background,
             args=(chat_id, thread_id),
@@ -345,7 +312,7 @@ class CodexSessionUiDomain:
                 message_id=message_id,
                 toast="正在加载快照…",
             )
-        return self._owner.bot.make_card_response(
+        return make_card_response(
             card=self._build_resume_guard_handled(
                 thread,
                 decision="已选择“查看快照”",
@@ -366,17 +333,17 @@ class CodexSessionUiDomain:
         state = self._owner._get_state(sender_id, chat_id, message_id)
         with self._owner._lock:
             if state["running"]:
-                return self._owner.bot.make_card_response(
+                return make_card_response(
                     toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
                     toast_type="warning",
                 )
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
-            return self._owner.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+            return make_card_response(toast="缺少 thread_id", toast_type="warning")
         return_to_sessions = bool(action_value.get("return_to_sessions"))
         thread = self._owner._find_thread_summary(thread_id)
         if thread is None:
-            return self._owner.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
+            return make_card_response(toast="未找到对应线程", toast_type="warning")
         threading.Thread(
             target=self._owner._resume_thread_in_background,
             args=(sender_id, chat_id, thread_id),
@@ -388,12 +355,12 @@ class CodexSessionUiDomain:
             daemon=True,
         ).start()
         if return_to_sessions:
-            return self._owner.bot.make_card_response(
+            return make_card_response(
                 card=build_sessions_pending_card(thread.thread_id, title=thread.title),
                 toast="正在恢复线程并继续写入…",
                 toast_type="success",
             )
-        return self._owner.bot.make_card_response(
+        return make_card_response(
             card=self._build_resume_guard_handled(
                 thread,
                 decision="已选择“恢复并继续写入”",
@@ -416,12 +383,12 @@ class CodexSessionUiDomain:
             session = self._find_thread_session(sender_id, chat_id, thread_id, message_id=message_id)
         except Exception as exc:
             logger.exception("查询重命名目标失败")
-            return self._owner.bot.make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
+            return make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
         if not session:
-            return self._owner.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
+            return make_card_response(toast="未找到对应线程", toast_type="warning")
         with self._owner._lock:
             self._owner._pending_rename_forms[message_id] = {"thread_id": thread_id}
-        return self._owner.bot.make_card_response(card=build_rename_card(session))
+        return make_card_response(card=build_rename_card(session))
 
     def handle_rename_submit_action(
         self,
@@ -434,12 +401,12 @@ class CodexSessionUiDomain:
         form_value = action_value.get("_form_value") or {}
         new_title = str(form_value.get("rename_title", "")).strip()
         if not new_title:
-            return self._owner.bot.make_card_response(toast="标题不能为空", toast_type="warning")
+            return make_card_response(toast="标题不能为空", toast_type="warning")
         try:
             self._owner._adapter.rename_thread(thread_id, new_title)
         except Exception as exc:
             logger.exception("卡片重命名失败")
-            return self._owner.bot.make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
+            return make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
 
         state = self._owner._get_state(sender_id, chat_id, message_id)
         with self._owner._lock:
@@ -468,13 +435,13 @@ class CodexSessionUiDomain:
     ) -> P2CardActionTriggerResponse:
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
-            return self._owner.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+            return make_card_response(toast="缺少 thread_id", toast_type="warning")
         if action_value.get("return_to_sessions"):
             return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已取消")
         thread = self._owner._find_thread_summary(thread_id)
         if thread is None:
-            return self._owner.bot.make_card_response(toast="未找到对应线程", toast_type="warning")
-        return self._owner.bot.make_card_response(
+            return make_card_response(toast="未找到对应线程", toast_type="warning")
+        return make_card_response(
             card=self._build_resume_guard_handled(
                 thread,
                 decision="已取消本次恢复",
@@ -495,23 +462,23 @@ class CodexSessionUiDomain:
         state = self._owner._get_state(sender_id, chat_id, message_id)
         with self._owner._lock:
             if state["running"]:
-                return self._owner.bot.make_card_response(
+                return make_card_response(
                     toast="执行中不能归档线程，请等待结束或先执行 /cancel。",
                     toast_type="warning",
                 )
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
-            return self._owner.bot.make_card_response(toast="缺少 thread_id", toast_type="warning")
+            return make_card_response(toast="缺少 thread_id", toast_type="warning")
         try:
             thread = self._owner._read_thread_summary(thread_id, original_arg=thread_id)
         except Exception as exc:
             logger.exception("读取归档目标失败")
-            return self._owner.bot.make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
+            return make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
         try:
             self._owner._adapter.archive_thread(thread.thread_id)
         except Exception as exc:
             logger.exception("归档线程失败")
-            return self._owner.bot.make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
+            return make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
         self._owner._favorites.remove_thread_globally(thread.thread_id)
         if state["current_thread_id"] == thread.thread_id:
             self._owner._clear_thread_binding(sender_id, chat_id, message_id=message_id)
@@ -551,8 +518,8 @@ class CodexSessionUiDomain:
             card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("刷新线程列表失败")
-            return self._owner.bot.make_card_response(toast=f"刷新失败：{exc}", toast_type="warning")
-        return self._owner.bot.make_card_response(card=card, toast=toast, toast_type="success")
+            return make_card_response(toast=f"刷新失败：{exc}", toast_type="warning")
+        return make_card_response(card=card, toast=toast, toast_type="success")
 
     def _render_sessions_card(self, sender_id: str, chat_id: str, *, message_id: str = "") -> dict:
         threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)

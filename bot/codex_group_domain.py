@@ -10,7 +10,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
-from bot.cards import build_group_acl_card, build_group_mode_card
+from bot.cards import CommandResult, build_group_acl_card, build_group_mode_card, make_card_response
 from bot.feishu_types import GroupAclSnapshot, MessageContextPayload
 
 
@@ -18,10 +18,6 @@ class _GroupDomainOwner(Protocol):
     bot: Any
 
     def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool: ...
-
-    def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
-
-    def _reply_card(self, chat_id: str, card: dict, *, message_id: str = "") -> None: ...
 
 
 class CodexGroupDomain:
@@ -80,32 +76,22 @@ class CodexGroupDomain:
         chat_id: str,
         arg: str,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult:
         del sender_id
         context = self._group_command_context(message_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
-            self._owner._reply_card(
-                chat_id,
-                self._group_mode_card(chat_id, open_id=sender_open_id),
-                message_id=message_id,
-            )
-            return
+            return CommandResult(card=self._group_mode_card(chat_id, open_id=sender_open_id))
         mode = self._normalize_group_mode(arg)
         if mode not in {"assistant", "all", "mention_only"}:
-            self._owner._reply_text(
-                chat_id,
-                "群聊工作态仅支持：`assistant`、`all`、`mention-only`",
-                message_id=message_id,
-            )
-            return
+            return CommandResult(text="群聊工作态仅支持：`assistant`、`all`、`mention-only`")
         self._owner.bot.set_group_mode(chat_id, mode)
         labels = {
             "assistant": "assistant",
             "all": "all",
             "mention_only": "mention-only",
         }
-        self._owner._reply_text(chat_id, f"已切换群聊工作态：`{labels[mode]}`", message_id=message_id)
+        return CommandResult(text=f"已切换群聊工作态：`{labels[mode]}`")
 
     def _acl_target_open_ids(self, message_id: str, raw_arg: str) -> list[str]:
         targets = {
@@ -125,17 +111,12 @@ class CodexGroupDomain:
         chat_id: str,
         arg: str,
         message_id: str = "",
-    ) -> None:
+    ) -> CommandResult:
         del sender_id
         context = self._group_command_context(message_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
-            self._owner._reply_card(
-                chat_id,
-                self._group_acl_card(chat_id, open_id=sender_open_id),
-                message_id=message_id,
-            )
-            return
+            return CommandResult(card=self._group_acl_card(chat_id, open_id=sender_open_id))
 
         cmd, _, rest = arg.partition(" ")
         subcommand = cmd.strip().lower()
@@ -147,56 +128,28 @@ class CodexGroupDomain:
         if subcommand == "policy":
             policy = payload.strip().lower()
             if policy not in {"admin-only", "allowlist", "all-members"}:
-                self._owner._reply_text(
-                    chat_id,
-                    "用法：`/acl policy <admin-only|allowlist|all-members>`",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="用法：`/acl policy <admin-only|allowlist|all-members>`")
             self._owner.bot.set_group_access_policy(chat_id, policy)
-            self._owner._reply_text(chat_id, f"已切换群聊授权策略：`{policy}`", message_id=message_id)
-            return
+            return CommandResult(text=f"已切换群聊授权策略：`{policy}`")
 
         if subcommand in {"grant", "allow"}:
             targets = self._acl_target_open_ids(message_id, payload)
             if not targets:
-                self._owner._reply_text(
-                    chat_id,
-                    "用法：`/acl grant @成员` 或 `/acl grant <open_id>`",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="用法：`/acl grant @成员` 或 `/acl grant <open_id>`")
             updated = self._owner.bot.grant_group_members(chat_id, targets)
             labels = self._group_member_labels(targets)
-            self._owner._reply_text(
-                chat_id,
-                f"已授权：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。",
-                message_id=message_id,
-            )
-            return
+            return CommandResult(text=f"已授权：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。")
 
         if subcommand in {"revoke", "remove"}:
             targets = self._acl_target_open_ids(message_id, payload)
             if not targets:
-                self._owner._reply_text(
-                    chat_id,
-                    "用法：`/acl revoke @成员` 或 `/acl revoke <open_id>`",
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(text="用法：`/acl revoke @成员` 或 `/acl revoke <open_id>`")
             updated = self._owner.bot.revoke_group_members(chat_id, targets)
             labels = self._group_member_labels(targets)
-            self._owner._reply_text(
-                chat_id,
-                f"已撤销：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。",
-                message_id=message_id,
-            )
-            return
+            return CommandResult(text=f"已撤销：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。")
 
-        self._owner._reply_text(
-            chat_id,
-            "用法：`/acl`、`/acl policy <admin-only|allowlist|all-members>`、`/acl grant @成员`、`/acl revoke @成员`",
-            message_id=message_id,
+        return CommandResult(
+            text="用法：`/acl`、`/acl policy <admin-only|allowlist|all-members>`、`/acl grant @成员`、`/acl revoke @成员`"
         )
 
     def handle_show_group_mode_card_action(
@@ -208,9 +161,9 @@ class CodexGroupDomain:
     ) -> P2CardActionTriggerResponse:
         del sender_id
         if not self._owner._is_group_chat(chat_id, message_id):
-            return self._owner.bot.make_card_response(toast="该命令仅支持群聊使用。", toast_type="warning")
+            return make_card_response(toast="该命令仅支持群聊使用。", toast_type="warning")
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
-        return self._owner.bot.make_card_response(
+        return make_card_response(
             card=self._group_mode_card(chat_id, open_id=operator_open_id)
         )
 
@@ -226,11 +179,11 @@ class CodexGroupDomain:
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
         mode = self._normalize_group_mode(str(action_value.get("mode", "")))
         if mode not in {"assistant", "all", "mention_only"}:
-            return self._owner.bot.make_card_response(toast="非法群聊工作态", toast_type="warning")
+            return make_card_response(toast="非法群聊工作态", toast_type="warning")
         if not self._owner.bot.is_group_admin(open_id=operator_open_id):
-            return self._owner.bot.make_card_response(toast="仅管理员可切换群聊工作态。", toast_type="warning")
+            return make_card_response(toast="仅管理员可切换群聊工作态。", toast_type="warning")
         self._owner.bot.set_group_mode(chat_id, mode)
-        return self._owner.bot.make_card_response(
+        return make_card_response(
             card=self._group_mode_card(chat_id, open_id=operator_open_id),
             toast=f"已切换群聊工作态：{mode}",
             toast_type="success",
@@ -248,11 +201,11 @@ class CodexGroupDomain:
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in {"admin-only", "allowlist", "all-members"}:
-            return self._owner.bot.make_card_response(toast="非法群聊授权策略", toast_type="warning")
+            return make_card_response(toast="非法群聊授权策略", toast_type="warning")
         if not self._owner.bot.is_group_admin(open_id=operator_open_id):
-            return self._owner.bot.make_card_response(toast="仅管理员可调整群聊授权策略。", toast_type="warning")
+            return make_card_response(toast="仅管理员可调整群聊授权策略。", toast_type="warning")
         self._owner.bot.set_group_access_policy(chat_id, policy)
-        return self._owner.bot.make_card_response(
+        return make_card_response(
             card=self._group_acl_card(chat_id, open_id=operator_open_id),
             toast=f"已切换群聊授权策略：{policy}",
             toast_type="success",

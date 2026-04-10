@@ -4,37 +4,29 @@ Codex help domain.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
 from bot.cards import (
+    CommandResult,
     build_help_dashboard_card,
     build_help_topic_actions_card,
     build_help_topic_card,
     build_markdown_card,
+    make_card_response,
 )
-
-
-class _HelpDomainOwner(Protocol):
-    bot: Any
-
-    def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
-
-    def _reply_card(self, chat_id: str, card: dict, *, message_id: str = "") -> None: ...
 
 
 class CodexHelpDomain:
     def __init__(
         self,
-        owner: _HelpDomainOwner,
         *,
         plugin_keyword: str,
         local_thread_safety_rule: str,
     ) -> None:
-        self._owner = owner
         self._plugin_keyword = plugin_keyword
         self._local_thread_safety_rule = local_thread_safety_rule
 
@@ -143,8 +135,8 @@ class CodexHelpDomain:
         del message_id
         card = self._build_help_card(str(action_value.get("topic", "")))
         if card is None:
-            return self._owner.bot.make_card_response(toast="未知帮助主题。", toast_type="warning")
-        return self._owner.bot.make_card_response(card=card)
+            return make_card_response(toast="未知帮助主题。", toast_type="warning")
+        return make_card_response(card=card)
 
     def handle_show_help_overview_action(
         self,
@@ -157,18 +149,13 @@ class CodexHelpDomain:
         del chat_id
         del message_id
         del action_value
-        return self._owner.bot.make_card_response(card=build_help_dashboard_card(self._help_overview_text()))
+        return make_card_response(card=build_help_dashboard_card(self._help_overview_text()))
 
-    def reply_help(self, chat_id: str, topic: str = "", *, message_id: str = "") -> None:
+    def reply_help(self, chat_id: str, topic: str = "", *, message_id: str = "") -> CommandResult:
         card = self._build_help_card(topic)
         if card is not None:
-            self._owner._reply_card(chat_id, card, message_id=message_id)
-            return
-        self._owner._reply_text(
-            chat_id,
-            "帮助主题仅支持：`session`、`settings`、`group`、`local`。\n发送 `/help` 查看概览。",
-            message_id=message_id,
-        )
+            return CommandResult(card=card)
+        return CommandResult(text="帮助主题仅支持：`session`、`settings`、`group`、`local`。\n发送 `/help` 查看概览。")
 
     def _help_overview_text(self) -> str:
         return (

@@ -21,6 +21,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummary
 from bot.cards import (
+    CommandResult,
     build_approval_handled_card,
     build_ask_user_answered_card,
     build_ask_user_card,
@@ -32,6 +33,7 @@ from bot.cards import (
     build_plan_card,
     build_permissions_approval_card,
     build_thread_snapshot_card,
+    make_card_response,
 )
 from bot.config import load_config_file
 from bot.constants import (
@@ -94,7 +96,7 @@ _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
 
 @dataclass(frozen=True)
 class _CommandRoute:
-    handler: Callable[[str, str, str, str], None]
+    handler: Callable[[str, str, str, str], CommandResult | None]
     scope: str = "any"
     admin_only_in_group: bool = True
     scope_denied_text: str = ""
@@ -230,7 +232,6 @@ class CodexHandler(BotHandler):
         )
         self._group_domain = CodexGroupDomain(self)
         self._help_domain = CodexHelpDomain(
-            self,
             plugin_keyword=KEYWORD,
             local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
         )
@@ -268,7 +269,11 @@ class CodexHandler(BotHandler):
                 state["active"] = True
 
         if not cleaned or cleaned.upper() == KEYWORD:
-            self._help_domain.reply_help(chat_id)
+            result = self._help_domain.reply_help(chat_id)
+            if result.card is not None:
+                self._reply_card(chat_id, result.card)
+            elif result.text:
+                self._reply_text(chat_id, result.text)
             return
 
         if cleaned.startswith("/"):
@@ -292,7 +297,7 @@ class CodexHandler(BotHandler):
                 return fallback
             form_value = action_value.get("_form_value") or {}
             if isinstance(form_value, dict) and form_value:
-                return self.bot.make_card_response(
+                return make_card_response(
                     toast="表单已失效或未找到对应问题，请重新触发该请求。",
                     toast_type="warning",
                 )
@@ -347,7 +352,7 @@ class CodexHandler(BotHandler):
             message_id=message_id,
             operator_open_id=str(action_value.get("_operator_open_id", "")).strip(),
         ):
-            return self.bot.make_card_response(
+            return make_card_response(
                 toast="仅管理员或当前提问者可提交群里的补充输入。",
                 toast_type="warning",
             )
@@ -385,7 +390,7 @@ class CodexHandler(BotHandler):
         with self._lock:
             pending = self._pending_rename_forms.get(message_id)
         if not pending:
-            return self.bot.make_card_response(
+            return make_card_response(
                 toast="重命名表单已失效，请重新打开。",
                 toast_type="warning",
             )
@@ -394,7 +399,7 @@ class CodexHandler(BotHandler):
             message_id=message_id,
             operator_open_id=str(action_value.get("_operator_open_id", "")).strip(),
         ):
-            return self.bot.make_card_response(
+            return make_card_response(
                 toast="仅管理员可操作群共享会话或群设置。",
                 toast_type="warning",
             )
@@ -636,10 +641,8 @@ class CodexHandler(BotHandler):
                 scope_denied_text="请私聊机器人执行 `/init <token>`。",
             ),
             "/pwd": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._reply_text(
-                    chat_id,
-                    f"当前目录：`{display_path(self._get_state(sender_id, chat_id, message_id)['working_dir'])}`",
-                    message_id=message_id,
+                handler=lambda sender_id, chat_id, arg, message_id: CommandResult(
+                    text=f"当前目录：`{display_path(self._get_state(sender_id, chat_id, message_id)['working_dir'])}`",
                 ),
             ),
             "/cd": _CommandRoute(
@@ -675,8 +678,8 @@ class CodexHandler(BotHandler):
                 ),
             ),
             "/cancel": _CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._cancel_current_turn(
-                    sender_id, chat_id, message_id=message_id
+                handler=lambda sender_id, chat_id, arg, message_id: CommandResult(
+                    text=self._cancel_current_turn(sender_id, chat_id, message_id=message_id)[1],
                 ),
             ),
             "/session": _CommandRoute(
@@ -872,7 +875,7 @@ class CodexHandler(BotHandler):
                 operator_open_id=operator_open_id,
             ):
                 return None
-            return self.bot.make_card_response(
+            return make_card_response(
                 toast="仅管理员可操作群共享会话或群设置。",
                 toast_type="warning",
             )
@@ -883,7 +886,7 @@ class CodexHandler(BotHandler):
                 operator_open_id=operator_open_id,
             ):
                 return None
-            return self.bot.make_card_response(
+            return make_card_response(
                 toast="仅管理员或当前提问者可停止当前群聊执行。",
                 toast_type="warning",
             )
@@ -894,7 +897,7 @@ class CodexHandler(BotHandler):
                 operator_open_id=operator_open_id,
             ):
                 return None
-            return self.bot.make_card_response(
+            return make_card_response(
                 toast="仅管理员可审批群共享会话请求。",
                 toast_type="warning",
             )
@@ -906,12 +909,12 @@ class CodexHandler(BotHandler):
                 operator_open_id=operator_open_id,
             ):
                 return None
-            return self.bot.make_card_response(
+            return make_card_response(
                 toast="仅管理员或当前提问者可提交群里的补充输入。",
                 toast_type="warning",
             )
         logger.warning("未知卡片群权限守卫: %s", route.group_guard)
-        return self.bot.make_card_response(
+        return make_card_response(
             toast="当前卡片动作配置异常。",
             toast_type="warning",
         )
@@ -925,12 +928,17 @@ class CodexHandler(BotHandler):
             self._reply_text(chat_id, f"未知命令：`{command}`\n发送 `/help` 查看可用命令。", message_id=message_id)
             return
         # 先做 scope guard，保证群/私聊专属命令优先返回精确拒绝文本；
-        # 只有 scope 允许通过后，才需要进入“群里是否仅管理员可用”的判断。
+        # 只有 scope 允许通过后，才需要进入"群里是否仅管理员可用"的判断。
         if not self._ensure_command_scope(route, chat_id, message_id):
             return
         if route.admin_only_in_group and not self._ensure_group_command_admin(chat_id, message_id):
             return
-        route.handler(sender_id, chat_id, arg, message_id)
+        result = route.handler(sender_id, chat_id, arg, message_id)
+        if result is not None:
+            if result.card is not None:
+                self._reply_card(chat_id, result.card, message_id=message_id)
+            elif result.text:
+                self._reply_text(chat_id, result.text, message_id=message_id)
 
     def _handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
         state = self._get_state(sender_id, chat_id, message_id)
@@ -1013,78 +1021,53 @@ class CodexHandler(BotHandler):
                 with self._lock:
                     state["pending_cancel"] = False
 
-    def _handle_cd_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> None:
+    def _handle_cd_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
-                self._reply_card(
-                    chat_id,
-                    build_markdown_card(
-                        "Codex 目录未切换",
-                        "执行中不能切换目录，请等待结束或先停止当前执行。",
-                        template="orange",
-                    ),
-                    message_id=message_id,
-                )
-                return
+                return CommandResult(card=build_markdown_card(
+                    "Codex 目录未切换",
+                    "执行中不能切换目录，请等待结束或先停止当前执行。",
+                    template="orange",
+                ))
 
         if not arg:
-            self._reply_card(
-                chat_id,
-                build_markdown_card(
-                    "Codex 当前目录",
-                    f"当前目录：`{display_path(state['working_dir'])}`",
-                ),
-                message_id=message_id,
-            )
-            return
+            return CommandResult(card=build_markdown_card(
+                "Codex 当前目录",
+                f"当前目录：`{display_path(state['working_dir'])}`",
+            ))
 
         target = resolve_working_dir(arg, fallback=state["working_dir"])
         if not pathlib.Path(target).exists():
-            self._reply_card(
-                chat_id,
-                build_markdown_card(
-                    "Codex 目录未切换",
-                    f"目录不存在：`{display_path(target)}`",
-                    template="orange",
-                ),
-                message_id=message_id,
-            )
-            return
+            return CommandResult(card=build_markdown_card(
+                "Codex 目录未切换",
+                f"目录不存在：`{display_path(target)}`",
+                template="orange",
+            ))
         if not pathlib.Path(target).is_dir():
-            self._reply_card(
-                chat_id,
-                build_markdown_card(
-                    "Codex 目录未切换",
-                    f"不是目录：`{display_path(target)}`",
-                    template="orange",
-                ),
-                message_id=message_id,
-            )
-            return
+            return CommandResult(card=build_markdown_card(
+                "Codex 目录未切换",
+                f"不是目录：`{display_path(target)}`",
+                template="orange",
+            ))
 
         self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
         with self._lock:
             state["working_dir"] = target
-        self._reply_card(
-            chat_id,
-            build_markdown_card(
-                "Codex 目录已切换",
-                (
-                    f"目录：`{display_path(target)}`\n"
-                    "当前线程绑定已清空。\n"
-                    "直接发送普通文本，会在新目录自动新建线程。"
-                ),
+        return CommandResult(card=build_markdown_card(
+            "Codex 目录已切换",
+            (
+                f"目录：`{display_path(target)}`\n"
+                "当前线程绑定已清空。\n"
+                "直接发送普通文本，会在新目录自动新建线程。"
             ),
-            message_id=message_id,
-        )
+        ))
 
-    def _handle_new_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
+    def _handle_new_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
         state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if state["running"]:
-                self._reply_text(chat_id, "执行中不能新建线程，请等待结束或先执行 `/cancel`。", message_id=message_id)
-                return
+                return CommandResult(text="执行中不能新建线程，请等待结束或先执行 `/cancel`。")
         try:
             snapshot = self._adapter.create_thread(
                 cwd=state["working_dir"],
@@ -1094,24 +1077,19 @@ class CodexHandler(BotHandler):
             )
         except Exception as exc:
             logger.exception("新建线程失败")
-            self._reply_text(chat_id, f"新建线程失败：{exc}", message_id=message_id)
-            return
+            return CommandResult(text=f"新建线程失败：{exc}")
         self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
-        self._reply_card(
-            chat_id,
-            build_markdown_card(
-                "Codex 线程已新建",
-                (
-                    f"线程：`{snapshot.summary.thread_id[:8]}…`\n"
-                    f"目录：`{display_path(snapshot.summary.cwd)}`\n"
-                    "直接发送普通文本开始第一轮对话。"
-                ),
-                template="green",
+        return CommandResult(card=build_markdown_card(
+            "Codex 线程已新建",
+            (
+                f"线程：`{snapshot.summary.thread_id[:8]}…`\n"
+                f"目录：`{display_path(snapshot.summary.cwd)}`\n"
+                "直接发送普通文本开始第一轮对话。"
             ),
-            message_id=message_id,
-        )
+            template="green",
+        ))
 
-    def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
+    def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
         state = self._get_state(sender_id, chat_id, message_id)
         thread_id = state["current_thread_id"]
         title = state["current_thread_name"] or "（未绑定线程）"
@@ -1156,50 +1134,37 @@ class CodexHandler(BotHandler):
             + f"\n\n{next_step}"
         )
         template = "turquoise" if state["running"] else "blue"
-        self._reply_card(
-            chat_id,
-            build_markdown_card("Codex 当前状态", content, template=template),
-            message_id=message_id,
-        )
+        return CommandResult(card=build_markdown_card("Codex 当前状态", content, template=template))
 
     def _handle_cancel_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
-        ok, message = self._cancel_current_turn(sender_id, chat_id, from_card=True)
-        return self.bot.make_card_response(toast=message, toast_type="success" if ok else "warning")
+        ok, message = self._cancel_current_turn(sender_id, chat_id)
+        return make_card_response(toast=message, toast_type="success" if ok else "warning")
 
     def _cancel_current_turn(
         self,
         sender_id: str,
         chat_id: str,
         *,
-        from_card: bool = False,
         message_id: str = "",
     ) -> tuple[bool, str]:
         state = self._get_state(sender_id, chat_id, message_id)
         thread_id = state["current_thread_id"]
         turn_id = state["current_turn_id"]
         if not state["running"] or not thread_id:
-            if not from_card:
-                self._reply_text(chat_id, "当前没有正在执行的 turn。", message_id=message_id)
             return False, "当前没有正在执行的 turn。"
         if not turn_id:
             with self._lock:
                 state["cancelled"] = True
                 state["pending_cancel"] = True
-            if not from_card:
-                self._reply_text(chat_id, "已请求停止当前执行。", message_id=message_id)
             return True, "已请求停止当前执行。"
         try:
             self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
         except Exception as exc:
             logger.exception("取消 turn 失败")
-            if not from_card:
-                self._reply_text(chat_id, f"取消失败：{exc}", message_id=message_id)
             return False, f"取消失败：{exc}"
         with self._lock:
             state["cancelled"] = True
             state["pending_cancel"] = False
-        if not from_card:
-            self._reply_text(chat_id, "已请求停止当前执行。", message_id=message_id)
         return True, "已请求停止当前执行。"
 
     @staticmethod
@@ -1224,7 +1189,7 @@ class CodexHandler(BotHandler):
         with self._lock:
             pending = self._pending_requests.get(request_key)
         if not pending:
-            return self.bot.make_card_response(toast="该审批请求已失效或已处理。", toast_type="warning")
+            return make_card_response(toast="该审批请求已失效或已处理。", toast_type="warning")
 
         action = action_value.get("action", "")
         title = pending["title"]
@@ -1264,7 +1229,7 @@ class CodexHandler(BotHandler):
             result = {"permissions": {}, "scope": "turn"}
             decision_text = "拒绝"
         else:
-            return self.bot.make_card_response(toast="未知审批动作", toast_type="warning")
+            return make_card_response(toast="未知审批动作", toast_type="warning")
 
         logger.info(
             "响应审批请求: request_key=%s, rpc_request_id=%s, action=%s, result=%s",
@@ -1276,7 +1241,7 @@ class CodexHandler(BotHandler):
         self._adapter.respond(rpc_request_id, result=result)
         with self._lock:
             self._pending_requests.pop(request_key, None)
-        return self.bot.make_card_response(
+        return make_card_response(
             card=build_approval_handled_card(title, decision_text),
             toast=f"已{decision_text}",
             toast_type="success",
@@ -1287,15 +1252,15 @@ class CodexHandler(BotHandler):
         with self._lock:
             pending = self._pending_requests.get(request_key)
         if not pending:
-            return self.bot.make_card_response(toast="该输入请求已失效或已处理。", toast_type="warning")
+            return make_card_response(toast="该输入请求已失效或已处理。", toast_type="warning")
 
         question_id = str(action_value.get("question_id", ""))
         if not question_id:
-            return self.bot.make_card_response(toast="缺少 question_id", toast_type="warning")
+            return make_card_response(toast="缺少 question_id", toast_type="warning")
 
         target_question = next((item for item in pending["questions"] if item.get("id", "") == question_id), None)
         if not target_question:
-            return self.bot.make_card_response(toast="未找到对应问题", toast_type="warning")
+            return make_card_response(toast="未找到对应问题", toast_type="warning")
 
         if action_value.get("action") == "answer_user_input_option":
             answer = str(action_value.get("answer", "")).strip()
@@ -1303,16 +1268,16 @@ class CodexHandler(BotHandler):
             options = target_question.get("options") or []
             allow_custom = bool(target_question.get("isOther", False)) or not options
             if not allow_custom:
-                return self.bot.make_card_response(toast="该问题仅支持选择预设选项", toast_type="warning")
+                return make_card_response(toast="该问题仅支持选择预设选项", toast_type="warning")
             form_value = action_value.get("_form_value") or {}
             answer = str(form_value.get(f"user_input_{question_id}", "")).strip()
         if not answer:
-            return self.bot.make_card_response(toast="回答不能为空", toast_type="warning")
+            return make_card_response(toast="回答不能为空", toast_type="warning")
 
         pending["answers"][question_id] = answer
         questions = pending["questions"]
         if len(pending["answers"]) < len(questions):
-            return self.bot.make_card_response(
+            return make_card_response(
                 card=build_ask_user_card(request_key, questions, pending["answers"]),
                 toast="已记录，继续回答下一题。",
                 toast_type="success",
@@ -1327,7 +1292,7 @@ class CodexHandler(BotHandler):
         self._adapter.respond(pending["rpc_request_id"], result=result)
         with self._lock:
             self._pending_requests.pop(request_key, None)
-        return self.bot.make_card_response(
+        return make_card_response(
             card=build_ask_user_answered_card(questions, pending["answers"]),
             toast="已提交回答。",
             toast_type="success",

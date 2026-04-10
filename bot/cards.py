@@ -2,10 +2,46 @@
 feishu-codex 飞书卡片构建。
 """
 
+from __future__ import annotations
+
 import json
+from dataclasses import dataclass
+
+from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    P2CardActionTriggerResponse,
+    CallBackCard,
+    CallBackToast,
+)
 
 from bot.constants import KEYWORD, display_path, format_timestamp, shorten
 from bot.feishu_bot import _MAX_CARD_TABLES, count_card_tables, limit_card_tables
+
+
+def make_card_response(
+    card: dict | None = None,
+    toast: str | None = None,
+    toast_type: str = "info",
+) -> P2CardActionTriggerResponse:
+    """构造卡片动作的响应（可更新卡片 / 弹 toast）"""
+    resp = P2CardActionTriggerResponse()
+    if toast:
+        resp.toast = CallBackToast()
+        resp.toast.type = toast_type
+        resp.toast.content = toast
+    if card:
+        resp.card = CallBackCard()
+        resp.card.type = "raw"
+        resp.card.data = card
+    return resp
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Command handler return value; handler dispatches the reply."""
+
+    text: str = ""
+    card: dict | None = None
+
 
 _HISTORY_TEXT_MAX = 300
 _PLAN_CONTENT_MAX = 4000
