@@ -1509,7 +1509,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程（已收起）")
         action = self._first_action(response["card"])
-        self.assertEqual(action["actions"][0]["text"]["content"], "展开")
+        self.assertEqual(action["actions"][0]["text"]["content"], "展开会话列表")
 
     def test_reopen_sessions_card_action_returns_sessions_card(self) -> None:
         handler, _ = self._make_handler()
@@ -1581,6 +1581,9 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("/help settings", content)
         self.assertIn("/help local", content)
         self.assertIn("如需在本地继续同一线程，请使用 `fcodex`", content)
+        action = self._first_action(card)
+        self.assertEqual(action["layout"], "trisection")
+        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["session", "settings", "group"])
 
     def test_help_session_mentions_resume_scope_and_new_semantics(self) -> None:
         handler, bot = self._make_handler()
@@ -1594,6 +1597,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`/session` 只列当前目录的线程", content)
         self.assertIn("`/resume <thread_id|thread_name>` 会做全局精确匹配", content)
         self.assertIn("`/new` 立即新建并切换到新线程", content)
+        self.assertEqual(self._first_action(card)["actions"][0]["text"]["content"], "返回帮助")
 
     def test_help_settings_mentions_permissions_as_recommended_entry(self) -> None:
         handler, bot = self._make_handler()
@@ -1612,6 +1616,18 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("/approval [untrusted|on-failure|on-request|never]", content)
         self.assertIn("/sandbox [read-only|workspace-write|danger-full-access]", content)
         self.assertIn("如果当前正在执行，新设置从下一轮生效。", content)
+        self.assertEqual(self._first_action(card)["actions"][0]["text"]["content"], "返回帮助")
+
+    def test_help_group_card_has_back_button(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "/help group")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：群聊")
+        self.assertIn("`assistant` 会缓存群聊消息", card["elements"][0]["content"])
+        self.assertEqual(self._first_action(card)["actions"][0]["text"]["content"], "返回帮助")
 
     def test_help_local_explains_wrapper_and_tui_resume_difference(self) -> None:
         handler, bot = self._make_handler()
@@ -1625,6 +1641,34 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`fcodex` 是 `codex --remote` 的 wrapper", content)
         self.assertIn("跨 provider 找线程", content)
         self.assertIn("不等同于 `fcodex /resume`", content)
+
+    def test_help_topic_action_returns_topic_card(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-help",
+            {"action": "show_help_topic", "topic": "settings"},
+        )
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：设置")
+        self.assertEqual(self._first_action(response["card"])["actions"][0]["text"]["content"], "返回帮助")
+
+    def test_help_back_action_returns_overview_dashboard(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-help",
+            {"action": "show_help_overview"},
+        )
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助")
+        action = self._first_action(response["card"])
+        self.assertEqual(action["layout"], "trisection")
+        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["session", "settings", "group"])
 
     def test_new_command_reply_focuses_on_next_step(self) -> None:
         handler, bot = self._make_handler()

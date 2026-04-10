@@ -31,6 +31,8 @@ from bot.cards import (
     build_execution_card,
     build_group_acl_card,
     build_group_mode_card,
+    build_help_dashboard_card,
+    build_help_topic_card,
     build_file_change_approval_card,
     build_history_preview_card,
     build_markdown_card,
@@ -740,6 +742,16 @@ class CodexHandler(BotHandler):
                 handler=lambda sender_id, chat_id, message_id, action_value: self._handle_reopen_sessions_card_action(
                     sender_id, chat_id, message_id
                 ),
+                group_guard="group_admin",
+            ),
+            "show_help_topic": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_help_topic_action(
+                    action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "show_help_overview": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_help_overview_action(),
                 group_guard="group_admin",
             ),
             "toggle_star_thread": _ActionRoute(
@@ -3218,14 +3230,12 @@ class CodexHandler(BotHandler):
             return text
         return text[-self._card_log_limit :] + "\n\n**[日志已截断，仅保留最近部分]**"
 
-    def _reply_help(self, chat_id: str, topic: str = "", *, message_id: str = "") -> None:
+    def _normalize_help_topic(self, topic: str) -> str:
         normalized = (topic or "").strip().lower()
         if normalized in {"", "basic", "basics", "overview"}:
-            self._reply_card(chat_id, build_markdown_card("Codex 帮助", self._help_overview_text()), message_id=message_id)
-            return
+            return "overview"
         if normalized in {"session", "sessions", "resume", "thread", "threads"}:
-            self._reply_card(chat_id, build_markdown_card("Codex 帮助：线程", self._help_session_text()), message_id=message_id)
-            return
+            return "session"
         if normalized in {
             "settings",
             "permission",
@@ -3235,13 +3245,40 @@ class CodexHandler(BotHandler):
             "mode",
             "advanced",
         }:
-            self._reply_card(chat_id, build_markdown_card("Codex 帮助：设置", self._help_settings_text()), message_id=message_id)
-            return
+            return "settings"
         if normalized in {"group", "groups", "acl"}:
-            self._reply_card(chat_id, build_markdown_card("Codex 帮助：群聊", self._help_group_text()), message_id=message_id)
-            return
+            return "group"
         if normalized in {"local", "fcodex", "wrapper"}:
-            self._reply_card(chat_id, build_markdown_card("Codex 帮助：本地继续", self._help_local_text()), message_id=message_id)
+            return "local"
+        return ""
+
+    def _build_help_card(self, topic: str) -> dict | None:
+        normalized = self._normalize_help_topic(topic)
+        if normalized == "overview":
+            return build_help_dashboard_card(self._help_overview_text())
+        if normalized == "session":
+            return build_help_topic_card("Codex 帮助：线程", self._help_session_text())
+        if normalized == "settings":
+            return build_help_topic_card("Codex 帮助：设置", self._help_settings_text())
+        if normalized == "group":
+            return build_help_topic_card("Codex 帮助：群聊", self._help_group_text())
+        if normalized == "local":
+            return build_markdown_card("Codex 帮助：本地继续", self._help_local_text())
+        return None
+
+    def _handle_show_help_topic_action(self, action_value: dict) -> P2CardActionTriggerResponse:
+        card = self._build_help_card(str(action_value.get("topic", "")))
+        if card is None:
+            return self.bot.make_card_response(toast="未知帮助主题。", toast_type="warning")
+        return self.bot.make_card_response(card=card)
+
+    def _handle_show_help_overview_action(self) -> P2CardActionTriggerResponse:
+        return self.bot.make_card_response(card=build_help_dashboard_card(self._help_overview_text()))
+
+    def _reply_help(self, chat_id: str, topic: str = "", *, message_id: str = "") -> None:
+        card = self._build_help_card(topic)
+        if card is not None:
+            self._reply_card(chat_id, card, message_id=message_id)
             return
         self._reply_text(
             chat_id,
@@ -3262,6 +3299,7 @@ class CodexHandler(BotHandler):
             "- `/whoami`：私聊查看自己的 `open_id`，以及 best-effort 的 `user_id`（仅用于排障）\n"
             "- `/whoareyou`：查看机器人自己的 `app_id` / `open_id`\n\n"
             "**更多命令与帮助**\n"
+            "- 下方按钮可直接切到 `session`、`settings`、`group`\n"
             "- `/help session` 查看线程切换、目录切换与归档\n"
             "- `/help settings` 查看 profile、权限与协作设置\n"
             "- `/help group` 查看群聊工作态、授权策略与上下文规则\n"

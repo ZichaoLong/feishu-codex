@@ -27,6 +27,86 @@ def build_markdown_card(title: str, content: str, *, template: str = "blue") -> 
     }
 
 
+def build_help_dashboard_card(content: str) -> dict:
+    """构造 /help 总览仪表盘。"""
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 帮助"},
+            "template": "blue",
+        },
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "layout": "trisection",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "session"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_help_topic",
+                            "plugin": KEYWORD,
+                            "topic": "session",
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "settings"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_help_topic",
+                            "plugin": KEYWORD,
+                            "topic": "settings",
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "group"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_help_topic",
+                            "plugin": KEYWORD,
+                            "topic": "group",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def build_help_topic_card(title: str, content: str) -> dict:
+    """构造 /help 子主题卡片。"""
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "返回帮助"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_help_overview",
+                            "plugin": KEYWORD,
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+
+
 def build_execution_card(
     log_text: str,
     reply_text: str = "",
