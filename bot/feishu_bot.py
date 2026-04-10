@@ -1962,17 +1962,13 @@ class FeishuBot(ABC):
         toast: Optional[str] = None,
         toast_type: str = "info",
     ) -> P2CardActionTriggerResponse:
-        """构造卡片动作的响应（可更新卡片 / 弹 toast）"""
-        resp = P2CardActionTriggerResponse()
-        if toast:
-            resp.toast = CallBackToast()
-            resp.toast.type = toast_type
-            resp.toast.content = toast
-        if card:
-            resp.card = CallBackCard()
-            resp.card.type = "raw"
-            resp.card.data = card
-        return resp
+        """构造卡片动作的响应（可更新卡片 / 弹 toast）。
+
+        委托给 bot.cards.make_card_response，此处保留以兼容现有子类。
+        """
+        from bot.cards import make_card_response as _make_card_response
+
+        return _make_card_response(card=card, toast=toast, toast_type=toast_type)
 
     def download_file(self, message_id: str, file_key: str) -> bytes:
         """下载飞书消息中的文件，返回文件二进制内容
