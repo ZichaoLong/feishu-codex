@@ -535,7 +535,9 @@ class CodexHandlerTests(unittest.TestCase):
         )
         self.assertIn("更接近直接执行", content)
         self.assertIn("更容易先规划、提问，并展示计划卡片", content)
-        self.assertEqual(self._first_action(card)["layout"], "trisection")
+        action_elements = self._action_elements(card)
+        self.assertEqual(action_elements[0]["layout"], "trisection")
+        self.assertEqual(action_elements[1]["actions"][0]["text"]["content"], "返回帮助")
 
     def test_execution_card_is_patchable_shared_card(self) -> None:
         card = build_execution_card("", running=True)
@@ -661,7 +663,13 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "chat-group", "/groupmode", message_id="m-group")
 
-        self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 群聊工作态")
+        card = bot.cards[-1][1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 群聊工作态")
+        action_elements = self._action_elements(card)
+        actions = action_elements[0]["actions"]
+        self.assertEqual([item["text"]["content"] for item in actions], ["assistant", "all", "mention-only"])
+        self.assertEqual(actions[0]["type"], "primary")
+        self.assertEqual(action_elements[-1]["actions"][0]["text"]["content"], "返回帮助")
 
     def test_groupmode_command_can_use_cached_chat_type_without_message_context(self) -> None:
         handler, bot = self._make_handler()
@@ -713,6 +721,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("assistant", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊工作态")
+        self.assertEqual(self._action_elements(response["card"])[-1]["actions"][0]["text"]["content"], "返回帮助")
 
     def test_group_acl_policy_card_action_updates_group_acl(self) -> None:
         handler, _ = self._make_handler()
@@ -833,6 +842,10 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(card["header"]["title"]["content"], "Codex 权限预设")
         self.assertIn("推荐先用这个", card["elements"][0]["content"])
         self.assertIn("优先选 `default`", card["elements"][0]["content"])
+        action_elements = self._action_elements(card)
+        self.assertEqual(len(action_elements), 2)
+        self.assertEqual(action_elements[0]["layout"], "trisection")
+        self.assertEqual(action_elements[1]["actions"][0]["text"]["content"], "返回帮助")
 
     def test_approval_command_without_arg_shows_approval_boundary(self) -> None:
         handler, bot = self._make_handler()
@@ -859,6 +872,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("plan", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 协作模式")
+        self.assertEqual(self._action_elements(response["card"])[1]["actions"][0]["text"]["content"], "返回帮助")
 
     def test_sandbox_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
@@ -891,6 +905,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("Full Access", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 权限预设")
+        self.assertEqual(self._action_elements(response["card"])[1]["actions"][0]["text"]["content"], "返回帮助")
 
     def test_turn_plan_updated_sends_then_patches_plan_card(self) -> None:
         handler, bot = self._make_handler()
@@ -1616,9 +1631,11 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("/approval [untrusted|on-failure|on-request|never]", content)
         self.assertIn("/sandbox [read-only|workspace-write|danger-full-access]", content)
         self.assertIn("如果当前正在执行，新设置从下一轮生效。", content)
-        self.assertEqual(self._first_action(card)["actions"][0]["text"]["content"], "返回帮助")
+        action = self._first_action(card)
+        self.assertEqual(action["layout"], "trisection")
+        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["/permissions", "/mode", "返回帮助"])
 
-    def test_help_group_card_has_back_button(self) -> None:
+    def test_help_group_card_has_shortcuts(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "/help group")
@@ -1627,7 +1644,8 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：群聊")
         self.assertIn("`assistant` 会缓存群聊消息", card["elements"][0]["content"])
-        self.assertEqual(self._first_action(card)["actions"][0]["text"]["content"], "返回帮助")
+        action = self._first_action(card)
+        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["/groupmode", "返回帮助"])
 
     def test_help_local_explains_wrapper_and_tui_resume_difference(self) -> None:
         handler, bot = self._make_handler()
@@ -1653,7 +1671,47 @@ class CodexHandlerTests(unittest.TestCase):
         )
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：设置")
-        self.assertEqual(self._first_action(response["card"])["actions"][0]["text"]["content"], "返回帮助")
+        self.assertEqual(
+            [item["text"]["content"] for item in self._first_action(response["card"])["actions"]],
+            ["/permissions", "/mode", "返回帮助"],
+        )
+
+    def test_help_settings_shortcut_can_open_permissions_card(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-help",
+            {"action": "show_permissions_card"},
+        )
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 权限预设")
+
+    def test_help_settings_shortcut_can_open_mode_card(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-help",
+            {"action": "show_mode_card"},
+        )
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 协作模式")
+
+    def test_help_group_shortcut_can_open_groupmode_card(self) -> None:
+        handler, _ = self._make_handler()
+        handler.bot.message_contexts["msg-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        response = handler.handle_card_action(
+            "ou_user",
+            "chat-group",
+            "msg-group",
+            {"action": "show_group_mode_card", "_operator_open_id": "ou_admin"},
+        )
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊工作态")
 
     def test_help_back_action_returns_overview_dashboard(self) -> None:
         handler, _ = self._make_handler()
@@ -1669,6 +1727,19 @@ class CodexHandlerTests(unittest.TestCase):
         action = self._first_action(response["card"])
         self.assertEqual(action["layout"], "trisection")
         self.assertEqual([item["text"]["content"] for item in action["actions"]], ["session", "settings", "group"])
+
+    def test_help_navigation_actions_are_not_group_admin_only(self) -> None:
+        handler, _ = self._make_handler()
+        handler.bot.message_contexts["msg-help-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+
+        response = handler.handle_card_action(
+            "ou_user",
+            "chat-group",
+            "msg-help-group",
+            {"action": "show_help_overview", "_operator_open_id": "ou_user"},
+        )
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助")
 
     def test_new_command_reply_focuses_on_next_step(self) -> None:
         handler, bot = self._make_handler()

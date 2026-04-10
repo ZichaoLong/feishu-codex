@@ -32,6 +32,7 @@ from bot.cards import (
     build_group_acl_card,
     build_group_mode_card,
     build_help_dashboard_card,
+    build_help_topic_actions_card,
     build_help_topic_card,
     build_file_change_approval_card,
     build_history_preview_card,
@@ -748,10 +749,26 @@ class CodexHandler(BotHandler):
                 handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_help_topic_action(
                     action_value
                 ),
-                group_guard="group_admin",
             ),
             "show_help_overview": _ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_help_overview_action(),
+            ),
+            "show_permissions_card": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_permissions_card_action(
+                    sender_id, chat_id
+                ),
+                group_guard="group_admin",
+            ),
+            "show_mode_card": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_mode_card_action(
+                    sender_id, chat_id
+                ),
+                group_guard="group_admin",
+            ),
+            "show_group_mode_card": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._handle_show_group_mode_card_action(
+                    chat_id, message_id, action_value
+                ),
                 group_guard="group_admin",
             ),
             "toggle_star_thread": _ActionRoute(
@@ -3259,9 +3276,65 @@ class CodexHandler(BotHandler):
         if normalized == "session":
             return build_help_topic_card("Codex 帮助：线程", self._help_session_text())
         if normalized == "settings":
-            return build_help_topic_card("Codex 帮助：设置", self._help_settings_text())
+            return build_help_topic_actions_card(
+                "Codex 帮助：设置",
+                self._help_settings_text(),
+                actions=[
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "/permissions"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_permissions_card",
+                            "plugin": KEYWORD,
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "/mode"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_mode_card",
+                            "plugin": KEYWORD,
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "返回帮助"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_help_overview",
+                            "plugin": KEYWORD,
+                        },
+                    },
+                ],
+                layout="trisection",
+            )
         if normalized == "group":
-            return build_help_topic_card("Codex 帮助：群聊", self._help_group_text())
+            return build_help_topic_actions_card(
+                "Codex 帮助：群聊",
+                self._help_group_text(),
+                actions=[
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "/groupmode"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_group_mode_card",
+                            "plugin": KEYWORD,
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "返回帮助"},
+                        "type": "default",
+                        "value": {
+                            "action": "show_help_overview",
+                            "plugin": KEYWORD,
+                        },
+                    },
+                ],
+            )
         if normalized == "local":
             return build_markdown_card("Codex 帮助：本地继续", self._help_local_text())
         return None
@@ -3274,6 +3347,44 @@ class CodexHandler(BotHandler):
 
     def _handle_show_help_overview_action(self) -> P2CardActionTriggerResponse:
         return self.bot.make_card_response(card=build_help_dashboard_card(self._help_overview_text()))
+
+    def _handle_show_permissions_card_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+    ) -> P2CardActionTriggerResponse:
+        state = self._get_state(sender_id, chat_id)
+        return self.bot.make_card_response(
+            card=build_permissions_preset_card(
+                state["approval_policy"],
+                state["sandbox"],
+                running=state["running"],
+            )
+        )
+
+    def _handle_show_mode_card_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+    ) -> P2CardActionTriggerResponse:
+        state = self._get_state(sender_id, chat_id)
+        return self.bot.make_card_response(
+            card=build_collaboration_mode_card(
+                state["collaboration_mode"],
+                running=state["running"],
+            )
+        )
+
+    def _handle_show_group_mode_card_action(
+        self,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
+        if not self._is_group_chat(chat_id, message_id):
+            return self.bot.make_card_response(toast="该命令仅支持群聊使用。", toast_type="warning")
+        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
+        return self.bot.make_card_response(card=self._group_mode_card(chat_id, open_id=operator_open_id))
 
     def _reply_help(self, chat_id: str, topic: str = "", *, message_id: str = "") -> None:
         card = self._build_help_card(topic)

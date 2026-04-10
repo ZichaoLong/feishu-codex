@@ -107,6 +107,48 @@ def build_help_topic_card(title: str, content: str) -> dict:
     }
 
 
+def build_help_topic_actions_card(
+    title: str,
+    content: str,
+    actions: list[dict],
+    *,
+    layout: str = "",
+) -> dict:
+    """构造带快捷按钮的 /help 子主题卡片。"""
+    action_element = {"tag": "action", "actions": actions}
+    if layout:
+        action_element["layout"] = layout
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {"tag": "hr"},
+            action_element,
+        ],
+    }
+
+
+def _back_to_help_action() -> dict:
+    return {
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "返回帮助"},
+                "type": "default",
+                "value": {
+                    "action": "show_help_overview",
+                    "plugin": KEYWORD,
+                },
+            }
+        ],
+    }
+
+
 def build_execution_card(
     log_text: str,
     reply_text: str = "",
@@ -474,7 +516,7 @@ def build_approval_policy_card(current_policy: str, *, running: bool = False) ->
                 },
             }
         )
-    elements.append({"tag": "action", "actions": buttons})
+    elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
 
     return {
         "config": _card_config(),
@@ -533,7 +575,7 @@ def build_sandbox_policy_card(current_sandbox: str, *, running: bool = False) ->
                 },
             }
         )
-    elements.append({"tag": "action", "actions": buttons})
+    elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
 
     return {
         "config": _card_config(),
@@ -627,7 +669,8 @@ def build_permissions_preset_card(
                 },
             }
         )
-    elements.append({"tag": "action", "actions": buttons})
+    elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
+    elements.append(_back_to_help_action())
 
     return {
         "config": _card_config(),
@@ -684,6 +727,7 @@ def build_collaboration_mode_card(current_mode: str, *, running: bool = False) -
             }
         )
     elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
+    elements.append(_back_to_help_action())
 
     return {
         "config": _card_config(),
@@ -727,7 +771,7 @@ def build_group_mode_card(current_mode: str, *, can_manage: bool) -> dict:
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": f"{'✓ ' if mode == current_mode else ''}{label}",
+                        "content": label,
                     },
                     "type": "primary" if mode == current_mode else "default",
                     "value": {
@@ -739,6 +783,7 @@ def build_group_mode_card(current_mode: str, *, can_manage: bool) -> dict:
             )
     if buttons:
         elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
+    elements.append(_back_to_help_action())
 
     return {
         "config": _card_config(),
