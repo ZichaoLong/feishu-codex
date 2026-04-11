@@ -116,6 +116,14 @@ class CodexAppServerAdapter(AgentAdapter):
     def current_app_server_url(self) -> str:
         return self._rpc.current_app_server_url()
 
+    def unsubscribe_thread(self, thread_id: str) -> None:
+        """Unsubscribe from a thread so the app-server can unload it."""
+        try:
+            self._rpc.request("thread/unsubscribe", {"threadId": thread_id})
+        except Exception:
+            logger.debug("thread/unsubscribe failed for %s", thread_id[:12], exc_info=True)
+        self._thread_resolved_model.pop(thread_id, None)
+
     def create_thread(
         self,
         *,
@@ -135,8 +143,19 @@ class CodexAppServerAdapter(AgentAdapter):
         self._cache_thread_model(result)
         return self._snapshot_from_thread(result["thread"])
 
-    def resume_thread(self, thread_id: str, profile: str | None = None) -> ThreadSnapshot:
+    def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        profile: str | None = None,
+        model: str | None = None,
+        model_provider: str | None = None,
+    ) -> ThreadSnapshot:
         params: dict[str, Any] = {"threadId": thread_id}
+        if model:
+            params["model"] = model
+        if model_provider:
+            params["modelProvider"] = model_provider
         if profile:
             params["config"] = {"profile": profile}
         result = self._rpc.request("thread/resume", params)

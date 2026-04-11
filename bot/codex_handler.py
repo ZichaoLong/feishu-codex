@@ -49,6 +49,7 @@ from bot.constants import (
     resolve_working_dir,
 )
 from bot.handler import BotHandler
+from bot.codex_config_reader import ResolvedProfileConfig, resolve_profile_from_codex_config
 from bot.codex_protocol.client import CodexRpcError
 from bot.codex_group_domain import CodexGroupDomain
 from bot.codex_help_domain import CodexHelpDomain
@@ -74,6 +75,7 @@ _LOCAL_THREAD_SAFETY_RULE = (
     "如需在本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。"
 )
 _GROUP_SHARED_STATE_KEY = "__group__"
+_EMPTY_RESOLVED_PROFILE = ResolvedProfileConfig()
 StateBinding: TypeAlias = tuple[str, str]
 _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
     "read-only": {
@@ -410,6 +412,7 @@ class CodexHandler(BotHandler):
 
     def deactivate_sender(self, sender_id: str, chat_id: str = "", message_id: str = "") -> None:
         key = self._state_binding(sender_id, chat_id, message_id)
+        unsubscribe_thread_id: str = ""
         with self._lock:
             state = self._states.pop(key, None)
             if not state:
@@ -417,6 +420,9 @@ class CodexHandler(BotHandler):
             thread_id = state["current_thread_id"]
             if thread_id and self._thread_bindings.get(thread_id) == key:
                 self._thread_bindings.pop(thread_id, None)
+                unsubscribe_thread_id = thread_id
+        if unsubscribe_thread_id:
+            self._adapter.unsubscribe_thread(unsubscribe_thread_id)
 
     def shutdown(self) -> None:
         """停止底层 app-server。"""
@@ -1439,10 +1445,14 @@ class CodexHandler(BotHandler):
         summary: ThreadSummary | None = None,
     ) -> ThreadSnapshot:
         thread = summary or self._find_thread_summary(thread_id)
+        profile = self._effective_default_profile()
+        resolved = resolve_profile_from_codex_config(profile) if profile else _EMPTY_RESOLVED_PROFILE
         try:
             return self._adapter.resume_thread(
                 thread_id,
-                profile=self._effective_default_profile() or None,
+                profile=profile or None,
+                model=resolved.model or None,
+                model_provider=resolved.model_provider or None,
             )
         except Exception as exc:
             if self._is_thread_not_found_error(exc):
@@ -1487,10 +1497,12 @@ class CodexHandler(BotHandler):
         state = self._get_state(sender_id, chat_id, message_id)
         state_binding = self._state_binding(sender_id, chat_id, message_id)
         takeover_binding: tuple[str, str] | None = None
+        unsubscribe_thread_id: str = ""
         with self._lock:
             old_thread_id = state["current_thread_id"]
             if old_thread_id and self._thread_bindings.get(old_thread_id) == state_binding:
                 self._thread_bindings.pop(old_thread_id, None)
+                unsubscribe_thread_id = old_thread_id
             existing_binding = self._thread_bindings.get(thread.thread_id)
             if existing_binding and existing_binding != state_binding:
                 takeover_binding = existing_binding
@@ -1501,6 +1513,8 @@ class CodexHandler(BotHandler):
             state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
             self._thread_bindings[thread.thread_id] = state_binding
+        if unsubscribe_thread_id:
+            self._adapter.unsubscribe_thread(unsubscribe_thread_id)
         if takeover_binding:
             self._reply_text(
                 takeover_binding[1],
@@ -1514,15 +1528,19 @@ class CodexHandler(BotHandler):
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
         state = self._get_state(sender_id, chat_id, message_id)
         state_binding = self._state_binding(sender_id, chat_id, message_id)
+        unsubscribe_thread_id: str = ""
         with self._lock:
             thread_id = state["current_thread_id"]
             if thread_id and self._thread_bindings.get(thread_id) == state_binding:
                 self._thread_bindings.pop(thread_id, None)
+                unsubscribe_thread_id = thread_id
             state["current_thread_id"] = ""
             state["current_thread_name"] = ""
             state["current_turn_id"] = ""
             state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
+        if unsubscribe_thread_id:
+            self._adapter.unsubscribe_thread(unsubscribe_thread_id)
 
     def _list_global_threads(self) -> list[ThreadSummary]:
         return list_global_threads(

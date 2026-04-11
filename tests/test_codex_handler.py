@@ -31,6 +31,7 @@ class _FakeAdapter:
         self.start_turn_calls: list[dict] = []
         self.interrupt_turn_calls: list[dict] = []
         self.archive_thread_calls: list[str] = []
+        self.unsubscribe_thread_calls: list[str] = []
 
     def stop(self) -> None:
         return None
@@ -88,8 +89,20 @@ class _FakeAdapter:
         self.last_profile = profile
         return self.read_runtime_config()
 
-    def resume_thread(self, thread_id: str, profile: str | None = None):
-        self.resume_thread_calls.append({"thread_id": thread_id, "profile": profile})
+    def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        profile: str | None = None,
+        model: str | None = None,
+        model_provider: str | None = None,
+    ):
+        self.resume_thread_calls.append({
+            "thread_id": thread_id,
+            "profile": profile,
+            "model": model,
+            "model_provider": model_provider,
+        })
         return ThreadSnapshot(
             summary=ThreadSummary(
                 thread_id=thread_id,
@@ -102,6 +115,9 @@ class _FakeAdapter:
                 status="idle",
             )
         )
+
+    def unsubscribe_thread(self, thread_id: str) -> None:
+        self.unsubscribe_thread_calls.append(thread_id)
 
     def archive_thread(self, thread_id: str) -> None:
         self.archive_thread_calls.append(thread_id)
@@ -1227,7 +1243,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        def fake_resume_thread(thread_id: str, profile: str | None = None):
+        def fake_resume_thread(thread_id: str, **kwargs):
             raise CodexRpcError("thread/resume", {"code": -32000, "message": "Codex websocket disconnected"})
 
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
@@ -1240,7 +1256,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, _ = self._make_handler()
         handler._adapter.list_threads_all = lambda **kwargs: []
 
-        def fake_resume_thread(thread_id: str, profile: str | None = None):
+        def fake_resume_thread(thread_id: str, **kwargs):
             raise CodexRpcError(
                 "thread/resume",
                 {"code": -32600, "message": f"no rollout found for thread id {thread_id}"},
@@ -1267,7 +1283,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
         resumed: list[str] = []
 
-        def fake_resume_thread(thread_id: str, profile: str | None = None):
+        def fake_resume_thread(thread_id: str, **kwargs):
             resumed.append(thread_id)
             return ThreadSnapshot(summary=thread)
 
@@ -1300,7 +1316,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.list_threads_all = fake_list_threads_all
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
-        handler._adapter.resume_thread = lambda thread_id, profile=None: ThreadSnapshot(summary=thread)
+        handler._adapter.resume_thread = lambda thread_id, **kwargs: ThreadSnapshot(summary=thread)
 
         handler._resume_snapshot("demo")
 
@@ -1811,7 +1827,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
-        handler._adapter.resume_thread = lambda thread_id, profile=None: ThreadSnapshot(
+        handler._adapter.resume_thread = lambda thread_id, **kwargs: ThreadSnapshot(
             summary=thread,
             turns=[
                 {
