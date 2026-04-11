@@ -89,6 +89,13 @@ class CodexAppServerAdapter(AgentAdapter):
     ) -> None:
         self._config = config
         self._collaboration_mode_model: str | None = None
+        # Workaround: collaborationMode.settings.model 会覆盖线程级 profile
+        # 解析出的 model（上游 turn/start 协议没有 config 字段，无法传递
+        # profile；而 collaborationMode.settings.model 是必填字段）。
+        # 缓存 thread/start 和 thread/resume 响应里后端解析好的 model，
+        # 作为 collaborationMode.settings.model 的 fallback，避免用
+        # model/list 的全局默认值覆盖 profile 指定的 model。
+        self._thread_resolved_model: dict[str, str] = {}
         self._rpc = CodexRpcClient(
             codex_command=config.codex_command,
             app_server_mode=config.app_server_mode,
@@ -125,6 +132,7 @@ class CodexAppServerAdapter(AgentAdapter):
             sandbox=sandbox,
         )
         result = self._rpc.request("thread/start", params)
+        self._cache_thread_model(result)
         return self._snapshot_from_thread(result["thread"])
 
     def resume_thread(self, thread_id: str, profile: str | None = None) -> ThreadSnapshot:
@@ -132,6 +140,7 @@ class CodexAppServerAdapter(AgentAdapter):
         if profile:
             params["config"] = {"profile": profile}
         result = self._rpc.request("thread/resume", params)
+        self._cache_thread_model(result)
         return self._snapshot_from_thread(result["thread"])
 
     def list_threads(
@@ -228,6 +237,7 @@ class CodexAppServerAdapter(AgentAdapter):
         params["collaborationMode"] = self._collaboration_mode_payload(
             effective_collaboration_mode,
             model=effective_model,
+            thread_id=thread_id,
             reasoning_effort=effective_reasoning,
         )
         return self._rpc.request("turn/start", _compact(params))
@@ -329,6 +339,7 @@ class CodexAppServerAdapter(AgentAdapter):
         mode: str,
         *,
         model: str | None,
+        thread_id: str = "",
         reasoning_effort: str | None,
     ) -> dict[str, Any]:
         normalized = str(mode).strip().lower()
@@ -337,15 +348,20 @@ class CodexAppServerAdapter(AgentAdapter):
         return {
             "mode": normalized,
             "settings": {
-                "model": self._resolve_collaboration_mode_model(model),
+                "model": self._resolve_collaboration_mode_model(model, thread_id=thread_id),
                 "reasoning_effort": reasoning_effort,
                 "developer_instructions": None,
             },
         }
 
-    def _resolve_collaboration_mode_model(self, configured_model: str | None) -> str:
+    def _resolve_collaboration_mode_model(self, configured_model: str | None, *, thread_id: str = "") -> str:
         if configured_model:
             return configured_model
+        # 优先使用线程创建/恢复时后端解析的 model（来自 profile），
+        # 避免用 model/list 全局默认值覆盖 profile 指定的 model。
+        thread_model = self._thread_resolved_model.get(thread_id) if thread_id else None
+        if thread_model:
+            return thread_model
         if self._collaboration_mode_model:
             return self._collaboration_mode_model
 
@@ -360,6 +376,13 @@ class CodexAppServerAdapter(AgentAdapter):
                 self._collaboration_mode_model = str(item["model"])
                 return self._collaboration_mode_model
         raise RuntimeError("无法解析 Codex 默认模型，无法构造 collaboration mode 参数")
+
+    def _cache_thread_model(self, result: dict[str, Any]) -> None:
+        thread = result.get("thread") or {}
+        thread_id = str(thread.get("id", "")).strip()
+        model = str(result.get("model", "")).strip()
+        if thread_id and model:
+            self._thread_resolved_model[thread_id] = model
 
     @staticmethod
     def _snapshot_from_thread(thread: dict[str, Any]) -> ThreadSnapshot:

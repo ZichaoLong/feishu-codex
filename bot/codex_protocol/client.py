@@ -133,6 +133,8 @@ class CodexRpcClient:
             "method": method,
             "params": params or {},
         }
+        if method in ("thread/start", "turn/start", "thread/resume"):
+            logger.debug("rpc request: %s params=%s", method, json.dumps(params or {}, ensure_ascii=False, default=str))
         self._send_json(payload)
 
         wait_seconds = timeout or self._request_timeout_seconds
@@ -142,6 +144,8 @@ class CodexRpcClient:
             raise TimeoutError(f"Codex request timed out: {method}")
         if pending.error is not None:
             raise CodexRpcError(method, pending.error)
+        if method in ("thread/start", "turn/start", "thread/resume"):
+            logger.debug("rpc result: %s keys=%s", method, sorted((pending.result or {}).keys()))
         return pending.result
 
     def respond(self, request_id: int | str, *, result: dict | None = None, error: dict | None = None) -> None:
