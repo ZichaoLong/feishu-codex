@@ -181,9 +181,10 @@ class CodexHelpDomain:
     def _help_session_text(self) -> str:
         return (
             "**线程相关**\n"
-            "- `/new` 立即新建并切换到新线程。\n"
+            "- `/new` 立即新建并切换到新线程；切走时旧线程会从 app-server 内存中释放。\n"
             "- `/session` 只列当前目录的线程，结果已跨 provider 汇总。\n"
             "- `/resume <thread_id|thread_name>` 会做全局精确匹配；恢复后会切到线程自己的目录。\n"
+            "- `/resume` 会尝试应用当前默认 profile 的 model 和 model_provider；切换 profile 后 `/resume` 旧线程可切换 provider。\n"
             "- 如果匹配到多个同名线程，`/resume` 会报错，不会替你猜。\n"
             "- `/cd <path>` 切换目录并清空当前线程绑定；之后发送普通文本，会在新目录自动新建线程。\n"
             "- `/rename` 改标题，`/star` 收藏当前线程，`/rm` 归档线程而不是硬删除。\n\n"
@@ -195,7 +196,10 @@ class CodexHelpDomain:
     def _help_settings_text(self) -> str:
         return (
             "**设置相关**\n"
-            "- `/profile` 查看或切换默认 profile；它影响 feishu-codex 与新的默认 `fcodex` 启动，不热切换已打开的 `fcodex` TUI。\n"
+            "- `/profile` 查看或切换默认 profile（打包 model_provider + model 等配置）。\n"
+            "- `/profile` 影响 `/new`（新建线程）和 `/resume`（恢复线程时尝试应用新 provider/model）。\n"
+            "- `/profile` 不影响已打开线程的后续 turn（`model_provider` 在线程级固定）；`/sandbox`、`/approval`、`/mode` 可在后续 turn 中随时切换。\n"
+            "- profile 配置从 `~/.codex/config.toml` 实时读取，修改后无需重启 feishu-codex。\n"
             "- `/init <token>` 仅私聊可用；会把当前发送者加入 `admin_open_ids`，并尽量自动写入 `bot_open_id`。\n"
             "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/whoareyou` 的实时探测结果仅用于诊断和初始化。\n"
             "- 推荐先用 `/permissions`；它会同时设置审批策略和沙箱，只影响当前飞书会话的后续 turn。\n"

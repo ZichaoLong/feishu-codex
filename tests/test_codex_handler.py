@@ -1654,7 +1654,7 @@ class CodexHandlerTests(unittest.TestCase):
         content = card["elements"][0]["content"]
         self.assertIn("`/profile` 查看或切换默认 profile", content)
         self.assertIn("推荐先用 `/permissions`", content)
-        self.assertIn("不热切换已打开的 `fcodex` TUI", content)
+        self.assertIn("model_provider", content)
         self.assertIn("只影响当前飞书会话的后续 turn", content)
         self.assertIn("/profile [name]", content)
         self.assertIn("/approval [untrusted|on-failure|on-request|never]", content)
