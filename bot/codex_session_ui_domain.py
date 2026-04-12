@@ -62,6 +62,7 @@ class _SessionUiDomainOwner(Protocol):
 class CodexSessionUiDomain:
     def __init__(self, owner: _SessionUiDomainOwner) -> None:
         self._owner = owner
+        self._expanded_session_cards: set[str] = set()
 
     def handle_session_command(
         self,
@@ -181,8 +182,8 @@ class CodexSessionUiDomain:
     ) -> P2CardActionTriggerResponse:
         del sender_id
         del chat_id
-        del message_id
         del action_value
+        self._set_session_card_expanded(message_id, expanded=False)
         return make_card_response(
             card=build_sessions_closed_card(),
             toast="已收起。",
@@ -197,6 +198,7 @@ class CodexSessionUiDomain:
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
         del action_value
+        self._set_session_card_expanded(message_id, expanded=True)
         return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已展开。")
 
     def handle_resume_thread_action(
@@ -337,8 +339,9 @@ class CodexSessionUiDomain:
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
         del action_value
+        self._set_session_card_expanded(message_id, expanded=True)
         try:
-            card = self._render_sessions_card(sender_id, chat_id, message_id=message_id, expanded=True)
+            card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("展开线程列表失败")
             return make_card_response(toast=f"展开失败：{exc}", toast_type="warning")
@@ -376,13 +379,29 @@ class CodexSessionUiDomain:
             return make_card_response(toast=f"刷新失败：{exc}", toast_type="warning")
         return make_card_response(card=card, toast=toast, toast_type="success")
 
+    def _set_session_card_expanded(self, message_id: str, *, expanded: bool) -> None:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return
+        with self._owner._lock:
+            if expanded:
+                self._expanded_session_cards.add(normalized_message_id)
+            else:
+                self._expanded_session_cards.discard(normalized_message_id)
+
+    def _is_session_card_expanded(self, message_id: str) -> bool:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return False
+        with self._owner._lock:
+            return normalized_message_id in self._expanded_session_cards
+
     def _render_sessions_card(
         self,
         sender_id: str,
         chat_id: str,
         *,
         message_id: str = "",
-        expanded: bool = False,
     ) -> dict:
         threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
         sessions, counts = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
@@ -393,7 +412,7 @@ class CodexSessionUiDomain:
             state["working_dir"],
             counts["total_all"],
             shown_count=counts["shown"],
-            expanded=expanded,
+            expanded=self._is_session_card_expanded(message_id),
         )
 
     def _build_session_rows(

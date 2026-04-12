@@ -72,7 +72,8 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared
 
 - `feishu-codex` 无法知道这个本地 TUI 是空闲、关闭，还是即将写入
 - `feishu-codex` 不能安全地假设自己对该线程拥有独占所有权
-- 对这种外部线程的 resume，必须要求用户显式选择
+- 如果要在本地继续同一个 live thread，应改用 `fcodex` 走 shared backend
+- 如果仍用裸 `codex` 在另一个 backend 写同一线程，就超出了当前支持的安全路径
 
 ## 6. `/resume` 安全模型
 
@@ -97,45 +98,21 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared
 
 ### 6.3 未加载于当前 backend
 
-如果目标线程当前没有加载在本 backend 中，`/resume` 不应立刻调用 `thread/resume`。
-
-应先展示一张三操作卡片：
-
-- `查看快照`
-- `恢复并继续写入`
-- `取消`
-
-#### `查看快照`
+如果目标线程当前没有加载在本 backend 中，当前实现仍会直接调用 `thread/resume`。
 
 行为：
 
-- 调用 `thread/read`
-- 展示标题、cwd、更新时间、source、可选的 `service_name`，以及最近几轮对话
-- 不绑定当前飞书会话
-- 不在当前 backend 中创建 live thread
-
-这是安全的只读检查路径。
-
-#### `恢复并继续写入`
-
-行为：
-
-- 调用 `thread/resume`
+- 直接恢复目标线程
 - 将当前飞书会话绑定到该线程
-- 明确回复一条警告：这会在当前 `feishu-codex` backend 中创建一个 live thread
+- 如果用户随后通过 `fcodex` 接入同一个 shared backend，则飞书与 `fcodex` 可以继续安全地共同读写这个 live thread
 
-警告需要表达清楚的含义：
+这条路径的前提是：
 
-- 如果另一个非 shared-backend 客户端也在写这个线程，历史可能分叉，或者至少让后续状态变得混乱
-- 如果目标是本地继续同一个 live thread，应优先走 shared backend 路径
+- 本地继续同一线程时，使用 `fcodex`
+- 不要再用裸 `codex` 通过另一个 backend 写这个线程
 
-这是一条经用户确认的风险路径，不是技术上的“接管”。
-
-#### `取消`
-
-行为：
-
-- 不做任何事
+当前实现**不再**通过预览/确认卡片拦截这类 resume。
+因此，对“可能同时被另一个 isolated backend 写入”的线程，避免双 backend 写入的责任在操作侧，而不是由 UI 强制保护。
 
 ## 7. 来源展示与对称风险
 
@@ -156,7 +133,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared
 - 如果飞书把外部线程恢复进自己的 backend，可能产生分叉
 - 如果用户之后又用裸 `codex` 在另一个 backend 恢复飞书正在使用的线程，同样存在风险
 
-`feishu-codex` 不能消除这种风险。它能做的，是避免把未知外部线程静默恢复到可写状态，并让安全路径保持显式。
+`feishu-codex` 不能消除这种风险。当前实现选择了更直接的 `/resume` 路径，因此安全边界依赖一条操作约束：需要多端继续同一 live thread 时，统一走 shared backend / `fcodex`，不要混用裸 `codex`。
 
 ## 8. 飞书多会话边界
 

@@ -70,12 +70,9 @@
 #   - exec
 #   - appServer
 
-# /session 展示的未收藏线程数量上限；默认值：5
+# /session 初始展示的线程数量上限；默认值：5
+# 说明：点击卡片里的“更多”后会展开全部线程。
 # session_recent_limit: 5
-
-# /session 展示的收藏线程数量上限；默认值：20
-# 说明：这是同一目录下 /session 卡片最多展示多少个已收藏线程，不是全局收藏总数限制。
-# session_starred_limit: 20
 
 # 单次 thread/list 聚合查询的最大线程数；默认值：100
 # thread_list_query_limit: 100

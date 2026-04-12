@@ -49,7 +49,7 @@
 
 - 原生协议优先：优先使用 `codex app-server` 行为和 API，而不是本地抓取或重建状态
 - 单一事实来源：thread id、cwd、title、preview、source、runtime config 来自 Codex
-- 飞书本地状态留在本地：favorites、本地默认 profile、UI 绑定状态由 `feishu-codex` 管理
+- 飞书本地状态留在本地：本地默认 profile、线程/UI 绑定状态由 `feishu-codex` 管理
 - shared-backend 路径显式存在：如果要和飞书继续同一个 live thread，应明确走同一个 backend
 - 运行时假设要文档化：wrapper 与 shared-backend 行为不能只隐含在代码里
 
@@ -98,7 +98,7 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/adapters/codex_app_server.py`：Codex adapter 边界
 - `bot/codex_protocol/client.py`：`codex app-server` 的 websocket JSON-RPC client
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
-- `bot/stores/*.py`：favorites、本地默认 profile、shared backend 运行时发现状态、群聊状态
+- `bot/stores/*.py`：本地默认 profile、shared backend 运行时发现状态、群聊状态
 
 ## 6. 数据与行为边界
 
@@ -118,7 +118,6 @@ shared backend 与 wrapper 的具体机制，见
 
 `feishu-codex` 只保存飞书或集成侧专属的数据：
 
-- favorites / starred 状态
 - 飞书与默认 `fcodex` 启动共用的本地默认 profile
 - shared backend 的运行时地址发现状态
 - 私聊当前绑定到哪个 thread，以及群聊按 `chat_id` 共享绑定到哪个 thread
@@ -130,7 +129,7 @@ shared backend 与 wrapper 的具体机制，见
 精确命令语义不在本文展开，而是交给专门文档：
 
 - `docs/session-profile-semantics.zh-CN.md` 说明 `/session`、`/resume`、`/profile`、`/rm` 与 wrapper 语义
-- `docs/shared-backend-resume-safety.zh-CN.md` 说明受保护的 `/resume` 与 backend 安全规则
+- `docs/shared-backend-resume-safety.zh-CN.md` 说明当前 `/resume` 合同与 backend 安全规则
 
 本文只固定这些边界：
 
@@ -257,7 +256,6 @@ feishu-codex/
       client.py
     stores/
       app_server_runtime_store.py
-      favorites_store.py
       profile_state_store.py
   config/
     system.yaml.example

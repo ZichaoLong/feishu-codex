@@ -31,7 +31,7 @@ semantic layers.
 - Scope: current directory only
 - Provider behavior: cross-provider aggregation
 - Purpose: browse threads relevant to the current directory
-- Sorting: favorites first, then most recently updated
+- Sorting: most recently updated first
 
 ### `/resume <thread_id|thread_name>`
 

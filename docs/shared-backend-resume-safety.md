@@ -85,7 +85,10 @@ Properties:
 - `feishu-codex` cannot know whether that local TUI is idle, closed, or about
   to write
 - `feishu-codex` cannot safely assume exclusive ownership of such a thread
-- external-thread resume must stay guarded by explicit user choice
+- local continuation of the same live thread should use `fcodex` and the shared
+  backend instead
+- continuing to write the same thread through bare `codex` on another backend
+  is outside the supported safe path
 
 ## 6. `/resume` Safety Model
 
@@ -110,50 +113,24 @@ This is safe because the thread already lives in the same backend.
 
 ### 6.3 Not loaded in current backend
 
-If the target thread is not loaded in the current backend, `/resume` must not
-immediately call `thread/resume`.
-
-Instead, show a three-action card:
-
-- `Preview Snapshot`
-- `Resume and Continue Writing`
-- `Cancel`
-
-#### `Preview Snapshot`
+If the target thread is not loaded in the current backend, the current
+implementation still calls `thread/resume` directly.
 
 Behavior:
 
-- call `thread/read`
-- show title, cwd, updated time, source, optional `service_name`, and recent
-  turns
-- do not bind the current Feishu chat
-- do not create a live thread in the current backend
-
-This is the safe inspection path.
-
-#### `Resume and Continue Writing`
-
-Behavior:
-
-- call `thread/resume`
+- resume the target thread immediately
 - bind the current Feishu chat to that thread
-- reply with an explicit warning that this creates a live thread in the current
-  `feishu-codex` backend
+- if the user later attaches through `fcodex` on the same shared backend,
+  Feishu and `fcodex` can continue operating on the same live thread safely
 
-Required warning meaning:
+This path assumes:
 
-- if another non-shared backend client also writes this thread, history may
-  diverge or become confusing
-- if the goal is local continuation of the same live thread, use the shared
-  backend path instead
+- local continuation of the same thread uses `fcodex`
+- bare `codex` is not also writing that thread through another backend
 
-This is an explicit user-confirmed risk path, not a technical handoff.
-
-#### `Cancel`
-
-Behavior:
-
-- do nothing
+The current implementation no longer blocks this path with a preview/confirm
+card. Avoiding dual-backend writes for such threads is now an operational rule,
+not a UI-enforced guard.
 
 ## 7. Provenance and Symmetric Risk
 
@@ -176,8 +153,10 @@ The risk is symmetric:
 - if a user later resumes a Feishu-active thread through bare `codex` on
   another backend, the same risk exists
 
-`feishu-codex` cannot eliminate that risk. It can only avoid silent writable
-resume for external threads and keep the safe path explicit.
+`feishu-codex` cannot eliminate that risk. The current implementation chooses a
+more direct `/resume` path, so the safety boundary relies on one operational
+rule: if multiple clients should continue the same live thread, keep them on the
+shared backend via `fcodex`, and do not mix in bare `codex`.
 
 ## 8. Feishu Multi-Chat Boundary
 

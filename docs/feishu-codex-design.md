@@ -59,7 +59,7 @@ bridge:
   scraping or reconstructed state
 - Single source of truth: thread id, cwd, title, preview, source, and runtime
   config come from Codex
-- Feishu-specific state stays local: favorites, local default profile, and UI
+- Feishu-specific state stays local: local default profile and thread/UI
   binding state remain in `feishu-codex`
 - Shared-backend behavior is explicit: continuing the same live thread with
   Feishu should go through one backend
@@ -114,8 +114,8 @@ Current module split:
 - `bot/adapters/codex_app_server.py`: Codex adapter boundary
 - `bot/codex_protocol/client.py`: websocket JSON-RPC client for `codex app-server`
 - `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and thin proxy
-- `bot/stores/*.py`: favorites, local default profile, runtime backend
-  discovery state, and group-chat state
+- `bot/stores/*.py`: local default profile, runtime backend discovery state,
+  and group-chat state
 
 ## 6. Data and Behavioral Boundaries
 
@@ -135,7 +135,6 @@ Codex remains the authority for:
 
 `feishu-codex` keeps only data that is Feishu- or integration-specific:
 
-- favorites / starred state
 - local default profile used by Feishu and default `fcodex` launches
 - runtime shared-backend discovery state
 - p2p thread bindings and group-shared thread bindings keyed by `chat_id`
@@ -148,8 +147,8 @@ Exact command semantics are documented outside this design document:
 
 - `docs/session-profile-semantics.md` covers `/session`, `/resume`, `/profile`,
   `/rm`, and wrapper semantics
-- `docs/shared-backend-resume-safety.md` covers guarded `/resume` and backend
-  safety rules
+- `docs/shared-backend-resume-safety.md` covers current `/resume` semantics and
+  backend safety rules
 
 This document only fixes the boundary:
 
@@ -292,7 +291,6 @@ feishu-codex/
       client.py
     stores/
       app_server_runtime_store.py
-      favorites_store.py
       profile_state_store.py
   config/
     system.yaml.example

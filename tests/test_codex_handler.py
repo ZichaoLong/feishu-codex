@@ -331,11 +331,11 @@ class CodexHandlerTests(unittest.TestCase):
             element for element in card["elements"] if isinstance(element, dict) and element.get("tag") == "action"
         ]
 
-    def _make_handler(self) -> tuple[CodexHandler, _FakeBot]:
+    def _make_handler(self, cfg: dict | None = None) -> tuple[CodexHandler, _FakeBot]:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        config_patch = patch("bot.codex_handler.load_config_file", return_value={})
+        config_patch = patch("bot.codex_handler.load_config_file", return_value=dict(cfg or {}))
         adapter_patch = patch("bot.codex_handler.CodexAppServerAdapter", _FakeAdapter)
         config_patch.start()
         adapter_patch.start()
@@ -1430,6 +1430,224 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
 
+    def test_show_more_sessions_action_expands_all_rows(self) -> None:
+        handler, _ = self._make_handler({"session_recent_limit": 1})
+        threads = [
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="one",
+                preview="",
+                created_at=0,
+                updated_at=3,
+                source="cli",
+                status="idle",
+            ),
+            ThreadSummary(
+                thread_id="thread-2",
+                cwd="/tmp/project",
+                name="two",
+                preview="",
+                created_at=0,
+                updated_at=2,
+                source="cli",
+                status="idle",
+            ),
+            ThreadSummary(
+                thread_id="thread-3",
+                cwd="/tmp/project",
+                name="three",
+                preview="",
+                created_at=0,
+                updated_at=1,
+                source="cli",
+                status="idle",
+            ),
+        ]
+        handler._adapter.list_threads_all = lambda **kwargs: threads
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "show_more_sessions"},
+        ))
+
+        content = "\n".join(
+            element.get("content", "")
+            for element in response["card"]["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("thread-1", content)
+        self.assertIn("thread-2", content)
+        self.assertIn("thread-3", content)
+        bottom_action = self._action_elements(response["card"])[-1]
+        self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
+        self.assertEqual(response["toast"], "已展开全部线程。")
+
+    def test_expanded_sessions_card_stays_expanded_after_archive(self) -> None:
+        handler, _ = self._make_handler({"session_recent_limit": 1})
+        threads = [
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="one",
+                preview="",
+                created_at=0,
+                updated_at=3,
+                source="cli",
+                status="idle",
+            ),
+            ThreadSummary(
+                thread_id="thread-2",
+                cwd="/tmp/project",
+                name="two",
+                preview="",
+                created_at=0,
+                updated_at=2,
+                source="cli",
+                status="idle",
+            ),
+            ThreadSummary(
+                thread_id="thread-3",
+                cwd="/tmp/project",
+                name="three",
+                preview="",
+                created_at=0,
+                updated_at=1,
+                source="cli",
+                status="idle",
+            ),
+        ]
+
+        def _list_threads_all(**kwargs):
+            return [thread for thread in threads if thread.thread_id != "thread-3"]
+
+        handler._adapter.list_threads_all = lambda **kwargs: threads
+        handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "show_more_sessions"},
+        )
+        handler._adapter.list_threads_all = _list_threads_all
+        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(
+            summary=next(thread for thread in threads if thread.thread_id == thread_id)
+        )
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "archive_thread", "thread_id": "thread-3"},
+        ))
+
+        content = "\n".join(
+            element.get("content", "")
+            for element in response["card"]["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("thread-1", content)
+        self.assertIn("thread-2", content)
+        self.assertNotIn("thread-3", content)
+        bottom_action = self._action_elements(response["card"])[-1]
+        self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
+
+    def test_expanded_sessions_card_stays_expanded_after_rename(self) -> None:
+        handler, _ = self._make_handler({"session_recent_limit": 1})
+        threads = [
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="one",
+                preview="",
+                created_at=0,
+                updated_at=3,
+                source="cli",
+                status="idle",
+            ),
+            ThreadSummary(
+                thread_id="thread-2",
+                cwd="/tmp/project",
+                name="two",
+                preview="",
+                created_at=0,
+                updated_at=2,
+                source="cli",
+                status="idle",
+            ),
+            ThreadSummary(
+                thread_id="thread-3",
+                cwd="/tmp/project",
+                name="three",
+                preview="",
+                created_at=0,
+                updated_at=1,
+                source="cli",
+                status="idle",
+            ),
+        ]
+
+        def _rename_thread(thread_id: str, name: str) -> None:
+            for index, thread in enumerate(threads):
+                if thread.thread_id == thread_id:
+                    threads[index] = ThreadSummary(
+                        thread_id=thread.thread_id,
+                        cwd=thread.cwd,
+                        name=name,
+                        preview=thread.preview,
+                        created_at=thread.created_at,
+                        updated_at=thread.updated_at,
+                        source=thread.source,
+                        status=thread.status,
+                        active_flags=list(thread.active_flags),
+                        path=thread.path,
+                        model_provider=thread.model_provider,
+                        service_name=thread.service_name,
+                    )
+                    return
+            raise AssertionError(f"unexpected thread_id: {thread_id}")
+
+        handler._adapter.list_threads_all = lambda **kwargs: threads
+        handler._adapter.rename_thread = _rename_thread
+
+        handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "show_more_sessions"},
+        )
+        handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "show_rename_form", "thread_id": "thread-2"},
+        )
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {
+                "action": "rename_thread",
+                "thread_id": "thread-2",
+                "_form_value": {"rename_title": "two-renamed"},
+            },
+        ))
+
+        content = "\n".join(
+            element.get("content", "")
+            for element in response["card"]["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("thread-1", content)
+        self.assertIn("thread-2", content)
+        self.assertIn("thread-3", content)
+        self.assertIn("two-renamed", content)
+        bottom_action = self._action_elements(response["card"])[-1]
+        self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
+        self.assertEqual(response["toast"], "已重命名。")
+
     def test_resume_thread_in_background_refreshes_sessions_card(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
@@ -1456,6 +1674,100 @@ class CodexHandlerTests(unittest.TestCase):
         )
 
         self.assertTrue(any(message_id == "msg-session" for message_id, _ in bot.patches))
+
+    def test_expanded_sessions_card_stays_expanded_after_resume_refresh(self) -> None:
+        handler, bot = self._make_handler({"session_recent_limit": 1})
+        threads = [
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="one",
+                preview="",
+                created_at=0,
+                updated_at=3,
+                source="cli",
+                status="notLoaded",
+            ),
+            ThreadSummary(
+                thread_id="thread-2",
+                cwd="/tmp/project",
+                name="two",
+                preview="",
+                created_at=0,
+                updated_at=2,
+                source="cli",
+                status="idle",
+            ),
+            ThreadSummary(
+                thread_id="thread-3",
+                cwd="/tmp/project",
+                name="three",
+                preview="",
+                created_at=0,
+                updated_at=1,
+                source="cli",
+                status="idle",
+            ),
+        ]
+        scheduled: dict[str, object] = {}
+
+        class _CapturedThread:
+            def __init__(self, *, target, args=(), kwargs=None, daemon=None):
+                del daemon
+                scheduled["target"] = target
+                scheduled["args"] = args
+                scheduled["kwargs"] = kwargs or {}
+                scheduled["started"] = False
+
+            def start(self) -> None:
+                scheduled["started"] = True
+
+        def _read_thread(thread_id: str, include_turns: bool = False) -> ThreadSnapshot:
+            del include_turns
+            thread = next(item for item in threads if item.thread_id == thread_id)
+            return ThreadSnapshot(summary=thread)
+
+        handler._adapter.list_threads_all = lambda **kwargs: threads
+        handler._adapter.read_thread = _read_thread
+        handler._adapter.resume_thread = lambda thread_id, **kwargs: ThreadSnapshot(summary=_read_thread(thread_id).summary)
+
+        handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "show_more_sessions"},
+        )
+
+        with patch("bot.codex_session_ui_domain.threading.Thread", _CapturedThread):
+            response = self._unpack_card_response(handler.handle_card_action(
+                "ou_user",
+                "c1",
+                "msg-session",
+                {"action": "resume_thread", "thread_id": "thread-1"},
+            ))
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
+        pending_content = response["card"]["elements"][0]["content"]
+        self.assertIn("正在恢复线程", pending_content)
+        self.assertEqual(response["toast"], "正在恢复线程…")
+        self.assertTrue(scheduled.get("started"))
+
+        target = scheduled["target"]
+        args = scheduled["args"]
+        kwargs = scheduled["kwargs"]
+        target(*args, **kwargs)
+
+        patched = json.loads(next(content for message_id, content in bot.patches if message_id == "msg-session"))
+        content = "\n".join(
+            element.get("content", "")
+            for element in patched["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("thread-1", content)
+        self.assertIn("thread-2", content)
+        self.assertIn("thread-3", content)
+        bottom_action = self._action_elements(patched)[-1]
+        self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
 
     def test_help_overview_is_layered(self) -> None:
         handler, bot = self._make_handler()
