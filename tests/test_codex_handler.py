@@ -1130,37 +1130,13 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        handler._favorites.toggle("ou_user", "thread-1")
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
         handler.handle_message("ou_user", "c1", "/rm")
 
         self.assertEqual(handler._adapter.archive_thread_calls, ["thread-1"])
         self.assertEqual(handler._get_state("ou_user", "c1")["current_thread_id"], "")
-        self.assertFalse(handler._favorites.is_starred("ou_user", "thread-1"))
         self.assertIn("不是硬删除", bot.replies[-1][1])
-
-    def test_rm_command_clears_favorites_for_all_users(self) -> None:
-        handler, _ = self._make_handler()
-        thread = ThreadSummary(
-            thread_id="thread-1",
-            cwd="/tmp/project",
-            name="demo",
-            preview="hello",
-            created_at=0,
-            updated_at=0,
-            source="appServer",
-            status="idle",
-        )
-        handler._bind_thread("ou_user", "c1", thread)
-        handler._favorites.toggle("ou_user", "thread-1")
-        handler._favorites.toggle("ou_user2", "thread-1")
-        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
-
-        handler.handle_message("ou_user", "c1", "/rm")
-
-        self.assertFalse(handler._favorites.is_starred("ou_user", "thread-1"))
-        self.assertFalse(handler._favorites.is_starred("ou_user2", "thread-1"))
 
     def test_profile_command_clears_stale_local_default_profile(self) -> None:
         handler, bot = self._make_handler()
@@ -1349,7 +1325,7 @@ class CodexHandlerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "匹配到多个同名线程"):
             handler._resume_snapshot("demo")
 
-    def test_resume_command_for_not_loaded_thread_shows_guard_card(self) -> None:
+    def test_resume_command_for_not_loaded_thread_resumes_directly(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -1368,136 +1344,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "c1", "/resume demo")
 
-        self.assertEqual(len(bot.cards), 1)
-        _, card = bot.cards[0]
-        self.assertEqual(card["header"]["title"]["content"], "恢复线程前确认")
-
-    def test_resume_guard_preview_action_returns_handled_card(self) -> None:
-        handler, _ = self._make_handler()
-        thread = ThreadSummary(
-            thread_id="thread-1",
-            cwd="/tmp/project",
-            name="demo",
-            preview="hello",
-            created_at=0,
-            updated_at=0,
-            source="cli",
-            status="notLoaded",
-            service_name="codex-tui",
-        )
-        handler._adapter.list_threads_all = lambda **kwargs: [thread]
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-guard",
-            {"action": "preview_thread_snapshot", "thread_id": "thread-1"},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认（已处理）")
-        self.assertIn("已选择“查看快照”", response["card"]["elements"][0]["content"])
-        self.assertFalse(any(element.get("tag") == "action" for element in response["card"]["elements"]))
-
-    def test_resume_guard_write_action_returns_handled_card(self) -> None:
-        handler, _ = self._make_handler()
-        thread = ThreadSummary(
-            thread_id="thread-1",
-            cwd="/tmp/project",
-            name="demo",
-            preview="hello",
-            created_at=0,
-            updated_at=0,
-            source="cli",
-            status="notLoaded",
-            service_name="codex-tui",
-        )
-        handler._adapter.list_threads_all = lambda **kwargs: [thread]
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-guard",
-            {"action": "resume_thread_write", "thread_id": "thread-1"},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认（已处理）")
-        self.assertIn("已选择“恢复并继续写入”", response["card"]["elements"][0]["content"])
-        self.assertFalse(any(element.get("tag") == "action" for element in response["card"]["elements"]))
-
-    def test_resume_guard_cancel_action_returns_handled_card(self) -> None:
-        handler, _ = self._make_handler()
-        thread = ThreadSummary(
-            thread_id="thread-1",
-            cwd="/tmp/project",
-            name="demo",
-            preview="hello",
-            created_at=0,
-            updated_at=0,
-            source="cli",
-            status="notLoaded",
-            service_name="codex-tui",
-        )
-        handler._adapter.list_threads_all = lambda **kwargs: [thread]
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-guard",
-            {"action": "cancel_resume_guard", "thread_id": "thread-1"},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认（已处理）")
-        self.assertIn("已取消本次恢复", response["card"]["elements"][0]["content"])
-        self.assertFalse(any(element.get("tag") == "action" for element in response["card"]["elements"]))
-
-    def test_resume_guard_cancel_action_from_sessions_returns_sessions_card(self) -> None:
-        handler, _ = self._make_handler()
-        thread = ThreadSummary(
-            thread_id="thread-1",
-            cwd="/tmp/project",
-            name="demo",
-            preview="hello",
-            created_at=0,
-            updated_at=0,
-            source="cli",
-            status="notLoaded",
-            service_name="codex-tui",
-        )
-        handler._adapter.list_threads_all = lambda **kwargs: [thread]
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-session",
-            {"action": "cancel_resume_guard", "thread_id": "thread-1", "return_to_sessions": True},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
-
-    def test_resume_guard_preview_action_from_sessions_returns_sessions_card(self) -> None:
-        handler, _ = self._make_handler()
-        thread = ThreadSummary(
-            thread_id="thread-1",
-            cwd="/tmp/project",
-            name="demo",
-            preview="hello",
-            created_at=0,
-            updated_at=0,
-            source="cli",
-            status="notLoaded",
-            service_name="codex-tui",
-        )
-        handler._adapter.list_threads_all = lambda **kwargs: [thread]
-        handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-session",
-            {"action": "preview_thread_snapshot", "thread_id": "thread-1", "return_to_sessions": True},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
+        self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
 
     def test_session_card_mentions_global_resume_scope(self) -> None:
         handler, bot = self._make_handler()
@@ -1514,11 +1361,12 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(captured_kwargs["model_providers"], [])
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
-        self.assertIn("跨 provider 汇总", card["elements"][0]["content"])
-        self.assertIn("`/resume <thread_id|thread_name>`", card["elements"][0]["content"])
-        self.assertIn("`/help local`", card["elements"][0]["content"])
+        content = card["elements"][0]["content"]
+        self.assertIn("跨 provider 汇总", content)
+        self.assertIn("`/resume <thread_id|thread_name>`", content)
+        self.assertIn("`/help local`", content)
 
-    def test_session_card_uses_trisection_layout_for_row_actions(self) -> None:
+    def test_session_card_uses_bisection_layout_for_row_actions(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -1537,9 +1385,13 @@ class CodexHandlerTests(unittest.TestCase):
 
         _, card = bot.cards[0]
         action_elements = self._action_elements(card)
-        self.assertEqual(action_elements[0]["actions"][0]["text"]["content"], "收起")
-        self.assertEqual(action_elements[1]["layout"], "trisection")
-        self.assertEqual(action_elements[1]["actions"][2]["text"]["content"], "归档")
+        row_action = action_elements[0]
+        self.assertEqual(row_action["layout"], "bisection")
+        self.assertEqual(len(row_action["actions"]), 2)
+        self.assertEqual(row_action["actions"][0]["text"]["content"], "恢复")
+        self.assertEqual(row_action["actions"][1]["text"]["content"], "归档")
+        bottom_action = action_elements[-1]
+        self.assertTrue(any(btn["text"]["content"] == "收起" for btn in bottom_action["actions"]))
 
     def test_close_sessions_card_action_returns_closed_card(self) -> None:
         handler, _ = self._make_handler()
@@ -1624,7 +1476,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("/help session", content)
         self.assertIn("/help settings", content)
         self.assertIn("/help local", content)
-        self.assertIn("如需在本地继续同一线程，请使用 `fcodex`", content)
+        self.assertIn("fcodex 和飞书可以同时读写同一线程", content)
         action = self._first_action(card)
         self.assertEqual(action["layout"], "trisection")
         self.assertEqual([item["text"]["content"] for item in action["actions"]], ["session", "settings", "group"])
@@ -1853,7 +1705,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("👤 **你**", content)
         self.assertIn("🤖 **Codex**", content)
 
-    def test_resume_card_action_for_not_loaded_thread_returns_guard_card(self) -> None:
+    def test_resume_card_action_for_not_loaded_thread_resumes_directly(self) -> None:
         handler, _ = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -1875,7 +1727,8 @@ class CodexHandlerTests(unittest.TestCase):
             {"action": "resume_thread", "thread_id": "thread-1"},
         ))
 
-        self.assertEqual(response["card"]["header"]["title"]["content"], "恢复线程前确认")
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
+        self.assertIn("正在恢复线程", response["toast"])
 
     def test_show_rename_form_registers_pending_message(self) -> None:
         handler, _ = self._make_handler()

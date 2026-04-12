@@ -24,7 +24,6 @@ from bot.session_resolution import (
     resolve_resume_name_via_remote_backend,
 )
 from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
-from bot.stores.favorites_store import FavoritesStore
 from bot.stores.profile_state_store import ProfileStateStore
 
 _WRAPPER_COMMANDS = {
@@ -297,7 +296,6 @@ def _handle_rm_command(cfg: dict, app_server_url: str, user_args: list[str], dat
         return 2
     finally:
         adapter.stop()
-    FavoritesStore(data_dir).remove_thread_globally(thread.thread_id)
     print(f"已归档线程：`{thread.thread_id[:8]}…` {thread.title}")
     print("说明：这里调用的是 Codex 的线程归档（archive），会从常规列表中隐藏，不是硬删除。")
     return 0

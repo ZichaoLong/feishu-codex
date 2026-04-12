@@ -187,7 +187,7 @@ class CodexHelpDomain:
             "- `/resume` 会尝试应用当前默认 profile 的 model 和 model_provider；切换 profile 后 `/resume` 旧线程可切换 provider。\n"
             "- 如果匹配到多个同名线程，`/resume` 会报错，不会替你猜。\n"
             "- `/cd <path>` 切换目录并清空当前线程绑定；之后发送普通文本，会在新目录自动新建线程。\n"
-            "- `/rename` 改标题，`/star` 收藏当前线程，`/rm` 归档线程而不是硬删除。\n\n"
+            "- `/rename` 改标题，`/rm` 归档线程而不是硬删除。\n\n"
             "**本地继续同一线程**\n"
             "- 可先用 `fcodex /session` 找线程；需要精确恢复时再用 `fcodex /resume`。\n"
             f"- {self._local_thread_safety_rule}"

@@ -816,14 +816,12 @@ class FCodexTests(unittest.TestCase):
         mock_adapter.stop.return_value = None
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.CodexAppServerAdapter", return_value=mock_adapter):
-                with patch("bot.fcodex.FavoritesStore.remove_thread_globally") as mock_remove:
-                    with patch("bot.fcodex.sys.stdout", stdout):
-                        with patch("sys.argv", ["fcodex", "/rm", thread_id]):
-                            with self.assertRaises(SystemExit) as exc:
-                                fcodex_main()
+                with patch("bot.fcodex.sys.stdout", stdout):
+                    with patch("sys.argv", ["fcodex", "/rm", thread_id]):
+                        with self.assertRaises(SystemExit) as exc:
+                            fcodex_main()
         self.assertEqual(exc.exception.code, 0)
         mock_adapter.archive_thread.assert_called_once_with(thread_id)
-        mock_remove.assert_called_once_with(thread_id)
         self.assertIn("已归档线程：`019d2e94…` demo", stdout.getvalue())
         self.assertIn("不是硬删除", stdout.getvalue())
 

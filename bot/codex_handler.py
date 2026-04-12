@@ -32,7 +32,6 @@ from bot.cards import (
     build_markdown_card,
     build_plan_card,
     build_permissions_approval_card,
-    build_thread_snapshot_card,
     make_card_response,
 )
 from bot.config import load_config_file
@@ -40,7 +39,6 @@ from bot.constants import (
     DEFAULT_APP_SERVER_MODE,
     DEFAULT_HISTORY_PREVIEW_ROUNDS,
     DEFAULT_SESSION_RECENT_LIMIT,
-    DEFAULT_SESSION_STARRED_LIMIT,
     DEFAULT_STREAM_PATCH_INTERVAL_MS,
     DEFAULT_THREAD_LIST_QUERY_LIMIT,
     FC_DATA_DIR,
@@ -62,7 +60,6 @@ from bot.session_resolution import (
     resolve_resume_target_by_name,
 )
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
-from bot.stores.favorites_store import FavoritesStore
 from bot.stores.profile_state_store import ProfileStateStore
 
 logger = logging.getLogger(__name__)
@@ -72,7 +69,7 @@ _CARD_LOG_LIMIT_DEFAULT = 8000
 _APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _LOCAL_THREAD_SAFETY_RULE = (
-    "如需在本地继续同一线程，请使用 `fcodex`，不要与裸 `codex` 同时写同一线程。"
+    "fcodex 和飞书可以同时读写同一线程；裸 codex 不要与 fcodex 或飞书同时写同一线程。"
 )
 _GROUP_SHARED_STATE_KEY = "__group__"
 _EMPTY_RESOLVED_PROFILE = ResolvedProfileConfig()
@@ -198,7 +195,6 @@ class CodexHandler(BotHandler):
             str(cfg.get("default_working_dir", "")),
         )
         self._session_recent_limit = int(cfg.get("session_recent_limit", DEFAULT_SESSION_RECENT_LIMIT))
-        self._session_starred_limit = int(cfg.get("session_starred_limit", DEFAULT_SESSION_STARRED_LIMIT))
         self._thread_list_query_limit = int(cfg.get("thread_list_query_limit", DEFAULT_THREAD_LIST_QUERY_LIMIT))
         self._history_preview_rounds = int(cfg.get("history_preview_rounds", DEFAULT_HISTORY_PREVIEW_ROUNDS))
         self._stream_patch_interval_ms = int(
@@ -218,7 +214,6 @@ class CodexHandler(BotHandler):
                     data_dir=self._data_dir,
                 ),
             )
-        self._favorites = FavoritesStore(self._data_dir)
         self._profile_state = ProfileStateStore(self._data_dir)
         self._adapter = CodexAppServerAdapter(
             self._adapter_config,
@@ -696,9 +691,6 @@ class CodexHandler(BotHandler):
             "/rename": _CommandRoute(
                 handler=self._session_ui_domain.handle_rename_command,
             ),
-            "/star": _CommandRoute(
-                handler=self._session_ui_domain.handle_star_command,
-            ),
             "/approval": _CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_approval_command(
                     sender_id, chat_id, arg, message_id=message_id
@@ -741,16 +733,9 @@ class CodexHandler(BotHandler):
                 handler=self._session_ui_domain.handle_resume_thread_action,
                 group_guard="group_admin",
             ),
-            "preview_thread_snapshot": _ActionRoute(
-                handler=self._session_ui_domain.handle_preview_thread_snapshot_action,
+            "show_more_sessions": _ActionRoute(
+                handler=self._session_ui_domain.handle_show_more_sessions_action,
                 group_guard="group_admin",
-            ),
-            "resume_thread_write": _ActionRoute(
-                handler=self._session_ui_domain.handle_resume_thread_write_action,
-                group_guard="group_admin",
-            ),
-            "cancel_resume_guard": _ActionRoute(
-                handler=self._session_ui_domain.handle_cancel_resume_guard_action,
             ),
             "close_sessions_card": _ActionRoute(
                 handler=self._session_ui_domain.handle_close_sessions_card_action,
@@ -780,10 +765,6 @@ class CodexHandler(BotHandler):
             ),
             "show_group_mode_card": _ActionRoute(
                 handler=self._group_domain.handle_show_group_mode_card_action,
-                group_guard="group_admin",
-            ),
-            "toggle_star_thread": _ActionRoute(
-                handler=self._session_ui_domain.handle_toggle_star_action,
                 group_guard="group_admin",
             ),
             "archive_thread": _ActionRoute(
@@ -1375,28 +1356,6 @@ class CodexHandler(BotHandler):
             message_id=message_id,
         )
 
-    def _send_thread_snapshot_in_background(self, chat_id: str, thread_id: str, *, message_id: str = "") -> None:
-        try:
-            snapshot = self._read_thread_snapshot(thread_id, original_arg=thread_id, include_turns=True)
-        except Exception as exc:
-            logger.exception("读取线程快照失败")
-            self._reply_text(chat_id, f"读取线程快照失败：{exc}", message_id=message_id)
-            return
-        rounds = self._extract_history_rounds(snapshot)
-        self._reply_card(
-            chat_id,
-            build_thread_snapshot_card(
-                snapshot.summary.thread_id,
-                title=snapshot.summary.title,
-                cwd=snapshot.summary.cwd,
-                updated_at=snapshot.summary.updated_at,
-                source=snapshot.summary.source,
-                service_name=snapshot.summary.service_name,
-                rounds=rounds,
-            ),
-            message_id=message_id,
-        )
-
     def _resolve_resume_target(self, arg: str) -> ThreadSummary:
         target = arg.strip()
         if looks_like_thread_id(target):
@@ -1463,10 +1422,6 @@ class CodexHandler(BotHandler):
                     "这通常意味着该线程正被本地 TUI 使用，或当前版本暂不支持加载它的完整历史。"
                 ) from exc
             raise
-
-    @staticmethod
-    def _is_loaded_in_current_backend(thread: ThreadSummary) -> bool:
-        return thread.status not in {"", "notLoaded"}
 
     def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
         threads = self._list_global_threads()

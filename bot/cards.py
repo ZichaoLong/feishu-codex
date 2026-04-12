@@ -1054,173 +1054,11 @@ def build_ask_user_answered_card(
     }
 
 
-def _thread_origin_text(source: str, service_name: str | None) -> str:
-    source_text = source or "unknown"
-    if service_name:
-        return f"`{source_text}` / `{service_name}`"
-    return f"`{source_text}`"
-
-
-def build_resume_guard_card(
-    thread_id: str,
-    *,
-    title: str,
-    cwd: str,
-    updated_at: int,
-    source: str,
-    service_name: str | None,
-    return_to_sessions: bool = False,
-) -> dict:
-    """构造外部线程恢复风险卡片。"""
-    origin_text = _thread_origin_text(source, service_name)
-    content = (
-        f"**{shorten(title, 160)}**\n"
-        f"thread: `{thread_id[:8]}…`\n"
-        f"目录：`{display_path(cwd)}`\n"
-        f"更新时间：`{format_timestamp(updated_at)}`\n"
-        f"来源：{origin_text}\n\n"
-        "该线程当前**未加载在 feishu-codex 的 backend 中**。\n"
-        "如果直接恢复并继续写入，feishu-codex 会在自己的 backend 里再恢复一份 live thread。\n"
-        "若本地裸 `codex` 也继续写同一线程，历史可能分叉或错乱。\n\n"
-        "如果只是想先看内容，请选“查看快照”。\n"
-        "如果希望本地与飞书继续同一个线程，请改用 `fcodex`，不要直接用裸 `codex`。"
-    )
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "恢复线程前确认"},
-            "template": "orange",
-        },
-        "elements": [
-            {"tag": "markdown", "content": content},
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "查看快照"},
-                        "type": "primary",
-                        "value": {
-                            "action": "preview_thread_snapshot",
-                            "plugin": KEYWORD,
-                            "thread_id": thread_id,
-                            "return_to_sessions": return_to_sessions,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "恢复并继续写入"},
-                        "type": "danger",
-                        "value": {
-                            "action": "resume_thread_write",
-                            "plugin": KEYWORD,
-                            "thread_id": thread_id,
-                            "return_to_sessions": return_to_sessions,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "取消"},
-                        "type": "default",
-                        "value": {
-                            "action": "cancel_resume_guard",
-                            "plugin": KEYWORD,
-                            "thread_id": thread_id,
-                            "return_to_sessions": return_to_sessions,
-                        },
-                    },
-                ],
-            },
-        ],
-    }
-
-
-def build_resume_guard_handled_card(
-    thread_id: str,
-    *,
-    title: str,
-    cwd: str,
-    updated_at: int,
-    source: str,
-    service_name: str | None,
-    decision: str,
-    detail: str,
-    template: str = "grey",
-) -> dict:
-    """构造已处理的线程恢复确认卡片。"""
-    origin_text = _thread_origin_text(source, service_name)
-    content = (
-        f"**{shorten(title, 160)}**\n"
-        f"thread: `{thread_id[:8]}…`\n"
-        f"目录：`{display_path(cwd)}`\n"
-        f"更新时间：`{format_timestamp(updated_at)}`\n"
-        f"来源：{origin_text}\n\n"
-        f"**已处理**：{decision}\n"
-        f"{detail}"
-    )
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "恢复线程前确认（已处理）"},
-            "template": template,
-        },
-        "elements": [{"tag": "markdown", "content": content}],
-    }
-
-
-def build_thread_snapshot_card(
-    thread_id: str,
-    *,
-    title: str,
-    cwd: str,
-    updated_at: int,
-    source: str,
-    service_name: str | None,
-    rounds: list[tuple[str, str]],
-) -> dict:
-    """构造线程快照卡片。"""
-    origin_text = _thread_origin_text(source, service_name)
-    elements: list[dict] = [
-        {
-            "tag": "markdown",
-            "content": (
-                f"**{shorten(title, 160)}**\n"
-                f"thread: `{thread_id[:8]}…`\n"
-                f"目录：`{display_path(cwd)}`\n"
-                f"更新时间：`{format_timestamp(updated_at)}`\n"
-                f"来源：{origin_text}\n\n"
-                "*当前仅查看快照，尚未在 feishu-codex backend 中恢复此线程。*"
-            ),
-        },
-        {"tag": "hr"},
-    ]
-
-    if rounds:
-        for user_text, assistant_text in rounds:
-            elements.append({"tag": "markdown", "content": f"👤 **你**\n{shorten(user_text, _HISTORY_TEXT_MAX)}"})
-            elements.append({"tag": "markdown", "content": f"🤖 **Codex**\n{shorten(assistant_text, _HISTORY_TEXT_MAX)}"})
-            elements.append({"tag": "hr"})
-    else:
-        elements.append({"tag": "markdown", "content": "*暂无可展示历史。*"})
-
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": f"线程 {thread_id[:8]}… 快照"},
-            "template": "green",
-        },
-        "elements": elements,
-    }
-
-
 def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
     """构造单个线程行。"""
     thread_id = session["thread_id"]
     current = thread_id == current_thread_id
     title = session.get("title", "（无标题）")
-    if session.get("starred"):
-        title = f"⭐ {title}"
 
     summary_parts = [f"**{thread_id[:8]}…**", f"`{display_path(session.get('cwd', ''))}`"]
     if session.get("model_provider"):
@@ -1232,7 +1070,7 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
         {"tag": "markdown", "content": line},
         {
             "tag": "action",
-            "layout": "trisection",
+            "layout": "bisection",
             "actions": [
                 {
                     "tag": "button",
@@ -1243,19 +1081,6 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
                     "type": "primary" if current else "default",
                     "value": {
                         "action": "resume_thread",
-                        "plugin": KEYWORD,
-                        "thread_id": thread_id,
-                    },
-                },
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": "取消收藏" if session.get("starred") else "收藏",
-                    },
-                    "type": "default",
-                    "value": {
-                        "action": "toggle_star_thread",
                         "plugin": KEYWORD,
                         "thread_id": thread_id,
                     },
@@ -1282,22 +1107,11 @@ def build_sessions_card(
     working_dir: str,
     total_count: int,
     *,
-    shown_starred_count: int,
-    total_starred_count: int,
-    shown_unstarred_count: int,
-    total_unstarred_count: int,
+    shown_count: int = 0,
+    expanded: bool = False,
 ) -> dict:
     """构造线程列表卡片。"""
     working_dir_display = display_path(working_dir) or working_dir or "."
-    summary_parts: list[str] = []
-    if total_starred_count:
-        summary = f"收藏 {shown_starred_count} / {total_starred_count} 个"
-        summary_parts.append(summary)
-    if total_unstarred_count:
-        summary = f"未收藏 {shown_unstarred_count} / {total_unstarred_count} 个"
-        summary_parts.append(summary)
-    if not summary_parts:
-        summary_parts.append(f"共 {total_count} 个线程")
 
     elements: list[dict] = [
         {
@@ -1305,34 +1119,50 @@ def build_sessions_card(
             "content": (
                 f"当前目录：`{working_dir_display}`\n"
                 "已按当前目录跨 provider 汇总显示线程。\n"
-                f"收藏优先，其余按最近更新时间排序。\n"
-                f"当前显示：{'，'.join(summary_parts)}。\n"
+                f"按最近更新时间排序，共 {total_count} 个线程。\n"
                 "想恢复其他目录的线程，或按名字做全局精确查找，请用 `/resume <thread_id|thread_name>`。\n"
                 "如需在本地继续同一线程，请使用 `fcodex`；详情见 `/help local`。"
             ),
         },
-        {
-            "tag": "action",
-            "actions": [
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": "收起"},
-                    "type": "default",
-                    "value": {
-                        "action": "close_sessions_card",
-                        "plugin": KEYWORD,
-                    },
-                }
-            ],
-        },
         {"tag": "hr"},
     ]
 
-    for session in sessions:
+    if expanded or total_count <= shown_count:
+        display_sessions = sessions
+    else:
+        display_sessions = sessions[:shown_count]
+
+    for session in display_sessions:
         elements.extend(build_session_row(session, current_thread_id))
 
     if not sessions:
         elements.append({"tag": "markdown", "content": "*当前目录下暂无可恢复线程。*"})
+
+    bottom_actions: list[dict] = []
+    if not expanded and total_count > shown_count and sessions:
+        bottom_actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "更多"},
+                "type": "default",
+                "value": {
+                    "action": "show_more_sessions",
+                    "plugin": KEYWORD,
+                },
+            }
+        )
+    bottom_actions.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "收起"},
+            "type": "default",
+            "value": {
+                "action": "close_sessions_card",
+                "plugin": KEYWORD,
+            },
+        }
+    )
+    elements.append({"tag": "action", "actions": bottom_actions})
 
     return {
         "config": _card_config(),
