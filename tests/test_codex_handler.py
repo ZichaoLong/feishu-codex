@@ -923,6 +923,22 @@ class CodexHandlerTests(unittest.TestCase):
             ["markdown", "hr", "markdown"],
         )
 
+    def test_execution_card_process_panel_defaults_to_collapsed(self) -> None:
+        card = build_execution_card(
+            "process log",
+            [ExecutionReplySegment("assistant", "reply")],
+            running=True,
+        )
+
+        process_panel = next(
+            element
+            for element in card["body"]["elements"]
+            if isinstance(element, dict)
+            and element.get("tag") == "collapsible_panel"
+            and element.get("header", {}).get("title", {}).get("content") == "执行过程"
+        )
+        self.assertFalse(process_panel["expanded"])
+
     def test_agent_message_completed_without_delta_preserves_divider_after_work(self) -> None:
         handler, bot = self._make_handler()
 

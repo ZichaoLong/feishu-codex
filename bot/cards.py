@@ -307,12 +307,12 @@ def build_execution_card(
         log_tables = count_card_tables(log_text)
         if log_tables > _MAX_CARD_TABLES:
             log_text = limit_card_tables(log_text, _MAX_CARD_TABLES)
-        elements.append(_panel("执行过程", log_text, expanded=running))
+        elements.append(_panel("执行过程", log_text, expanded=False))
         elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=True))
     elif reply_panel_elements:
         elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=True))
     elif log_text:
-        elements.append(_panel("执行过程", limit_card_tables(log_text), expanded=running))
+        elements.append(_panel("执行过程", limit_card_tables(log_text), expanded=False))
     else:
         elements.append({"tag": "markdown", "content": "*暂无输出*"})
 
