@@ -261,6 +261,25 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             {"type": "dangerFullAccess"},
         )
 
+    def test_steer_turn_sends_expected_turn_id(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.steer_turn(thread_id="thread-1", turn_id="turn-9", text="follow up")
+
+        self.assertEqual(
+            fake_rpc.calls[0],
+            (
+                "turn/steer",
+                {
+                    "threadId": "thread-1",
+                    "input": [{"type": "text", "text": "follow up"}],
+                    "expectedTurnId": "turn-9",
+                },
+            ),
+        )
+
     def test_list_threads_can_explicitly_disable_provider_filter(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
         fake_rpc = _FakeRpc()

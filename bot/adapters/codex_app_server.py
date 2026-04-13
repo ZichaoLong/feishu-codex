@@ -261,6 +261,14 @@ class CodexAppServerAdapter(AgentAdapter):
         )
         return self._rpc.request("turn/start", _compact(params))
 
+    def steer_turn(self, *, thread_id: str, turn_id: str, text: str) -> dict[str, Any]:
+        params = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": text}],
+            "expectedTurnId": turn_id,
+        }
+        return self._rpc.request("turn/steer", params)
+
     def interrupt_turn(self, *, thread_id: str, turn_id: str) -> None:
         self._rpc.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 
