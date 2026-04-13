@@ -18,7 +18,7 @@ from bot.cards import (
     CommandResult,
     build_approval_policy_card,
     build_collaboration_mode_card,
-    build_markdown_card,
+    build_profile_card,
     build_permissions_preset_card,
     build_sandbox_policy_card,
     make_card_response,
@@ -216,6 +216,7 @@ class CodexSettingsDomain:
         profile_resolution = owner._current_default_profile_resolution(runtime_config)
         local_profile = profile_resolution.effective_profile
         profiles = {profile.name: profile for profile in runtime_config.profiles}
+        profile_names = [profile.name for profile in runtime_config.profiles if profile.name]
 
         def _profile_provider_text(profile_name: str) -> str:
             if not profile_name:
@@ -225,19 +226,30 @@ class CodexSettingsDomain:
                 return f"`{profile.model_provider}`"
             return "未显式设置，实际以新线程解析结果为准"
 
-        if not arg:
-            example_profile = runtime_config.profiles[0].name if runtime_config.profiles else "name"
-            lines = [
-                f"当前默认 profile：`{local_profile or '（未设置）'}`",
-                f"默认 profile 对应 provider：{_profile_provider_text(local_profile)}",
-                f"切换方式：`/profile <name>`，例如：`/profile {example_profile}`",
-            ]
-            if runtime_config.profiles:
-                lines.extend(["", "**可用 profile**"])
-                for profile in runtime_config.profiles:
-                    provider = _profile_provider_text(profile.name)
-                    marker = " <- 默认" if profile.name == local_profile else ""
-                    lines.append(f"- `{profile.name}` -> {provider}{marker}")
+        def _build_profile_summary_card(
+            *,
+            leading_lines: list[str] | None = None,
+            current_profile: str,
+        ) -> dict:
+            lines = list(leading_lines or [])
+            lines.extend(
+                [
+                    f"当前默认 profile：`{current_profile or '（未设置）'}`",
+                    f"默认 profile 对应 provider：{_profile_provider_text(current_profile)}",
+                ]
+            )
+            if profile_names:
+                lines.extend(
+                    [
+                        "切换方式：发送 `/profile <name>`，或直接点下面按钮。",
+                        "",
+                        "**可用 profile**",
+                    ]
+                )
+                for profile_name in profile_names:
+                    provider = _profile_provider_text(profile_name)
+                    marker = " <- 默认" if profile_name == current_profile else ""
+                    lines.append(f"- `{profile_name}` -> {provider}{marker}")
             else:
                 lines.append("未在当前 Codex 配置中发现可用 profile。")
             lines.extend(
@@ -258,7 +270,14 @@ class CodexSettingsDomain:
                     "注意：当前 feishu-codex 配置写死了 "
                     f"`model_provider: {owner._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
                 )
-            return CommandResult(card=build_markdown_card("Codex 默认 Profile", "\n".join(lines)))
+            return build_profile_card(
+                content="\n".join(lines),
+                profile_names=profile_names,
+                current_profile=current_profile,
+            )
+
+        if not arg:
+            return CommandResult(card=_build_profile_summary_card(current_profile=local_profile))
 
         target_profile = arg.strip()
         if target_profile not in profiles:
@@ -273,28 +292,13 @@ class CodexSettingsDomain:
             return CommandResult(text=f"切换 profile 失败：{exc}")
 
         state = owner._get_state(sender_id, chat_id, message_id)
-        lines = [
-            f"已切换默认 profile：`{target_profile}`",
-            f"默认 profile 对应 provider：{_profile_provider_text(target_profile)}",
-            "再次切换：`/profile <name>`",
-        ]
-        lines.extend(
-            [
-                "",
-                "**说明**",
-                "作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。",
-            ]
-        )
+        lines = [f"已切换默认 profile：`{target_profile}`"]
         if state["running"]:
             lines.append("如果当前正在执行，新 profile 从下一轮生效。")
-        lines.append("已打开的 `fcodex` TUI 不会热切换。")
-        lines.append("如用 `fcodex -p` 固定 profile，该会话不受影响。")
-        if owner._adapter_config.model_provider:
-            lines.append(
-                "注意：当前 feishu-codex 配置写死了 "
-                f"`model_provider: {owner._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
-            )
-        return CommandResult(card=build_markdown_card("Codex 默认 Profile", "\n".join(lines)))
+        return CommandResult(card=_build_profile_summary_card(
+            leading_lines=lines + [""],
+            current_profile=target_profile,
+        ))
 
     def handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
@@ -471,4 +475,22 @@ class CodexSettingsDomain:
                 state["collaboration_mode"],
                 running=state["running"],
             )
+        )
+
+    def handle_set_profile(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
+        owner = self._owner
+        target_profile = str(action_value.get("profile", "")).strip()
+        if not target_profile:
+            return make_card_response(toast="缺少 profile 名称", toast_type="warning")
+        result = self.handle_profile_command(sender_id, chat_id, target_profile)
+        if result.card is None:
+            return make_card_response(toast=result.text or "切换 profile 失败", toast_type="warning")
+        toast = f"已切换默认 profile：{target_profile}"
+        state = owner._get_state(sender_id, chat_id)
+        if state["running"]:
+            toast += "；下一轮生效"
+        return make_card_response(
+            card=result.card,
+            toast=toast,
+            toast_type="success",
         )

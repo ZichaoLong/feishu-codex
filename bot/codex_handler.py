@@ -814,6 +814,12 @@ class CodexHandler(BotHandler):
                 ),
                 group_guard="group_admin",
             ),
+            "set_profile": _ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_profile(
+                    sender_id, chat_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
             "set_collaboration_mode": _ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_collaboration_mode(
                     sender_id, chat_id, action_value

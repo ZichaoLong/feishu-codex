@@ -1206,13 +1206,23 @@ class CodexHandlerTests(unittest.TestCase):
         content = card["elements"][0]["content"]
         self.assertIn("当前默认 profile：`（未设置）`", content)
         self.assertIn("默认 profile 对应 provider：跟随 Codex 原生默认", content)
-        self.assertIn("切换方式：`/profile <name>`，例如：`/profile provider1`", content)
+        self.assertIn("切换方式：发送 `/profile <name>`，或直接点下面按钮。", content)
         self.assertIn("**可用 profile**", content)
         self.assertIn("`provider1` -> `provider1_api`", content)
         self.assertIn("`provider2` -> `provider2_api`", content)
         self.assertIn("**说明**", content)
         self.assertIn("作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。", content)
         self.assertIn("已打开的 `fcodex` TUI 不会热切换。", content)
+        action = self._action_elements(card)[0]
+        self.assertNotIn("layout", action)
+        self.assertEqual(
+            [item["text"]["content"] for item in action["actions"]],
+            ["provider1", "provider2"],
+        )
+        self.assertEqual(
+            [item["type"] for item in action["actions"]],
+            ["default", "default"],
+        )
 
     def test_profile_command_switches_local_default_profile(self) -> None:
         handler, bot = self._make_handler()
@@ -1225,10 +1235,15 @@ class CodexHandlerTests(unittest.TestCase):
         content = card["elements"][0]["content"]
         self.assertIn("已切换默认 profile：`provider2`", content)
         self.assertIn("默认 profile 对应 provider：`provider2_api`", content)
-        self.assertIn("再次切换：`/profile <name>`", content)
+        self.assertIn("切换方式：发送 `/profile <name>`，或直接点下面按钮。", content)
         self.assertIn("**说明**", content)
         self.assertIn("作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。", content)
         self.assertIn("已打开的 `fcodex` TUI 不会热切换。", content)
+        action = self._action_elements(card)[0]
+        self.assertEqual(
+            [item["type"] for item in action["actions"]],
+            ["default", "primary"],
+        )
         self.assertEqual(handler._profile_state.load_default_profile(), "provider2")
 
     def test_profile_command_prefers_profile_mapping_for_default_provider(self) -> None:
@@ -1250,6 +1265,27 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("当前默认 profile：`provider2`", content)
         self.assertIn("默认 profile 对应 provider：`provider2_api`", content)
         self.assertNotIn("当前运行时 provider", content)
+
+    def test_profile_card_action_updates_state(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "m1",
+            {"action": "set_profile", "profile": "provider2"},
+        ))
+
+        self.assertEqual(handler._profile_state.load_default_profile(), "provider2")
+        self.assertEqual(response["toast_type"], "success")
+        self.assertIn("provider2", response["toast"])
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 默认 Profile")
+        action = self._action_elements(response["card"])[0]
+        self.assertNotIn("layout", action)
+        self.assertEqual(
+            [item["type"] for item in action["actions"]],
+            ["default", "primary"],
+        )
 
     def test_profile_command_with_unknown_name_shows_usage(self) -> None:
         handler, bot = self._make_handler()
@@ -1509,7 +1545,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`/resume <thread_id|thread_name>`", content)
         self.assertIn("`/help local`", content)
 
-    def test_session_card_uses_bisection_layout_for_row_actions(self) -> None:
+    def test_session_card_uses_trisection_layout_for_row_actions(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -1529,12 +1565,37 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[0]
         action_elements = self._action_elements(card)
         row_action = action_elements[0]
-        self.assertEqual(row_action["layout"], "bisection")
+        self.assertEqual(row_action["layout"], "trisection")
         self.assertEqual(len(row_action["actions"]), 2)
         self.assertEqual(row_action["actions"][0]["text"]["content"], "恢复")
         self.assertEqual(row_action["actions"][1]["text"]["content"], "归档")
         bottom_action = action_elements[-1]
         self.assertTrue(any(btn["text"]["content"] == "收起" for btn in bottom_action["actions"]))
+
+    def test_session_card_marks_current_thread_in_button_text(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        state = handler._get_state("ou_user", "c1")
+        with handler._lock:
+            state["current_thread_id"] = "thread-1"
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+
+        handler.handle_message("ou_user", "c1", "/session")
+
+        _, card = bot.cards[0]
+        self.assertNotIn("**当前**", card["elements"][2]["content"])
+        row_action = self._action_elements(card)[0]
+        self.assertEqual(row_action["actions"][0]["text"]["content"], "当前")
+        self.assertEqual(row_action["actions"][0]["type"], "primary")
 
     def test_close_sessions_card_action_returns_closed_card(self) -> None:
         handler, _ = self._make_handler()

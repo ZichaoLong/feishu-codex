@@ -63,6 +63,48 @@ def build_markdown_card(title: str, content: str, *, template: str = "blue") -> 
     }
 
 
+def build_profile_card(
+    *,
+    content: str,
+    profile_names: list[str],
+    current_profile: str,
+) -> dict:
+    """构造默认 profile 选择卡片。"""
+    elements: list[dict] = [
+        {"tag": "markdown", "content": content},
+    ]
+    if profile_names:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": profile_name},
+                            "type": "primary" if profile_name == current_profile else "default",
+                            "value": {
+                                "action": "set_profile",
+                                "plugin": KEYWORD,
+                                "profile": profile_name,
+                            },
+                        }
+                        for profile_name in profile_names
+                    ],
+                },
+            ]
+        )
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": "Codex 默认 Profile"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
 def build_help_dashboard_card(content: str) -> dict:
     """构造 /help 总览仪表盘。"""
     return {
@@ -1070,13 +1112,13 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
         {"tag": "markdown", "content": line},
         {
             "tag": "action",
-            "layout": "bisection",
+            "layout": "trisection",
             "actions": [
                 {
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": f"{'✓ 当前  ' if current else ''}恢复",
+                        "content": "当前" if current else "恢复",
                     },
                     "type": "primary" if current else "default",
                     "value": {
