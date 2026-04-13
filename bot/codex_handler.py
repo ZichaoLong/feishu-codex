@@ -54,6 +54,7 @@ from bot.codex_help_domain import CodexHelpDomain
 from bot.codex_session_ui_domain import CodexSessionUiDomain
 from bot.codex_settings_domain import CodexSettingsDomain
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
+from bot.execution_transcript import ExecutionReplySegment, ExecutionTranscript
 from bot.session_resolution import (
     list_global_threads,
     looks_like_thread_id,
@@ -92,6 +93,15 @@ _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
         "sandbox": "danger-full-access",
     },
 }
+_WORK_ITEM_LABELS = {
+    "commandExecution": "命令执行",
+    "fileChange": "文件修改",
+    "imageGeneration": "图片生成",
+    "mcpToolCall": "MCP 工具调用",
+    "patchApply": "补丁应用",
+    "viewImageToolCall": "查看图片",
+    "webSearch": "网页搜索",
+}
 
 
 @dataclass(frozen=True)
@@ -125,8 +135,7 @@ class _RuntimeState(TypedDict):
     current_message_id: str
     current_prompt_message_id: str
     current_actor_open_id: str
-    full_reply_text: str
-    full_log_text: str
+    execution_transcript: ExecutionTranscript
     started_at: float
     last_runtime_event_at: float
     last_patch_at: float
@@ -452,8 +461,7 @@ class CodexHandler(BotHandler):
             "current_message_id": "",
             "current_prompt_message_id": "",
             "current_actor_open_id": "",
-            "full_reply_text": "",
-            "full_log_text": "",
+            "execution_transcript": ExecutionTranscript(),
             "started_at": 0.0,
             "last_runtime_event_at": 0.0,
             "last_patch_at": 0.0,
@@ -1055,9 +1063,10 @@ class CodexHandler(BotHandler):
                 state["current_thread_name"] = ""
             if reason:
                 status_label = "当前会话已失联" if clear_thread_binding else "当前运行态已失联"
-                state["full_log_text"] += f"\n[{status_label}] {reason}\n"
-                if not state["full_reply_text"]:
-                    state["full_reply_text"] = f"{status_label}：{reason}"
+                transcript = state["execution_transcript"]
+                transcript.append_process_note(f"\n[{status_label}] {reason}\n")
+                if not transcript.has_reply_output():
+                    transcript.set_reply_text(f"{status_label}：{reason}")
         self._flush_execution_card(sender_id, chat_id, immediate=True)
 
     def _resume_bound_thread(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
@@ -1084,7 +1093,7 @@ class CodexHandler(BotHandler):
         return snapshot.summary.thread_id
 
     @staticmethod
-    def _snapshot_reply_text(snapshot: ThreadSnapshot, *, turn_id: str = "") -> str:
+    def _snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> tuple[str, list[dict[str, Any]]]:
         target_turns = snapshot.turns
         normalized_turn_id = str(turn_id or "").strip()
         if normalized_turn_id:
@@ -1096,14 +1105,21 @@ class CodexHandler(BotHandler):
             if matched_turns:
                 target_turns = matched_turns[-1:]
         for turn in reversed(target_turns):
+            items = turn.get("items") or []
             parts = [
                 str(item.get("text", "") or "").strip()
-                for item in turn.get("items") or []
+                for item in items
                 if item.get("type") == "agentMessage" and str(item.get("text", "") or "").strip()
             ]
             if parts:
-                return "\n\n".join(parts)
-        return ""
+                return "\n\n".join(parts), items
+        return "", []
+
+    def _card_reply_segments(
+        self,
+        transcript: ExecutionTranscript,
+    ) -> list[ExecutionReplySegment]:
+        return transcript.reply_segments_for_card(self._card_reply_limit)
 
     def _finalize_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
         state = self._get_state(sender_id, chat_id)
@@ -1159,14 +1175,19 @@ class CodexHandler(BotHandler):
                 return self._finalize_execution_card_from_state(sender_id, chat_id)
             return False
 
-        reply_text = self._snapshot_reply_text(snapshot, turn_id=turn_id)
+        reply_text, reply_items = self._snapshot_reply(snapshot, turn_id=turn_id)
         state = self._get_state(sender_id, chat_id)
         should_finalize = force_finalize or snapshot.summary.status != "active"
         with self._lock:
             state["current_thread_name"] = snapshot.summary.name or snapshot.summary.preview or state["current_thread_name"]
             state["working_dir"] = snapshot.summary.cwd or state["working_dir"]
-            if reply_text and len(reply_text) >= len(state["full_reply_text"]):
-                state["full_reply_text"] = reply_text
+            transcript = state["execution_transcript"]
+            if reply_text and len(reply_text) >= len(transcript.reply_text()):
+                if not transcript.rebuild_reply_from_snapshot_items(
+                    reply_items,
+                    fallback_text=reply_text,
+                ):
+                    transcript.set_reply_text(reply_text)
             if not should_finalize:
                 state["running"] = True
                 self._mark_runtime_event_locked(state)
@@ -1197,8 +1218,7 @@ class CodexHandler(BotHandler):
             state["current_turn_id"] = ""
             state["current_prompt_message_id"] = str(message_id or "").strip()
             state["current_actor_open_id"] = str(actor_open_id or "").strip() or self._group_actor_open_id(message_id)
-            state["full_reply_text"] = ""
-            state["full_log_text"] = ""
+            state["execution_transcript"].reset()
             state["started_at"] = time.monotonic()
             state["last_runtime_event_at"] = state["started_at"]
             state["followup_sent"] = False
@@ -1212,7 +1232,7 @@ class CodexHandler(BotHandler):
             if card_id:
                 self.bot.patch_message(
                     card_id,
-                    json.dumps(build_execution_card("", running=True), ensure_ascii=False),
+                    json.dumps(build_execution_card("", [], running=True), ensure_ascii=False),
                 )
         if not card_id:
             card_id = self._send_execution_card(chat_id, message_id)
@@ -1245,7 +1265,7 @@ class CodexHandler(BotHandler):
                     with self._lock:
                         state["running"] = False
                         state["pending_cancel"] = False
-                        state["full_reply_text"] = f"启动失败：{retry_exc}"
+                        state["execution_transcript"].set_reply_text(f"启动失败：{retry_exc}")
                     if self._is_thread_not_found_error(retry_exc):
                         with self._lock:
                             state["current_thread_id"] = ""
@@ -1259,7 +1279,7 @@ class CodexHandler(BotHandler):
                 with self._lock:
                     state["running"] = False
                     state["pending_cancel"] = False
-                    state["full_reply_text"] = f"启动失败：{exc}"
+                    state["execution_transcript"].set_reply_text(f"启动失败：{exc}")
                 self._flush_execution_card(sender_id, chat_id, immediate=True)
                 if not card_id:
                     self._reply_text(chat_id, f"启动失败：{exc}", message_id=message_id)
@@ -2097,8 +2117,7 @@ class CodexHandler(BotHandler):
                 if previous_message_id:
                     previous_execution_card = {
                         "message_id": previous_message_id,
-                        "reply_text": state["full_reply_text"],
-                        "log_text": state["full_log_text"],
+                        "transcript": state["execution_transcript"].clone(),
                         "cancelled": bool(state["cancelled"]),
                         "elapsed": int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0,
                     }
@@ -2106,8 +2125,7 @@ class CodexHandler(BotHandler):
                 state["current_message_id"] = ""
                 state["current_prompt_message_id"] = ""
                 state["current_actor_open_id"] = ""
-                state["full_reply_text"] = ""
-                state["full_log_text"] = ""
+                state["execution_transcript"].reset()
                 state["started_at"] = time.monotonic()
                 state["last_runtime_event_at"] = state["started_at"]
                 state["last_patch_at"] = 0.0
@@ -2119,8 +2137,7 @@ class CodexHandler(BotHandler):
             if previous_execution_card is not None:
                 self._patch_execution_card_message(
                     previous_execution_card["message_id"],
-                    log_text=previous_execution_card["log_text"],
-                    reply_text=previous_execution_card["reply_text"],
+                    transcript=previous_execution_card["transcript"],
                     running=False,
                     elapsed=previous_execution_card["elapsed"],
                     cancelled=previous_execution_card["cancelled"],
@@ -2169,16 +2186,30 @@ class CodexHandler(BotHandler):
         if binding:
             self._note_runtime_event(*binding)
         item = params.get("item") or {}
-        item_type = item.get("type")
+        item_type = str(item.get("type", "") or "").strip()
+        if not binding:
+            return
+        state = self._get_state(*binding)
         if item_type == "commandExecution":
             command = item.get("command") or ""
             cwd = item.get("cwd") or ""
-            self._append_log_by_thread(
-                thread_id,
-                f"\n$ ({display_path(cwd)}) {command}\n",
-            )
+            with self._lock:
+                state["execution_transcript"].start_process_block(
+                    f"\n$ ({display_path(cwd)}) {command}\n",
+                    marks_work=True,
+                )
+            self._schedule_execution_card_update(*binding)
         elif item_type == "fileChange":
-            self._append_log_by_thread(thread_id, "\n[准备应用文件修改]\n")
+            with self._lock:
+                state["execution_transcript"].start_process_block("\n[准备应用文件修改]\n", marks_work=True)
+            self._schedule_execution_card_update(*binding)
+        elif item_type in _WORK_ITEM_LABELS:
+            with self._lock:
+                state["execution_transcript"].append_process_note(
+                    f"\n[{_WORK_ITEM_LABELS[item_type]}]\n",
+                    marks_work=True,
+                )
+            self._schedule_execution_card_update(*binding)
 
     def _handle_agent_message_delta(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
@@ -2188,7 +2219,7 @@ class CodexHandler(BotHandler):
         self._note_runtime_event(*binding)
         state = self._get_state(*binding)
         with self._lock:
-            state["full_reply_text"] += params.get("delta", "")
+            state["execution_transcript"].append_assistant_delta(str(params.get("delta", "") or ""))
         self._schedule_execution_card_update(*binding)
 
     def _handle_command_delta(self, params: dict[str, Any]) -> None:
@@ -2196,18 +2227,18 @@ class CodexHandler(BotHandler):
         binding = self._thread_bindings.get(thread_id)
         if binding:
             self._note_runtime_event(*binding)
-        self._append_log_by_thread(params.get("threadId", ""), params.get("delta", ""))
+        self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""))
 
     def _handle_file_change_delta(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
         binding = self._thread_bindings.get(thread_id)
         if binding:
             self._note_runtime_event(*binding)
-        self._append_log_by_thread(params.get("threadId", ""), params.get("delta", ""))
+        self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""))
 
     def _handle_item_completed(self, params: dict[str, Any]) -> None:
         item = params.get("item") or {}
-        item_type = item.get("type")
+        item_type = str(item.get("type", "") or "").strip()
         thread_id = params.get("threadId", "")
         binding = self._thread_bindings.get(thread_id)
         if binding:
@@ -2215,22 +2246,43 @@ class CodexHandler(BotHandler):
         if item_type == "commandExecution":
             exit_code = item.get("exitCode")
             status = item.get("status")
-            tail = f"\n[命令结束 status={status} exit={exit_code}]\n"
-            self._append_log_by_thread(thread_id, tail)
+            state = self._get_state(*binding) if binding else None
+            if state is not None:
+                with self._lock:
+                    state["execution_transcript"].finish_process_block(
+                        f"\n[命令结束 status={status} exit={exit_code}]\n"
+                    )
+                self._schedule_execution_card_update(*binding)
         elif item_type == "fileChange":
             changes = item.get("changes") or []
-            if changes:
-                summary = "\n".join(f"- {change.get('kind', 'update')}: {change.get('path', '')}" for change in changes[:20])
-                self._append_log_by_thread(thread_id, f"\n[文件变更]\n{summary}\n")
+            state = self._get_state(*binding) if binding else None
+            if state is not None:
+                suffix = ""
+                if changes:
+                    summary = "\n".join(
+                        f"- {change.get('kind', 'update')}: {change.get('path', '')}"
+                        for change in changes[:20]
+                    )
+                    suffix = f"\n[文件变更]\n{summary}\n"
+                with self._lock:
+                    state["execution_transcript"].finish_process_block(suffix)
+                self._schedule_execution_card_update(*binding)
         elif item_type == "agentMessage" and item.get("text"):
             binding = self._thread_bindings.get(thread_id)
             if not binding:
                 return
             state = self._get_state(*binding)
             with self._lock:
-                if len(item["text"]) > len(state["full_reply_text"]):
-                    state["full_reply_text"] = item["text"]
+                transcript = state["execution_transcript"]
+                if len(item["text"]) >= len(transcript.reply_text()):
+                    transcript.reconcile_current_assistant_text(str(item["text"] or ""))
             self._schedule_execution_card_update(*binding)
+        elif item_type in _WORK_ITEM_LABELS:
+            state = self._get_state(*binding) if binding else None
+            if state is not None:
+                with self._lock:
+                    state["execution_transcript"].finish_process_block()
+                self._schedule_execution_card_update(*binding)
         elif item_type == "plan" and item.get("text"):
             binding = self._thread_bindings.get(thread_id)
             if not binding:
@@ -2260,10 +2312,11 @@ class CodexHandler(BotHandler):
         with self._lock:
             if status == "interrupted":
                 state["cancelled"] = True
-            if error and not state["full_reply_text"]:
-                state["full_reply_text"] = error.get("message") or "执行失败"
+            transcript = state["execution_transcript"]
+            if error and not transcript.has_reply_output():
+                transcript.set_reply_text(error.get("message") or "执行失败")
             elif error:
-                state["full_log_text"] += f"\n[错误] {error.get('message', '执行失败')}\n"
+                transcript.append_process_note(f"\n[错误] {error.get('message', '执行失败')}\n")
         self._reconcile_execution_mirror(
             binding[0],
             binding[1],
@@ -2278,11 +2331,11 @@ class CodexHandler(BotHandler):
             return
         state = self._get_state(*binding)
         with self._lock:
-            state["full_log_text"] += text
+            state["execution_transcript"].append_process_delta(text)
         self._schedule_execution_card_update(*binding)
 
     def _send_execution_card(self, chat_id: str, parent_message_id: str) -> str | None:
-        card = build_execution_card("", running=True)
+        card = build_execution_card("", [], running=True)
         content = json.dumps(card, ensure_ascii=False)
         if parent_message_id:
             return self.bot.reply_to_message(parent_message_id, "interactive", content)
@@ -2292,8 +2345,7 @@ class CodexHandler(BotHandler):
         self,
         message_id: str,
         *,
-        log_text: str,
-        reply_text: str,
+        transcript: ExecutionTranscript,
         running: bool,
         elapsed: int,
         cancelled: bool,
@@ -2302,8 +2354,8 @@ class CodexHandler(BotHandler):
         if not normalized_message_id:
             return False
         card = build_execution_card(
-            self._card_log_text(log_text),
-            self._card_reply_text(reply_text),
+            self._card_log_text(transcript.process_text()),
+            self._card_reply_segments(transcript),
             running=running,
             elapsed=elapsed,
             cancelled=cancelled and not running,
@@ -2342,8 +2394,8 @@ class CodexHandler(BotHandler):
             message_id = state["current_message_id"]
             if not message_id:
                 return
-            reply_text = state["full_reply_text"]
-            log_text = state["full_log_text"]
+            transcript = state["execution_transcript"].clone()
+            reply_text = transcript.reply_text()
             running = state["running"]
             cancelled = state["cancelled"]
             prompt_message_id = state["current_prompt_message_id"].strip()
@@ -2352,8 +2404,7 @@ class CodexHandler(BotHandler):
 
         ok = self._patch_execution_card_message(
             message_id,
-            log_text=log_text,
-            reply_text=reply_text,
+            transcript=transcript,
             running=running,
             elapsed=elapsed,
             cancelled=cancelled,
@@ -2366,7 +2417,7 @@ class CodexHandler(BotHandler):
         with self._lock:
             if state["followup_sent"]:
                 return
-            reply_text = state["full_reply_text"]
+            reply_text = state["execution_transcript"].reply_text()
             current_message_id = state["current_message_id"]
             prompt_message_id = state["current_prompt_message_id"].strip()
             need_followup = not current_message_id or len(reply_text) > self._card_reply_limit
@@ -2417,11 +2468,6 @@ class CodexHandler(BotHandler):
         if new_message_id:
             with self._lock:
                 state["plan_message_id"] = new_message_id
-
-    def _card_reply_text(self, text: str) -> str:
-        if len(text) <= self._card_reply_limit:
-            return text
-        return text[: self._card_reply_limit] + "\n\n**[回复过长，完整内容已另行发送为文本消息]**"
 
     def _card_log_text(self, text: str) -> str:
         if len(text) <= self._card_log_limit:

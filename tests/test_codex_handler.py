@@ -8,6 +8,7 @@ from bot.cards import build_ask_user_card, build_execution_card
 from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, ThreadSnapshot, ThreadSummary
 from bot.codex_handler import CodexHandler
 from bot.codex_protocol.client import CodexRpcError
+from bot.execution_transcript import ExecutionReplySegment
 
 
 class _FakeAdapter:
@@ -392,8 +393,8 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "old-card"
-            state["full_reply_text"] = "收到"
-            state["full_log_text"] = "old log"
+            state["execution_transcript"].set_reply_text("收到")
+            state["execution_transcript"].append_process_note("old log")
             state["running"] = False
 
         handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-2"}})
@@ -401,7 +402,10 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(len(bot.sent_messages), 1)
         self.assertEqual(handler._get_state("ou_user", "c1")["current_message_id"], "plan-card-2")
-        self.assertEqual(handler._get_state("ou_user", "c1")["full_reply_text"], "新的回复")
+        self.assertEqual(
+            handler._get_state("ou_user", "c1")["execution_transcript"].reply_text(),
+            "新的回复",
+        )
 
     def test_external_turn_started_finalizes_previous_execution_card(self) -> None:
         handler, bot = self._make_handler()
@@ -419,8 +423,8 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "old-card"
-            state["full_reply_text"] = "上一轮回复"
-            state["full_log_text"] = "上一轮日志"
+            state["execution_transcript"].set_reply_text("上一轮回复")
+            state["execution_transcript"].append_process_note("上一轮日志")
             state["running"] = False
 
         handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-2"}})
@@ -627,7 +631,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_turn_id"], "")
-        self.assertEqual(state["full_reply_text"], "完整最终回复")
+        self.assertEqual(state["execution_transcript"].reply_text(), "完整最终回复")
         self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
         patched_card = json.loads(bot.patches[-1][1])
         self.assertIn("完整最终回复", json.dumps(patched_card, ensure_ascii=False))
@@ -662,7 +666,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_turn_id"], "")
-        self.assertEqual(state["full_reply_text"], "inactive final")
+        self.assertEqual(state["execution_transcript"].reply_text(), "inactive final")
         self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
         patched_card = json.loads(bot.patches[-1][1])
         body_elements = patched_card["body"]["elements"]
@@ -705,7 +709,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_thread_id"], "thread-created")
-        self.assertEqual(state["full_reply_text"], "closed final")
+        self.assertEqual(state["execution_transcript"].reply_text(), "closed final")
         self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
         patched_card = json.loads(bot.patches[-1][1])
         body_elements = patched_card["body"]["elements"]
@@ -753,7 +757,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         state = handler._get_state("ou_user", "c1")
         self.assertFalse(state["running"])
-        self.assertEqual(state["full_reply_text"], "watchdog final")
+        self.assertEqual(state["execution_transcript"].reply_text(), "watchdog final")
 
     def test_cancel_refreshes_stale_execution_card_when_turn_already_finished(self) -> None:
         handler, bot = self._make_handler()
@@ -763,7 +767,7 @@ class CodexHandlerTests(unittest.TestCase):
         with handler._lock:
             state["running"] = False
             state["current_turn_id"] = ""
-            state["full_reply_text"] = "done"
+            state["execution_transcript"].set_reply_text("done")
 
         ok, message = handler._cancel_current_turn("ou_user", "c1")
 
@@ -892,9 +896,70 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(action_elements[1]["actions"][0]["text"]["content"], "返回帮助")
 
     def test_execution_card_is_patchable_shared_card(self) -> None:
-        card = build_execution_card("", running=True)
+        card = build_execution_card("", [], running=True)
 
         self.assertTrue(card["config"]["update_multi"])
+
+    def test_execution_card_renders_native_reply_divider(self) -> None:
+        card = build_execution_card(
+            "",
+            [
+                ExecutionReplySegment("assistant", "第一段"),
+                ExecutionReplySegment("divider"),
+                ExecutionReplySegment("assistant", "第二段"),
+            ],
+            running=False,
+        )
+
+        reply_panel = next(
+            element
+            for element in card["body"]["elements"]
+            if isinstance(element, dict)
+            and element.get("tag") == "collapsible_panel"
+            and element.get("header", {}).get("title", {}).get("content") == "回复"
+        )
+        self.assertEqual(
+            [element["tag"] for element in reply_panel["elements"]],
+            ["markdown", "hr", "markdown"],
+        )
+
+    def test_agent_message_completed_without_delta_preserves_divider_after_work(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "第一段"})
+        handler._handle_item_started(
+            {
+                "threadId": "thread-created",
+                "item": {"type": "commandExecution", "command": "ls", "cwd": "/tmp/project"},
+            }
+        )
+        handler._handle_item_completed(
+            {
+                "threadId": "thread-created",
+                "item": {"type": "commandExecution", "status": "completed", "exitCode": 0},
+            }
+        )
+        handler._handle_item_completed(
+            {
+                "threadId": "thread-created",
+                "item": {"type": "agentMessage", "text": "第二段"},
+            }
+        )
+        handler._flush_execution_card("ou_user", "c1", immediate=True)
+
+        patched = json.loads(bot.patches[-1][1])
+        reply_panel = next(
+            element
+            for element in patched["body"]["elements"]
+            if isinstance(element, dict)
+            and element.get("tag") == "collapsible_panel"
+            and element.get("header", {}).get("title", {}).get("content") == "回复"
+        )
+        self.assertEqual(
+            [element["tag"] for element in reply_panel["elements"]],
+            ["markdown", "hr", "markdown"],
+        )
 
     def test_whoami_command_in_p2p_returns_identity_and_admin_config_hint(self) -> None:
         handler, bot = self._make_handler()
@@ -1356,7 +1421,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertFalse(any(element.get("tag") == "form" for element in card["elements"]))
 
     def test_execution_card_shows_help_hint(self) -> None:
-        card = build_execution_card("", "", running=True)
+        card = build_execution_card("", [], running=True)
 
         self.assertIn("/help", card["body"]["elements"][0]["content"])
 

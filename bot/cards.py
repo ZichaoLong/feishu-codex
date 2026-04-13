@@ -14,6 +14,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.constants import KEYWORD, display_path, format_timestamp, shorten
+from bot.execution_transcript import ExecutionReplySegment
 from bot.feishu_bot import _MAX_CARD_TABLES, count_card_tables, limit_card_tables
 
 
@@ -229,7 +230,7 @@ def _back_to_help_action() -> dict:
 
 def build_execution_card(
     log_text: str,
-    reply_text: str = "",
+    reply_segments: list[ExecutionReplySegment],
     *,
     running: bool = False,
     elapsed: int = 0,
@@ -265,6 +266,34 @@ def build_execution_card(
             "elements": [{"tag": "markdown", "content": content or ""}],
         }
 
+    def _panel_with_elements(title: str, panel_elements: list[dict], expanded: bool) -> dict:
+        return {
+            "tag": "collapsible_panel",
+            "expanded": expanded,
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "icon": panel_icon,
+                "icon_position": "left",
+                "icon_expanded_angle": 90,
+            },
+            "elements": panel_elements or [{"tag": "markdown", "content": ""}],
+        }
+
+    def _reply_panel_elements(segments: list[ExecutionReplySegment]) -> list[dict]:
+        panel_elements: list[dict] = []
+        remaining = _MAX_CARD_TABLES
+        for segment in segments:
+            if segment.kind == "divider":
+                if panel_elements:
+                    panel_elements.append({"tag": "hr"})
+                continue
+            text = segment.text
+            if remaining > 0:
+                text = limit_card_tables(text, remaining)
+                remaining -= count_card_tables(text)
+            panel_elements.append({"tag": "markdown", "content": text})
+        return panel_elements
+
     elements: list[dict] = []
     elements.append(
         {
@@ -273,18 +302,15 @@ def build_execution_card(
         }
     )
     elements.append({"tag": "hr"})
-    if log_text and reply_text:
+    reply_panel_elements = _reply_panel_elements(reply_segments)
+    if log_text and reply_panel_elements:
         log_tables = count_card_tables(log_text)
-        reply_tables = count_card_tables(reply_text)
-        if log_tables + reply_tables > _MAX_CARD_TABLES:
-            reply_budget = min(reply_tables, _MAX_CARD_TABLES)
-            log_budget = _MAX_CARD_TABLES - reply_budget
-            log_text = limit_card_tables(log_text, log_budget)
-            reply_text = limit_card_tables(reply_text, reply_budget)
+        if log_tables > _MAX_CARD_TABLES:
+            log_text = limit_card_tables(log_text, _MAX_CARD_TABLES)
         elements.append(_panel("执行过程", log_text, expanded=running))
-        elements.append(_panel("回复", reply_text, expanded=True))
-    elif reply_text:
-        elements.append(_panel("回复", limit_card_tables(reply_text), expanded=True))
+        elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=True))
+    elif reply_panel_elements:
+        elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=True))
     elif log_text:
         elements.append(_panel("执行过程", limit_card_tables(log_text), expanded=running))
     else:
