@@ -490,7 +490,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         state = handler._get_state("ou_user", "c1")
         self.assertTrue(ok)
-        self.assertIn("线程绑定已保留", message)
+        self.assertEqual(message, "当前执行已结束，已刷新卡片状态。")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_thread_id"], "thread-created")
         self.assertEqual(state["current_turn_id"], "")
@@ -582,6 +582,29 @@ class CodexHandlerTests(unittest.TestCase):
             bot.reply_parents[-1],
             ("chat-group", "当前线程仍在执行，请等待结束或先执行 `/cancel`。", "m-2"),
         )
+
+    def test_snapshot_timeout_only_marks_runtime_degraded(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler._adapter.thread_snapshots[("thread-created", True)] = TimeoutError(
+            "Codex request timed out: thread/read"
+        )
+
+        finalized = handler._reconcile_execution_snapshot(
+            "ou_user",
+            "c1",
+            thread_id="thread-created",
+            turn_id="turn-1",
+            force_finalize=False,
+        )
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(finalized)
+        self.assertTrue(state["running"])
+        self.assertEqual(state["runtime_channel_state"], "degraded")
+        self.assertEqual(state["current_turn_id"], "turn-1")
+        self.assertEqual(state["current_message_id"], "plan-card-2")
 
     def test_group_prompts_share_backend_state_by_chat_id(self) -> None:
         handler, bot = self._make_handler()
@@ -800,8 +823,33 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "existing-card"
-            state["pending_local_turn_card"] = True
+            state["awaiting_local_turn_started"] = True
             state["running"] = True
+
+        handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-1"}})
+
+        self.assertEqual(len(bot.sent_messages), 0)
+        self.assertEqual(handler._get_state("ou_user", "c1")["current_message_id"], "existing-card")
+
+    def test_duplicate_turn_started_does_not_open_second_execution_card(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        state = handler._get_state("ou_user", "c1")
+        with handler._lock:
+            state["current_message_id"] = "existing-card"
+            state["current_turn_id"] = "turn-1"
+            state["running"] = True
+            state["awaiting_local_turn_started"] = False
 
         handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-1"}})
 

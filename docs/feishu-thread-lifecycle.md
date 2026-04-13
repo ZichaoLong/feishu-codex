@@ -103,7 +103,7 @@ When a Feishu chat already has a bound `thread_id`:
 This mirrors the upstream contract while adapting to Feishu's weaker
 connection-liveness assumptions.
 
-### 5.4 Online Notifications Are Best-Effort
+### 5.4 Live Notifications Are the Primary Runtime Truth
 
 While Feishu is still subscribed, it uses live notifications for:
 
@@ -112,12 +112,39 @@ While Feishu is still subscribed, it uses live notifications for:
 - approval requests
 - terminal events
 
-But terminal notifications can be missed after disconnects or ownership
+On the Feishu side, `thread/read` is only a snapshot reconciliation tool. It is
+not allowed to declare the current execution dead on its own.
+
+The rules are:
+
+- trust live notifications first while a turn is running
+- use `thread/read` only to fill in final reply content, close stale cards, and
+  confirm that a thread is no longer active
+- treat a `thread/read` timeout or transport error as a temporary degraded
+  channel, not as permission to clear the current execution anchor
+
+Terminal notifications can still be missed after disconnects or ownership
 transfers. Therefore the Feishu side also reconciles from `thread/read`:
 
 - when terminal signals arrive
 - when `thread/closed` arrives
 - when a watchdog notices a running card has gone quiet for too long
+
+### 5.5 Execution Card Anchor Contract
+
+For a single Feishu chat, there may be at most one active execution card at any
+time:
+
+- the active execution is anchored by `prompt_message_id`, `card_message_id`,
+  and `turn_id`
+- live deltas, terminal notifications, and watchdog reconciliation may only
+  update that active card
+- once an execution is finalized, that card stops being the active anchor
+- only a new local prompt or a new external turn may create the next execution
+  card
+
+Therefore a soft `thread/read` failure must never clear the current anchor and
+then let later notifications create a second card for the same execution.
 
 ## 6. Relationship With `fcodex`
 
@@ -144,6 +171,9 @@ Current Feishu-side implementation should satisfy all of these:
 - one Feishu chat keeps one logical current thread binding
 - group chats share binding by `chat_id`
 - runtime loss does not clear binding automatically
+- `thread/read` timeout/transport errors only degrade the runtime channel; they
+  do not immediately declare runtime loss
+- one Feishu chat has at most one active execution card at a time
 - `/new` and `/resume` explicitly replace the binding
 - if runtime is gone, the next prompt rehydrates it from the bound
   `thread_id`

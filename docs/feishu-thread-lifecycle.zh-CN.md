@@ -96,7 +96,7 @@ flowchart TD
 
 这条规则遵守的是上游协议合同；区别只在于飞书侧更经常进入“已绑定但已 unload”的状态。
 
-### 5.4 在线通知是 best-effort，不是真相源
+### 5.4 在线通知是执行中的主真相源
 
 只要飞书侧当前仍订阅着这个 thread，它就会依赖 live notification 获取：
 
@@ -105,11 +105,29 @@ flowchart TD
 - 审批请求
 - 各类终态事件
 
-但终态通知可能因为断连、接管、时序问题而漏掉。因此飞书侧还必须在这些场景主动做 `thread/read` 对账：
+`thread/read` 在飞书侧只承担“快照补账”职责，不承担“宣告运行态已失联”的职责。
+因此飞书侧的规则是：
+
+- 运行中的执行卡片，优先相信 live notification
+- `thread/read` 只用于补齐最终回复、补收口、确认 thread 是否已经不再 active
+- 一次 `thread/read` timeout 或 transport error，只能把运行通道标记为临时降级，不能清空当前执行锚点
+
+但终态通知可能因为断连、接管、时序问题而漏掉。因此飞书侧仍需要在这些场景主动做 `thread/read` 对账：
 
 - 收到终态信号时
 - 收到 `thread/closed` 时
 - 执行卡片长时间没有运行时事件时，由 watchdog 主动对账
+
+### 5.5 执行卡片锚点合同
+
+对同一个飞书会话，任一时刻最多只允许一张“当前执行卡片”：
+
+- 当前执行卡片由 `prompt_message_id`、`card_message_id`、`turn_id` 共同锚定
+- live delta、终态通知、watchdog 补账都只能更新这张当前执行卡片
+- 当执行结束后，这张卡片会被收口并退出“当前执行锚点”
+- 后续新的本地 prompt 或新的外部 turn，才允许创建下一张执行卡片
+
+因此，`thread/read` 软失败不能导致“先把当前卡片判死、清空锚点，再被后续事件新开一张卡片”。
 
 ## 6. 与 `fcodex` 的关系
 
@@ -136,6 +154,8 @@ flowchart TD
 - 一个飞书会话只维护一个逻辑上的当前 thread 绑定
 - 群聊按 `chat_id` 共享绑定
 - runtime 丢失不会自动清空绑定
+- `thread/read` timeout/transport error 只会标记运行通道降级，不会直接宣告“当前运行态已失联”
+- 同一飞书会话同一时刻最多只有一张活动执行卡
 - `/new` 与 `/resume` 才是显式改绑操作
 - 如果 runtime 已丢失，下一条消息会根据已绑定的 `thread_id` 自动恢复
 - `thread/closed` 被视为 runtime 状态迁移，而不是逻辑解绑
