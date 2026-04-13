@@ -32,6 +32,8 @@ class _FakeAdapter:
         self.interrupt_turn_calls: list[dict] = []
         self.archive_thread_calls: list[str] = []
         self.unsubscribe_thread_calls: list[str] = []
+        self.read_thread_calls: list[dict] = []
+        self.thread_snapshots: dict[tuple[str, bool | None], ThreadSnapshot | Exception] = {}
 
     def stop(self) -> None:
         return None
@@ -72,7 +74,15 @@ class _FakeAdapter:
         )
 
     def read_thread(self, thread_id: str, include_turns: bool = False):
-        raise NotImplementedError
+        self.read_thread_calls.append({"thread_id": thread_id, "include_turns": include_turns})
+        snapshot = self.thread_snapshots.get((thread_id, include_turns))
+        if snapshot is None:
+            snapshot = self.thread_snapshots.get((thread_id, None))
+        if snapshot is None:
+            raise NotImplementedError
+        if isinstance(snapshot, Exception):
+            raise snapshot
+        return snapshot
 
     def read_runtime_config(self, *, cwd: str | None = None) -> RuntimeConfigSummary:
         return RuntimeConfigSummary(
@@ -335,7 +345,9 @@ class CodexHandlerTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        config_patch = patch("bot.codex_handler.load_config_file", return_value=dict(cfg or {}))
+        effective_cfg = {"mirror_watchdog_seconds": 999999}
+        effective_cfg.update(dict(cfg or {}))
+        config_patch = patch("bot.codex_handler.load_config_file", return_value=effective_cfg)
         adapter_patch = patch("bot.codex_handler.CodexAppServerAdapter", _FakeAdapter)
         config_patch.start()
         adapter_patch.start()
@@ -474,10 +486,75 @@ class CodexHandlerTests(unittest.TestCase):
 
         state = handler._get_state("ou_user", "c1")
         self.assertTrue(ok)
-        self.assertIn("已自动清理本地状态", message)
+        self.assertIn("线程绑定已保留", message)
         self.assertFalse(state["running"])
-        self.assertEqual(state["current_thread_id"], "")
+        self.assertEqual(state["current_thread_id"], "thread-created")
         self.assertEqual(state["current_turn_id"], "")
+
+    def test_continue_auto_resumes_bound_thread_when_loaded_thread_is_missing(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        state = handler._get_state("ou_user", "c1")
+        with handler._lock:
+            state["running"] = False
+            state["current_turn_id"] = ""
+
+        original_start_turn = handler._adapter.start_turn
+        attempts: list[str] = []
+
+        def _start_turn_with_missing_loaded_thread(**kwargs):
+            attempts.append(kwargs["thread_id"])
+            if len(attempts) == 1:
+                raise CodexRpcError("turn/start", {"code": -32000, "message": "thread not found: thread-created"})
+            return original_start_turn(**kwargs)
+
+        handler._adapter.start_turn = _start_turn_with_missing_loaded_thread
+
+        handler.handle_message("ou_user", "c1", "继续")
+
+        self.assertEqual(attempts, ["thread-created", "thread-created"])
+        self.assertEqual(
+            handler._adapter.resume_thread_calls,
+            [{"thread_id": "thread-created", "profile": None, "model": None, "model_provider": None}],
+        )
+        self.assertEqual(len(handler._adapter.create_thread_calls), 1)
+        self.assertEqual(handler._get_state("ou_user", "c1")["current_thread_id"], "thread-created")
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, [])
+
+    def test_reconcile_runtime_loss_keeps_thread_binding_for_next_prompt(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler._adapter.thread_snapshots[("thread-created", True)] = CodexRpcError(
+            "thread/read",
+            {"code": -32000, "message": "thread not found: thread-created"},
+        )
+        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(state["running"])
+        self.assertEqual(state["current_thread_id"], "thread-created")
+
+        original_start_turn = handler._adapter.start_turn
+        attempts: list[str] = []
+
+        def _start_turn_with_missing_loaded_thread(**kwargs):
+            attempts.append(kwargs["thread_id"])
+            if len(attempts) == 1:
+                raise CodexRpcError("turn/start", {"code": -32000, "message": "thread not found: thread-created"})
+            return original_start_turn(**kwargs)
+
+        handler._adapter.start_turn = _start_turn_with_missing_loaded_thread
+
+        handler.handle_message("ou_user", "c1", "继续")
+
+        self.assertEqual(attempts, ["thread-created", "thread-created"])
+        self.assertEqual(
+            handler._adapter.resume_thread_calls[-1],
+            {"thread_id": "thread-created", "profile": None, "model": None, "model_provider": None},
+        )
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, [])
 
     def test_running_p2p_prompt_replies_wait_or_cancel(self) -> None:
         handler, bot = self._make_handler()
@@ -518,6 +595,190 @@ class CodexHandlerTests(unittest.TestCase):
             ["thread-created", "thread-created"],
         )
         self.assertIs(handler._get_state("ou_user", "chat-group"), handler._get_state("ou_user2", "chat-group"))
+
+    def test_turn_completed_reconciles_reply_text_from_thread_snapshot(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [
+                        {"type": "agentMessage", "text": "完整最终回复"},
+                    ],
+                }
+            ],
+        )
+
+        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "完整"})
+        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(state["running"])
+        self.assertEqual(state["current_turn_id"], "")
+        self.assertEqual(state["full_reply_text"], "完整最终回复")
+        self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
+        patched_card = json.loads(bot.patches[-1][1])
+        self.assertIn("完整最终回复", json.dumps(patched_card, ensure_ascii=False))
+
+    def test_thread_status_inactive_reconciles_and_finalizes_running_card(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [
+                        {"type": "agentMessage", "text": "inactive final"},
+                    ],
+                }
+            ],
+        )
+
+        handler._handle_thread_status_changed({"threadId": "thread-created", "status": {"type": "idle"}})
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(state["running"])
+        self.assertEqual(state["current_turn_id"], "")
+        self.assertEqual(state["full_reply_text"], "inactive final")
+        self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
+        patched_card = json.loads(bot.patches[-1][1])
+        body_elements = patched_card["body"]["elements"]
+        self.assertFalse(
+            any(
+                isinstance(element, dict)
+                and element.get("tag") == "button"
+                and element.get("text", {}).get("content") == "取消执行"
+                for element in body_elements
+            )
+        )
+
+    def test_thread_closed_reconciles_running_card_without_clearing_binding(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [
+                        {"type": "agentMessage", "text": "closed final"},
+                    ],
+                }
+            ],
+        )
+
+        handler._handle_thread_closed({"threadId": "thread-created"})
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(state["running"])
+        self.assertEqual(state["current_thread_id"], "thread-created")
+        self.assertEqual(state["full_reply_text"], "closed final")
+        self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
+        patched_card = json.loads(bot.patches[-1][1])
+        body_elements = patched_card["body"]["elements"]
+        self.assertFalse(
+            any(
+                isinstance(element, dict)
+                and element.get("tag") == "button"
+                and element.get("text", {}).get("content") == "取消执行"
+                for element in body_elements
+            )
+        )
+
+    def test_watchdog_reconciles_missed_terminal_notifications(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [
+                        {"type": "agentMessage", "text": "watchdog final"},
+                    ],
+                }
+            ],
+        )
+        state = handler._get_state("ou_user", "c1")
+        with handler._lock:
+            generation = state["mirror_watchdog_generation"]
+            if state["mirror_watchdog_timer"] is not None:
+                state["mirror_watchdog_timer"].cancel()
+                state["mirror_watchdog_timer"] = None
+
+        handler._run_mirror_watchdog("ou_user", "c1", generation)
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(state["running"])
+        self.assertEqual(state["full_reply_text"], "watchdog final")
+
+    def test_cancel_refreshes_stale_execution_card_when_turn_already_finished(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        state = handler._get_state("ou_user", "c1")
+        with handler._lock:
+            state["running"] = False
+            state["current_turn_id"] = ""
+            state["full_reply_text"] = "done"
+
+        ok, message = handler._cancel_current_turn("ou_user", "c1")
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "当前执行已结束，已刷新卡片状态。")
+        patched_card = json.loads(bot.patches[-1][1])
+        body_elements = patched_card["body"]["elements"]
+        self.assertFalse(
+            any(
+                isinstance(element, dict)
+                and element.get("tag") == "button"
+                and element.get("text", {}).get("content") == "取消执行"
+                for element in body_elements
+            )
+        )
 
     def test_local_turn_started_reuses_existing_execution_card(self) -> None:
         handler, bot = self._make_handler()
@@ -561,6 +822,24 @@ class CodexHandlerTests(unittest.TestCase):
         handler._bind_thread("ou_user2", "chat-group", thread)
 
         self.assertEqual(bot.replies, [])
+
+    def test_rebinding_same_thread_does_not_unsubscribe_current_subscription(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._bind_thread("ou_user", "c1", thread)
+
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, [])
 
     def test_group_followup_reply_stays_on_trigger_message(self) -> None:
         handler, bot = self._make_handler()

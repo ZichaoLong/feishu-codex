@@ -70,6 +70,7 @@
 - 创建 Python 虚拟环境到 `~/.local/share/feishu-codex/.venv/`
 - 安装代码包与依赖
 - 初始化配置文件到 `~/.config/feishu-codex/`
+- 刷新本地默认模板 `~/.config/feishu-codex/system.yaml.example` 与 `~/.config/feishu-codex/codex.yaml.example`
 - 生成初始化口令文件 `~/.config/feishu-codex/init.token`
 - 注册 systemd 用户服务
 - 安装 `feishu-codex` 管理命令和 `fcodex` wrapper
@@ -363,6 +364,7 @@ group_history_fetch_lookback_seconds: 21600
 
 - 想理解 `/session`、`/resume`、`/profile`、thread / session 的精确语义：`docs/session-profile-semantics.zh-CN.md`
 - 想理解 `fcodex`、shared backend、动态端口、cwd 代理这些运行时机制：`docs/fcodex-shared-backend-runtime.zh-CN.md`
+- 想理解为什么飞书侧不能照搬 `fcodex` 的前端实现，以及线程绑定 / unload / resume 的状态机：`docs/feishu-thread-lifecycle.zh-CN.md`
 - 想理解 shared backend、安全边界，以及为什么裸 `codex` 不应与飞书 / `fcodex` 同时写同一线程：`docs/shared-backend-resume-safety.zh-CN.md`
 - 想理解整体架构、模块边界、仓库结构，以及 `feishu-cc` 与 Codex 的关系：`docs/feishu-codex-design.zh-CN.md`
 - 想理解 `approval`、`sandbox`、`permissions` 这些概念背后的模型：`docs/codex-permissions-model.zh-CN.md`
