@@ -83,8 +83,8 @@
 # /resume 成功后是否发送历史预览卡片；默认值：true
 # show_history_preview_on_resume: true
 
-# 运行中主卡片最小 patch 间隔（毫秒）；默认值：300
-# stream_patch_interval_ms: 300
+# 运行中主卡片最小 patch 间隔（毫秒）；默认值：700
+# stream_patch_interval_ms: 700
 
 # 主卡片中回复区最大字符数；默认值：12000
 # 超出后卡片会截断，完整回复会额外以文本消息发送。

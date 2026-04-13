@@ -123,10 +123,6 @@ class AgentAdapter(ABC):
         ...
 
     @abstractmethod
-    def steer_turn(self, *, thread_id: str, turn_id: str, text: str) -> dict[str, Any]:
-        ...
-
-    @abstractmethod
     def interrupt_turn(self, *, thread_id: str, turn_id: str) -> None:
         ...
 

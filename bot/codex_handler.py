@@ -45,7 +45,6 @@ from bot.constants import (
     KEYWORD,
     display_path,
     resolve_working_dir,
-    shorten,
 )
 from bot.handler import BotHandler
 from bot.codex_config_reader import ResolvedProfileConfig, resolve_profile_from_codex_config
@@ -67,9 +66,6 @@ logger = logging.getLogger(__name__)
 
 _CARD_REPLY_LIMIT_DEFAULT = 12000
 _CARD_LOG_LIMIT_DEFAULT = 8000
-_QUEUED_PROMPT_FLUSH_MAX_RETRIES = 5
-_QUEUED_PROMPT_FLUSH_RETRY_DELAY_SECONDS = 0.05
-_PENDING_STEER_PREVIEW_LIMIT = 80
 _APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _LOCAL_THREAD_SAFETY_RULE = (
@@ -116,19 +112,6 @@ class _PlanStepState(TypedDict):
     status: str
 
 
-class _QueuedPromptState(TypedDict):
-    text: str
-    message_id: str
-    actor_open_id: str
-    prefer_steer: bool
-
-
-class _PendingSteerState(TypedDict):
-    message: str
-    image_count: int
-    preview_text: str
-
-
 class _RuntimeState(TypedDict):
     active: bool
     working_dir: str
@@ -158,9 +141,6 @@ class _RuntimeState(TypedDict):
     plan_explanation: str
     plan_steps: list[_PlanStepState]
     plan_text: str
-    queued_prompts: list[_QueuedPromptState]
-    queued_prompt_flush_running: bool
-    pending_steers: list[_PendingSteerState]
 
 
 class _PendingRenameFormState(TypedDict):
@@ -476,9 +456,6 @@ class CodexHandler(BotHandler):
             "plan_explanation": "",
             "plan_steps": [],
             "plan_text": "",
-            "queued_prompts": [],
-            "queued_prompt_flush_running": False,
-            "pending_steers": [],
         }
 
     def _existing_state_binding_locked(self, sender_id: str, chat_id: str) -> StateBinding | None:
@@ -955,83 +932,6 @@ class CodexHandler(BotHandler):
         elif result.text:
             self._reply_text(chat_id, result.text, message_id=message_id)
 
-    def _queue_prompt(
-        self,
-        state: _RuntimeState,
-        *,
-        text: str,
-        message_id: str = "",
-        actor_open_id: str = "",
-        prefer_steer: bool,
-    ) -> None:
-        with self._lock:
-            state["queued_prompts"].append(
-                {
-                    "text": text,
-                    "message_id": str(message_id or "").strip(),
-                    "actor_open_id": str(actor_open_id or "").strip(),
-                    "prefer_steer": prefer_steer,
-                }
-            )
-
-    @staticmethod
-    def _pending_steer_compare_key_from_content(content_items: list[dict[str, Any]] | None) -> tuple[str, int]:
-        message_parts: list[str] = []
-        image_count = 0
-        for item in content_items or []:
-            if not isinstance(item, dict):
-                continue
-            item_type = str(item.get("type", "") or "").strip()
-            if item_type == "text":
-                message_parts.append(str(item.get("text", "") or ""))
-            elif item_type in {"image", "local_image"}:
-                image_count += 1
-        return "".join(message_parts), image_count
-
-    @staticmethod
-    def _pending_steer_preview_text(text: str) -> str:
-        flattened = " ".join(str(text or "").split()).strip()
-        return shorten(flattened or "（空消息）", _PENDING_STEER_PREVIEW_LIMIT)
-
-    def _record_pending_steer(self, state: _RuntimeState, *, text: str) -> None:
-        with self._lock:
-            state["pending_steers"].append(
-                {
-                    "message": str(text or ""),
-                    "image_count": 0,
-                    "preview_text": self._pending_steer_preview_text(text),
-                }
-            )
-
-    @staticmethod
-    def _same_queued_prompt(left: _QueuedPromptState, right: _QueuedPromptState) -> bool:
-        return (
-            left["text"] == right["text"]
-            and left["message_id"] == right["message_id"]
-            and left["actor_open_id"] == right["actor_open_id"]
-            and left["prefer_steer"] == right["prefer_steer"]
-        )
-
-    @staticmethod
-    def _is_active_turn_not_steerable_error(exc: Exception) -> bool:
-        if not isinstance(exc, CodexRpcError):
-            return False
-        message = str(exc.error.get("message", "")).lower()
-        if message in {"cannot steer a review turn", "cannot steer a compact turn"}:
-            return True
-        data = exc.error.get("data") or {}
-        codex_error_info = data.get("codexErrorInfo") or {}
-        if not isinstance(codex_error_info, dict):
-            return False
-        return "activeTurnNotSteerable" in codex_error_info
-
-    @staticmethod
-    def _is_retryable_turn_steer_race(exc: Exception) -> bool:
-        if not isinstance(exc, CodexRpcError):
-            return False
-        message = str(exc.error.get("message", "")).lower()
-        return message == "no active turn to steer" or message.startswith("expected active turn id `")
-
     @staticmethod
     def _is_turn_thread_not_found_error(exc: Exception) -> bool:
         if not isinstance(exc, CodexRpcError):
@@ -1068,7 +968,6 @@ class CodexHandler(BotHandler):
             state["pending_local_turn_card"] = False
             state["current_prompt_message_id"] = ""
             state["current_actor_open_id"] = ""
-            state["pending_steers"] = []
             if clear_thread_binding:
                 state["current_thread_id"] = ""
                 state["current_thread_name"] = ""
@@ -1077,95 +976,6 @@ class CodexHandler(BotHandler):
                 if not state["full_reply_text"]:
                     state["full_reply_text"] = f"当前会话已失联：{reason}"
         self._flush_execution_card(sender_id, chat_id, immediate=True)
-
-    def _flush_ready_queued_prompts(self, sender_id: str, chat_id: str) -> bool:
-        state = self._get_state(sender_id, chat_id)
-        while True:
-            with self._lock:
-                if state["pending_cancel"] or state["cancelled"] or not state["running"]:
-                    return False
-                thread_id = state["current_thread_id"].strip()
-                turn_id = state["current_turn_id"].strip()
-                queued_prompts = state["queued_prompts"]
-                if not thread_id or not turn_id or not queued_prompts:
-                    return False
-                pending = dict(queued_prompts[0])
-                if not pending["prefer_steer"]:
-                    return False
-            try:
-                self._adapter.steer_turn(
-                    thread_id=thread_id,
-                    turn_id=turn_id,
-                    text=pending["text"],
-                )
-            except Exception as exc:
-                if self._is_retryable_turn_steer_race(exc):
-                    return True
-                if self._is_active_turn_not_steerable_error(exc):
-                    with self._lock:
-                        queued_prompts = state["queued_prompts"]
-                        if queued_prompts and self._same_queued_prompt(queued_prompts[0], pending):
-                            queued_prompts[0]["prefer_steer"] = False
-                    return False
-                logger.exception("补发插播消息失败")
-                with self._lock:
-                    queued_prompts = state["queued_prompts"]
-                    if queued_prompts and self._same_queued_prompt(queued_prompts[0], pending):
-                        queued_prompts.pop(0)
-                self._reply_text(chat_id, f"插播消息失败：{exc}", message_id=pending["message_id"])
-                return False
-            self._record_pending_steer(state, text=pending["text"])
-            with self._lock:
-                queued_prompts = state["queued_prompts"]
-                if queued_prompts and self._same_queued_prompt(queued_prompts[0], pending):
-                    queued_prompts.pop(0)
-
-    def _run_queued_prompt_flush(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_state(sender_id, chat_id)
-        try:
-            retries_left = _QUEUED_PROMPT_FLUSH_MAX_RETRIES
-            while True:
-                should_retry = self._flush_ready_queued_prompts(sender_id, chat_id)
-                if not should_retry:
-                    return
-                if retries_left <= 0:
-                    logger.warning("插播消息补发重试耗尽，降级为下一轮处理")
-                    with self._lock:
-                        queued_prompts = state["queued_prompts"]
-                        if queued_prompts and queued_prompts[0]["prefer_steer"]:
-                            queued_prompts[0]["prefer_steer"] = False
-                    return
-                retries_left -= 1
-                time.sleep(_QUEUED_PROMPT_FLUSH_RETRY_DELAY_SECONDS)
-        finally:
-            with self._lock:
-                state["queued_prompt_flush_running"] = False
-
-    def _schedule_queued_prompt_flush(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_state(sender_id, chat_id)
-        with self._lock:
-            if state["queued_prompt_flush_running"]:
-                return
-            state["queued_prompt_flush_running"] = True
-        threading.Thread(
-            target=self._run_queued_prompt_flush,
-            args=(sender_id, chat_id),
-            daemon=True,
-        ).start()
-
-    def _start_next_queued_prompt(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_state(sender_id, chat_id)
-        with self._lock:
-            if state["running"] or not state["queued_prompts"]:
-                return
-            pending = dict(state["queued_prompts"].pop(0))
-        self._start_prompt_turn(
-            sender_id,
-            chat_id,
-            pending["text"],
-            message_id=pending["message_id"],
-            actor_open_id=pending["actor_open_id"],
-        )
 
     def _start_prompt_turn(
         self,
@@ -1197,7 +1007,6 @@ class CodexHandler(BotHandler):
             state["followup_sent"] = False
             state["last_patch_at"] = 0.0
             state["pending_local_turn_card"] = True
-            state["pending_steers"] = []
             self._clear_plan_state(state)
 
         card_id = ""
@@ -1253,102 +1062,12 @@ class CodexHandler(BotHandler):
                     state["pending_cancel"] = False
 
     def _handle_running_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> bool:
+        del text
         state = self._get_state(sender_id, chat_id, message_id)
         with self._lock:
             if not state["running"]:
                 return False
-        if self._is_group_chat(chat_id, message_id) and not self._is_group_turn_actor(
-            chat_id,
-            message_id=message_id,
-        ):
-            self._reply_text(
-                chat_id,
-                "当前群聊执行中，仅管理员或本轮提问者可以插播消息。",
-                message_id=message_id,
-            )
-            return True
-
-        actor_open_id = self._group_actor_open_id(message_id)
-        with self._lock:
-            thread_id = state["current_thread_id"].strip()
-            turn_id = state["current_turn_id"].strip()
-        if not thread_id:
-            self._reply_text(chat_id, "当前线程状态异常，暂时无法插播消息。", message_id=message_id)
-            return True
-        if not turn_id:
-            self._queue_prompt(
-                state,
-                text=text,
-                message_id=message_id,
-                actor_open_id=actor_open_id,
-                prefer_steer=True,
-            )
-            self._reply_text(
-                chat_id,
-                "已记录插播消息，待当前 turn 就绪后继续处理。",
-                message_id=message_id,
-            )
-            return True
-
-        try:
-            self._adapter.steer_turn(thread_id=thread_id, turn_id=turn_id, text=text)
-        except Exception as exc:
-            if self._is_active_turn_not_steerable_error(exc):
-                self._queue_prompt(
-                    state,
-                    text=text,
-                    message_id=message_id,
-                    actor_open_id=actor_open_id,
-                    prefer_steer=False,
-                )
-                self._reply_text(
-                    chat_id,
-                    "当前执行不支持中途插播，已排队到本轮结束后继续处理。",
-                    message_id=message_id,
-                )
-                return True
-            if self._is_retryable_turn_steer_race(exc):
-                self._queue_prompt(
-                    state,
-                    text=text,
-                    message_id=message_id,
-                    actor_open_id=actor_open_id,
-                    prefer_steer=True,
-                )
-                self._reply_text(
-                    chat_id,
-                    "已记录插播消息，待当前 turn 就绪后继续处理。",
-                    message_id=message_id,
-                )
-                return True
-            if (
-                self._is_turn_thread_not_found_error(exc)
-                or self._is_transport_disconnect(exc)
-                or self._is_request_timeout_error(exc)
-            ):
-                reason = self._runtime_recovery_reason(exc)
-                self._reset_broken_runtime_state(
-                    sender_id,
-                    chat_id,
-                    reason=reason,
-                    clear_thread_binding=True,
-                )
-                self._reply_text(
-                    chat_id,
-                    "当前执行对应的后端会话已失联，已自动清理本地状态。请重新发送这条消息。",
-                    message_id=message_id,
-                )
-                return True
-            logger.exception("插播消息失败")
-            self._reply_text(chat_id, f"插播消息失败：{exc}", message_id=message_id)
-            return True
-
-        self._record_pending_steer(state, text=text)
-        self._reply_text(
-            chat_id,
-            "已插播，会在当前执行的下一个可接收边界继续处理。",
-            message_id=message_id,
-        )
+        self._reply_text(chat_id, "当前线程仍在执行，请等待结束或先执行 `/cancel`。", message_id=message_id)
         return True
 
     def _handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
@@ -2096,7 +1815,6 @@ class CodexHandler(BotHandler):
                 state["started_at"] = time.monotonic()
                 state["last_patch_at"] = 0.0
                 state["followup_sent"] = False
-                state["pending_steers"] = []
             state["running"] = True
             state["pending_local_turn_card"] = False
             self._clear_plan_state(state)
@@ -2122,7 +1840,6 @@ class CodexHandler(BotHandler):
             else:
                 with self._lock:
                     state["pending_cancel"] = False
-        self._schedule_queued_prompt_flush(*binding)
         self._schedule_execution_card_update(*binding)
 
     def _handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
@@ -2180,23 +1897,7 @@ class CodexHandler(BotHandler):
         item = params.get("item") or {}
         item_type = item.get("type")
         thread_id = params.get("threadId", "")
-        if item_type == "userMessage":
-            binding = self._thread_bindings.get(thread_id)
-            if not binding:
-                return
-            state = self._get_state(*binding)
-            message, image_count = self._pending_steer_compare_key_from_content(item.get("content") or [])
-            preview_text = ""
-            with self._lock:
-                pending_steers = state["pending_steers"]
-                if pending_steers:
-                    pending = pending_steers[0]
-                    if pending["message"] == message and pending["image_count"] == image_count:
-                        preview_text = pending["preview_text"]
-                        pending_steers.pop(0)
-            if preview_text:
-                self._append_log_by_thread(thread_id, f"\n[开始处理插播消息] {preview_text}\n")
-        elif item_type == "commandExecution":
+        if item_type == "commandExecution":
             exit_code = item.get("exitCode")
             status = item.get("status")
             tail = f"\n[命令结束 status={status} exit={exit_code}]\n"
@@ -2244,7 +1945,6 @@ class CodexHandler(BotHandler):
             state["current_turn_id"] = ""
             state["pending_local_turn_card"] = False
             state["pending_cancel"] = False
-            state["pending_steers"] = []
             if status == "interrupted":
                 state["cancelled"] = True
             if error and not state["full_reply_text"]:
@@ -2256,7 +1956,6 @@ class CodexHandler(BotHandler):
         with self._lock:
             state["current_prompt_message_id"] = ""
             state["current_actor_open_id"] = ""
-        self._start_next_queued_prompt(*binding)
 
     def _append_log_by_thread(self, thread_id: str, text: str) -> None:
         binding = self._thread_bindings.get(thread_id)
