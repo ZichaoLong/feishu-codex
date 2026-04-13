@@ -1016,3 +1016,69 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         assert entry is not None
         self.assertEqual(entry["sender_principal_id"], "cli_a1b2c3")
         self.assertEqual(entry["sender_type"], "app")
+
+    def test_history_entry_skips_self_app_sender(self) -> None:
+        bot = self._make_bot()
+        bot.app_id = "cli_self_bot"
+
+        entry = bot._history_entry_from_message(
+            _history_item(
+                message_id="hist-self-app",
+                created_at=1712476800000,
+                text="Codex Bot 自己发的卡片",
+                sender_id="cli_self_bot",
+                sender_type="app",
+            )
+        )
+
+        self.assertIsNone(entry)
+
+    def test_history_fetch_filters_self_app_messages(self) -> None:
+        bot = self._make_bot()
+        bot.app_id = "cli_self_bot"
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=SimpleNamespace(
+                        list=lambda request: _HistoryResponse(
+                            [
+                                _history_item(
+                                    message_id="hist-self-app",
+                                    created_at=1000,
+                                    text="自己发的卡片",
+                                    sender_id="cli_self_bot",
+                                    sender_type="app",
+                                ),
+                                _history_item(
+                                    message_id="hist-other-app",
+                                    created_at=1001,
+                                    text="其他机器人消息",
+                                    sender_id="cli_other_bot",
+                                    sender_type="app",
+                                ),
+                                _history_item(
+                                    message_id="hist-user",
+                                    created_at=1002,
+                                    text="普通用户消息",
+                                ),
+                            ]
+                        )
+                    )
+                )
+            )
+        )
+
+        entries = FeishuBot._fetch_group_history_entries(
+            bot,
+            chat_id="chat-1",
+            current_message_id="m-current",
+            current_create_time=2000,
+            existing_message_ids=set(),
+            after_created_at=0,
+            limit=10,
+        )
+
+        self.assertEqual(
+            [item["message_id"] for item in entries],
+            ["hist-other-app", "hist-user"],
+        )

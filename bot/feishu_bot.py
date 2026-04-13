@@ -939,6 +939,12 @@ class FeishuBot(ABC):
             payloads.append(self._mention_payload(mention))
         return payloads
 
+    def _is_self_history_app_sender(self, *, sender_type: str, sender_id: str) -> bool:
+        normalized_sender_type = str(sender_type or "").strip()
+        normalized_sender_id = str(sender_id or "").strip()
+        normalized_app_id = str(self.app_id or "").strip()
+        return bool(normalized_app_id) and normalized_sender_type == "app" and normalized_sender_id == normalized_app_id
+
     def _history_entry_from_message(self, item: Any) -> GroupMessageEntry | None:
         message_id = str(getattr(item, "message_id", "") or "").strip()
         if not message_id:
@@ -962,6 +968,8 @@ class FeishuBot(ABC):
         sender = getattr(item, "sender", None)
         sender_type = str(getattr(sender, "sender_type", "") or "user").strip()
         sender_id = str(getattr(sender, "id", "") or "").strip()
+        if self._is_self_history_app_sender(sender_type=sender_type, sender_id=sender_id):
+            return None
         sender_principal_id = sender_id if sender_type in {"user", "app"} else ""
         sender_name = self._display_name_for_sender_identity(
             user_id="",
