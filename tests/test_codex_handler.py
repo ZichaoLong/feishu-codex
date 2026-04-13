@@ -469,6 +469,27 @@ class CodexHandlerTests(unittest.TestCase):
         )
         self.assertFalse(handler._get_state("ou_user", "c1")["pending_cancel"])
 
+    def test_cancel_recovers_from_missing_thread(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+
+        def _raise_missing_thread(*, thread_id: str, turn_id: str):
+            del thread_id
+            del turn_id
+            raise CodexRpcError("turn/interrupt", {"code": -32000, "message": "thread not found: thread-created"})
+
+        handler._adapter.interrupt_turn = _raise_missing_thread
+
+        ok, message = handler._cancel_current_turn("ou_user", "c1")
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertTrue(ok)
+        self.assertIn("已自动清理本地状态", message)
+        self.assertFalse(state["running"])
+        self.assertEqual(state["current_thread_id"], "")
+        self.assertEqual(state["current_turn_id"], "")
+
     def test_running_p2p_prompt_uses_turn_steer(self) -> None:
         handler, bot = self._make_handler()
 
@@ -481,6 +502,58 @@ class CodexHandlerTests(unittest.TestCase):
             [{"thread_id": "thread-created", "turn_id": "turn-1", "text": "follow up"}],
         )
         self.assertIn("已插播", bot.replies[-1][1])
+
+    def test_committed_steer_user_message_marks_log_without_polluting_reply(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello", message_id="m-1")
+        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "第一段回复"})
+
+        handler.handle_message("ou_user", "c1", "follow up question", message_id="m-2")
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertEqual(len(state["pending_steers"]), 1)
+
+        handler._handle_item_completed({
+            "threadId": "thread-created",
+            "item": {
+                "type": "userMessage",
+                "id": "um-2",
+                "content": [{"type": "text", "text": "follow up question"}],
+            },
+        })
+
+        self.assertEqual(handler._get_state("ou_user", "c1")["pending_steers"], [])
+        self.assertIn("第一段回复", handler._get_state("ou_user", "c1")["full_reply_text"])
+        self.assertNotIn("follow up question", handler._get_state("ou_user", "c1")["full_reply_text"])
+        self.assertIn("[开始处理插播消息] follow up question", handler._get_state("ou_user", "c1")["full_log_text"])
+
+        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "第二段回复"})
+
+        self.assertTrue(handler._get_state("ou_user", "c1")["full_reply_text"].endswith("第二段回复"))
+
+    def test_running_prompt_recovers_from_missing_thread(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello", message_id="m-1")
+
+        def _raise_missing_thread(*, thread_id: str, turn_id: str, text: str):
+            del thread_id
+            del turn_id
+            del text
+            raise CodexRpcError("turn/steer", {"code": -32000, "message": "thread not found: thread-created"})
+
+        handler._adapter.steer_turn = _raise_missing_thread
+
+        handler.handle_message("ou_user", "c1", "follow up", message_id="m-2")
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(state["running"])
+        self.assertEqual(state["current_turn_id"], "")
+        self.assertEqual(state["current_thread_id"], "")
+        self.assertEqual(state["pending_steers"], [])
+        self.assertIn("当前会话已失联", state["full_log_text"])
+        self.assertIn("当前执行对应的后端会话已失联", bot.replies[-1][1])
 
     def test_running_group_prompt_rejects_non_actor_non_admin_steer(self) -> None:
         handler, bot = self._make_handler()
@@ -599,6 +672,17 @@ class CodexHandlerTests(unittest.TestCase):
             [{"thread_id": "thread-created", "turn_id": "turn-1", "text": "late steer"}],
         )
         self.assertEqual(handler._get_state("ou_user", "c1")["queued_prompts"], [])
+        self.assertEqual(len(handler._get_state("ou_user", "c1")["pending_steers"]), 1)
+        handler._handle_item_completed({
+            "threadId": "thread-created",
+            "item": {
+                "type": "userMessage",
+                "id": "um-1",
+                "content": [{"type": "text", "text": "late steer"}],
+            },
+        })
+        self.assertEqual(handler._get_state("ou_user", "c1")["pending_steers"], [])
+        self.assertIn("[开始处理插播消息] late steer", handler._get_state("ou_user", "c1")["full_log_text"])
         self.assertFalse(handler._get_state("ou_user", "c1")["queued_prompt_flush_running"])
 
     def test_group_prompts_share_backend_state_by_chat_id(self) -> None:
