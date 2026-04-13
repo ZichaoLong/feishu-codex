@@ -109,7 +109,8 @@ flowchart TD
 因此飞书侧的规则是：
 
 - 运行中的执行卡片，优先相信 live notification
-- `thread/read` 只用于补齐最终回复、补收口、确认 thread 是否已经不再 active
+- 收到终态通知时，先按当前 transcript 立即收口执行卡片
+- `thread/read` 只用于后台补齐最终回复、补收口、确认 thread 是否已经不再 active
 - 一次 `thread/read` timeout 或 transport error，只能把运行通道标记为临时降级，不能清空当前执行锚点
 
 但终态通知可能因为断连、接管、时序问题而漏掉。因此飞书侧仍需要在这些场景主动做 `thread/read` 对账：
@@ -125,6 +126,7 @@ flowchart TD
 - 当前执行卡片由 `prompt_message_id`、`card_message_id`、`turn_id` 共同锚定
 - live delta、终态通知、watchdog 补账都只能更新这张当前执行卡片
 - 当执行结束后，这张卡片会被收口并退出“当前执行锚点”
+- 如果终态后还需要补最终文本，只允许后台按旧 `card_message_id` 回写这张已结束的旧卡片
 - 后续新的本地 prompt 或新的外部 turn，才允许创建下一张执行卡片
 
 因此，`thread/read` 软失败不能导致“先把当前卡片判死、清空锚点，再被后续事件新开一张卡片”。

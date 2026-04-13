@@ -118,8 +118,11 @@ not allowed to declare the current execution dead on its own.
 The rules are:
 
 - trust live notifications first while a turn is running
-- use `thread/read` only to fill in final reply content, close stale cards, and
-  confirm that a thread is no longer active
+- when a terminal signal arrives, finalize the execution card immediately from
+  the current transcript
+- use `thread/read` only as a background reconciliation pass to fill in final
+  reply content, close stale cards, and confirm that a thread is no longer
+  active
 - treat a `thread/read` timeout or transport error as a temporary degraded
   channel, not as permission to clear the current execution anchor
 
@@ -140,6 +143,8 @@ time:
 - live deltas, terminal notifications, and watchdog reconciliation may only
   update that active card
 - once an execution is finalized, that card stops being the active anchor
+- if terminal reconciliation still needs to fill in missing text later, it may
+  only patch that finalized card by its old `card_message_id`
 - only a new local prompt or a new external turn may create the next execution
   card
 

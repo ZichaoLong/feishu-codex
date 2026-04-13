@@ -177,6 +177,18 @@ class _PendingRequestState(TypedDict):
     actor_open_id: str
 
 
+@dataclass(frozen=True)
+class _TerminalReconcileTarget:
+    chat_id: str
+    thread_id: str
+    turn_id: str
+    card_message_id: str
+    prompt_message_id: str
+    transcript: ExecutionTranscript
+    cancelled: bool
+    elapsed: int
+
+
 def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
     for preset, config in _PERMISSIONS_PRESETS.items():
         if config["approval_policy"] == approval_policy and config["sandbox"] == sandbox:
@@ -550,6 +562,73 @@ class CodexHandler(BotHandler):
             cancelled=cancelled,
         )
 
+    def _capture_terminal_reconcile_target(
+        self,
+        sender_id: str,
+        chat_id: str,
+        *,
+        thread_id: str,
+        turn_id: str = "",
+    ) -> _TerminalReconcileTarget | None:
+        state = self._get_state(sender_id, chat_id)
+        with self._lock:
+            card_message_id = state["current_message_id"].strip()
+            if not card_message_id:
+                return None
+            resolved_turn_id = str(turn_id or state["current_turn_id"] or "").strip()
+            if not resolved_turn_id:
+                return None
+            return _TerminalReconcileTarget(
+                chat_id=chat_id,
+                thread_id=str(thread_id or "").strip(),
+                turn_id=resolved_turn_id,
+                card_message_id=card_message_id,
+                prompt_message_id=state["current_prompt_message_id"].strip(),
+                transcript=state["execution_transcript"].clone(),
+                cancelled=state["cancelled"],
+                elapsed=int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0,
+            )
+
+    def _schedule_terminal_execution_reconcile(self, target: _TerminalReconcileTarget | None) -> None:
+        if target is None or not target.thread_id or not target.card_message_id:
+            return
+        worker = threading.Thread(
+            target=self._run_terminal_execution_reconcile,
+            args=(target,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_terminal_execution_reconcile(self, target: _TerminalReconcileTarget) -> None:
+        try:
+            snapshot = self._adapter.read_thread(target.thread_id, include_turns=True)
+        except Exception as exc:
+            logger.info(
+                "终态补账跳过: chat=%s thread=%s reason=%s",
+                target.chat_id,
+                target.thread_id[:12],
+                self._runtime_recovery_reason(exc),
+            )
+            return
+
+        reply_text, reply_items = self._snapshot_reply(snapshot, turn_id=target.turn_id)
+        if not reply_text:
+            return
+
+        transcript = target.transcript.clone()
+        if not transcript.rebuild_reply_from_snapshot_items(reply_items, fallback_text=reply_text):
+            transcript.set_reply_text(reply_text)
+        if transcript.reply_text() == target.transcript.reply_text():
+            return
+
+        self._patch_execution_card_message(
+            target.card_message_id,
+            transcript=transcript,
+            running=False,
+            elapsed=target.elapsed,
+            cancelled=target.cancelled,
+        )
+
     def _mark_runtime_degraded(self, sender_id: str, chat_id: str, *, reason: str) -> None:
         state = self._get_state(sender_id, chat_id)
         with self._lock:
@@ -606,7 +685,6 @@ class CodexHandler(BotHandler):
             chat_id,
             thread_id=thread_id,
             turn_id=turn_id,
-            force_finalize=False,
         )
         if not finalized:
             self._schedule_mirror_watchdog(sender_id, chat_id)
@@ -1175,6 +1253,25 @@ class CodexHandler(BotHandler):
         self._retire_execution_anchor(sender_id, chat_id)
         return True
 
+    def _finalize_execution_from_terminal_signal(
+        self,
+        sender_id: str,
+        chat_id: str,
+        *,
+        thread_id: str,
+        turn_id: str = "",
+    ) -> bool:
+        target = self._capture_terminal_reconcile_target(
+            sender_id,
+            chat_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
+        finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
+        if finalized:
+            self._schedule_terminal_execution_reconcile(target)
+        return finalized
+
     def _reconcile_execution_snapshot(
         self,
         sender_id: str,
@@ -1182,7 +1279,6 @@ class CodexHandler(BotHandler):
         *,
         thread_id: str,
         turn_id: str = "",
-        force_finalize: bool,
     ) -> bool:
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
@@ -1206,13 +1302,11 @@ class CodexHandler(BotHandler):
                 )
                 return False
             logger.exception("读取线程快照失败: thread=%s", normalized_thread_id[:12])
-            if force_finalize:
-                return self._finalize_execution_card_from_state(sender_id, chat_id)
             return False
 
         reply_text, reply_items = self._snapshot_reply(snapshot, turn_id=turn_id)
         state = self._get_state(sender_id, chat_id)
-        should_finalize = force_finalize or snapshot.summary.status != "active"
+        should_finalize = snapshot.summary.status != "active"
         with self._lock:
             state["current_thread_name"] = snapshot.summary.name or snapshot.summary.preview or state["current_thread_name"]
             state["working_dir"] = snapshot.summary.cwd or state["working_dir"]
@@ -1359,7 +1453,6 @@ class CodexHandler(BotHandler):
                 chat_id,
                 thread_id=thread_id,
                 turn_id=turn_id,
-                force_finalize=False,
             )
             with self._lock:
                 if not state["running"]:
@@ -2082,12 +2175,11 @@ class CodexHandler(BotHandler):
                 state["running"] = True
                 state["awaiting_local_turn_started"] = False
         if status_type != "active" and (current_turn_id or current_message_id):
-            self._reconcile_execution_snapshot(
+            self._finalize_execution_from_terminal_signal(
                 binding[0],
                 binding[1],
                 thread_id=thread_id,
                 turn_id=current_turn_id,
-                force_finalize=True,
             )
             return
         if status_type == "active":
@@ -2114,12 +2206,11 @@ class CodexHandler(BotHandler):
             current_message_id = state["current_message_id"]
             is_running = state["running"]
         if is_running or current_turn_id or current_message_id:
-            self._reconcile_execution_snapshot(
+            self._finalize_execution_from_terminal_signal(
                 binding[0],
                 binding[1],
                 thread_id=thread_id,
                 turn_id=current_turn_id,
-                force_finalize=True,
             )
             return
         with self._lock:
@@ -2360,12 +2451,11 @@ class CodexHandler(BotHandler):
                 transcript.set_reply_text(error.get("message") or "执行失败")
             elif error:
                 transcript.append_process_note(f"\n[错误] {error.get('message', '执行失败')}\n")
-        self._reconcile_execution_snapshot(
+        self._finalize_execution_from_terminal_signal(
             binding[0],
             binding[1],
             thread_id=thread_id,
             turn_id=turn_id or state["current_turn_id"],
-            force_finalize=True,
         )
 
     def _append_log_by_thread(self, thread_id: str, text: str) -> None:

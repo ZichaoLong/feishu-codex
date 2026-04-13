@@ -596,7 +596,6 @@ class CodexHandlerTests(unittest.TestCase):
             "c1",
             thread_id="thread-created",
             turn_id="turn-1",
-            force_finalize=False,
         )
 
         state = handler._get_state("ou_user", "c1")
@@ -605,6 +604,65 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(state["runtime_channel_state"], "degraded")
         self.assertEqual(state["current_turn_id"], "turn-1")
         self.assertEqual(state["current_message_id"], "plan-card-2")
+
+    def test_terminal_signal_finalizes_immediately_before_background_reconcile(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
+            handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertFalse(state["running"])
+        self.assertEqual(state["current_message_id"], "")
+        self.assertEqual(state["last_execution_message_id"], "plan-card-2")
+        schedule_reconcile.assert_called_once()
+
+    def test_background_terminal_reconcile_only_patches_old_card(self) -> None:
+        handler, bot = self._make_handler()
+
+        target = handler._capture_terminal_reconcile_target("ou_user", "c1", thread_id="thread-created", turn_id="turn-1")
+        self.assertIsNone(target)
+
+        handler.handle_message("ou_user", "c1", "hello")
+        target = handler._capture_terminal_reconcile_target("ou_user", "c1", thread_id="thread-created", turn_id="turn-1")
+        assert target is not None
+
+        handler._finalize_execution_card_from_state("ou_user", "c1")
+        state = handler._get_state("ou_user", "c1")
+        with handler._lock:
+            state["current_message_id"] = "new-card"
+            state["current_turn_id"] = "turn-2"
+            state["running"] = True
+            state["awaiting_local_turn_started"] = False
+
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [
+                        {"type": "agentMessage", "text": "hello final answer"},
+                    ],
+                }
+            ],
+        )
+
+        handler._run_terminal_execution_reconcile(target)
+
+        state = handler._get_state("ou_user", "c1")
+        self.assertEqual(state["current_message_id"], "new-card")
+        self.assertTrue(any(message_id == target.card_message_id for message_id, _ in bot.patches))
+        self.assertFalse(any(message_id == "new-card" for message_id, _ in bot.patches))
 
     def test_group_prompts_share_backend_state_by_chat_id(self) -> None:
         handler, bot = self._make_handler()
@@ -623,74 +681,33 @@ class CodexHandlerTests(unittest.TestCase):
         )
         self.assertIs(handler._get_state("ou_user", "chat-group"), handler._get_state("ou_user2", "chat-group"))
 
-    def test_turn_completed_reconciles_reply_text_from_thread_snapshot(self) -> None:
+    def test_turn_completed_finalizes_immediately_and_schedules_terminal_reconcile(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "hello")
-        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
-            summary=ThreadSummary(
-                thread_id="thread-created",
-                cwd="/tmp/project",
-                name="demo",
-                preview="",
-                created_at=0,
-                updated_at=0,
-                source="appServer",
-                status="idle",
-            ),
-            turns=[
-                {
-                    "id": "turn-1",
-                    "items": [
-                        {"type": "agentMessage", "text": "完整最终回复"},
-                    ],
-                }
-            ],
-        )
-
         handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "完整"})
-        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
+        with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
+            handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
 
         state = handler._get_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_turn_id"], "")
-        self.assertEqual(state["execution_transcript"].reply_text(), "完整最终回复")
-        self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
+        self.assertEqual(state["execution_transcript"].reply_text(), "完整")
+        schedule_reconcile.assert_called_once()
         patched_card = json.loads(bot.patches[-1][1])
-        self.assertIn("完整最终回复", json.dumps(patched_card, ensure_ascii=False))
+        self.assertIn("完整", json.dumps(patched_card, ensure_ascii=False))
 
-    def test_thread_status_inactive_reconciles_and_finalizes_running_card(self) -> None:
+    def test_thread_status_inactive_finalizes_immediately_and_schedules_terminal_reconcile(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "hello")
-        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
-            summary=ThreadSummary(
-                thread_id="thread-created",
-                cwd="/tmp/project",
-                name="demo",
-                preview="",
-                created_at=0,
-                updated_at=0,
-                source="appServer",
-                status="idle",
-            ),
-            turns=[
-                {
-                    "id": "turn-1",
-                    "items": [
-                        {"type": "agentMessage", "text": "inactive final"},
-                    ],
-                }
-            ],
-        )
-
-        handler._handle_thread_status_changed({"threadId": "thread-created", "status": {"type": "idle"}})
+        with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
+            handler._handle_thread_status_changed({"threadId": "thread-created", "status": {"type": "idle"}})
 
         state = handler._get_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_turn_id"], "")
-        self.assertEqual(state["execution_transcript"].reply_text(), "inactive final")
-        self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
+        schedule_reconcile.assert_called_once()
         patched_card = json.loads(bot.patches[-1][1])
         body_elements = patched_card["body"]["elements"]
         self.assertFalse(
@@ -702,38 +719,17 @@ class CodexHandlerTests(unittest.TestCase):
             )
         )
 
-    def test_thread_closed_reconciles_running_card_without_clearing_binding(self) -> None:
+    def test_thread_closed_finalizes_immediately_without_clearing_binding(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "hello")
-        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
-            summary=ThreadSummary(
-                thread_id="thread-created",
-                cwd="/tmp/project",
-                name="demo",
-                preview="",
-                created_at=0,
-                updated_at=0,
-                source="appServer",
-                status="idle",
-            ),
-            turns=[
-                {
-                    "id": "turn-1",
-                    "items": [
-                        {"type": "agentMessage", "text": "closed final"},
-                    ],
-                }
-            ],
-        )
-
-        handler._handle_thread_closed({"threadId": "thread-created"})
+        with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
+            handler._handle_thread_closed({"threadId": "thread-created"})
 
         state = handler._get_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_thread_id"], "thread-created")
-        self.assertEqual(state["execution_transcript"].reply_text(), "closed final")
-        self.assertEqual(handler._adapter.read_thread_calls[-1], {"thread_id": "thread-created", "include_turns": True})
+        schedule_reconcile.assert_called_once()
         patched_card = json.loads(bot.patches[-1][1])
         body_elements = patched_card["body"]["elements"]
         self.assertFalse(
