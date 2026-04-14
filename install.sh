@@ -127,10 +127,16 @@ echo "[ 3/6 ] 初始化配置文件..."
 
 mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$ENV_DIR"
 
+cp "$INSTALL_DIR/config/system.yaml.example" "$CONFIG_DIR/system.yaml.example"
+_green "  ✓ 已刷新 ~/.config/feishu-codex/system.yaml.example（本地默认模板）"
+
+cp "$INSTALL_DIR/config/codex.yaml.example" "$CONFIG_DIR/codex.yaml.example"
+_green "  ✓ 已刷新 ~/.config/feishu-codex/codex.yaml.example（本地默认模板）"
+
 if [ -f "$CONFIG_DIR/system.yaml" ]; then
     _yellow "  ~/.config/feishu-codex/system.yaml 已存在，跳过（保护现有配置）"
 else
-    cp "$INSTALL_DIR/config/system.yaml.example" "$CONFIG_DIR/system.yaml"
+    cp "$CONFIG_DIR/system.yaml.example" "$CONFIG_DIR/system.yaml"
     _green "  ✓ 已创建 ~/.config/feishu-codex/system.yaml（请填入飞书应用凭证）"
 fi
 
@@ -161,7 +167,7 @@ if [ -f "$CONFIG_DIR/codex.yaml" ]; then
         _yellow "  ~/.config/feishu-codex/codex.yaml 已存在，跳过（保护现有配置）"
     fi
 else
-    cp "$INSTALL_DIR/config/codex.yaml.example" "$CONFIG_DIR/codex.yaml"
+    cp "$CONFIG_DIR/codex.yaml.example" "$CONFIG_DIR/codex.yaml"
     if [ "$CODEX_PATH" != "codex" ]; then
         sed -i -E "s|^#?[[:space:]]*codex_command:.*|codex_command: \"$CODEX_PATH\"|" "$CONFIG_DIR/codex.yaml" 2>/dev/null || true
     fi
@@ -298,6 +304,19 @@ case "\${1:-}" in
             *) echo "已取消。" ;;
         esac
         ;;
+    clear-bindings)
+        echo "即将清空 feishu-codex 已保存的 Feishu 聊天绑定。"
+        echo "这不会删除 Codex 线程本身，只会让飞书侧当前会话忘记自己绑定到哪个 thread。"
+        echo ""
+        read -r -p "确认清空？[y/N] " _confirm
+        if [[ "\$_confirm" != "y" && "\$_confirm" != "Y" ]]; then
+            echo "已取消。"
+            exit 0
+        fi
+        export FC_CONFIG_DIR="$CONFIG_DIR"
+        export FC_DATA_DIR="$DATA_DIR"
+        exec "$VENV_DIR/bin/feishu-codex-clear-bindings"
+        ;;
     uninstall)
         echo "即将卸载 feishu-codex，将删除以下内容："
         echo "  systemd 服务:  ~/.config/systemd/user/\$SERVICE_NAME.service"
@@ -350,7 +369,7 @@ case "\${1:-}" in
         echo "已彻底清除。项目源码保留在 $INSTALL_DIR"
         ;;
     *)
-        echo "用法: feishu-codex {start|stop|restart|status|log|run|config|uninstall|purge}"
+        echo "用法: feishu-codex {start|stop|restart|status|log|run|config|clear-bindings|uninstall|purge}"
         echo ""
         echo "  start     启动服务（通过 systemd）"
         echo "  stop      停止服务"
@@ -359,6 +378,7 @@ case "\${1:-}" in
         echo "  log       查看实时日志（Ctrl+C 退出）"
         echo "  run       前台运行（调试用，直接执行不走 systemd）"
         echo "  config    打开配置文件（飞书凭证 / Codex 参数）"
+        echo "  clear-bindings 清空飞书侧已保存的聊天绑定"
         echo "  uninstall 卸载服务和管理命令（保留配置、数据、源码）"
         echo "  purge     彻底清除（在 uninstall 基础上额外删除配置和数据）"
         ;;

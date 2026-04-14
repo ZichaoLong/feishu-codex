@@ -21,6 +21,7 @@ DEFAULT_HISTORY_PREVIEW_ROUNDS = 3
 DEFAULT_STREAM_PATCH_INTERVAL_MS = 700
 DEFAULT_APP_SERVER_MODE = "managed"
 DEFAULT_APP_SERVER_URL = "ws://127.0.0.1:8765"
+GROUP_SHARED_BINDING_OWNER_ID = "__group__"
 
 
 def display_path(path: str, base: str = "") -> str:

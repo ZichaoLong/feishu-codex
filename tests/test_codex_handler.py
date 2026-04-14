@@ -342,10 +342,16 @@ class CodexHandlerTests(unittest.TestCase):
             element for element in card["elements"] if isinstance(element, dict) and element.get("tag") == "action"
         ]
 
-    def _make_handler(self, cfg: dict | None = None) -> tuple[CodexHandler, _FakeBot]:
-        tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tempdir.cleanup)
-        data_dir = pathlib.Path(tempdir.name)
+    def _make_handler(
+        self,
+        cfg: dict | None = None,
+        *,
+        data_dir: pathlib.Path | None = None,
+    ) -> tuple[CodexHandler, _FakeBot]:
+        if data_dir is None:
+            tempdir = tempfile.TemporaryDirectory()
+            self.addCleanup(tempdir.cleanup)
+            data_dir = pathlib.Path(tempdir.name)
         effective_cfg = {"mirror_watchdog_seconds": 999999}
         effective_cfg.update(dict(cfg or {}))
         config_patch = patch("bot.codex_handler.load_config_file", return_value=effective_cfg)
@@ -355,6 +361,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.addCleanup(config_patch.stop)
         self.addCleanup(adapter_patch.stop)
         handler = CodexHandler(data_dir=data_dir)
+        self.addCleanup(handler.shutdown)
         bot = _FakeBot(data_dir)
         handler.bot = bot
         return handler, bot
@@ -364,7 +371,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "c1", "/mode plan")
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["collaboration_mode"], "plan")
         self.assertIn("已切换协作模式：`plan`", bot.replies[-1][1])
         self.assertIn("只影响当前飞书会话的后续 turn", bot.replies[-1][1])
@@ -390,7 +397,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "old-card"
             state["execution_transcript"].set_reply_text("收到")
@@ -401,9 +408,9 @@ class CodexHandlerTests(unittest.TestCase):
         handler._handle_agent_message_delta({"threadId": "thread-1", "delta": "新的回复"})
 
         self.assertEqual(len(bot.sent_messages), 1)
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_message_id"], "plan-card-2")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_message_id"], "plan-card-2")
         self.assertEqual(
-            handler._get_state("ou_user", "c1")["execution_transcript"].reply_text(),
+            handler._get_runtime_state("ou_user", "c1")["execution_transcript"].reply_text(),
             "新的回复",
         )
 
@@ -420,7 +427,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "old-card"
             state["execution_transcript"].set_reply_text("上一轮回复")
@@ -440,14 +447,14 @@ class CodexHandlerTests(unittest.TestCase):
                 for element in body_elements
             )
         )
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_message_id"], "plan-card-2")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_message_id"], "plan-card-2")
 
     def test_prompt_start_response_sets_current_turn_id_immediately(self) -> None:
         handler, _ = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "hello")
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["current_turn_id"], "turn-1")
 
     def test_cancel_before_turn_started_is_applied_after_turn_started(self) -> None:
@@ -455,7 +462,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "c1", "hello")
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["current_turn_id"] = ""
 
@@ -464,7 +471,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(message, "已请求停止当前执行。")
         self.assertEqual(handler._adapter.interrupt_turn_calls, [])
-        self.assertTrue(handler._get_state("ou_user", "c1")["pending_cancel"])
+        self.assertTrue(handler._get_runtime_state("ou_user", "c1")["pending_cancel"])
 
         handler._handle_turn_started({"threadId": "thread-created", "turn": {"id": "turn-1"}})
 
@@ -472,7 +479,7 @@ class CodexHandlerTests(unittest.TestCase):
             handler._adapter.interrupt_turn_calls,
             [{"thread_id": "thread-created", "turn_id": "turn-1"}],
         )
-        self.assertFalse(handler._get_state("ou_user", "c1")["pending_cancel"])
+        self.assertFalse(handler._get_runtime_state("ou_user", "c1")["pending_cancel"])
 
     def test_cancel_recovers_from_missing_thread(self) -> None:
         handler, _ = self._make_handler()
@@ -488,7 +495,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         ok, message = handler._cancel_current_turn("ou_user", "c1")
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertTrue(ok)
         self.assertEqual(message, "当前执行已结束，已刷新卡片状态。")
         self.assertFalse(state["running"])
@@ -499,7 +506,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, _ = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "hello")
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["running"] = False
             state["current_turn_id"] = ""
@@ -523,7 +530,7 @@ class CodexHandlerTests(unittest.TestCase):
             [{"thread_id": "thread-created", "profile": None, "model": None, "model_provider": None}],
         )
         self.assertEqual(len(handler._adapter.create_thread_calls), 1)
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_thread_id"], "thread-created")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_id"], "thread-created")
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, [])
 
     def test_reconcile_runtime_loss_keeps_thread_binding_for_next_prompt(self) -> None:
@@ -536,7 +543,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_thread_id"], "thread-created")
 
@@ -598,7 +605,7 @@ class CodexHandlerTests(unittest.TestCase):
             turn_id="turn-1",
         )
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(finalized)
         self.assertTrue(state["running"])
         self.assertEqual(state["runtime_channel_state"], "degraded")
@@ -612,7 +619,7 @@ class CodexHandlerTests(unittest.TestCase):
         with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
             handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_message_id"], "")
         self.assertEqual(state["last_execution_message_id"], "plan-card-2")
@@ -629,7 +636,7 @@ class CodexHandlerTests(unittest.TestCase):
         assert target is not None
 
         handler._finalize_execution_card_from_state("ou_user", "c1")
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "new-card"
             state["current_turn_id"] = "turn-2"
@@ -659,7 +666,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._run_terminal_execution_reconcile(target)
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["current_message_id"], "new-card")
         self.assertTrue(any(message_id == target.card_message_id for message_id, _ in bot.patches))
         self.assertFalse(any(message_id == "new-card" for message_id, _ in bot.patches))
@@ -679,7 +686,83 @@ class CodexHandlerTests(unittest.TestCase):
             [call["thread_id"] for call in handler._adapter.start_turn_calls],
             ["thread-created", "thread-created"],
         )
-        self.assertIs(handler._get_state("ou_user", "chat-group"), handler._get_state("ou_user2", "chat-group"))
+        self.assertIs(handler._get_runtime_state("ou_user", "chat-group"), handler._get_runtime_state("ou_user2", "chat-group"))
+
+    def test_p2p_stored_binding_survives_handler_restart(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        project_dir = data_dir / "project"
+        project_dir.mkdir()
+
+        handler1, _ = self._make_handler(data_dir=data_dir)
+        handler1.handle_message("ou_user", "c1", f"/cd {project_dir}")
+        handler1.handle_message("ou_user", "c1", "/permissions full-access")
+        handler1.handle_message("ou_user", "c1", "/mode plan")
+        handler1.handle_message("ou_user", "c1", "hello")
+
+        handler2, _ = self._make_handler(data_dir=data_dir)
+        state = handler2._get_runtime_state("ou_user", "c1")
+
+        self.assertEqual(state["working_dir"], str(project_dir))
+        self.assertEqual(state["current_thread_id"], "thread-created")
+        self.assertEqual(state["current_thread_title"], "（无标题）")
+        self.assertEqual(state["approval_policy"], "never")
+        self.assertEqual(state["sandbox"], "danger-full-access")
+        self.assertEqual(state["collaboration_mode"], "plan")
+        self.assertFalse(state["running"])
+
+        handler2.handle_message("ou_user", "c1", "follow up")
+
+        self.assertEqual(len(handler2._adapter.create_thread_calls), 0)
+        self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-created")
+
+    def test_group_stored_binding_survives_handler_restart(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+
+        handler1, bot1 = self._make_handler(data_dir=data_dir)
+        bot1.message_contexts["m-bind"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+        handler1._bind_thread(
+            "ou_user",
+            "chat-group",
+            ThreadSummary(
+                thread_id="thread-group",
+                cwd="/tmp/project",
+                name="",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            ),
+            message_id="m-bind",
+        )
+
+        handler2, bot2 = self._make_handler(data_dir=data_dir)
+        bot2.message_contexts["m-status"] = {"chat_type": "group", "sender_open_id": "ou_user2"}
+        state = handler2._get_runtime_state("ou_user2", "chat-group", "m-status")
+
+        self.assertEqual(state["current_thread_id"], "thread-group")
+        self.assertIn(("__group__", "chat-group"), handler2._runtime_state_by_binding)
+
+        bot2.message_contexts["m-prompt"] = {"chat_type": "group", "sender_open_id": "ou_user2"}
+        handler2.handle_message("ou_user2", "chat-group", "第二轮", message_id="m-prompt")
+
+        self.assertEqual(len(handler2._adapter.create_thread_calls), 0)
+        self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-group")
+
+    def test_status_shows_untitled_instead_of_unbound_when_thread_exists(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+        handler.handle_message("ou_user", "c1", "/status")
+
+        _, card = bot.cards[-1]
+        rendered = json.dumps(card, ensure_ascii=False)
+        self.assertIn("当前线程：`thread-c…` （无标题）", rendered)
+        self.assertNotIn("（未绑定线程）", rendered)
 
     def test_turn_completed_finalizes_immediately_and_schedules_terminal_reconcile(self) -> None:
         handler, bot = self._make_handler()
@@ -689,7 +772,7 @@ class CodexHandlerTests(unittest.TestCase):
         with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
             handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_turn_id"], "")
         self.assertEqual(state["execution_transcript"].reply_text(), "完整")
@@ -704,7 +787,7 @@ class CodexHandlerTests(unittest.TestCase):
         with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
             handler._handle_thread_status_changed({"threadId": "thread-created", "status": {"type": "idle"}})
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_turn_id"], "")
         schedule_reconcile.assert_called_once()
@@ -726,7 +809,7 @@ class CodexHandlerTests(unittest.TestCase):
         with patch.object(handler, "_schedule_terminal_execution_reconcile") as schedule_reconcile:
             handler._handle_thread_closed({"threadId": "thread-created"})
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["current_thread_id"], "thread-created")
         schedule_reconcile.assert_called_once()
@@ -765,7 +848,7 @@ class CodexHandlerTests(unittest.TestCase):
                 }
             ],
         )
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             generation = state["mirror_watchdog_generation"]
             if state["mirror_watchdog_timer"] is not None:
@@ -774,7 +857,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._run_mirror_watchdog("ou_user", "c1", generation)
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(state["running"])
         self.assertEqual(state["execution_transcript"].reply_text(), "watchdog final")
 
@@ -782,7 +865,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "hello")
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["running"] = False
             state["current_turn_id"] = ""
@@ -816,7 +899,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "existing-card"
             state["awaiting_local_turn_started"] = True
@@ -825,7 +908,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-1"}})
 
         self.assertEqual(len(bot.sent_messages), 0)
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_message_id"], "existing-card")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_message_id"], "existing-card")
 
     def test_duplicate_turn_started_does_not_open_second_execution_card(self) -> None:
         handler, bot = self._make_handler()
@@ -840,7 +923,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["current_message_id"] = "existing-card"
             state["current_turn_id"] = "turn-1"
@@ -850,7 +933,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-1"}})
 
         self.assertEqual(len(bot.sent_messages), 0)
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_message_id"], "existing-card")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_message_id"], "existing-card")
 
     def test_group_thread_binding_is_not_treated_as_takeover_for_same_chat(self) -> None:
         handler, bot = self._make_handler()
@@ -1273,16 +1356,35 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "chat-group", "/status", message_id="m-status")
 
-        self.assertIn(("__group__", "chat-group"), handler._states)
-        self.assertNotIn(("ou_user", "chat-group"), handler._states)
-        self.assertIs(handler._get_state("ou_user", "chat-group"), handler._get_state("ou_user2", "chat-group"))
+        self.assertIn(("__group__", "chat-group"), handler._runtime_state_by_binding)
+        self.assertNotIn(("ou_user", "chat-group"), handler._runtime_state_by_binding)
+        self.assertIs(handler._get_runtime_state("ou_user", "chat-group"), handler._get_runtime_state("ou_user2", "chat-group"))
+
+    def test_group_settings_card_action_uses_shared_chat_binding_key(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        response = self._unpack_card_response(
+            handler.handle_card_action(
+                "ou_user",
+                "chat-group",
+                "m-group",
+                {"action": "set_collaboration_mode", "mode": "plan", "_operator_open_id": "ou_admin"},
+            )
+        )
+
+        self.assertEqual(handler._get_runtime_state("ou_user", "chat-group", "m-group")["collaboration_mode"], "plan")
+        self.assertIn(("__group__", "chat-group"), handler._runtime_state_by_binding)
+        self.assertNotIn(("ou_user", "chat-group"), handler._runtime_state_by_binding)
+        self.assertEqual(response["toast_type"], "success")
+        self.assertIn("plan", response["toast"])
 
     def test_sandbox_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "/sandbox read-only")
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["sandbox"], "read-only")
         self.assertIn("已切换沙箱策略：`read-only`", bot.replies[-1][1])
         self.assertIn("只影响当前飞书会话的后续 turn", bot.replies[-1][1])
@@ -1303,7 +1405,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "c1", "/permissions full-access")
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["approval_policy"], "never")
         self.assertEqual(state["sandbox"], "danger-full-access")
         self.assertIn("Full Access", bot.replies[-1][1])
@@ -1345,7 +1447,7 @@ class CodexHandlerTests(unittest.TestCase):
             {"action": "set_collaboration_mode", "mode": "plan"},
         ))
 
-        self.assertEqual(handler._get_state("ou_user", "c1")["collaboration_mode"], "plan")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["collaboration_mode"], "plan")
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("plan", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 协作模式")
@@ -1361,7 +1463,7 @@ class CodexHandlerTests(unittest.TestCase):
             {"action": "set_sandbox_policy", "policy": "read-only"},
         ))
 
-        self.assertEqual(handler._get_state("ou_user", "c1")["sandbox"], "read-only")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["sandbox"], "read-only")
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("read-only", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 沙箱策略")
@@ -1376,7 +1478,7 @@ class CodexHandlerTests(unittest.TestCase):
             {"action": "set_permissions_preset", "preset": "full-access"},
         ))
 
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["approval_policy"], "never")
         self.assertEqual(state["sandbox"], "danger-full-access")
         self.assertEqual(response["toast_type"], "success")
@@ -1386,7 +1488,7 @@ class CodexHandlerTests(unittest.TestCase):
 
     def test_turn_plan_updated_sends_then_patches_plan_card(self) -> None:
         handler, bot = self._make_handler()
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         thread = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -1435,7 +1537,7 @@ class CodexHandlerTests(unittest.TestCase):
 
     def test_plan_item_completion_sends_plan_card(self) -> None:
         handler, bot = self._make_handler()
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         thread = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -1619,7 +1721,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("ou_user", "c1", "/rm")
 
         self.assertEqual(handler._adapter.archive_thread_calls, ["thread-1"])
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_thread_id"], "")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_id"], "")
         self.assertIn("不是硬删除", bot.replies[-1][1])
 
     def test_profile_command_clears_stale_local_default_profile(self) -> None:
@@ -1665,7 +1767,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "c1", "hello", message_id="m1")
 
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_message_id"], "reserved-card")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_message_id"], "reserved-card")
         self.assertEqual(len(bot.sent_messages), 0)
         self.assertEqual(bot.patches[-1][0], "reserved-card")
 
@@ -1889,7 +1991,7 @@ class CodexHandlerTests(unittest.TestCase):
             source="cli",
             status="idle",
         )
-        state = handler._get_state("ou_user", "c1")
+        state = handler._get_runtime_state("ou_user", "c1")
         with handler._lock:
             state["current_thread_id"] = "thread-1"
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
@@ -2471,8 +2573,8 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "c1", "/cd /tmp")
 
-        self.assertEqual(handler._get_state("ou_user", "c1")["working_dir"], "/tmp")
-        self.assertEqual(handler._get_state("ou_user", "c1")["current_thread_id"], "")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["working_dir"], "/tmp")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_id"], "")
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 目录已切换")
         self.assertIn("当前线程绑定已清空。", card["elements"][0]["content"])
@@ -2541,12 +2643,24 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-1",
-            {"action": "resume_thread", "thread_id": "thread-1"},
-        ))
+        class _ImmediateThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                self._target = target
+                self._args = args
+                self._kwargs = kwargs or {}
+                self.daemon = daemon
+
+            def start(self):
+                if self._target is not None:
+                    self._target(*self._args, **self._kwargs)
+
+        with patch("bot.codex_session_ui_domain.threading.Thread", _ImmediateThread):
+            response = self._unpack_card_response(handler.handle_card_action(
+                "ou_user",
+                "c1",
+                "msg-1",
+                {"action": "resume_thread", "thread_id": "thread-1"},
+            ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
         self.assertIn("正在恢复线程", response["toast"])

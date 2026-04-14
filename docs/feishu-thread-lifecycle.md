@@ -80,7 +80,7 @@ If app-server unloads a thread because the last subscriber disappears, the
 Feishu chat must keep:
 
 - `current_thread_id`
-- `current_thread_name`
+- `current_thread_title`
 - chat-local working directory and UI state
 
 It must not treat `thread/closed` or `turn/start -> thread not found` as proof

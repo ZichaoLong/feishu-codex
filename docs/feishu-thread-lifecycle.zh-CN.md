@@ -75,7 +75,7 @@ flowchart TD
 如果 app-server 因“最后一个订阅者离开”而 unload 某个 thread，飞书侧仍必须保留：
 
 - `current_thread_id`
-- `current_thread_name`
+- `current_thread_title`
 - 这个飞书会话当前目录等本地状态
 
 不能把 `thread/closed` 或 `turn/start -> thread not found` 直接当成“这个会话不再绑定任何线程”的证据。

@@ -35,7 +35,8 @@ class _SettingsDomainOwner(Protocol):
     _profile_state: Any
     _adapter_config: Any
 
-    def _get_state(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
+    def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
+    def _save_stored_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> None: ...
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None: ...
 
@@ -291,7 +292,7 @@ class CodexSettingsDomain:
             logger.exception("保存 feishu-codex 默认 profile 失败")
             return CommandResult(text=f"切换 profile 失败：{exc}")
 
-        state = owner._get_state(sender_id, chat_id, message_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         lines = [f"已切换默认 profile：`{target_profile}`"]
         if state["running"]:
             lines.append("如果当前正在执行，新 profile 从下一轮生效。")
@@ -302,7 +303,7 @@ class CodexSettingsDomain:
 
     def handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
-        state = owner._get_state(sender_id, chat_id, message_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in self._approval_policies:
@@ -310,6 +311,7 @@ class CodexSettingsDomain:
             with owner._lock:
                 state["approval_policy"] = policy
                 running = state["running"]
+                owner._save_stored_binding(sender_id, chat_id, message_id)
             message = f"已切换审批策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
@@ -318,7 +320,7 @@ class CodexSettingsDomain:
 
     def handle_sandbox_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
-        state = owner._get_state(sender_id, chat_id, message_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in self._sandbox_policies:
@@ -326,6 +328,7 @@ class CodexSettingsDomain:
             with owner._lock:
                 state["sandbox"] = policy
                 running = state["running"]
+                owner._save_stored_binding(sender_id, chat_id, message_id)
             message = f"已切换沙箱策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
@@ -334,7 +337,7 @@ class CodexSettingsDomain:
 
     def handle_permissions_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
-        state = owner._get_state(sender_id, chat_id, message_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         if arg:
             preset = arg.strip().lower()
             config = self._permissions_presets.get(preset)
@@ -344,6 +347,7 @@ class CodexSettingsDomain:
                 state["approval_policy"] = config["approval_policy"]
                 state["sandbox"] = config["sandbox"]
                 running = state["running"]
+                owner._save_stored_binding(sender_id, chat_id, message_id)
             message = (
                 f"已切换权限预设：`{config['label']}`\n"
                 f"审批：`{config['approval_policy']}`\n"
@@ -361,7 +365,7 @@ class CodexSettingsDomain:
 
     def handle_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         owner = self._owner
-        state = owner._get_state(sender_id, chat_id, message_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         if arg:
             mode = arg.strip().lower()
             if mode not in {"default", "plan"}:
@@ -369,6 +373,7 @@ class CodexSettingsDomain:
             with owner._lock:
                 state["collaboration_mode"] = mode
                 running = state["running"]
+                owner._save_stored_binding(sender_id, chat_id, message_id)
             message = f"已切换协作模式：`{mode}`\n作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
@@ -378,15 +383,22 @@ class CodexSettingsDomain:
             running=state["running"],
         ))
 
-    def handle_set_approval_policy(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
+    def handle_set_approval_policy(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
         owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._approval_policies:
             return make_card_response(toast="非法审批策略", toast_type="warning")
-        state = owner._get_state(sender_id, chat_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         with owner._lock:
             state["approval_policy"] = policy
             running = state["running"]
+            owner._save_stored_binding(sender_id, chat_id, message_id)
         toast = f"已切换审批策略：{policy}"
         if running:
             toast += "；下一轮生效"
@@ -396,15 +408,22 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_set_sandbox_policy(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
+    def handle_set_sandbox_policy(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
         owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._sandbox_policies:
             return make_card_response(toast="非法沙箱策略", toast_type="warning")
-        state = owner._get_state(sender_id, chat_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         with owner._lock:
             state["sandbox"] = policy
             running = state["running"]
+            owner._save_stored_binding(sender_id, chat_id, message_id)
         toast = f"已切换沙箱策略：{policy}"
         if running:
             toast += "；下一轮生效"
@@ -414,17 +433,24 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_set_permissions_preset(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
+    def handle_set_permissions_preset(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
         owner = self._owner
         preset = str(action_value.get("preset", "")).strip().lower()
         config = self._permissions_presets.get(preset)
         if config is None:
             return make_card_response(toast="非法权限预设", toast_type="warning")
-        state = owner._get_state(sender_id, chat_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         with owner._lock:
             state["approval_policy"] = config["approval_policy"]
             state["sandbox"] = config["sandbox"]
             running = state["running"]
+            owner._save_stored_binding(sender_id, chat_id, message_id)
         toast = f"已切换权限预设：{config['label']}"
         if running:
             toast += "；下一轮生效"
@@ -438,15 +464,22 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_set_collaboration_mode(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
+    def handle_set_collaboration_mode(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
         owner = self._owner
         mode = str(action_value.get("mode", "")).strip().lower()
         if mode not in {"default", "plan"}:
             return make_card_response(toast="非法协作模式", toast_type="warning")
-        state = owner._get_state(sender_id, chat_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         with owner._lock:
             state["collaboration_mode"] = mode
             running = state["running"]
+            owner._save_stored_binding(sender_id, chat_id, message_id)
         toast = f"已切换协作模式：{mode}"
         if running:
             toast += "；下一轮生效"
@@ -456,9 +489,14 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_show_permissions_card_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
+    def handle_show_permissions_card_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> P2CardActionTriggerResponse:
         owner = self._owner
-        state = owner._get_state(sender_id, chat_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         return make_card_response(
             card=build_permissions_preset_card(
                 state["approval_policy"],
@@ -467,9 +505,14 @@ class CodexSettingsDomain:
             )
         )
 
-    def handle_show_mode_card_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
+    def handle_show_mode_card_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> P2CardActionTriggerResponse:
         owner = self._owner
-        state = owner._get_state(sender_id, chat_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         return make_card_response(
             card=build_collaboration_mode_card(
                 state["collaboration_mode"],
@@ -477,16 +520,22 @@ class CodexSettingsDomain:
             )
         )
 
-    def handle_set_profile(self, sender_id: str, chat_id: str, action_value: dict) -> P2CardActionTriggerResponse:
+    def handle_set_profile(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
         owner = self._owner
         target_profile = str(action_value.get("profile", "")).strip()
         if not target_profile:
             return make_card_response(toast="缺少 profile 名称", toast_type="warning")
-        result = self.handle_profile_command(sender_id, chat_id, target_profile)
+        result = self.handle_profile_command(sender_id, chat_id, target_profile, message_id=message_id)
         if result.card is None:
             return make_card_response(toast=result.text or "切换 profile 失败", toast_type="warning")
         toast = f"已切换默认 profile：{target_profile}"
-        state = owner._get_state(sender_id, chat_id)
+        state = owner._get_runtime_state(sender_id, chat_id, message_id)
         if state["running"]:
             toast += "；下一轮生效"
         return make_card_response(

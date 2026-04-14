@@ -66,6 +66,21 @@ class GroupChatStoreData(TypedDict):
     groups: dict[str, GroupState]
 
 
+class StoredChatBinding(TypedDict):
+    working_dir: str
+    current_thread_id: str
+    current_thread_title: str
+    approval_policy: str
+    sandbox: str
+    collaboration_mode: str
+
+
+class ChatBindingsFileData(TypedDict):
+    schema_version: int
+    p2p_bindings: dict[str, dict[str, StoredChatBinding]]
+    group_bindings: dict[str, StoredChatBinding]
+
+
 class BotIdentitySnapshot(TypedDict):
     app_id: str
     configured_open_id: str
