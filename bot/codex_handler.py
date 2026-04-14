@@ -447,8 +447,7 @@ class CodexHandler(BotHandler):
             self._cancel_patch_timer_locked(state)
             self._cancel_mirror_watchdog_locked(state)
             thread_id = state["current_thread_id"]
-            if thread_id and self._chat_binding_key_by_thread_id.get(thread_id) == key:
-                self._chat_binding_key_by_thread_id.pop(thread_id, None)
+            if self._unregister_thread_binding_locked(key, thread_id):
                 unsubscribe_thread_id = thread_id
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
@@ -518,6 +517,25 @@ class CodexHandler(BotHandler):
         state["approval_policy"] = stored_binding["approval_policy"]
         state["sandbox"] = stored_binding["sandbox"]
         state["collaboration_mode"] = stored_binding["collaboration_mode"]
+
+    def _register_thread_binding_locked(self, binding: ChatBindingKey, thread_id: str) -> ChatBindingKey | None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return None
+        existing_binding = self._chat_binding_key_by_thread_id.get(normalized_thread_id)
+        self._chat_binding_key_by_thread_id[normalized_thread_id] = binding
+        if existing_binding and existing_binding != binding:
+            return existing_binding
+        return None
+
+    def _unregister_thread_binding_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return False
+        if self._chat_binding_key_by_thread_id.get(normalized_thread_id) != binding:
+            return False
+        self._chat_binding_key_by_thread_id.pop(normalized_thread_id, None)
+        return True
 
     def _stored_binding_from_runtime(self, state: _RuntimeState) -> dict[str, str]:
         return {
@@ -757,6 +775,7 @@ class CodexHandler(BotHandler):
                 stored_binding = self._chat_binding_store.load(key)
                 if stored_binding is not None:
                     self._apply_stored_binding(state, stored_binding)
+                    self._register_thread_binding_locked(key, state["current_thread_id"])
                 self._runtime_state_by_binding[key] = state
             return self._runtime_state_by_binding[key]
 
@@ -1977,16 +1996,11 @@ class CodexHandler(BotHandler):
         unsubscribe_thread_id: str = ""
         with self._lock:
             old_thread_id = state["current_thread_id"]
-            if (
-                old_thread_id
-                and old_thread_id != thread.thread_id
-                and self._chat_binding_key_by_thread_id.get(old_thread_id) == chat_binding_key
+            if old_thread_id != thread.thread_id and self._unregister_thread_binding_locked(
+                chat_binding_key,
+                old_thread_id,
             ):
-                self._chat_binding_key_by_thread_id.pop(old_thread_id, None)
                 unsubscribe_thread_id = old_thread_id
-            existing_chat_binding_key = self._chat_binding_key_by_thread_id.get(thread.thread_id)
-            if existing_chat_binding_key and existing_chat_binding_key != chat_binding_key:
-                takeover_chat_binding_key = existing_chat_binding_key
             state["current_thread_id"] = thread.thread_id
             state["current_thread_title"] = thread.title
             state["working_dir"] = thread.cwd or state["working_dir"]
@@ -1994,7 +2008,7 @@ class CodexHandler(BotHandler):
             state["awaiting_local_turn_started"] = False
             self._cancel_mirror_watchdog_locked(state)
             self._clear_plan_state(state)
-            self._chat_binding_key_by_thread_id[thread.thread_id] = chat_binding_key
+            takeover_chat_binding_key = self._register_thread_binding_locked(chat_binding_key, thread.thread_id)
             self._sync_stored_binding_locked(chat_binding_key, state)
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
@@ -2014,8 +2028,7 @@ class CodexHandler(BotHandler):
         unsubscribe_thread_id: str = ""
         with self._lock:
             thread_id = state["current_thread_id"]
-            if thread_id and self._chat_binding_key_by_thread_id.get(thread_id) == chat_binding_key:
-                self._chat_binding_key_by_thread_id.pop(thread_id, None)
+            if self._unregister_thread_binding_locked(chat_binding_key, thread_id):
                 unsubscribe_thread_id = thread_id
             state["current_thread_id"] = ""
             state["current_thread_title"] = ""

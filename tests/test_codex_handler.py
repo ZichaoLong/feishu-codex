@@ -717,6 +717,30 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(handler2._adapter.create_thread_calls), 0)
         self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-created")
 
+    def test_p2p_stored_binding_rebuilds_thread_reverse_mapping_after_restart(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+
+        handler1, _ = self._make_handler(data_dir=data_dir)
+        handler1.handle_message("ou_user", "c1", "hello")
+
+        handler2, bot2 = self._make_handler(data_dir=data_dir)
+        state = handler2._get_runtime_state("ou_user", "c1")
+
+        self.assertEqual(state["current_thread_id"], "thread-created")
+        self.assertEqual(handler2._chat_binding_key_by_thread_id["thread-created"], ("ou_user", "c1"))
+
+        handler2.handle_message("ou_user", "c1", "follow up")
+        handler2._handle_turn_started({"threadId": "thread-created", "turn": {"id": "turn-2"}})
+        handler2._handle_agent_message_delta({"threadId": "thread-created", "delta": "恢复后事件正常路由"})
+        handler2._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-2", "status": "completed"}})
+
+        self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-created")
+        self.assertTrue(bot2.patches)
+        patched_card = json.loads(bot2.patches[-1][1])
+        self.assertIn("恢复后事件正常路由", json.dumps(patched_card, ensure_ascii=False))
+
     def test_group_stored_binding_survives_handler_restart(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
