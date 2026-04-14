@@ -777,6 +777,47 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(handler2._adapter.create_thread_calls), 0)
         self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-group")
 
+    def test_group_stored_binding_rebuilds_thread_reverse_mapping_after_restart(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+
+        handler1, bot1 = self._make_handler(data_dir=data_dir)
+        bot1.message_contexts["m-bind"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+        handler1._bind_thread(
+            "ou_user",
+            "chat-group",
+            ThreadSummary(
+                thread_id="thread-group",
+                cwd="/tmp/project",
+                name="",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="idle",
+            ),
+            message_id="m-bind",
+        )
+
+        handler2, bot2 = self._make_handler(data_dir=data_dir)
+        bot2.message_contexts["m-status"] = {"chat_type": "group", "sender_open_id": "ou_user2"}
+        state = handler2._get_runtime_state("ou_user2", "chat-group", "m-status")
+
+        self.assertEqual(state["current_thread_id"], "thread-group")
+        self.assertEqual(handler2._chat_binding_key_by_thread_id["thread-group"], ("__group__", "chat-group"))
+
+        bot2.message_contexts["m-prompt"] = {"chat_type": "group", "sender_open_id": "ou_user2"}
+        handler2.handle_message("ou_user2", "chat-group", "继续", message_id="m-prompt")
+        handler2._handle_turn_started({"threadId": "thread-group", "turn": {"id": "turn-2"}})
+        handler2._handle_agent_message_delta({"threadId": "thread-group", "delta": "群重启后事件正常路由"})
+        handler2._handle_turn_completed({"threadId": "thread-group", "turn": {"id": "turn-2", "status": "completed"}})
+
+        self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-group")
+        self.assertTrue(bot2.patches)
+        patched_card = json.loads(bot2.patches[-1][1])
+        self.assertIn("群重启后事件正常路由", json.dumps(patched_card, ensure_ascii=False))
+
     def test_status_shows_untitled_instead_of_unbound_when_thread_exists(self) -> None:
         handler, bot = self._make_handler()
 
