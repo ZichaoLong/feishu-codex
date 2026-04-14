@@ -41,6 +41,7 @@
   - 0 个匹配：报错
   - 多个精确同名匹配：报错
 - 成功行为：
+  - 先立即进入后台恢复流程，给用户一个 pending 提示
   - 恢复目标线程
   - 将当前飞书会话切换到该线程自己的工作目录
 
@@ -88,6 +89,9 @@ wrapper 额外增加的行为：
 - `fcodex /rm <thread_id|thread_name>`
 - `fcodex /session [cwd|global]`
 - `fcodex /resume <thread_id|thread_name>`
+
+这 5 条命令就是 Feishu 与 `fcodex` wrapper 之间完整的 shared surface；
+运行中 TUI 内的 upstream `/help`、`/resume`、`/profile` 等命令不在这个 shared surface 内。
 
 它们必须以独立 wrapper 命令形式使用，不会与裸 `codex` 的 flags 或 subcommands 混用。
 

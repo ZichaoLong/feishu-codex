@@ -17,6 +17,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 from bot.adapters.base import ThreadSummary
 from bot.cards import (
     CommandResult,
+    build_markdown_card,
     build_rename_card,
     build_sessions_card,
     build_sessions_closed_card,
@@ -40,6 +41,8 @@ class _SessionUiDomainOwner(Protocol):
     def _save_stored_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> None: ...
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None: ...
+
+    def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
 
     def _resolve_resume_target(self, arg: str) -> ThreadSummary: ...
 
@@ -95,20 +98,19 @@ class CodexSessionUiDomain:
             return CommandResult(
                 text="用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。"
             )
-        try:
-            thread = self._owner._resolve_resume_target(arg)
-        except Exception as exc:
-            logger.exception("解析恢复目标失败")
-            return CommandResult(text=f"恢复线程失败：{exc}")
-        self._owner._resume_thread_in_background(
-            sender_id,
-            chat_id,
-            thread.thread_id,
-            original_arg=arg,
-            summary=thread,
-            message_id=message_id,
+        target = arg.strip()
+        threading.Thread(
+            target=self._resume_target_in_background,
+            args=(sender_id, chat_id, target),
+            kwargs={"message_id": message_id},
+            daemon=True,
+        ).start()
+        return CommandResult(
+            card=build_markdown_card(
+                "Codex 正在恢复线程",
+                f"正在恢复：`{target}`\n完成后会自动回复结果。",
+            )
         )
-        return None
 
     def handle_rename_command(
         self,
@@ -240,6 +242,29 @@ class CodexSessionUiDomain:
             card=build_sessions_pending_card(thread.thread_id, title=thread.title),
             toast="正在恢复线程…",
             toast_type="success",
+        )
+
+    def _resume_target_in_background(
+        self,
+        sender_id: str,
+        chat_id: str,
+        target: str,
+        *,
+        message_id: str = "",
+    ) -> None:
+        try:
+            thread = self._owner._resolve_resume_target(target)
+        except Exception as exc:
+            logger.exception("解析恢复目标失败")
+            self._owner._reply_text(chat_id, f"恢复线程失败：{exc}", message_id=message_id)
+            return
+        self._owner._resume_thread_in_background(
+            sender_id,
+            chat_id,
+            thread.thread_id,
+            original_arg=target,
+            summary=thread,
+            message_id=message_id,
         )
 
     def handle_show_rename_action(

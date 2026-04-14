@@ -18,6 +18,14 @@ from bot.cards import (
     build_markdown_card,
     make_card_response,
 )
+from bot.shared_command_surface import get_shared_command
+
+
+_SHARED_HELP_COMMAND = get_shared_command("help")
+_SHARED_PROFILE_COMMAND = get_shared_command("profile")
+_SHARED_RM_COMMAND = get_shared_command("rm")
+_SHARED_SESSION_COMMAND = get_shared_command("session")
+_SHARED_RESUME_COMMAND = get_shared_command("resume")
 
 
 class CodexHelpDomain:
@@ -162,8 +170,8 @@ class CodexHelpDomain:
             "直接发送普通文本即可向当前线程提问；如果当前没有绑定线程，会在当前目录自动新建。\n\n"
             "**命令**\n"
             "- `/new` 立即新建线程\n"
-            "- `/session` 查看当前目录线程\n"
-            "- `/resume <thread_id|thread_name>` 恢复指定线程\n"
+            f"- `{_SHARED_SESSION_COMMAND.feishu_usage}` 查看当前目录线程\n"
+            f"- `{_SHARED_RESUME_COMMAND.feishu_usage}` 恢复指定线程\n"
             "- `/cd <path>` 切换目录并清空当前线程绑定\n"
             "- `/status` 查看当前状态\n\n"
             "- `/init <token>`：私聊初始化管理员和 `bot_open_id`\n"
@@ -182,23 +190,23 @@ class CodexHelpDomain:
         return (
             "**线程相关**\n"
             "- `/new` 立即新建并切换到新线程；切走时旧线程会从 app-server 内存中释放。\n"
-            "- `/session` 只列当前目录的线程，结果已跨 provider 汇总。\n"
-            "- `/resume <thread_id|thread_name>` 会做全局精确匹配；恢复后会切到线程自己的目录。\n"
-            "- `/resume` 会尝试应用当前默认 profile 的 model 和 model_provider；切换 profile 后 `/resume` 旧线程可切换 provider。\n"
-            "- 如果匹配到多个同名线程，`/resume` 会报错，不会替你猜。\n"
+            f"- `{_SHARED_SESSION_COMMAND.feishu_usage}` 只列当前目录的线程，结果已跨 provider 汇总。\n"
+            f"- `{_SHARED_RESUME_COMMAND.feishu_usage}` 会做全局精确匹配；恢复后会切到线程自己的目录。\n"
+            f"- `{_SHARED_RESUME_COMMAND.slash_name}` 会尝试应用当前默认 profile 的 model 和 model_provider；切换 profile 后旧线程可切换 provider。\n"
+            f"- 如果匹配到多个同名线程，`{_SHARED_RESUME_COMMAND.slash_name}` 会报错，不会替你猜。\n"
             "- `/cd <path>` 切换目录并清空当前线程绑定；之后发送普通文本，会在新目录自动新建线程。\n"
-            "- `/rename` 改标题，`/rm` 归档线程而不是硬删除。\n\n"
+            f"- `/rename` 改标题，`{_SHARED_RM_COMMAND.slash_name}` 归档线程而不是硬删除。\n\n"
             "**本地继续同一线程**\n"
-            "- 可先用 `fcodex /session` 找线程；需要精确恢复时再用 `fcodex /resume`。\n"
+            f"- 可先用 `{_SHARED_SESSION_COMMAND.wrapper_usage}` 找线程；需要精确恢复时再用 `{_SHARED_RESUME_COMMAND.wrapper_usage}`。\n"
             f"- {self._local_thread_safety_rule}"
         )
 
     def _help_settings_text(self) -> str:
         return (
             "**设置相关**\n"
-            "- `/profile` 查看或切换默认 profile（打包 model_provider + model 等配置）。\n"
-            "- `/profile` 影响 `/new`（新建线程）和 `/resume`（恢复线程时尝试应用新 provider/model）。\n"
-            "- `/profile` 不影响已打开线程的后续 turn（`model_provider` 在线程级固定）；`/sandbox`、`/approval`、`/mode` 可在后续 turn 中随时切换。\n"
+            f"- `{_SHARED_PROFILE_COMMAND.slash_name}` 查看或切换默认 profile（完整用法：`{_SHARED_PROFILE_COMMAND.feishu_usage}`；打包 model_provider + model 等配置）。\n"
+            f"- `{_SHARED_PROFILE_COMMAND.slash_name}` 影响 `/new`（新建线程）和 `{_SHARED_RESUME_COMMAND.slash_name}`（恢复线程时尝试应用新 provider/model）。\n"
+            f"- `{_SHARED_PROFILE_COMMAND.slash_name}` 不影响已打开线程的后续 turn（`model_provider` 在线程级固定）；`/sandbox`、`/approval`、`/mode` 可在后续 turn 中随时切换。\n"
             "- profile 配置从 `~/.codex/config.toml` 实时读取，修改后无需重启 feishu-codex。\n"
             "- `/init <token>` 仅私聊可用；会把当前发送者加入 `admin_open_ids`，并尽量自动写入 `bot_open_id`。\n"
             "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/whoareyou` 的实时探测结果仅用于诊断和初始化。\n"
@@ -208,7 +216,7 @@ class CodexHelpDomain:
             "- 如果当前正在执行，新设置从下一轮生效。\n\n"
             "**命令**\n"
             "- `/init <token>`\n"
-            "- `/profile [name]`\n"
+            f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`\n"
             "- `/permissions [read-only|default|full-access]`\n"
             "- `/approval [untrusted|on-failure|on-request|never]`\n"
             "- `/sandbox [read-only|workspace-write|danger-full-access]`\n"
@@ -244,8 +252,9 @@ class CodexHelpDomain:
         return (
             "**本地继续线程时再用 `fcodex`**\n"
             "- `fcodex` 是 `codex --remote` 的 wrapper，默认连到 feishu-codex 的 shared backend。\n"
-            "- `fcodex /session`、`fcodex /resume <thread_id|thread_name>` 会用共享发现逻辑，跨 provider 找线程。\n"
-            "- 进入 TUI 后，里面的 `/resume` 是 Codex 原生命令，不等同于 `fcodex /resume`。\n"
+            f"- 共享 surface 只覆盖：`{_SHARED_HELP_COMMAND.wrapper_usage}`、`{_SHARED_PROFILE_COMMAND.wrapper_usage}`、`{_SHARED_RM_COMMAND.wrapper_usage}`、`{_SHARED_SESSION_COMMAND.wrapper_usage}`、`{_SHARED_RESUME_COMMAND.wrapper_usage}`。\n"
+            f"- `{_SHARED_SESSION_COMMAND.wrapper_usage}`、`{_SHARED_RESUME_COMMAND.wrapper_usage}` 会用共享发现逻辑，跨 provider 找线程。\n"
+            f"- 进入 TUI 后，里面的 `{_SHARED_RESUME_COMMAND.slash_name}` 是 Codex 原生命令，不等同于 `fcodex /resume` 这层 wrapper 命令（完整用法：`{_SHARED_RESUME_COMMAND.wrapper_usage}`）。\n"
             "- 只想开独立的本地会话，直接用裸 `codex`。\n"
             f"- {self._local_thread_safety_rule}"
         )

@@ -23,19 +23,22 @@ from bot.session_resolution import (
     looks_like_thread_id,
     resolve_resume_name_via_remote_backend,
 )
+from bot.shared_command_surface import (
+    format_shared_wrapper_command_names,
+    get_shared_command,
+    shared_wrapper_commands,
+    shared_wrapper_help_lines,
+    shared_wrapper_usage_lines,
+)
 from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
 from bot.stores.profile_state_store import ProfileStateStore
 
-_WRAPPER_COMMANDS = {
-    "/help",
-    "/help-resume",
-    "/help-session",
-    "/profile",
-    "/rm",
-    "/resume",
-    "/session",
-    "/sessions",
-}
+_WRAPPER_COMMANDS = shared_wrapper_commands()
+_HELP_COMMAND = get_shared_command("help")
+_PROFILE_COMMAND = get_shared_command("profile")
+_RM_COMMAND = get_shared_command("rm")
+_SESSION_COMMAND = get_shared_command("session")
+_RESUME_COMMAND = get_shared_command("resume")
 
 _OPTIONS_WITH_VALUE = {
     "-C",
@@ -223,7 +226,7 @@ def _handle_profile_command(cfg: dict, app_server_url: str, user_args: list[str]
     profile_store = ProfileStateStore(data_dir)
     try:
         if len(user_args) > 2:
-            print("用法：fcodex /profile [profile_name]", file=sys.stderr)
+            print(f"用法：{_PROFILE_COMMAND.wrapper_usage}", file=sys.stderr)
             return 2
         if len(user_args) == 1:
             lines, _ = _runtime_profile_summary(adapter, profile_store, config, app_server_url)
@@ -232,7 +235,7 @@ def _handle_profile_command(cfg: dict, app_server_url: str, user_args: list[str]
 
         target_profile = user_args[1].strip()
         if not target_profile:
-            print("用法：fcodex /profile [profile_name]", file=sys.stderr)
+            print(f"用法：{_PROFILE_COMMAND.wrapper_usage}", file=sys.stderr)
             return 2
         runtime = adapter.read_runtime_config()
         profiles = {profile.name: profile for profile in runtime.profiles}
@@ -281,7 +284,7 @@ def _resolve_thread_target_via_remote_backend(
 
 def _handle_rm_command(cfg: dict, app_server_url: str, user_args: list[str], data_dir: pathlib.Path) -> int:
     if len(user_args) != 2:
-        print("用法：fcodex /rm <thread_id|thread_name>", file=sys.stderr)
+        print(f"用法：{_RM_COMMAND.wrapper_usage}", file=sys.stderr)
         return 2
     thread, error = _resolve_thread_target_via_remote_backend(cfg, app_server_url, user_args[1])
     if not thread:
@@ -306,12 +309,12 @@ def _resolve_wrapper_resume_args(cfg: dict, app_server_url: str, user_args: list
         return None
 
     if len(user_args) != 2:
-        print("用法：fcodex /resume <thread_id|thread_name>", file=sys.stderr)
+        print(f"用法：{_RESUME_COMMAND.wrapper_usage}", file=sys.stderr)
         raise SystemExit(2)
 
     target = user_args[1].strip()
     if not target:
-        print("用法：fcodex /resume <thread_id|thread_name>", file=sys.stderr)
+        print(f"用法：{_RESUME_COMMAND.wrapper_usage}", file=sys.stderr)
         raise SystemExit(2)
     if looks_like_thread_id(target):
         return ["resume", target]
@@ -413,11 +416,8 @@ def _launch_local_cwd_proxy(backend_url: str, effective_cwd: str) -> tuple[str, 
 
 def _print_wrapper_usage() -> None:
     print("用法：", file=sys.stderr)
-    print("  fcodex /help", file=sys.stderr)
-    print("  fcodex /profile [profile_name]", file=sys.stderr)
-    print("  fcodex /rm <thread_id|thread_name>", file=sys.stderr)
-    print("  fcodex /session [cwd|global]", file=sys.stderr)
-    print("  fcodex /resume <thread_id|thread_name>", file=sys.stderr)
+    for usage in shared_wrapper_usage_lines():
+        print(f"  {usage}", file=sys.stderr)
     print("说明：以上 wrapper 自命令都必须单独使用。", file=sys.stderr)
 
 
@@ -439,7 +439,7 @@ def _handle_internal_command(
     if first_known_wrapper_idx < 0:
         if user_args[0].startswith("/"):
             print(f"未知 fcodex 自命令：{user_args[0]}", file=sys.stderr)
-            print("说明：shell 层只支持 `/help`、`/profile`、`/rm`、`/session`、`/resume`。", file=sys.stderr)
+            print(f"说明：shell 层只支持 {format_shared_wrapper_command_names()}。", file=sys.stderr)
             print("其他 `/...` 命令请先进入 Codex TUI 再执行。", file=sys.stderr)
             return 2
         return None
@@ -449,7 +449,7 @@ def _handle_internal_command(
         return _handle_profile_command(cfg, app_server_url, user_args, data_dir)
     if cmd == "/rm":
         return _handle_rm_command(cfg, app_server_url, user_args, data_dir)
-    if cmd in {"/session", "/sessions"}:
+    if cmd == "/session":
         scope = "cwd"
         if len(user_args) == 2:
             arg = user_args[1].strip().lower()
@@ -458,23 +458,20 @@ def _handle_internal_command(
             elif arg in {"global", "all"}:
                 scope = "global"
             else:
-                print("用法：fcodex /session [cwd|global]", file=sys.stderr)
+                print(f"用法：{_SESSION_COMMAND.wrapper_usage}", file=sys.stderr)
                 return 2
         elif len(user_args) > 2:
-            print("用法：fcodex /session [cwd|global]", file=sys.stderr)
+            print(f"用法：{_SESSION_COMMAND.wrapper_usage}", file=sys.stderr)
             return 2
         return _handle_local_list_command(cfg, app_server_url, scope)
     if cmd == "/resume":
         return _resolve_wrapper_resume_args(cfg, app_server_url, user_args)
-    if cmd in {"/help", "/help-resume", "/help-session"}:
+    if cmd == "/help":
         if len(user_args) != 1:
-            print("用法：fcodex /help", file=sys.stderr)
+            print(f"用法：{_HELP_COMMAND.wrapper_usage}", file=sys.stderr)
             return 2
-        print("fcodex /help                   查看 wrapper 自命令说明。")
-        print("fcodex /profile [name]         查看或切换 feishu-codex / 默认 fcodex 的本地默认 profile。")
-        print("fcodex /rm <id|name>           归档线程（archive），从常规列表中隐藏。")
-        print("fcodex /session [cwd|global]  列出共享后端线程；默认当前目录，跨 provider。")
-        print("fcodex /resume <thread_id|thread_name>  恢复线程；`name` 走全局跨 provider 精确匹配。")
+        for line in shared_wrapper_help_lines():
+            print(line)
         print("说明：以上 wrapper 自命令必须单独使用，不能与裸 codex 参数混用。")
         print("说明：`fcodex`、`fcodex <prompt>`、`fcodex resume <id>` 仍是 upstream Codex CLI，只是默认连到 feishu-codex shared backend。")
         print("说明：`fcodex /session`、`fcodex /resume <name>` 复用与飞书一致的共享发现逻辑。")
@@ -482,7 +479,7 @@ def _handle_internal_command(
         print("说明：`fcodex /profile` 只改 feishu-codex / 默认 fcodex 的本地默认 profile；`fcodex -p <profile>` 仍以显式参数为准。")
         return 0
     print(f"未知 fcodex 自命令：{cmd}", file=sys.stderr)
-    print("可用：/help  /profile  /rm  /session  /resume", file=sys.stderr)
+    print(f"可用：{format_shared_wrapper_command_names()}", file=sys.stderr)
     return 2
 
 

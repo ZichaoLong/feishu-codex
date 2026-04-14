@@ -44,6 +44,7 @@ semantic layers.
   - zero matches: error
   - multiple exact-name matches: error
 - Success behavior:
+  - immediately enters a background resume flow and shows a pending hint
   - resume the target thread
   - switch the Feishu chat to the thread's own working directory
 
@@ -91,6 +92,10 @@ These are handled by the `fcodex` wrapper itself:
 - `fcodex /rm <thread_id|thread_name>`
 - `fcodex /session [cwd|global]`
 - `fcodex /resume <thread_id|thread_name>`
+
+These five commands are the entire shared surface between Feishu and the
+`fcodex` wrapper. Upstream `/help`, `/resume`, `/profile`, and other commands
+inside a running TUI session are intentionally outside this shared surface.
 
 They must be used as standalone wrapper commands. They are intentionally not
 mixed with bare `codex` flags or subcommands.

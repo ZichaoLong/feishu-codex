@@ -479,6 +479,90 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(calls, ["", "next-1"])
         self.assertEqual([item["message_id"] for item in entries], ["hist-3", "hist-4"])
 
+    def test_thread_history_fetch_uses_desc_scan_and_stops_at_boundary(self) -> None:
+        bot = self._make_bot()
+        responses = {
+            "": _HistoryResponse(
+                [
+                    _history_item(message_id="hist-6", created_at=6000, text="第六条", thread_id="thread-1"),
+                    _history_item(message_id="hist-5", created_at=5000, text="第五条", thread_id="thread-1"),
+                ],
+                has_more=True,
+                page_token="next-1",
+            ),
+            "next-1": _HistoryResponse(
+                [
+                    _history_item(message_id="m-boundary", created_at=3000, text="边界消息", thread_id="thread-1"),
+                    _history_item(message_id="hist-old", created_at=2000, text="过旧消息", thread_id="thread-1"),
+                ],
+                has_more=True,
+                page_token="next-2",
+            ),
+        }
+        calls: list[tuple[str, str]] = []
+
+        def fake_list(request):
+            token = str(getattr(request, "page_token", "") or "")
+            sort_type = str(getattr(request, "sort_type", "") or "")
+            calls.append((token, sort_type))
+            return responses[token]
+
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=SimpleNamespace(list=fake_list),
+                )
+            )
+        )
+
+        entries = FeishuBot._fetch_group_history_entries(
+            bot,
+            chat_id="chat-1",
+            current_message_id="m-current",
+            current_create_time=7000,
+            existing_message_ids=set(),
+            after_created_at=3000,
+            after_message_ids={"m-boundary"},
+            thread_id="thread-1",
+            limit=10,
+        )
+
+        self.assertEqual(calls, [("", "ByCreateTimeDesc"), ("next-1", "ByCreateTimeDesc")])
+        self.assertEqual([item["message_id"] for item in entries], ["hist-5", "hist-6"])
+
+    def test_chat_history_fetch_applies_boundary_slack_to_start_time(self) -> None:
+        bot = self._make_bot()
+        captured = {}
+
+        def fake_list(request):
+            captured["start_time"] = str(getattr(request, "start_time", "") or "")
+            captured["end_time"] = str(getattr(request, "end_time", "") or "")
+            captured["sort_type"] = str(getattr(request, "sort_type", "") or "")
+            return _HistoryResponse([])
+
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=SimpleNamespace(list=fake_list),
+                )
+            )
+        )
+
+        entries = FeishuBot._fetch_group_history_entries(
+            bot,
+            chat_id="chat-1",
+            current_message_id="m-current",
+            current_create_time=10000,
+            existing_message_ids=set(),
+            after_created_at=8000,
+            limit=10,
+        )
+
+        self.assertEqual(entries, [])
+        self.assertEqual(captured["start_time"], "3")
+        self.assertEqual(captured["end_time"], "10")
+        self.assertEqual(captured["sort_type"], "ByCreateTimeAsc")
+
     def test_history_fetch_keeps_same_timestamp_unconsumed_messages_after_boundary(self) -> None:
         bot = self._make_bot()
         bot.client = SimpleNamespace(

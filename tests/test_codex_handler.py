@@ -1993,8 +1993,31 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        handler.handle_message("ou_user", "c1", "/resume demo")
+        recorded_threads = []
 
+        class _RecordedThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                self._target = target
+                self._args = args
+                self._kwargs = kwargs or {}
+                self.daemon = daemon
+
+            def start(self):
+                recorded_threads.append(self)
+
+            def run(self):
+                if self._target is not None:
+                    self._target(*self._args, **self._kwargs)
+
+        with patch("bot.codex_session_ui_domain.threading.Thread", _RecordedThread):
+            handler.handle_message("ou_user", "c1", "/resume demo")
+
+        self.assertEqual(len(recorded_threads), 1)
+        self.assertEqual(handler._adapter.resume_thread_calls, [])
+        _, pending_card = bot.cards[-1]
+        self.assertEqual(pending_card["header"]["title"]["content"], "Codex 正在恢复线程")
+        self.assertIn("正在恢复：`demo`", pending_card["elements"][0]["content"])
+        recorded_threads[0].run()
         self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
 
     def test_session_card_mentions_global_resume_scope(self) -> None:
@@ -2679,7 +2702,28 @@ class CodexHandlerTests(unittest.TestCase):
             ],
         )
 
-        handler.handle_message("ou_user", "c1", "/resume demo")
+        recorded_threads = []
+
+        class _RecordedThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                self._target = target
+                self._args = args
+                self._kwargs = kwargs or {}
+                self.daemon = daemon
+
+            def start(self):
+                recorded_threads.append(self)
+
+            def run(self):
+                if self._target is not None:
+                    self._target(*self._args, **self._kwargs)
+
+        with patch("bot.codex_session_ui_domain.threading.Thread", _RecordedThread):
+            handler.handle_message("ou_user", "c1", "/resume demo")
+
+        self.assertEqual(len(recorded_threads), 1)
+        self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 正在恢复线程")
+        recorded_threads[0].run()
 
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "线程 thread-1… 最近对话")
@@ -2801,6 +2845,47 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "warning")
         self.assertEqual(response["toast"], "重命名表单已失效，请重新打开。")
 
+    def test_approval_card_action_is_idempotent_while_processing(self) -> None:
+        handler, _ = self._make_handler()
+        responded = []
+        nested = {}
+
+        def fake_respond(request_id, *, result=None, error=None):
+            responded.append((request_id, result, error))
+            if len(responded) == 1:
+                nested["response"] = self._unpack_card_response(handler._handle_approval_card_action(
+                    {
+                        "request_id": "req-1",
+                        "action": "command_allow_once",
+                    }
+                ))
+
+        handler._adapter.respond = fake_respond
+        handler._pending_requests["req-1"] = {
+            "rpc_request_id": "rpc-1",
+            "method": "item/commandExecution/requestApproval",
+            "params": {},
+            "title": "Codex 命令执行审批",
+            "questions": [],
+            "answers": {},
+            "status": "pending",
+        }
+
+        response = self._unpack_card_response(handler._handle_approval_card_action(
+            {
+                "request_id": "req-1",
+                "action": "command_allow_once",
+            }
+        ))
+
+        self.assertEqual(len(responded), 1)
+        self.assertEqual(responded[0][0], "rpc-1")
+        self.assertEqual(responded[0][1], {"decision": "accept"})
+        self.assertEqual(nested["response"]["toast_type"], "warning")
+        self.assertEqual(nested["response"]["toast"], "该审批请求正在处理中，请稍候。")
+        self.assertEqual(response["toast_type"], "success")
+        self.assertEqual(response["toast"], "已允许本次")
+
     def test_custom_user_input_is_shown_when_other_is_allowed(self) -> None:
         card = build_ask_user_card(
             "req-1",
@@ -2885,6 +2970,60 @@ class CodexHandlerTests(unittest.TestCase):
             responded["result"],
             {"answers": {"q1": {"answers": ["创建 c.txt"]}}},
         )
+
+    def test_user_input_action_is_idempotent_while_processing_final_submit(self) -> None:
+        handler, _ = self._make_handler()
+        responded = []
+        nested = {}
+
+        def fake_respond(request_id, *, result=None, error=None):
+            responded.append((request_id, result, error))
+            if len(responded) == 1:
+                nested["response"] = self._unpack_card_response(handler._handle_user_input_action(
+                    {
+                        "request_id": "req-1",
+                        "action": "answer_user_input_option",
+                        "question_id": "q1",
+                        "answer": "确认步骤",
+                    }
+                ))
+
+        handler._adapter.respond = fake_respond
+        handler._pending_requests["req-1"] = {
+            "rpc_request_id": "rpc-1",
+            "method": "item/tool/requestUserInput",
+            "questions": [
+                {
+                    "id": "q1",
+                    "header": "步骤确认",
+                    "question": "请选择下一步。",
+                    "options": [{"label": "确认步骤", "description": ""}],
+                    "isOther": False,
+                }
+            ],
+            "answers": {},
+            "status": "pending",
+        }
+
+        response = self._unpack_card_response(handler._handle_user_input_action(
+            {
+                "request_id": "req-1",
+                "action": "answer_user_input_option",
+                "question_id": "q1",
+                "answer": "确认步骤",
+            }
+        ))
+
+        self.assertEqual(len(responded), 1)
+        self.assertEqual(responded[0][0], "rpc-1")
+        self.assertEqual(
+            responded[0][1],
+            {"answers": {"q1": {"answers": ["确认步骤"]}}},
+        )
+        self.assertEqual(nested["response"]["toast_type"], "warning")
+        self.assertEqual(nested["response"]["toast"], "该输入请求正在提交，请稍候。")
+        self.assertEqual(response["toast_type"], "success")
+        self.assertEqual(response["toast"], "已提交回答。")
 
     def test_form_value_only_callback_without_pending_request_returns_warning(self) -> None:
         handler, _ = self._make_handler()

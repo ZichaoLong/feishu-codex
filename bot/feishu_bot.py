@@ -72,6 +72,7 @@ _SENDER_NAME_CACHE_TTL = 6 * 3600
 # assistant 模式按需回捞群历史消息的窗口
 _GROUP_HISTORY_FETCH_LIMIT = 50
 _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS = 24 * 3600
+_GROUP_HISTORY_BOUNDARY_SLACK_SECONDS = 5
 
 
 def _non_negative_int(value: Any, default: int) -> int:
@@ -1005,42 +1006,167 @@ class FeishuBot(ABC):
             return []
         min_created_at = max(int(after_created_at or 0), 0)
         normalized_thread_id = str(thread_id or "").strip()
+        if normalized_thread_id:
+            try:
+                return self._fetch_thread_history_entries(
+                    thread_id=normalized_thread_id,
+                    current_message_id=current_message_id,
+                    existing_message_ids=existing_message_ids,
+                    min_created_at=min_created_at,
+                    boundary_message_ids=after_message_ids or set(),
+                    limit=effective_limit,
+                    descending=True,
+                )
+            except Exception as exc:
+                if not self._should_fallback_thread_history_scan(exc):
+                    raise
+                logger.warning("话题倒序历史回捞失败，回退到升序扫描: thread_id=%s error=%s", normalized_thread_id, exc)
+                return self._fetch_thread_history_entries(
+                    thread_id=normalized_thread_id,
+                    current_message_id=current_message_id,
+                    existing_message_ids=existing_message_ids,
+                    min_created_at=min_created_at,
+                    boundary_message_ids=after_message_ids or set(),
+                    limit=effective_limit,
+                    descending=False,
+                )
+        return self._fetch_chat_history_entries(
+            chat_id=chat_id,
+            current_message_id=current_message_id,
+            current_create_time=current_create_time,
+            existing_message_ids=existing_message_ids,
+            min_created_at=min_created_at,
+            boundary_message_ids=after_message_ids or set(),
+            limit=effective_limit,
+        )
+
+    @staticmethod
+    def _should_fallback_thread_history_scan(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "invalid request parameter" in message or "sort_type" in message
+
+    def _fetch_thread_history_entries(
+        self,
+        *,
+        thread_id: str,
+        current_message_id: str,
+        existing_message_ids: set[str],
+        min_created_at: int,
+        boundary_message_ids: set[str],
+        limit: int,
+        descending: bool,
+    ) -> list[GroupMessageEntry]:
+        page_token = ""
+        seen_message_ids = set(existing_message_ids)
+        seen_message_ids.add(str(current_message_id or "").strip())
+        normalized_boundary_ids = {
+            str(item).strip()
+            for item in boundary_message_ids
+            if str(item).strip()
+        }
+        descending_entries: list[GroupMessageEntry] = []
+        ascending_entries: deque[GroupMessageEntry] = deque(maxlen=limit)
+
+        while True:
+            builder = (
+                ListMessageRequest.builder()
+                .container_id_type("thread")
+                .container_id(thread_id)
+                .sort_type("ByCreateTimeDesc" if descending else "ByCreateTimeAsc")
+                .page_size(50)
+            )
+            if page_token:
+                builder = builder.page_token(page_token)
+            request = builder.build()
+            response = self.client.im.v1.message.list(request)
+            if not response.success():
+                raise RuntimeError(f"code={response.code}, msg={response.msg}")
+
+            body = response.data
+            items = list(getattr(body, "items", None) or [])
+            stop_fetch = False
+            for item in items:
+                entry = self._history_entry_from_message(item)
+                if not entry:
+                    continue
+                if str(entry.get("thread_id", "") or "").strip() != thread_id:
+                    continue
+                entry_created_at = max(int(entry.get("created_at", 0) or 0), 0)
+                message_id = str(entry.get("message_id", "") or "").strip()
+                if min_created_at > 0 and entry_created_at < min_created_at:
+                    if descending:
+                        stop_fetch = True
+                        break
+                    continue
+                if (
+                    min_created_at > 0
+                    and entry_created_at == min_created_at
+                    and message_id in normalized_boundary_ids
+                ):
+                    continue
+                if not message_id or message_id in seen_message_ids:
+                    continue
+                seen_message_ids.add(message_id)
+                if descending:
+                    descending_entries.append(entry)
+                    if len(descending_entries) >= limit:
+                        stop_fetch = True
+                        break
+                else:
+                    ascending_entries.append(entry)
+
+            if stop_fetch or not getattr(body, "has_more", False):
+                break
+            page_token = str(getattr(body, "page_token", "") or "").strip()
+            if not page_token:
+                break
+
+        if descending:
+            descending_entries.reverse()
+            return descending_entries
+        return list(ascending_entries)
+
+    def _fetch_chat_history_entries(
+        self,
+        *,
+        chat_id: str,
+        current_message_id: str,
+        current_create_time: int | str | None,
+        existing_message_ids: set[str],
+        min_created_at: int,
+        boundary_message_ids: set[str],
+        limit: int,
+    ) -> list[GroupMessageEntry]:
         end_time = int(int(current_create_time or 0) / 1000) if current_create_time else int(time.time())
         if end_time <= 0:
             end_time = int(time.time())
         start_time = max(0, end_time - self._group_history_fetch_lookback_seconds)
-        if min_created_at > 0 and not normalized_thread_id:
-            start_time = max(start_time, int(min_created_at / 1000))
+        if min_created_at > 0:
+            start_time = max(
+                start_time,
+                max(0, int(min_created_at / 1000) - _GROUP_HISTORY_BOUNDARY_SLACK_SECONDS),
+            )
         page_token = ""
-        entries: deque[GroupMessageEntry] = deque(maxlen=effective_limit)
+        entries: deque[GroupMessageEntry] = deque(maxlen=limit)
         seen_message_ids = set(existing_message_ids)
         seen_message_ids.add(str(current_message_id or "").strip())
         boundary_message_ids = {
             str(item).strip()
-            for item in (after_message_ids or set())
+            for item in boundary_message_ids
             if str(item).strip()
         }
 
         while True:
             builder = ListMessageRequest.builder()
-            if normalized_thread_id:
-                builder = (
-                    builder
-                    .container_id_type("thread")
-                    .container_id(normalized_thread_id)
-                    .sort_type("ByCreateTimeAsc")
-                    .page_size(50)
-                )
-            else:
-                builder = (
-                    builder
-                    .container_id_type("chat")
-                    .container_id(chat_id)
-                    .start_time(str(start_time))
-                    .end_time(str(end_time))
-                    .sort_type("ByCreateTimeAsc")
-                    .page_size(50)
-                )
+            builder = (
+                builder
+                .container_id_type("chat")
+                .container_id(chat_id)
+                .start_time(str(start_time))
+                .end_time(str(end_time))
+                .sort_type("ByCreateTimeAsc")
+                .page_size(50)
+            )
             if page_token:
                 builder = builder.page_token(page_token)
             request = builder.build()
@@ -1054,11 +1180,7 @@ class FeishuBot(ABC):
                 entry = self._history_entry_from_message(item)
                 if not entry:
                     continue
-                entry_thread_id = str(entry.get("thread_id", "") or "").strip()
-                if normalized_thread_id:
-                    if entry_thread_id != normalized_thread_id:
-                        continue
-                elif entry_thread_id:
+                if str(entry.get("thread_id", "") or "").strip():
                     continue
                 entry_created_at = max(int(entry.get("created_at", 0) or 0), 0)
                 message_id = str(entry.get("message_id", "") or "").strip()

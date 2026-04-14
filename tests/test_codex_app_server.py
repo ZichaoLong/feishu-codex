@@ -690,7 +690,7 @@ class FCodexTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         self.assertIn("fcodex /help", stdout.getvalue())
         self.assertIn("fcodex /profile [name]", stdout.getvalue())
-        self.assertIn("fcodex /rm <id|name>", stdout.getvalue())
+        self.assertIn("fcodex /rm <thread_id|thread_name>", stdout.getvalue())
         self.assertIn("fcodex /session", stdout.getvalue())
         self.assertIn("fcodex /resume <thread_id|thread_name>", stdout.getvalue())
         self.assertIn("进入 TUI 后，`/help`、`/resume` 等命令恢复 upstream 原样", stdout.getvalue())

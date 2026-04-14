@@ -207,12 +207,18 @@ The following behaviors are part of the current implementation contract:
   - includes group context since the last trigger boundary
 - main-flow (`chat` container) history recovery is constrained by
   `group_history_fetch_limit` and `group_history_fetch_lookback_seconds`
+- main-flow recovery keeps a small backward slack window around the boundary
+  timestamp, then dedupes with boundary `message_id`s so messages are not
+  missed at the edge of the time window
 - `group_history_fetch_limit` and `group_history_fetch_lookback_seconds` also
   act as the global recovery switch; setting either to `0` disables both
   main-flow and thread recovery
 - thread (`thread` container) history recovery does not currently promise a
   strict `group_history_fetch_lookback_seconds` cutoff, because the public
     Feishu API does not support `start_time` / `end_time` for thread containers
+  - thread recovery prefers `ByCreateTimeDesc` and stops as soon as it crosses
+    the stored boundary; it only falls back to ascending scan if descending
+    ordering is not usable in practice
   - maintains separate context boundaries for the main chat flow and each group
     thread
   - still uses one shared group backend session, so the model may remember

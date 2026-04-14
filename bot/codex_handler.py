@@ -176,6 +176,11 @@ class _PendingRequestState(TypedDict):
     chat_id: str
     sender_id: str
     actor_open_id: str
+    status: str
+
+
+_PENDING_REQUEST_STATUS_PENDING = "pending"
+_PENDING_REQUEST_STATUS_PROCESSING = "processing"
 
 
 @dataclass(frozen=True)
@@ -1711,52 +1716,60 @@ class CodexHandler(BotHandler):
     def _refresh_sessions_card_message(self, sender_id: str, chat_id: str, message_id: str) -> None:
         self._session_ui_domain.refresh_sessions_card_message(sender_id, chat_id, message_id)
 
+    @staticmethod
+    def _pending_request_status(pending: _PendingRequestState | dict[str, Any]) -> str:
+        return str(pending.get("status", _PENDING_REQUEST_STATUS_PENDING) or _PENDING_REQUEST_STATUS_PENDING)
+
     def _handle_approval_card_action(self, action_value: dict) -> P2CardActionTriggerResponse:
         request_key = str(action_value.get("request_id", ""))
         with self._lock:
             pending = self._pending_requests.get(request_key)
-        if not pending:
-            return make_card_response(toast="该审批请求已失效或已处理。", toast_type="warning")
+            if not pending:
+                return make_card_response(toast="该审批请求已失效或已处理。", toast_type="warning")
+            if self._pending_request_status(pending) == _PENDING_REQUEST_STATUS_PROCESSING:
+                return make_card_response(toast="该审批请求正在处理中，请稍候。", toast_type="warning")
 
-        action = action_value.get("action", "")
-        title = pending["title"]
-        rpc_request_id = pending["rpc_request_id"]
+            action = action_value.get("action", "")
+            title = pending["title"]
+            rpc_request_id = pending["rpc_request_id"]
 
-        if action == "command_allow_once":
-            result = {"decision": "accept"}
-            decision_text = "允许本次"
-        elif action == "command_allow_session":
-            result = {"decision": "acceptForSession"}
-            decision_text = "允许本会话"
-        elif action == "command_deny":
-            result = {"decision": "decline"}
-            decision_text = "拒绝"
-        elif action == "command_abort":
-            result = {"decision": "cancel"}
-            decision_text = "中止本轮"
-        elif action == "file_change_accept":
-            result = {"decision": "accept"}
-            decision_text = "允许本次"
-        elif action == "file_change_accept_session":
-            result = {"decision": "acceptForSession"}
-            decision_text = "允许本会话"
-        elif action == "file_change_decline":
-            result = {"decision": "decline"}
-            decision_text = "拒绝"
-        elif action == "file_change_cancel":
-            result = {"decision": "cancel"}
-            decision_text = "中止本轮"
-        elif action == "permissions_allow_once":
-            result = {"permissions": pending["params"].get("permissions") or {}, "scope": "turn"}
-            decision_text = "允许本次"
-        elif action == "permissions_allow_session":
-            result = {"permissions": pending["params"].get("permissions") or {}, "scope": "session"}
-            decision_text = "允许本会话"
-        elif action == "permissions_deny":
-            result = {"permissions": {}, "scope": "turn"}
-            decision_text = "拒绝"
-        else:
-            return make_card_response(toast="未知审批动作", toast_type="warning")
+            if action == "command_allow_once":
+                result = {"decision": "accept"}
+                decision_text = "允许本次"
+            elif action == "command_allow_session":
+                result = {"decision": "acceptForSession"}
+                decision_text = "允许本会话"
+            elif action == "command_deny":
+                result = {"decision": "decline"}
+                decision_text = "拒绝"
+            elif action == "command_abort":
+                result = {"decision": "cancel"}
+                decision_text = "中止本轮"
+            elif action == "file_change_accept":
+                result = {"decision": "accept"}
+                decision_text = "允许本次"
+            elif action == "file_change_accept_session":
+                result = {"decision": "acceptForSession"}
+                decision_text = "允许本会话"
+            elif action == "file_change_decline":
+                result = {"decision": "decline"}
+                decision_text = "拒绝"
+            elif action == "file_change_cancel":
+                result = {"decision": "cancel"}
+                decision_text = "中止本轮"
+            elif action == "permissions_allow_once":
+                result = {"permissions": pending["params"].get("permissions") or {}, "scope": "turn"}
+                decision_text = "允许本次"
+            elif action == "permissions_allow_session":
+                result = {"permissions": pending["params"].get("permissions") or {}, "scope": "session"}
+                decision_text = "允许本会话"
+            elif action == "permissions_deny":
+                result = {"permissions": {}, "scope": "turn"}
+                decision_text = "拒绝"
+            else:
+                return make_card_response(toast="未知审批动作", toast_type="warning")
+
+            pending["status"] = _PENDING_REQUEST_STATUS_PROCESSING
 
         logger.info(
             "响应审批请求: request_key=%s, rpc_request_id=%s, action=%s, result=%s",
@@ -1765,7 +1778,15 @@ class CodexHandler(BotHandler):
             action,
             result,
         )
-        self._adapter.respond(rpc_request_id, result=result)
+        try:
+            self._adapter.respond(rpc_request_id, result=result)
+        except Exception as exc:
+            logger.exception("响应审批请求失败")
+            with self._lock:
+                current = self._pending_requests.get(request_key)
+                if current is pending:
+                    current["status"] = _PENDING_REQUEST_STATUS_PENDING
+            return make_card_response(toast=f"审批提交失败：{exc}", toast_type="warning")
         with self._lock:
             self._pending_requests.pop(request_key, None)
         return make_card_response(
@@ -1780,12 +1801,15 @@ class CodexHandler(BotHandler):
             pending = self._pending_requests.get(request_key)
         if not pending:
             return make_card_response(toast="该输入请求已失效或已处理。", toast_type="warning")
+        if self._pending_request_status(pending) == _PENDING_REQUEST_STATUS_PROCESSING:
+            return make_card_response(toast="该输入请求正在提交，请稍候。", toast_type="warning")
 
         question_id = str(action_value.get("question_id", ""))
         if not question_id:
             return make_card_response(toast="缺少 question_id", toast_type="warning")
 
-        target_question = next((item for item in pending["questions"] if item.get("id", "") == question_id), None)
+        questions = pending.get("questions") or []
+        target_question = next((item for item in questions if item.get("id", "") == question_id), None)
         if not target_question:
             return make_card_response(toast="未找到对应问题", toast_type="warning")
 
@@ -1801,26 +1825,58 @@ class CodexHandler(BotHandler):
         if not answer:
             return make_card_response(toast="回答不能为空", toast_type="warning")
 
-        pending["answers"][question_id] = answer
-        questions = pending["questions"]
-        if len(pending["answers"]) < len(questions):
-            return make_card_response(
-                card=build_ask_user_card(request_key, questions, pending["answers"]),
-                toast="已记录，继续回答下一题。",
-                toast_type="success",
-            )
+        with self._lock:
+            pending = self._pending_requests.get(request_key)
+            if not pending:
+                return make_card_response(toast="该输入请求已失效或已处理。", toast_type="warning")
+            if self._pending_request_status(pending) == _PENDING_REQUEST_STATUS_PROCESSING:
+                return make_card_response(toast="该输入请求正在提交，请稍候。", toast_type="warning")
+
+            questions = pending.get("questions") or []
+            answers = pending.setdefault("answers", {})
+            if question_id in answers:
+                return make_card_response(
+                    card=build_ask_user_card(request_key, questions, answers),
+                    toast="该问题已记录，请继续剩余问题。",
+                    toast_type="warning",
+                )
+
+            answers[question_id] = answer
+            if len(answers) < len(questions):
+                return make_card_response(
+                    card=build_ask_user_card(request_key, questions, answers),
+                    toast="已记录，继续回答下一题。",
+                    toast_type="success",
+                )
+
+            pending["status"] = _PENDING_REQUEST_STATUS_PROCESSING
+            rpc_request_id = pending["rpc_request_id"]
+            final_answers = dict(answers)
 
         result = {
             "answers": {
-                q.get("id", ""): {"answers": [pending["answers"][q.get("id", "")]]}
+                q.get("id", ""): {"answers": [final_answers[q.get("id", "")]]}
                 for q in questions
             }
         }
-        self._adapter.respond(pending["rpc_request_id"], result=result)
+        try:
+            self._adapter.respond(rpc_request_id, result=result)
+        except Exception as exc:
+            logger.exception("提交用户输入失败")
+            with self._lock:
+                current = self._pending_requests.get(request_key)
+                if current is pending:
+                    current_answers = current.setdefault("answers", {})
+                    current_answers.pop(question_id, None)
+                    current["status"] = _PENDING_REQUEST_STATUS_PENDING
+            return make_card_response(
+                toast=f"提交回答失败：{exc}",
+                toast_type="warning",
+            )
         with self._lock:
             self._pending_requests.pop(request_key, None)
         return make_card_response(
-            card=build_ask_user_answered_card(questions, pending["answers"]),
+            card=build_ask_user_answered_card(questions, final_answers),
             toast="已提交回答。",
             toast_type="success",
         )
@@ -2206,6 +2262,7 @@ class CodexHandler(BotHandler):
                 "chat_id": chat_id,
                 "sender_id": sender_id,
                 "actor_open_id": actor_open_id,
+                "status": _PENDING_REQUEST_STATUS_PENDING,
             }
 
     def _auto_reject_request(self, request_id: int | str, method: str, params: dict[str, Any]) -> None:
