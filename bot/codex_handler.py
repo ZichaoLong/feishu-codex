@@ -1300,6 +1300,45 @@ class CodexHandler(BotHandler):
             current_chat_mode="all",
         )
 
+    @staticmethod
+    def _write_denied_text(owner_label: str) -> str:
+        return f"当前线程正由{owner_label}执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。"
+
+    @classmethod
+    def _interaction_denied_text(cls, lease: InteractionLease | None) -> str:
+        owner_label = "另一终端"
+        if lease is not None and lease.holder.kind == "feishu":
+            owner_label = "另一飞书会话"
+        return cls._write_denied_text(owner_label)
+
+    def _prompt_write_denial_text(
+        self,
+        binding: ChatBindingKey,
+        chat_id: str,
+        thread_id: str,
+        *,
+        message_id: str = "",
+        current_chat_mode: str | None = None,
+    ) -> str:
+        sharing_violation = self._thread_sharing_policy_violation(
+            chat_id,
+            thread_id,
+            message_id=message_id,
+            current_chat_mode=current_chat_mode,
+        )
+        if sharing_violation:
+            return sharing_violation
+        with self._lock:
+            interaction_lease = self._current_interaction_lease_locked(thread_id)
+            if interaction_lease is not None and not interaction_lease.holder.same_holder(
+                self._feishu_interaction_holder(binding)
+            ):
+                return self._interaction_denied_text(interaction_lease)
+            write_owner = self._thread_lease_registry.lease_owner(thread_id)
+            if write_owner is not None and write_owner != binding:
+                return self._write_denied_text("另一飞书会话")
+        return ""
+
     def _chat_binding_key(self, sender_id: str, chat_id: str, message_id: str = "") -> ChatBindingKey:
         if sender_id == GROUP_SHARED_BINDING_OWNER_ID:
             return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
@@ -1333,28 +1372,18 @@ class CodexHandler(BotHandler):
         thread_id = runtime.current_thread_id.strip()
         if not thread_id:
             return True
-        sharing_violation = self._thread_sharing_policy_violation(chat_id, thread_id, message_id=message_id)
-        if sharing_violation:
-            self._reply_text(
-                chat_id,
-                sharing_violation,
-                message_id=message_id,
-                reply_in_thread=self._message_reply_in_thread(message_id),
-            )
-            return False
         chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
-        with self._lock:
-            interaction_lease = self._current_interaction_lease_locked(thread_id)
-        if interaction_lease is None:
+        denial_text = self._prompt_write_denial_text(
+            chat_binding_key,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
+        if not denial_text:
             return True
-        if interaction_lease.holder.same_holder(self._feishu_interaction_holder(chat_binding_key)):
-            return True
-        owner_label = "另一终端"
-        if interaction_lease.holder.kind == "feishu":
-            owner_label = "另一飞书会话"
         self._reply_text(
             chat_id,
-            f"当前线程正由{owner_label}执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
+            denial_text,
             message_id=message_id,
             reply_in_thread=self._message_reply_in_thread(message_id),
         )
@@ -2044,10 +2073,44 @@ class CodexHandler(BotHandler):
         actor_open_id: str = "",
     ) -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
+        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        released_thread_id = runtime.current_thread_id.strip()
+        preattached_interaction_lease: InteractionLeaseAcquireResult | None = None
+        if released_thread_id and not runtime.binding.feishu_runtime_attached:
+            denial_text = self._prompt_write_denial_text(
+                chat_binding_key,
+                chat_id,
+                released_thread_id,
+                message_id=message_id,
+            )
+            if denial_text:
+                self._reply_text(
+                    chat_id,
+                    denial_text,
+                    message_id=message_id,
+                    reply_in_thread=self._message_reply_in_thread(message_id),
+                )
+                return
+            with self._lock:
+                preattached_interaction_lease = self._acquire_interaction_lease_for_binding(
+                    chat_binding_key,
+                    released_thread_id,
+                )
+            if not preattached_interaction_lease.granted:
+                self._reply_text(
+                    chat_id,
+                    self._interaction_denied_text(preattached_interaction_lease.lease),
+                    message_id=message_id,
+                    reply_in_thread=self._message_reply_in_thread(message_id),
+                )
+                return
         try:
             thread_id = self._ensure_thread(sender_id, chat_id, message_id=message_id)
             thread_id = self._ensure_binding_runtime_attached(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
+            if preattached_interaction_lease is not None and preattached_interaction_lease.acquired:
+                self._release_interaction_lease_for_binding(chat_binding_key, released_thread_id)
             logger.exception("准备线程失败")
             self._render_start_failure(
                 chat_id=chat_id,
@@ -2056,9 +2119,10 @@ class CodexHandler(BotHandler):
             )
             return
 
-        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
         sharing_violation = self._thread_sharing_policy_violation(chat_id, thread_id, message_id=message_id)
         if sharing_violation:
+            if preattached_interaction_lease is not None and preattached_interaction_lease.acquired:
+                self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
             self._reply_text(
                 chat_id,
                 sharing_violation,
@@ -2066,23 +2130,19 @@ class CodexHandler(BotHandler):
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )
             return
-        interaction_lease: InteractionLeaseAcquireResult
+        interaction_lease = preattached_interaction_lease
         lease = None
         with self._lock:
-            interaction_lease = self._acquire_interaction_lease_for_binding(chat_binding_key, thread_id)
-            if not interaction_lease.granted:
-                current_owner = interaction_lease.lease
-                owner_label = "另一终端"
-                if current_owner is not None and current_owner.holder.kind == "feishu":
-                    owner_label = "另一飞书会话"
-            else:
+            if interaction_lease is None:
+                interaction_lease = self._acquire_interaction_lease_for_binding(chat_binding_key, thread_id)
+            if interaction_lease.granted:
                 lease = self._acquire_thread_write_lease_locked(chat_binding_key, thread_id)
                 if lease.granted:
                     self._sync_stored_binding_locked(chat_binding_key, state)
         if not interaction_lease.granted:
             self._reply_text(
                 chat_id,
-                f"当前线程正由{owner_label}执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
+                self._interaction_denied_text(interaction_lease.lease),
                 message_id=message_id,
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )

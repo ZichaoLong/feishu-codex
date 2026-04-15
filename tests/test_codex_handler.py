@@ -2264,6 +2264,69 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler2._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
         self.assertEqual(handler2._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "attached")
 
+    def test_denied_prompt_keeps_released_binding_released_when_all_mode_group_owns_thread(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-a"] = "group"
+        bot.chat_types["chat-b"] = "group"
+        bot.group_modes["chat-b"] = "all"
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+
+        handler._bind_thread("ou_user", "chat-a", thread)
+        handler._release_feishu_runtime_by_thread_id("thread-1")
+        handler._bind_thread("ou_user2", "chat-b", thread)
+
+        handler.handle_message("ou_user", "chat-a", "hello again")
+
+        self.assertEqual(handler._adapter.resume_thread_calls, [])
+        self.assertEqual(handler._adapter.start_turn_calls, [])
+        self.assertEqual(
+            handler._get_runtime_state("ou_user", "chat-a")["current_thread_runtime_state"],
+            "released",
+        )
+        self.assertEqual(handler._thread_subscribers("thread-1"), (("__group__", "chat-b"),))
+        self.assertIn("其他群聊独占", bot.replies[-1][1])
+
+    def test_denied_prompt_keeps_released_binding_released_when_interaction_lease_is_external(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._release_feishu_runtime_by_thread_id("thread-1")
+        InteractionLeaseStore(data_dir).force_acquire(
+            "thread-1",
+            make_fcodex_interaction_holder("fcodex:other", owner_pid=os.getpid()),
+        )
+
+        handler.handle_message("ou_user", "c1", "hello again")
+
+        self.assertEqual(handler._adapter.resume_thread_calls, [])
+        self.assertEqual(handler._adapter.start_turn_calls, [])
+        self.assertEqual(handler._thread_subscribers("thread-1"), ())
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "released")
+        self.assertEqual(InteractionLeaseStore(data_dir).load("thread-1").holder.kind, "fcodex")
+        self.assertIn("当前线程正由另一终端执行", bot.replies[-1][1])
+
     def test_service_control_plane_releases_runtime_via_running_service(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)

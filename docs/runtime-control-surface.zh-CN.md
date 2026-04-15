@@ -115,24 +115,46 @@
 - 显式 profile 恢复
 - 当前 live runtime 无法借 `resume` 改 provider
 
-## 3. 几个必须明确区分的组合
+## 3. Runtime 持有、Owner 租约与状态迁移
 
-### 3.1 `bound + attached + active`
+### 3.1 `attached/released` 不是 owner lease
 
-表示：
+`feishu runtime` 只回答一件事：
 
-- 当前飞书会话仍绑定该 thread
-- Feishu 服务仍附着该 thread
-- backend 上当前正在执行 turn
+- 当前运行中的 `feishu-codex` 服务，是否仍对该 thread 保持 runtime residency
 
-### 3.2 `bound + attached + notLoaded`
+它不回答：
 
-这通常只会短暂出现于状态迁移边缘，最终应转到：
+- 当前哪个 Feishu binding 可以发起下一轮 turn
+- 当前哪个前端可以处理审批 / 补充输入 / 中断
 
-- 重新 resume 后回到 `attached + idle/active`
-- 或显式释放后转到 `released + notLoaded`
+这两类问题属于独立的 lease 事实。
 
-### 3.3 `bound + released + notLoaded`
+### 3.2 三种事实的对照
+
+| 事实 | 作用范围 | 它回答的问题 | 在 `feishu runtime == released` 时还能存在吗？ |
+| --- | --- | --- | --- |
+| `feishu runtime` = `attached/released` | Feishu 服务连接 | 当前运行中的 Feishu 服务是否仍附着该 thread？ | 这是它本身的状态轴 |
+| `Feishu 写入 owner` | 仅 Feishu 内部 | 当前哪个 Feishu binding 可以向共享 thread 写入？ | 不应再保留有意义的 Feishu 写入 owner |
+| `交互 owner` | 跨前端（`feishu-codex` + `fcodex`） | 当前谁可以处理中断、审批、补充输入？ | 可以。外部 owner（如 `fcodex`）仍可能存在 |
+
+直接后果是：
+
+- `attached + 无 owner` 是完全合法的 idle 稳态
+- `released + 外部交互 owner` 也完全合法，表示别的前端仍在持有 live thread
+
+### 3.3 几个必须明确接受的有效组合
+
+### `bound + attached + idle + 无 owner`
+
+表示当前 chat 仍指向该 thread，Feishu 仍附着，但没有正在运行的 turn owner。
+这是 turn 结束后的正常 idle 稳态。
+
+### `bound + attached + active + 当前 binding 是 owner`
+
+表示当前 binding 既持有 Feishu 写入租约，也持有跨前端交互租约，正在执行这一轮 turn。
+
+### `bound + released + notLoaded`
 
 表示：
 
@@ -142,7 +164,7 @@
 
 这是最典型的“可以重新切 profile 再恢复”的状态。
 
-### 3.4 `bound + released + idle/active`
+### `bound + released + idle/active`
 
 表示：
 
@@ -151,6 +173,31 @@
 - 最常见的是本地 `fcodex`
 
 因此，`released` 不保证 backend 一定 `notLoaded`。
+
+### 3.4 正式状态转移表
+
+下表是 Feishu 侧状态迁移的权威合同。
+
+| 当前 binding | 当前 `feishu runtime` | 当前 backend | 事件 | 守卫条件 | 下一 binding | 下一 `feishu runtime` | 下一 backend | 说明 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `unbound` | `not-applicable` | `not-applicable` | 普通 prompt 或 `/new` | 被接受 | `bound` | `attached` | `idle` 或 `active` | 先建新 thread，再启动或准备 turn |
+| `unbound` | `not-applicable` | 任意 | `/resume <thread>` | 目标解析成功且允许恢复 | `bound` | `attached` | 通常为 `idle` | 当前 chat 绑定切到目标 thread |
+| `bound` | `attached` | `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 获取 Feishu 写入 owner 和交互 owner |
+| `bound` | `attached` | `active` | turn 终态事件 | 无 | `bound` | `attached` | 通常为 `idle` | 清理 owner lease；binding 与附着保持不变 |
+| `bound` | `attached` | `idle` 或 `active` | `/release-feishu-runtime` | 当前没有 Feishu 侧运行中的 turn，且没有待处理审批 / 输入 | `bound` | `released` | `notLoaded`、`idle` 或 `active` | release 释放的是整个运行中 Feishu 服务对该 thread 的 runtime 持有 |
+| `bound` | `released` | `notLoaded` 或 `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 先重新附着 / resume，再启动 turn |
+| `bound` | `released` | 任意 | 普通 prompt | prompt preflight 被拒绝 | 不变 | 不变 | 不变 | 纯拒绝：不得 resume，不得新增 subscriber，不得把 `released` 改成 `attached` |
+| `bound` | `attached` 或 `released` | 任意 | `/new` 或 `/resume <other>` | 被接受 | 绑定到另一 thread | `attached` | 通常为 `idle` | 当前 binding 切换到新目标 |
+| `bound` | `attached` 或 `released` | 任意 | 显式清空 / 归档当前 binding / chat unavailable 清理 | 被接受 | `unbound` | `not-applicable` | 对该 Feishu binding 来说为 `not-applicable` | 清理 Feishu 侧 binding 以及本地执行锚点 |
+
+### 3.5 不允许含糊的规则
+
+- `all` 模式独占是按“当前 thread 上的 Feishu runtime 占用”判断，不按一个仅被记住的 `bound + released` bookmark 判断。
+- 被拒绝的 prompt 必须是 pure reject。
+  它不能调用 `thread/resume`，不能新增 Feishu subscriber，也不能把
+  `feishu runtime` 从 `released` 改成 `attached`。
+- `release-feishu-runtime` 释放的是 Feishu 的 runtime residency 和 Feishu 本地 owner lease；
+  它不会抹掉 chat 仍指向哪个 thread 的 binding bookmark。
 
 ## 4. `/status` 合同
 
@@ -225,12 +272,12 @@
 
 ### 5.6 之后再发普通消息会怎样
 
-如果某个 Feishu binding 当前仍 `bound`，但其 `feishu runtime == released`，那么之后在这个 chat 里直接发送普通消息时：
+如果某个 Feishu binding 当前仍 `bound`，但其 `feishu runtime == released`，那么之后在这个 chat 里直接发送普通消息时，会先执行正常的 prompt preflight。
 
-1. 先按当前绑定的 `thread_id` 重新附着 / resume
-2. 再启动 turn
+1. 如果 prompt 被拒绝，这次拒绝必须是 pure reject，binding 继续保持 `released`。
+2. 只有在 prompt 被接受时，Feishu 才会按当前绑定的 `thread_id` 重新附着 / resume，然后启动 turn。
 
-如果当时该 thread 已 `notLoaded`，这条重新附着路径会遵守
+如果当时该 thread 已 `notLoaded`，这条“已通过 preflight 的重新附着路径”会遵守
 `docs/session-profile-semantics.zh-CN.md` 里关于 unloaded thread 的 profile 恢复合同。
 
 ## 6. 本地管理面：`feishu-codexctl`

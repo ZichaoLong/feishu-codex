@@ -197,7 +197,9 @@ wrapper 额外增加的行为：
 - 当目标线程当前 `loaded-in-current-backend` 时，`resume` 复用的是现有 live runtime。
   - 这一分支上，不能通过 `resume` 改写该 live thread 的 profile 或 provider
   - 显式 `-p/--profile` 或其他 resume 时覆盖项，在这个分支上不构成有效切换
-- 如果某个飞书 binding 当前仍指向该 thread，但其 `feishu runtime` 已是 `released`，则下一条普通消息会先按当前绑定重新附着 / resume，再启动 turn。
+- 如果某个飞书 binding 当前仍指向该 thread，但其 `feishu runtime` 已是 `released`，则下一条普通消息会先走正常的 prompt preflight。
+  - 如果这条 prompt 被拒绝，则这次拒绝必须是 pure reject，binding 继续保持 `released`
+  - 只有在 prompt 被接受时，Feishu 才会按当前绑定重新附着 / resume，再启动 turn
   - 如果当时 thread 已 `notLoaded`，就回到本节的 unloaded-thread 规则
   - 如果当时 thread 仍 `loaded`，则只是复用现有 live runtime，不能借此切 provider
 - 因此，“线程原始 profile”不是本项目推荐使用的合同术语。

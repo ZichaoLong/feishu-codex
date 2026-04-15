@@ -214,8 +214,12 @@ Therefore:
   - explicit `-p/--profile` or other resume-time overrides do not become an
     effective switch there
 - If a Feishu binding still points at the thread but its `feishu runtime` is
-  already `released`, the next ordinary message first reattaches / resumes
-  using the bound thread, then starts the turn.
+  already `released`, the next ordinary message first runs the normal prompt
+  preflight.
+  - If that prompt is denied, the denial is pure reject and the binding must
+    stay `released`
+  - Only if the prompt is accepted does Feishu reattach / resume using the
+    bound thread, then start the turn
   - If the thread is `notLoaded` at that moment, the unloaded-thread rule in
     this section applies
   - If the thread is still `loaded`, it only reuses the live runtime and

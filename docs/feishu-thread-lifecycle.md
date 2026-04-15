@@ -46,6 +46,14 @@ connection is still attached to that thread” as `feishu runtime`:
 This is only a stricter name for the `subscription` fact. It does not change
 the requirement to keep it distinct from `binding` and `loaded runtime`.
 
+For operational control, also keep these separate from:
+
+- `Feishu write owner`
+- `interaction owner`
+
+Those are temporary leases, not binding/runtime state axes.
+The exact contract is defined in `docs/runtime-control-surface.md`.
+
 ## 3. Why Feishu Cannot Copy `fcodex` Literally
 
 `fcodex` normally keeps one live remote session while the TUI process stays
@@ -84,6 +92,11 @@ flowchart TD
     B -->|/new or /resume another thread| A
     D -->|/new or /resume another thread| A
 ```
+
+This diagram intentionally compresses several axes.
+The authoritative binding/runtime/backend transition table, including the
+pure-reject rule for `bound + released` prompts, lives in
+`docs/runtime-control-surface.md`.
 
 ## 5. Runtime Recovery Rules
 
@@ -193,8 +206,10 @@ Current Feishu-side implementation should satisfy all of these:
   do not immediately declare runtime loss
 - one Feishu chat has at most one active execution card at a time
 - `/new` and `/resume` explicitly replace the binding
-- if runtime is gone, the next prompt rehydrates it from the bound
-  `thread_id`
+- if runtime is gone, the next prompt may rehydrate it from the bound
+  `thread_id`, but only after normal prompt preflight passes
+- a rejected prompt on a `bound + released` binding is pure reject and does not
+  reattach runtime
 - `thread/closed` is handled as a runtime transition, not a logical unbind
 
 ## 8. Relevant Files
