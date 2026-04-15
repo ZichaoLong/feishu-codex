@@ -1167,6 +1167,30 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.start_turn_calls[-1]["thread_id"], "thread-1")
         self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-b"))
 
+    def test_resume_rejects_thread_shared_by_all_mode_group(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-a"] = "group"
+        bot.chat_types["chat-b"] = "group"
+        bot.group_modes["chat-a"] = "all"
+        bot.message_contexts["m-b"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "chat-a", thread)
+
+        handler._resume_thread_in_background_impl("ou_user2", "chat-b", "thread-1", message_id="m-b")
+
+        self.assertEqual(handler._get_runtime_state("ou_user2", "chat-b", "m-b")["current_thread_id"], "")
+        self.assertIn("`all` 模式", bot.replies[-1][1])
+        self.assertIn("其他群聊独占", bot.replies[-1][1])
+
     def test_turn_completion_notifies_active_non_owner_subscribers(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
@@ -1195,6 +1219,33 @@ class CodexHandlerTests(unittest.TestCase):
             ("chat-a", "线程 `thread-1…` 的上一轮执行已结束；本会话现在可继续提问。"),
             bot.replies,
         )
+
+    def test_handle_chat_unavailable_clears_binding_and_persistence(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        bot.chat_types["chat-group"] = "group"
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "chat-group", thread)
+
+        handler.handle_chat_unavailable("chat-group", reason="disbanded")
+
+        self.assertNotIn(("__group__", "chat-group"), handler._runtime_state_by_binding)
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
+
+        handler2, _ = self._make_handler(data_dir=data_dir)
+        state = handler2._get_runtime_state("ou_user", "chat-group", "m-group")
+        self.assertEqual(state["current_thread_id"], "")
 
     def test_turn_completion_skips_inactive_non_owner_subscribers(self) -> None:
         handler, bot = self._make_handler()
@@ -1661,6 +1712,30 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
         self.assertIn("已切换群聊工作态：`assistant`", bot.replies[-1][1])
 
+    def test_groupmode_command_rejects_all_when_thread_is_shared(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+        bot.chat_types["chat-other"] = "group"
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "chat-group", thread)
+        handler._bind_thread("ou_user2", "chat-other", thread)
+
+        handler.handle_message("ou_user", "chat-group", "/groupmode all", message_id="m-group")
+
+        self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
+        self.assertIn("`all` 模式", bot.replies[-1][1])
+        self.assertIn("不能与其他飞书会话共享", bot.replies[-1][1])
+
     def test_groupmode_command_rejects_non_admin(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
@@ -1694,6 +1769,34 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("assistant", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊工作态")
         self.assertEqual(self._action_elements(response["card"])[-1]["actions"][0]["text"]["content"], "返回帮助")
+
+    def test_groupmode_card_action_rejects_all_when_thread_is_shared(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+        bot.chat_types["chat-other"] = "group"
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "chat-group", thread)
+        handler._bind_thread("ou_user2", "chat-other", thread)
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "chat-group",
+            "m1",
+            {"action": "set_group_mode", "mode": "all", "_operator_open_id": "ou_admin"},
+        ))
+
+        self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
+        self.assertEqual(response["toast_type"], "warning")
+        self.assertIn("不能与其他飞书会话共享", response["toast"])
 
     def test_group_acl_policy_card_action_updates_group_acl(self) -> None:
         handler, _ = self._make_handler()

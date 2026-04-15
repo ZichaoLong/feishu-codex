@@ -249,6 +249,22 @@ class GroupChatStore:
     def log_path(self, chat_id: str) -> pathlib.Path:
         return self._log_path(chat_id)
 
+    def clear_chat(self, chat_id: str) -> bool:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return False
+        removed = False
+        with self._lock:
+            data = self._read_all()
+            if data["groups"].pop(normalized_chat_id, None) is not None:
+                self._write_all(data)
+                removed = True
+        log_path = self._log_path(normalized_chat_id)
+        if log_path.exists():
+            log_path.unlink()
+            removed = True
+        return removed
+
     def _state_path(self) -> pathlib.Path:
         return self._data_dir / "group_chat_state.json"
 

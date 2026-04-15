@@ -533,21 +533,77 @@ class CodexHandler(BotHandler):
     def is_sender_active(self, sender_id: str, chat_id: str = "", message_id: str = "") -> bool:
         return self._get_runtime_state(sender_id, chat_id, message_id)["active"]
 
+    def _deactivate_binding_locked(self, key: ChatBindingKey) -> str:
+        state = self._runtime_state_by_binding.pop(key, None)
+        self._chat_binding_store.clear(key)
+        if not state:
+            return ""
+        self._cancel_patch_timer_locked(state)
+        self._cancel_mirror_watchdog_locked(state)
+        thread_id = str(state["current_thread_id"] or "").strip()
+        self._release_thread_write_lease_locked(key, thread_id)
+        self._release_interaction_lease_for_binding(key, thread_id)
+        if self._unsubscribe_thread_locked(key, thread_id):
+            return thread_id
+        return ""
+
     def deactivate_sender(self, sender_id: str, chat_id: str = "", message_id: str = "") -> None:
         key = self._chat_binding_key(sender_id, chat_id, message_id)
         unsubscribe_thread_id: str = ""
         with self._lock:
-            state = self._runtime_state_by_binding.pop(key, None)
-            if not state:
-                return
-            self._cancel_patch_timer_locked(state)
-            self._cancel_mirror_watchdog_locked(state)
-            thread_id = state["current_thread_id"]
-            self._release_interaction_lease_for_binding(key, thread_id)
-            if self._unsubscribe_thread_locked(key, thread_id):
-                unsubscribe_thread_id = thread_id
+            unsubscribe_thread_id = self._deactivate_binding_locked(key)
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+
+    def preflight_group_prompt(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
+        return self._runtime_call(
+            self._preflight_group_prompt_impl,
+            sender_id,
+            chat_id,
+            message_id=message_id,
+        )
+
+    def handle_chat_unavailable(self, chat_id: str, *, reason: str = "") -> None:
+        self._runtime_call(self._handle_chat_unavailable_impl, chat_id, reason=reason)
+
+    def _handle_chat_unavailable_impl(self, chat_id: str, *, reason: str = "") -> None:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return
+        unsubscribe_thread_ids: list[str] = []
+        pending_to_fail_close: list[tuple[int | str, str, dict[str, Any]]] = []
+        with self._lock:
+            binding_keys = [
+                binding
+                for binding in self._runtime_state_by_binding
+                if binding[1] == normalized_chat_id
+            ]
+            for binding in binding_keys:
+                unsubscribe_thread_id = self._deactivate_binding_locked(binding)
+                if unsubscribe_thread_id:
+                    unsubscribe_thread_ids.append(unsubscribe_thread_id)
+            for request_key, pending in list(self._pending_requests.items()):
+                if str(pending.get("chat_id", "") or "").strip() != normalized_chat_id:
+                    continue
+                pending_to_fail_close.append(
+                    (
+                        pending["rpc_request_id"],
+                        str(pending.get("method", "") or ""),
+                        dict(pending.get("params") or {}),
+                    )
+                )
+                self._pending_requests.pop(request_key, None)
+        for unsubscribe_thread_id in sorted(set(unsubscribe_thread_ids)):
+            self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+        for rpc_request_id, method, params in pending_to_fail_close:
+            self._auto_reject_request(rpc_request_id, method, params)
+        logger.info(
+            "chat unavailable cleanup finished: chat=%s reason=%s bindings=%s pending=%s",
+            normalized_chat_id,
+            reason or "-",
+            len(unsubscribe_thread_ids),
+            len(pending_to_fail_close),
+        )
 
     def shutdown(self) -> None:
         """停止底层 app-server。"""
@@ -1160,6 +1216,57 @@ class CodexHandler(BotHandler):
     def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool:
         return self._resolve_chat_type(chat_id, message_id) == "group"
 
+    def _thread_sharing_policy_violation(
+        self,
+        chat_id: str,
+        thread_id: str,
+        *,
+        message_id: str = "",
+        current_chat_mode: str | None = None,
+    ) -> str:
+        normalized_thread_id = str(thread_id or "").strip()
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_thread_id or not normalized_chat_id:
+            return ""
+        current_mode = str(current_chat_mode or "").strip().lower()
+        if not current_mode and self._is_group_chat(normalized_chat_id, message_id):
+            current_mode = str(self.bot.get_group_mode(normalized_chat_id) or "").strip().lower()
+        with self._lock:
+            subscribers = self._thread_lease_registry.subscribers(normalized_thread_id)
+        other_chat_ids = sorted({binding[1] for binding in subscribers if binding[1] != normalized_chat_id})
+        if current_mode == "all" and other_chat_ids:
+            return (
+                "当前群聊处于 `all` 模式；该模式下线程不能与其他飞书会话共享。"
+                "请先切到 `assistant` 或 `mention-only`，或为本群新建线程。"
+            )
+        for binding in subscribers:
+            if binding[1] == normalized_chat_id:
+                continue
+            if binding[0] != GROUP_SHARED_BINDING_OWNER_ID:
+                continue
+            if str(self.bot.get_group_mode(binding[1]) or "").strip().lower() != "all":
+                continue
+            return (
+                "该线程当前已被处于 `all` 模式的其他群聊独占；"
+                "请先为本会话新建线程，或让对方切回 `assistant` / `mention-only`。"
+            )
+        return ""
+
+    def _validate_group_mode_change(self, chat_id: str, mode: str, *, message_id: str = "") -> str:
+        normalized_mode = str(mode or "").strip().lower()
+        if normalized_mode != "all":
+            return ""
+        runtime = self._get_runtime_view(GROUP_SHARED_BINDING_OWNER_ID, chat_id, message_id)
+        thread_id = runtime.current_thread_id.strip()
+        if not thread_id:
+            return ""
+        return self._thread_sharing_policy_violation(
+            chat_id,
+            thread_id,
+            message_id=message_id,
+            current_chat_mode="all",
+        )
+
     def _chat_binding_key(self, sender_id: str, chat_id: str, message_id: str = "") -> ChatBindingKey:
         if sender_id == GROUP_SHARED_BINDING_OWNER_ID:
             return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
@@ -1185,6 +1292,40 @@ class CodexHandler(BotHandler):
             return False
         context = self.bot.get_message_context(message_id)
         return bool(str(context.get("thread_id", "") or "").strip())
+
+    def _preflight_group_prompt_impl(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
+        if self._handle_running_prompt(sender_id, chat_id, "", message_id=message_id):
+            return False
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        thread_id = runtime.current_thread_id.strip()
+        if not thread_id:
+            return True
+        sharing_violation = self._thread_sharing_policy_violation(chat_id, thread_id, message_id=message_id)
+        if sharing_violation:
+            self._reply_text(
+                chat_id,
+                sharing_violation,
+                message_id=message_id,
+                reply_in_thread=self._message_reply_in_thread(message_id),
+            )
+            return False
+        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
+        with self._lock:
+            interaction_lease = self._current_interaction_lease_locked(thread_id)
+        if interaction_lease is None:
+            return True
+        if interaction_lease.holder.same_holder(self._feishu_interaction_holder(chat_binding_key)):
+            return True
+        owner_label = "另一终端"
+        if interaction_lease.holder.kind == "feishu":
+            owner_label = "另一飞书会话"
+        self._reply_text(
+            chat_id,
+            f"当前线程正由{owner_label}执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
+            message_id=message_id,
+            reply_in_thread=self._message_reply_in_thread(message_id),
+        )
+        return False
 
     def _is_group_admin_actor(
         self,
@@ -1865,6 +2006,15 @@ class CodexHandler(BotHandler):
             return
 
         chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
+        sharing_violation = self._thread_sharing_policy_violation(chat_id, thread_id, message_id=message_id)
+        if sharing_violation:
+            self._reply_text(
+                chat_id,
+                sharing_violation,
+                message_id=message_id,
+                reply_in_thread=self._message_reply_in_thread(message_id),
+            )
+            return
         interaction_lease: InteractionLeaseAcquireResult
         lease = None
         with self._lock:
@@ -2469,6 +2619,16 @@ class CodexHandler(BotHandler):
         refresh_session_message_id: str = "",
     ) -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
+        sharing_violation = self._thread_sharing_policy_violation(
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
+        if sharing_violation:
+            self._reply_text(chat_id, sharing_violation, message_id=message_id)
+            if refresh_session_message_id:
+                self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
+            return
         try:
             snapshot = self._resume_snapshot_by_id(
                 thread_id,

@@ -46,3 +46,9 @@ class CodexBot(FeishuBot):
         self, sender_id: str, chat_id: str, message_id: str, file_key: str, file_name: str
     ) -> None:
         self._handler.handle_file_message(sender_id, chat_id, message_id, file_key, file_name)
+
+    def allow_group_prompt(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
+        return self._handler.preflight_group_prompt(sender_id, chat_id, message_id=message_id)
+
+    def on_chat_unavailable(self, chat_id: str, *, reason: str = "") -> None:
+        self._handler.handle_chat_unavailable(chat_id, reason=reason)

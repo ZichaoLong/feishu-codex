@@ -20,6 +20,8 @@ class _GroupDomainOwner(Protocol):
 
     def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool: ...
 
+    def _validate_group_mode_change(self, chat_id: str, mode: str, *, message_id: str = "") -> str: ...
+
 
 class CodexGroupDomain:
     def __init__(self, owner: _GroupDomainOwner) -> None:
@@ -86,6 +88,9 @@ class CodexGroupDomain:
         mode = self._normalize_group_mode(arg)
         if mode not in GROUP_MODES:
             return CommandResult(text="群聊工作态仅支持：`assistant`、`all`、`mention-only`")
+        violation = self._owner._validate_group_mode_change(chat_id, mode, message_id=message_id)
+        if violation:
+            return CommandResult(text=violation)
         self._owner.bot.set_group_mode(chat_id, mode)
         labels = {
             "assistant": "assistant",
@@ -176,13 +181,15 @@ class CodexGroupDomain:
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
         del sender_id
-        del message_id
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
         mode = self._normalize_group_mode(str(action_value.get("mode", "")))
         if mode not in GROUP_MODES:
             return make_card_response(toast="非法群聊工作态", toast_type="warning")
         if not self._owner.bot.is_group_admin(open_id=operator_open_id):
             return make_card_response(toast="仅管理员可切换群聊工作态。", toast_type="warning")
+        violation = self._owner._validate_group_mode_change(chat_id, mode, message_id=message_id)
+        if violation:
+            return make_card_response(toast=violation, toast_type="warning")
         self._owner.bot.set_group_mode(chat_id, mode)
         return make_card_response(
             card=self._group_mode_card(chat_id, open_id=operator_open_id),

@@ -73,3 +73,27 @@ class GroupChatStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "schema_version"):
             store.get_group_mode("chat-1")
+
+    def test_clear_chat_removes_group_state_and_log(self) -> None:
+        _, store, state_path = self._make_store()
+
+        store.set_group_mode("chat-1", "all")
+        store.append_message(
+            "chat-1",
+            {
+                "message_id": "m-1",
+                "created_at": 1,
+                "sender_user_id": "u-1",
+                "sender_principal_id": "ou-1",
+                "sender_type": "user",
+                "sender_name": "User",
+                "msg_type": "text",
+                "thread_id": "",
+                "text": "hello",
+            },
+        )
+
+        self.assertTrue(store.clear_chat("chat-1"))
+        self.assertFalse(store.log_path("chat-1").exists())
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["groups"], {})

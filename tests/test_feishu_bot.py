@@ -4,7 +4,11 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
+from lark_oapi.api.im.v1 import (
+    P2ImChatDisbandedV1,
+    P2ImChatMemberBotDeletedV1,
+    P2ImMessageReceiveV1,
+)
 
 from bot.feishu_bot import FeishuBot
 
@@ -32,6 +36,8 @@ class _RecordingBot(FeishuBot):
         self.history_entries: list[dict] = []
         self.history_fetch_calls: list[dict] = []
         self.history_fetch_error: Exception | None = None
+        self.allow_group_prompt_result = True
+        self.chat_unavailable_events: list[tuple[str, str]] = []
 
     def on_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
         self.received_messages.append((sender_id, chat_id, text, message_id))
@@ -64,6 +70,15 @@ class _RecordingBot(FeishuBot):
 
     def _resolve_sender_name(self, open_id: str) -> str:
         return open_id[:8]
+
+    def allow_group_prompt(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
+        del sender_id
+        del chat_id
+        del message_id
+        return bool(self.allow_group_prompt_result)
+
+    def on_chat_unavailable(self, chat_id: str, *, reason: str = "") -> None:
+        self.chat_unavailable_events.append((chat_id, reason))
 
     def _fetch_group_history_entries(
         self,
@@ -298,6 +313,33 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("仅管理员或已授权成员", bot.replies[-1][1])
         self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 0)
 
+    def test_assistant_mode_preflight_can_block_history_recovery_before_fetch(self) -> None:
+        bot = self._make_bot()
+        bot.set_group_mode("chat-1", "assistant")
+        bot.set_group_access_policy("chat-1", "all-members")
+        bot.allow_group_prompt_result = False
+
+        bot._handle_raw_message(
+            _message_event(
+                message_id="m-1",
+                chat_id="chat-1",
+                text="@_user_1 请处理",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                mentions=[
+                    {
+                        "key": "@_user_1",
+                        "id": {"user_id": "u-bot", "open_id": "ou-bot"},
+                        "name": "Codex",
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(bot.received_messages, [])
+        self.assertEqual(bot.history_fetch_calls, [])
+        self.assertEqual(bot.reply_refs, [])
+
     def test_assistant_mode_fetches_history_on_every_authorized_mention(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
@@ -392,6 +434,41 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("第二次回捞补到的机器人消息", second_text)
         self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 3)
         self.assertEqual(bot._group_store.get_last_boundary_created_at("chat-1"), 1712476920000)
+
+    def test_chat_disbanded_event_clears_local_group_state_and_notifies_subclass(self) -> None:
+        bot = self._make_bot()
+        bot.set_group_mode("chat-1", "all")
+        bot._group_store.append_message(
+            "chat-1",
+            {
+                "message_id": "m-1",
+                "created_at": 1,
+                "sender_user_id": "u-1",
+                "sender_principal_id": "ou-1",
+                "sender_type": "user",
+                "sender_name": "User",
+                "msg_type": "text",
+                "thread_id": "",
+                "text": "hello",
+            },
+        )
+        bot.remember_chat_type("chat-1", "group")
+
+        bot._on_raw_chat_disbanded(P2ImChatDisbandedV1({"event": {"chat_id": "chat-1"}}))
+
+        self.assertEqual(bot.get_group_mode("chat-1"), "assistant")
+        self.assertFalse(bot._group_store.log_path("chat-1").exists())
+        self.assertEqual(bot.lookup_chat_type("chat-1"), "")
+        self.assertEqual(bot.chat_unavailable_events[-1], ("chat-1", "disbanded"))
+
+    def test_bot_deleted_event_clears_local_group_state_and_notifies_subclass(self) -> None:
+        bot = self._make_bot()
+        bot.set_group_mode("chat-1", "all")
+
+        bot._on_raw_chat_member_bot_deleted(P2ImChatMemberBotDeletedV1({"event": {"chat_id": "chat-1"}}))
+
+        self.assertEqual(bot.get_group_mode("chat-1"), "assistant")
+        self.assertEqual(bot.chat_unavailable_events[-1], ("chat-1", "bot_removed"))
 
     def test_assistant_mode_persists_boundary_message_ids_for_same_timestamp_entries(self) -> None:
         bot = self._make_bot()

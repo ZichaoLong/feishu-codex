@@ -244,6 +244,8 @@ class FeishuBot(ABC):
 
         self._event_handler = lark.EventDispatcherHandler.builder("", "") \
             .register_p2_im_message_receive_v1(self._on_raw_message) \
+            .register_p2_im_chat_disbanded_v1(self._on_raw_chat_disbanded) \
+            .register_p2_im_chat_member_bot_deleted_v1(self._on_raw_chat_member_bot_deleted) \
             .register_p2_card_action_trigger(self._on_raw_card_action) \
             .register_p2_application_bot_menu_v6(self._on_raw_bot_menu) \
             .build()
@@ -488,6 +490,32 @@ class FeishuBot(ABC):
                 self._pending_execution_cards.pop(oldest_message_id, None)
             else:
                 break
+
+    def _forget_chat_state(self, chat_id: str) -> None:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return
+        self._group_store.clear_chat(normalized_chat_id)
+        with self._chat_type_cache_lock:
+            self._chat_type_cache.pop(normalized_chat_id, None)
+        with self._message_context_lock:
+            stale_message_ids = [
+                message_id
+                for message_id, ctx in self._message_contexts.items()
+                if str(ctx.payload.get("chat_id", "") or "").strip() == normalized_chat_id
+            ]
+            for message_id in stale_message_ids:
+                self._message_contexts.pop(message_id, None)
+        with self._pending_forwards_lock:
+            stale_forward_keys = [
+                key
+                for key, pending in self._pending_forwards.items()
+                if key[1] == normalized_chat_id
+            ]
+            for key in stale_forward_keys:
+                pending = self._pending_forwards.pop(key, None)
+                if pending is not None and pending.timer:
+                    pending.timer.cancel()
 
     @staticmethod
     def _extract_text(msg_type: str, content_dict: dict) -> str:
@@ -1721,15 +1749,6 @@ class FeishuBot(ABC):
         if chat_type == "group":
             control_text = self._is_group_control_text(text)
             allowed_to_use = self.is_group_user_allowed(chat_id, open_id=sender_open_id)
-            should_prepare_history = (
-                group_mode == self._GROUP_MODE_ASSISTANT
-                and bot_mentioned
-                and allowed_to_use
-                and not control_text
-                and self._history_recovery_enabled()
-            )
-            if should_prepare_history:
-                self._prepare_group_history_execution_card(chat_id, message_id)
             if group_mode == self._GROUP_MODE_ASSISTANT:
                 log_text = text
                 if bot_mentioned and not log_text and not control_text:
@@ -1759,6 +1778,10 @@ class FeishuBot(ABC):
                 if control_text:
                     self.on_message(sender_id, chat_id, text, message_id=message_id)
                     return
+                if not self.allow_group_prompt(sender_id, chat_id, message_id=message_id):
+                    return
+                if self._history_recovery_enabled():
+                    self._prepare_group_history_execution_card(chat_id, message_id)
                 try:
                     context_entries = self._collect_assistant_context_entries(
                         chat_id=chat_id,
@@ -1808,6 +1831,8 @@ class FeishuBot(ABC):
                         self._group_acl_denied_text(group_mode),
                         parent_message_id=message_id,
                     )
+                return
+            if not control_text and not self.allow_group_prompt(sender_id, chat_id, message_id=message_id):
                 return
         if msg_type == "file":
             file_key = content_dict.get("file_key", "")
@@ -1862,6 +1887,28 @@ class FeishuBot(ABC):
             self.on_bot_menu(open_id, event_key)
         except Exception as e:
             logger.error("处理菜单事件异常: %s", e, exc_info=True)
+
+    def _on_raw_chat_disbanded(self, data: P2ImChatDisbandedV1) -> None:
+        try:
+            chat_id = str(data.event.chat_id or "").strip()
+            if not chat_id:
+                return
+            logger.info("群聊已解散: chat=%s", chat_id)
+            self._forget_chat_state(chat_id)
+            self.on_chat_unavailable(chat_id, reason="disbanded")
+        except Exception as e:
+            logger.error("处理群解散事件异常: %s", e, exc_info=True)
+
+    def _on_raw_chat_member_bot_deleted(self, data: P2ImChatMemberBotDeletedV1) -> None:
+        try:
+            chat_id = str(data.event.chat_id or "").strip()
+            if not chat_id:
+                return
+            logger.info("机器人已被移出群聊: chat=%s", chat_id)
+            self._forget_chat_state(chat_id)
+            self.on_chat_unavailable(chat_id, reason="bot_removed")
+        except Exception as e:
+            logger.error("处理机器人出群事件异常: %s", e, exc_info=True)
 
     @staticmethod
     def _detect_id_type(receive_id: str) -> str:
@@ -2150,6 +2197,18 @@ class FeishuBot(ABC):
     def on_bot_menu(self, open_id: str, event_key: str) -> None:
         """处理机器人菜单点击事件，子类可覆写"""
         pass
+
+    def allow_group_prompt(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
+        """在群消息进入业务处理前做一次轻量 preflight，默认允许。"""
+        del sender_id
+        del chat_id
+        del message_id
+        return True
+
+    def on_chat_unavailable(self, chat_id: str, *, reason: str = "") -> None:
+        """群聊解散或机器人出群后的生命周期回调，子类可覆写。"""
+        del chat_id
+        del reason
 
     # ---- 启动 ----
 
