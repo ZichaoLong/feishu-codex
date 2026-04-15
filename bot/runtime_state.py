@@ -80,6 +80,7 @@ class ExecutionStateChanged(RuntimeStateEvent):
     current_message_id: Any = UNSET
     last_execution_message_id: Any = UNSET
     current_prompt_message_id: Any = UNSET
+    current_prompt_reply_in_thread: Any = UNSET
     current_actor_open_id: Any = UNSET
     runtime_channel_state: Any = UNSET
     started_at: Any = UNSET
@@ -149,6 +150,7 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
                 state["current_message_id"] = ""
             state["current_turn_id"] = ""
             state["current_prompt_message_id"] = ""
+            state["current_prompt_reply_in_thread"] = False
             state["current_actor_open_id"] = ""
             state["awaiting_local_turn_started"] = False
         case ExecutionRetired(runtime_channel_state=runtime_channel_state):
@@ -179,6 +181,8 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
                 state["last_execution_message_id"] = change.last_execution_message_id
             if change.current_prompt_message_id is not UNSET:
                 state["current_prompt_message_id"] = change.current_prompt_message_id
+            if change.current_prompt_reply_in_thread is not UNSET:
+                state["current_prompt_reply_in_thread"] = change.current_prompt_reply_in_thread
             if change.current_actor_open_id is not UNSET:
                 state["current_actor_open_id"] = change.current_actor_open_id
             if change.runtime_channel_state is not UNSET:

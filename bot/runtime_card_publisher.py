@@ -131,10 +131,21 @@ class RuntimeCardPublisher:
     def __init__(self, bot: _CardPublisherBot):
         self._bot = bot
 
-    def send_execution_card(self, chat_id: str, parent_message_id: str) -> str | None:
+    def send_execution_card(
+        self,
+        chat_id: str,
+        parent_message_id: str,
+        *,
+        reply_in_thread: bool = False,
+    ) -> str | None:
         content = json.dumps(render_execution_card(ExecutionCardModel.running_placeholder()), ensure_ascii=False)
         if parent_message_id:
-            return self._bot.reply_to_message(parent_message_id, "interactive", content)
+            return self._bot.reply_to_message(
+                parent_message_id,
+                "interactive",
+                content,
+                reply_in_thread=reply_in_thread,
+            )
         return self._bot.send_message_get_id(chat_id, "interactive", content)
 
     def patch_execution_card(self, message_id: str, model: ExecutionCardModel) -> bool:
@@ -153,6 +164,7 @@ class RuntimeCardPublisher:
         parent_message_id: str,
         plan_message_id: str,
         model: PlanCardModel,
+        reply_in_thread: bool = False,
     ) -> PlanCardPublishResult:
         content = json.dumps(render_plan_card(model), ensure_ascii=False)
         normalized_existing = str(plan_message_id or "").strip()
@@ -166,7 +178,12 @@ class RuntimeCardPublisher:
 
         new_message_id: str | None = None
         if parent_message_id:
-            new_message_id = self._bot.reply_to_message(parent_message_id, "interactive", content)
+            new_message_id = self._bot.reply_to_message(
+                parent_message_id,
+                "interactive",
+                content,
+                reply_in_thread=reply_in_thread,
+            )
         if not new_message_id:
             new_message_id = self._bot.send_message_get_id(chat_id, "interactive", content)
         normalized_new_id = str(new_message_id or "").strip() or None

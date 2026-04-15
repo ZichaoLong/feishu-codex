@@ -83,6 +83,7 @@ from bot.session_resolution import (
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.profile_state_store import ProfileStateStore
+from bot.thread_lease_registry import ThreadLeaseRegistry
 from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,7 @@ class _RuntimeState(TypedDict):
     current_message_id: str
     last_execution_message_id: str
     current_prompt_message_id: str
+    current_prompt_reply_in_thread: bool
     current_actor_open_id: str
     execution_transcript: ExecutionTranscript
     runtime_channel_state: str
@@ -240,7 +242,7 @@ class CodexHandler(BotHandler):
         self._config_dir = config_dir
         self._lock = threading.RLock()
         self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = {}
-        self._chat_binding_key_by_thread_id: dict[str, ChatBindingKey] = {}
+        self._thread_lease_registry = ThreadLeaseRegistry()
         self._pending_requests: dict[str, _PendingRequestState] = {}
         self._pending_rename_forms: dict[str, _PendingRenameFormState] = {}
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
@@ -531,7 +533,7 @@ class CodexHandler(BotHandler):
             self._cancel_patch_timer_locked(state)
             self._cancel_mirror_watchdog_locked(state)
             thread_id = state["current_thread_id"]
-            if self._unregister_thread_binding_locked(key, thread_id):
+            if self._unsubscribe_thread_locked(key, thread_id):
                 unsubscribe_thread_id = thread_id
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
@@ -563,6 +565,7 @@ class CodexHandler(BotHandler):
             "current_message_id": "",
             "last_execution_message_id": "",
             "current_prompt_message_id": "",
+            "current_prompt_reply_in_thread": False,
             "current_actor_open_id": "",
             "execution_transcript": ExecutionTranscript(),
             "runtime_channel_state": "live",
@@ -609,24 +612,54 @@ class CodexHandler(BotHandler):
             ),
         )
 
-    def _register_thread_binding_locked(self, binding: ChatBindingKey, thread_id: str) -> ChatBindingKey | None:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return None
-        existing_binding = self._chat_binding_key_by_thread_id.get(normalized_thread_id)
-        self._chat_binding_key_by_thread_id[normalized_thread_id] = binding
-        if existing_binding and existing_binding != binding:
-            return existing_binding
+    def _subscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
+        return self._thread_lease_registry.subscribe(binding, thread_id)
+
+    def _unsubscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
+        return self._thread_lease_registry.unsubscribe(binding, thread_id).thread_orphaned
+
+    def _acquire_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str):
+        return self._thread_lease_registry.acquire_write_lease(binding, thread_id)
+
+    def _release_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
+        return self._thread_lease_registry.release_write_lease(binding, thread_id)
+
+    def _execution_binding_for_thread_locked(
+        self,
+        thread_id: str,
+        *,
+        adopt_sole_subscriber: bool = False,
+    ) -> ChatBindingKey | None:
+        owner = self._thread_lease_registry.lease_owner(thread_id)
+        if owner is not None:
+            return owner
+        subscribers = self._thread_lease_registry.subscribers(thread_id)
+        if len(subscribers) == 1:
+            binding = subscribers[0]
+            if adopt_sole_subscriber:
+                self._thread_lease_registry.acquire_write_lease(binding, thread_id)
+            return binding
         return None
 
-    def _unregister_thread_binding_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return False
-        if self._chat_binding_key_by_thread_id.get(normalized_thread_id) != binding:
-            return False
-        self._chat_binding_key_by_thread_id.pop(normalized_thread_id, None)
-        return True
+    def _execution_binding_for_thread(
+        self,
+        thread_id: str,
+        *,
+        adopt_sole_subscriber: bool = False,
+    ) -> ChatBindingKey | None:
+        with self._lock:
+            return self._execution_binding_for_thread_locked(
+                thread_id,
+                adopt_sole_subscriber=adopt_sole_subscriber,
+            )
+
+    def _thread_subscribers(self, thread_id: str) -> tuple[ChatBindingKey, ...]:
+        with self._lock:
+            return self._thread_lease_registry.subscribers(thread_id)
+
+    def _thread_write_owner(self, thread_id: str) -> ChatBindingKey | None:
+        with self._lock:
+            return self._thread_lease_registry.lease_owner(thread_id)
 
     def _stored_binding_from_runtime(self, state: _RuntimeState) -> dict[str, str]:
         return {
@@ -761,7 +794,9 @@ class CodexHandler(BotHandler):
 
     def _retire_execution_anchor(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
+        binding = self._chat_binding_key(sender_id, chat_id)
         with self._lock:
+            self._release_thread_write_lease_locked(binding, state["current_thread_id"])
             self._apply_runtime_state_message_locked(state, ExecutionRetired())
 
     def _refresh_terminal_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
@@ -958,7 +993,7 @@ class CodexHandler(BotHandler):
                 stored_binding = self._chat_binding_store.load(key)
                 if stored_binding is not None:
                     self._apply_stored_binding(state, stored_binding)
-                    self._register_thread_binding_locked(key, state["current_thread_id"])
+                    self._subscribe_thread_locked(key, state["current_thread_id"])
                 self._runtime_state_by_binding[key] = state
             return self._runtime_state_by_binding[key]
 
@@ -997,6 +1032,12 @@ class CodexHandler(BotHandler):
             return ""
         context = self.bot.get_message_context(message_id)
         return str(context.get("sender_open_id", "")).strip()
+
+    def _message_reply_in_thread(self, message_id: str) -> bool:
+        if not message_id:
+            return False
+        context = self.bot.get_message_context(message_id)
+        return bool(str(context.get("thread_id", "") or "").strip())
 
     def _is_group_admin_actor(
         self,
@@ -1087,15 +1128,39 @@ class CodexHandler(BotHandler):
         request_actor_open_id = request["actor_open_id"].strip()
         return bool(request_actor_open_id and actor_open_id and request_actor_open_id == actor_open_id)
 
-    def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None:
+    def _reply_text(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        message_id: str = "",
+        reply_in_thread: bool = False,
+    ) -> None:
         if self._is_group_chat(chat_id, message_id) and message_id:
-            self.bot.reply(chat_id, text, parent_message_id=message_id)
+            self.bot.reply(
+                chat_id,
+                text,
+                parent_message_id=message_id,
+                reply_in_thread=reply_in_thread,
+            )
             return
         self.bot.reply(chat_id, text)
 
-    def _reply_card(self, chat_id: str, card: dict, *, message_id: str = "") -> None:
+    def _reply_card(
+        self,
+        chat_id: str,
+        card: dict,
+        *,
+        message_id: str = "",
+        reply_in_thread: bool = False,
+    ) -> None:
         if self._is_group_chat(chat_id, message_id) and message_id:
-            self.bot.reply_card(chat_id, card, parent_message_id=message_id)
+            self.bot.reply_card(
+                chat_id,
+                card,
+                parent_message_id=message_id,
+                reply_in_thread=reply_in_thread,
+            )
             return
         self.bot.reply_card(chat_id, card)
 
@@ -1110,7 +1175,12 @@ class CodexHandler(BotHandler):
             card = build_markdown_card("Codex 启动失败", text, template="red")
             if self.bot.patch_message(reserved_card_id, json.dumps(card, ensure_ascii=False)):
                 return
-        self._reply_text(chat_id, text, message_id=message_id)
+        self._reply_text(
+            chat_id,
+            text,
+            message_id=message_id,
+            reply_in_thread=self._message_reply_in_thread(message_id),
+        )
 
     def _build_command_routes(self) -> dict[str, _CommandRoute]:
         return {
@@ -1506,12 +1576,7 @@ class CodexHandler(BotHandler):
             )
             self._cancel_mirror_watchdog_locked(state)
         if not has_card:
-            with self._lock:
-                self._clear_execution_anchor_locked(state, clear_card_message=False)
-                self._apply_runtime_state_message_locked(
-                    state,
-                    ExecutionStateChanged(runtime_channel_state="live"),
-                )
+            self._retire_execution_anchor(sender_id, chat_id)
             return False
         self._flush_execution_card(sender_id, chat_id, immediate=True)
         self._send_followup_if_needed(sender_id, chat_id)
@@ -1622,6 +1687,19 @@ class CodexHandler(BotHandler):
             )
             return
 
+        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
+        with self._lock:
+            lease = self._acquire_thread_write_lease_locked(chat_binding_key, thread_id)
+        if not lease.granted:
+            self._reply_text(
+                chat_id,
+                "当前线程正由另一飞书会话执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
+                message_id=message_id,
+                reply_in_thread=self._message_reply_in_thread(message_id),
+            )
+            return
+
+        prompt_reply_in_thread = self._message_reply_in_thread(message_id)
         with self._lock:
             started_at = time.monotonic()
             self._apply_runtime_state_message_locked(
@@ -1633,6 +1711,7 @@ class CodexHandler(BotHandler):
                     current_turn_id="",
                     last_execution_message_id="",
                     current_prompt_message_id=str(message_id or "").strip(),
+                    current_prompt_reply_in_thread=prompt_reply_in_thread,
                     current_actor_open_id=str(actor_open_id or "").strip()
                     or self._group_actor_open_id(message_id),
                     runtime_channel_state="live",
@@ -1662,7 +1741,11 @@ class CodexHandler(BotHandler):
                     ),
                 )
         if not card_id:
-            card_id = self._send_execution_card(chat_id, message_id)
+            card_id = self._send_execution_card(
+                chat_id,
+                message_id,
+                reply_in_thread=prompt_reply_in_thread,
+            )
         with self._lock:
             self._apply_runtime_state_message_locked(
                 state,
@@ -1702,20 +1785,16 @@ class CodexHandler(BotHandler):
                             ),
                         )
                     if self._is_thread_not_found_error(retry_exc):
-                        binding = self._chat_binding_key(sender_id, chat_id, message_id)
-                        with self._lock:
-                            self._apply_persisted_runtime_state_message_locked(
-                                binding,
-                                state,
-                                ThreadStateChanged(
-                                    current_thread_id="",
-                                    current_thread_title="",
-                                ),
-                            )
+                        self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
                     self._flush_execution_card(sender_id, chat_id, immediate=True)
                     self._retire_execution_anchor(sender_id, chat_id)
                     if not card_id:
-                        self._reply_text(chat_id, f"启动失败：{retry_exc}", message_id=message_id)
+                        self._reply_text(
+                            chat_id,
+                            f"启动失败：{retry_exc}",
+                            message_id=message_id,
+                            reply_in_thread=prompt_reply_in_thread,
+                        )
                     return
             else:
                 logger.exception("启动 turn 失败")
@@ -1731,7 +1810,12 @@ class CodexHandler(BotHandler):
                 self._flush_execution_card(sender_id, chat_id, immediate=True)
                 self._retire_execution_anchor(sender_id, chat_id)
                 if not card_id:
-                    self._reply_text(chat_id, f"启动失败：{exc}", message_id=message_id)
+                    self._reply_text(
+                        chat_id,
+                        f"启动失败：{exc}",
+                        message_id=message_id,
+                        reply_in_thread=prompt_reply_in_thread,
+                    )
                 return
 
         turn_id = self._extract_turn_id_from_start_response(start_response)
@@ -2329,11 +2413,10 @@ class CodexHandler(BotHandler):
     ) -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
         chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
-        takeover_chat_binding_key: tuple[str, str] | None = None
         unsubscribe_thread_id: str = ""
         with self._lock:
             old_thread_id = state["current_thread_id"]
-            if old_thread_id != thread.thread_id and self._unregister_thread_binding_locked(
+            if old_thread_id != thread.thread_id and self._unsubscribe_thread_locked(
                 chat_binding_key,
                 old_thread_id,
             ):
@@ -2356,18 +2439,9 @@ class CodexHandler(BotHandler):
             )
             self._cancel_mirror_watchdog_locked(state)
             self._clear_plan_state(state)
-            takeover_chat_binding_key = self._register_thread_binding_locked(chat_binding_key, thread.thread_id)
+            self._subscribe_thread_locked(chat_binding_key, thread.thread_id)
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
-        if takeover_chat_binding_key:
-            self._reply_text(
-                takeover_chat_binding_key[1],
-                (
-                    f"线程 `{thread.thread_id[:8]}…` 已被另一飞书会话接管。"
-                    "当前会话不再接收该线程的实时更新；如需重新接管，请再次执行 "
-                    f"`/resume {thread.thread_id}`。"
-                ),
-            )
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
@@ -2375,7 +2449,7 @@ class CodexHandler(BotHandler):
         unsubscribe_thread_id: str = ""
         with self._lock:
             thread_id = state["current_thread_id"]
-            if self._unregister_thread_binding_locked(chat_binding_key, thread_id):
+            if self._unsubscribe_thread_locked(chat_binding_key, thread_id):
                 unsubscribe_thread_id = thread_id
             self._apply_persisted_runtime_state_message_locked(
                 chat_binding_key,
@@ -2495,7 +2569,7 @@ class CodexHandler(BotHandler):
         self, request_id: int | str, method: str, params: dict[str, Any]
     ) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             logger.warning("未找到线程绑定，自动 fail-close: method=%s thread=%s", method, thread_id)
             self._auto_reject_request(request_id, method, params)
@@ -2505,6 +2579,7 @@ class CodexHandler(BotHandler):
         state = self._get_runtime_state(*binding)
         with self._lock:
             prompt_message_id = state["current_prompt_message_id"].strip()
+            prompt_reply_in_thread = bool(state["current_prompt_reply_in_thread"])
             actor_open_id = state["current_actor_open_id"].strip()
 
         if method == "item/commandExecution/requestApproval":
@@ -2537,6 +2612,7 @@ class CodexHandler(BotHandler):
                 chat_id,
                 "收到 MCP elicitation 请求，当前版本暂未支持，已取消该请求。",
                 message_id=prompt_message_id,
+                reply_in_thread=prompt_reply_in_thread,
             )
             self._adapter.respond(request_id, result={"action": "cancel"})
             return
@@ -2551,7 +2627,12 @@ class CodexHandler(BotHandler):
         content = json.dumps(card, ensure_ascii=False)
         message_id: str | None = None
         if prompt_message_id:
-            message_id = self.bot.reply_to_message(prompt_message_id, "interactive", content)
+            message_id = self.bot.reply_to_message(
+                prompt_message_id,
+                "interactive",
+                content,
+                reply_in_thread=prompt_reply_in_thread,
+            )
         if not message_id:
             message_id = self.bot.send_message_get_id(chat_id, "interactive", content)
         if not message_id:
@@ -2595,7 +2676,7 @@ class CodexHandler(BotHandler):
 
     def _handle_thread_status_changed(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             return
         state = self._get_runtime_state(*binding)
@@ -2640,7 +2721,7 @@ class CodexHandler(BotHandler):
 
     def _handle_thread_closed(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             return
         self._note_runtime_event(*binding)
@@ -2669,25 +2750,28 @@ class CodexHandler(BotHandler):
 
     def _handle_thread_name_updated(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
-        if not binding:
+        bindings = self._thread_subscribers(thread_id)
+        if not bindings:
             return
-        self._note_runtime_event(*binding)
-        state = self._get_runtime_state(*binding)
         new_title = str(params.get("threadName") or "").strip()
-        with self._lock:
-            if state["current_thread_id"] != thread_id:
-                return
-            resolved_title = new_title or state["current_thread_title"]
-            self._apply_persisted_runtime_state_message_locked(
-                binding,
-                state,
-                ThreadStateChanged(current_thread_title=resolved_title),
-            )
+        execution_binding = self._thread_write_owner(thread_id)
+        if execution_binding is not None:
+            self._note_runtime_event(*execution_binding)
+        for binding in bindings:
+            state = self._get_runtime_state(*binding)
+            with self._lock:
+                if state["current_thread_id"] != thread_id:
+                    continue
+                resolved_title = new_title or state["current_thread_title"]
+                self._apply_persisted_runtime_state_message_locked(
+                    binding,
+                    state,
+                    ThreadStateChanged(current_thread_title=resolved_title),
+                )
 
     def _handle_turn_started(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             return
         self._note_runtime_event(*binding)
@@ -2768,7 +2852,7 @@ class CodexHandler(BotHandler):
 
     def _handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             return
         self._note_runtime_event(*binding)
@@ -2796,7 +2880,7 @@ class CodexHandler(BotHandler):
 
     def _handle_item_started(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if binding:
             self._note_runtime_event(*binding)
         item = params.get("item") or {}
@@ -2827,7 +2911,7 @@ class CodexHandler(BotHandler):
 
     def _handle_agent_message_delta(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             return
         self._note_runtime_event(*binding)
@@ -2838,14 +2922,14 @@ class CodexHandler(BotHandler):
 
     def _handle_command_delta(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if binding:
             self._note_runtime_event(*binding)
         self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""))
 
     def _handle_file_change_delta(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if binding:
             self._note_runtime_event(*binding)
         self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""))
@@ -2854,7 +2938,7 @@ class CodexHandler(BotHandler):
         item = params.get("item") or {}
         item_type = str(item.get("type", "") or "").strip()
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if binding:
             self._note_runtime_event(*binding)
         if item_type == "commandExecution":
@@ -2882,7 +2966,7 @@ class CodexHandler(BotHandler):
                     state["execution_transcript"].finish_process_block(suffix)
                 self._schedule_execution_card_update(*binding)
         elif item_type == "agentMessage" and item.get("text"):
-            binding = self._chat_binding_key_by_thread_id.get(thread_id)
+            binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
             if not binding:
                 return
             state = self._get_runtime_state(*binding)
@@ -2898,7 +2982,7 @@ class CodexHandler(BotHandler):
                     state["execution_transcript"].finish_process_block()
                 self._schedule_execution_card_update(*binding)
         elif item_type == "plan" and item.get("text"):
-            binding = self._chat_binding_key_by_thread_id.get(thread_id)
+            binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
             if not binding:
                 return
             state = self._get_runtime_state(*binding)
@@ -2920,7 +3004,7 @@ class CodexHandler(BotHandler):
 
     def _handle_turn_completed(self, params: dict[str, Any]) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             return
         self._note_runtime_event(*binding)
@@ -2948,7 +3032,7 @@ class CodexHandler(BotHandler):
         )
 
     def _append_log_by_thread(self, thread_id: str, text: str) -> None:
-        binding = self._chat_binding_key_by_thread_id.get(thread_id)
+        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
         if not binding:
             return
         state = self._get_runtime_state(*binding)
@@ -2956,8 +3040,18 @@ class CodexHandler(BotHandler):
             state["execution_transcript"].append_process_delta(text)
         self._schedule_execution_card_update(*binding)
 
-    def _send_execution_card(self, chat_id: str, parent_message_id: str) -> str | None:
-        return self._runtime_card_publisher().send_execution_card(chat_id, parent_message_id)
+    def _send_execution_card(
+        self,
+        chat_id: str,
+        parent_message_id: str,
+        *,
+        reply_in_thread: bool = False,
+    ) -> str | None:
+        return self._runtime_card_publisher().send_execution_card(
+            chat_id,
+            parent_message_id,
+            reply_in_thread=reply_in_thread,
+        )
 
     def _patch_execution_card_message(
         self,
@@ -3029,6 +3123,7 @@ class CodexHandler(BotHandler):
             running = runtime.execution.running
             cancelled = runtime.execution.cancelled
             prompt_message_id = runtime.execution.current_prompt_message_id.strip()
+            prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
             elapsed = (
                 int(max(0.0, time.monotonic() - runtime.execution.started_at))
                 if runtime.execution.started_at
@@ -3043,7 +3138,17 @@ class CodexHandler(BotHandler):
             cancelled=cancelled,
         )
         if not ok and immediate and reply_text:
-            self._reply_text(chat_id, reply_text, message_id=prompt_message_id)
+            with self._lock:
+                self._apply_runtime_state_message_locked(
+                    state,
+                    ExecutionStateChanged(followup_sent=True),
+                )
+            self._reply_text(
+                chat_id,
+                reply_text,
+                message_id=prompt_message_id,
+                reply_in_thread=prompt_reply_in_thread,
+            )
 
     def _send_followup_if_needed(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -3054,6 +3159,7 @@ class CodexHandler(BotHandler):
             reply_text = runtime.execution.transcript.reply_text()
             current_message_id = runtime.execution.current_message_id
             prompt_message_id = runtime.execution.current_prompt_message_id.strip()
+            prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
             need_followup = not current_message_id or len(reply_text) > self._card_reply_limit
             if not reply_text or not need_followup:
                 return
@@ -3061,7 +3167,12 @@ class CodexHandler(BotHandler):
                 state,
                 ExecutionStateChanged(followup_sent=True),
             )
-        self._reply_text(chat_id, reply_text, message_id=prompt_message_id)
+        self._reply_text(
+            chat_id,
+            reply_text,
+            message_id=prompt_message_id,
+            reply_in_thread=prompt_reply_in_thread,
+        )
 
     def _clear_plan_state(self, state: _RuntimeState) -> None:
         self._apply_runtime_state_message_locked(state, PlanStateChanged(clear=True))
@@ -3076,6 +3187,7 @@ class CodexHandler(BotHandler):
             parent_message_id=runtime.execution.current_message_id,
             plan_message_id=runtime.plan.message_id,
             model=model,
+            reply_in_thread=runtime.execution.current_prompt_reply_in_thread,
         )
         state = self._get_runtime_state(sender_id, chat_id)
         if result.attempted_existing and not result.reused_existing:

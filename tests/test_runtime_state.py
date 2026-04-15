@@ -24,6 +24,7 @@ def _build_state() -> dict[str, object]:
         "current_message_id": "card-1",
         "last_execution_message_id": "",
         "current_prompt_message_id": "prompt-1",
+        "current_prompt_reply_in_thread": True,
         "current_actor_open_id": "ou_user",
         "execution_transcript": ExecutionTranscript(),
         "runtime_channel_state": "degraded",
@@ -60,6 +61,7 @@ class RuntimeStateReducerTests(unittest.TestCase):
         self.assertEqual(state["current_message_id"], "")
         self.assertEqual(state["current_turn_id"], "")
         self.assertEqual(state["current_prompt_message_id"], "")
+        self.assertFalse(state["current_prompt_reply_in_thread"])
         self.assertEqual(state["current_actor_open_id"], "")
         self.assertFalse(state["awaiting_local_turn_started"])
         self.assertEqual(state["runtime_channel_state"], "live")

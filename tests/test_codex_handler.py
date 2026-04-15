@@ -172,10 +172,13 @@ class _FakeBot:
         self.replies: list[tuple[str, str]] = []
         self.cards: list[tuple[str, dict]] = []
         self.reply_refs: list[tuple[str, str, str]] = []
+        self.reply_ref_calls: list[tuple[str, str, str, bool]] = []
         self.reply_parents: list[tuple[str, str, str]] = []
+        self.reply_parent_calls: list[tuple[str, str, str, bool]] = []
         self.card_parents: list[tuple[str, dict, str]] = []
         self.sent_messages: list[tuple[str, str, str]] = []
         self.patches: list[tuple[str, str]] = []
+        self.patch_results: dict[str, bool] = {}
         self.message_contexts: dict[str, dict] = {}
         self.group_modes: dict[str, str] = {}
         self.group_acls: dict[str, dict] = {}
@@ -195,6 +198,7 @@ class _FakeBot:
         self.replies.append((chat_id, text))
         if parent_message_id:
             self.reply_parents.append((chat_id, text, parent_message_id))
+            self.reply_parent_calls.append((chat_id, text, parent_message_id, reply_in_thread))
 
     def reply_card(self, chat_id: str, card: dict, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
         self.cards.append((chat_id, card))
@@ -203,6 +207,7 @@ class _FakeBot:
 
     def reply_to_message(self, parent_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> str:
         self.reply_refs.append((parent_id, msg_type, content))
+        self.reply_ref_calls.append((parent_id, msg_type, content, reply_in_thread))
         return "plan-card-1"
 
     def send_message_get_id(self, chat_id: str, msg_type: str, content: str) -> str:
@@ -211,7 +216,7 @@ class _FakeBot:
 
     def patch_message(self, message_id: str, content: str) -> bool:
         self.patches.append((message_id, content))
-        return True
+        return self.patch_results.get(message_id, True)
 
     def make_card_response(self, card=None, toast=None, toast_type="info"):
         return {"card": card, "toast": toast, "toast_type": toast_type}
@@ -731,7 +736,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler2._get_runtime_state("ou_user", "c1")
 
         self.assertEqual(state["current_thread_id"], "thread-created")
-        self.assertEqual(handler2._chat_binding_key_by_thread_id["thread-created"], ("ou_user", "c1"))
+        self.assertEqual(handler2._thread_subscribers("thread-created"), (("ou_user", "c1"),))
 
         handler2.handle_message("ou_user", "c1", "follow up")
         handler2._handle_turn_started({"threadId": "thread-created", "turn": {"id": "turn-2"}})
@@ -807,7 +812,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler2._get_runtime_state("ou_user2", "chat-group", "m-status")
 
         self.assertEqual(state["current_thread_id"], "thread-group")
-        self.assertEqual(handler2._chat_binding_key_by_thread_id["thread-group"], ("__group__", "chat-group"))
+        self.assertEqual(handler2._thread_subscribers("thread-group"), (("__group__", "chat-group"),))
 
         bot2.message_contexts["m-prompt"] = {"chat_type": "group", "sender_open_id": "ou_user2"}
         handler2.handle_message("ou_user2", "chat-group", "继续", message_id="m-prompt")
@@ -1042,7 +1047,11 @@ class CodexHandlerTests(unittest.TestCase):
     def test_group_followup_reply_stays_on_trigger_message(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
-        bot.message_contexts["m-thread"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+        bot.message_contexts["m-thread"] = {
+            "chat_type": "group",
+            "sender_open_id": "ou_user",
+            "thread_id": "om_thread",
+        }
         handler._card_reply_limit = 5
 
         handler.handle_message("ou_user", "chat-group", "thread prompt", message_id="m-thread")
@@ -1050,8 +1059,27 @@ class CodexHandlerTests(unittest.TestCase):
         handler._handle_turn_completed({"threadId": "thread-created", "turn": {"status": "completed"}})
 
         self.assertEqual(bot.reply_parents[-1], ("chat-group", "123456789", "m-thread"))
+        self.assertTrue(bot.reply_parent_calls[-1][3])
 
-    def test_takeover_notifies_previous_feishu_binding(self) -> None:
+    def test_group_followup_reply_stays_in_topic_after_message_context_is_gone(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+        bot.message_contexts["m-thread"] = {
+            "chat_type": "group",
+            "sender_open_id": "ou_user",
+            "thread_id": "om_thread",
+        }
+        handler._card_reply_limit = 5
+
+        handler.handle_message("ou_user", "chat-group", "thread prompt", message_id="m-thread")
+        bot.message_contexts.pop("m-thread", None)
+        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "123456789"})
+        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"status": "completed"}})
+
+        self.assertEqual(bot.reply_parents[-1], ("chat-group", "123456789", "m-thread"))
+        self.assertTrue(bot.reply_parent_calls[-1][3])
+
+    def test_multiple_bindings_share_thread_but_only_owner_can_write_until_turn_finishes(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -1066,9 +1094,98 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._bind_thread("ou_user", "chat-a", thread)
         handler._bind_thread("ou_user", "chat-b", thread)
+        self.assertEqual(handler._thread_subscribers("thread-1"), (("ou_user", "chat-a"), ("ou_user", "chat-b")))
 
-        self.assertEqual(bot.replies[-1][0], "chat-a")
-        self.assertIn("已被另一飞书会话接管", bot.replies[-1][1])
+        handler.handle_message("ou_user", "chat-a", "first turn")
+
+        self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-a"))
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["thread_id"], "thread-1")
+
+        handler.handle_message("ou_user", "chat-b", "second turn")
+
+        self.assertEqual(len(handler._adapter.start_turn_calls), 1)
+        self.assertEqual(bot.replies[-1][0], "chat-b")
+        self.assertIn("当前线程正由另一飞书会话执行", bot.replies[-1][1])
+        self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-a"))
+
+        handler._handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
+
+        self.assertIsNone(handler._thread_write_owner("thread-1"))
+
+        handler.handle_message("ou_user", "chat-b", "third turn")
+
+        self.assertEqual(len(handler._adapter.start_turn_calls), 2)
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["thread_id"], "thread-1")
+        self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-b"))
+
+    def test_approval_request_reply_stays_in_topic_after_message_context_is_gone(self) -> None:
+        handler, bot = self._make_handler()
+        bot.chat_types["chat-group"] = "group"
+        bot.message_contexts["m-thread"] = {
+            "chat_type": "group",
+            "sender_open_id": "ou_user",
+            "thread_id": "om_thread",
+        }
+
+        handler.handle_message("ou_user", "chat-group", "thread prompt", message_id="m-thread")
+        bot.message_contexts.pop("m-thread", None)
+
+        handler._handle_adapter_request_impl(
+            "req-1",
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread-created",
+                "command": "ls",
+                "cwd": "/tmp/project",
+                "reason": "need approval",
+            },
+        )
+
+        self.assertEqual(bot.reply_refs[-1][0], "m-thread")
+        self.assertTrue(bot.reply_ref_calls[-1][3])
+
+    def test_approval_request_routes_to_current_thread_write_owner(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler._bind_thread("ou_user", "chat-a", thread)
+        handler._bind_thread("ou_user", "chat-b", thread)
+        handler.handle_message("ou_user", "chat-a", "first turn")
+
+        handler._handle_adapter_request_impl(
+            "req-1",
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread-1",
+                "command": "ls",
+                "cwd": "/tmp/project",
+                "reason": "need approval",
+            },
+        )
+
+        self.assertEqual(bot.sent_messages[-1][0], "chat-a")
+        self.assertNotEqual(bot.sent_messages[-1][0], "chat-b")
+
+    def test_patch_failure_fallback_does_not_send_duplicate_followup(self) -> None:
+        handler, bot = self._make_handler()
+        handler._card_reply_limit = 5
+
+        handler.handle_message("ou_user", "c1", "hello")
+        bot.patch_results["plan-card-2"] = False
+        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "123456789"})
+        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
+
+        matching_replies = [item for item in bot.replies if item == ("c1", "123456789")]
+        self.assertEqual(len(matching_replies), 1)
 
     def test_mode_command_without_arg_shows_mode_card(self) -> None:
         handler, bot = self._make_handler()

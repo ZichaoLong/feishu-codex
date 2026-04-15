@@ -48,6 +48,7 @@ class ExecutionView:
     current_message_id: str
     last_execution_message_id: str
     current_prompt_message_id: str
+    current_prompt_reply_in_thread: bool
     current_actor_open_id: str
     transcript: ExecutionTranscript
     runtime_channel_state: str
@@ -131,6 +132,7 @@ def build_runtime_view(state: Mapping[str, Any]) -> RuntimeView:
             current_message_id=str(state["current_message_id"] or ""),
             last_execution_message_id=str(state["last_execution_message_id"] or ""),
             current_prompt_message_id=str(state["current_prompt_message_id"] or ""),
+            current_prompt_reply_in_thread=bool(state["current_prompt_reply_in_thread"]),
             current_actor_open_id=str(state["current_actor_open_id"] or ""),
             transcript=state["execution_transcript"].clone(),
             runtime_channel_state=str(state["runtime_channel_state"] or ""),

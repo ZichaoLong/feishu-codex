@@ -19,6 +19,7 @@ def _build_state() -> dict[str, object]:
         "current_message_id": "card-1",
         "last_execution_message_id": "card-old",
         "current_prompt_message_id": "prompt-1",
+        "current_prompt_reply_in_thread": True,
         "current_actor_open_id": "ou_user",
         "execution_transcript": transcript,
         "runtime_channel_state": "live",
@@ -56,6 +57,7 @@ class RuntimeViewTests(unittest.TestCase):
         self.assertEqual(view.sandbox, "workspace-write")
         self.assertEqual(view.collaboration_mode, "default")
         self.assertEqual(view.execution.effective_message_id, "card-1")
+        self.assertTrue(view.execution.current_prompt_reply_in_thread)
         self.assertTrue(view.execution.has_execution_anchor)
         self.assertEqual(view.plan.steps[0].step, "old")
 
