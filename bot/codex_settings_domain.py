@@ -5,7 +5,6 @@ Codex settings domain.
 from __future__ import annotations
 
 import logging
-import threading
 from secrets import compare_digest
 from typing import Any, Protocol
 
@@ -31,12 +30,20 @@ logger = logging.getLogger(__name__)
 
 class _SettingsDomainOwner(Protocol):
     bot: Any
-    _lock: threading.RLock
     _profile_state: Any
     _adapter_config: Any
 
     def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
-    def _save_stored_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> None: ...
+    def _update_runtime_settings(
+        self,
+        sender_id: str,
+        chat_id: str,
+        *,
+        message_id: str = "",
+        approval_policy: Any = ...,
+        sandbox: Any = ...,
+        collaboration_mode: Any = ...,
+    ) -> None: ...
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None: ...
 
@@ -308,10 +315,13 @@ class CodexSettingsDomain:
             policy = arg.strip().lower()
             if policy not in self._approval_policies:
                 return CommandResult(text="审批策略仅支持：`untrusted`、`on-failure`、`on-request`、`never`")
-            with owner._lock:
-                state["approval_policy"] = policy
-                running = state["running"]
-                owner._save_stored_binding(sender_id, chat_id, message_id)
+            owner._update_runtime_settings(
+                sender_id,
+                chat_id,
+                message_id=message_id,
+                approval_policy=policy,
+            )
+            running = state["running"]
             message = f"已切换审批策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
@@ -325,10 +335,13 @@ class CodexSettingsDomain:
             policy = arg.strip().lower()
             if policy not in self._sandbox_policies:
                 return CommandResult(text="沙箱策略仅支持：`read-only`、`workspace-write`、`danger-full-access`")
-            with owner._lock:
-                state["sandbox"] = policy
-                running = state["running"]
-                owner._save_stored_binding(sender_id, chat_id, message_id)
+            owner._update_runtime_settings(
+                sender_id,
+                chat_id,
+                message_id=message_id,
+                sandbox=policy,
+            )
+            running = state["running"]
             message = f"已切换沙箱策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
@@ -343,11 +356,14 @@ class CodexSettingsDomain:
             config = self._permissions_presets.get(preset)
             if config is None:
                 return CommandResult(text="权限预设仅支持：`read-only`、`default`、`full-access`")
-            with owner._lock:
-                state["approval_policy"] = config["approval_policy"]
-                state["sandbox"] = config["sandbox"]
-                running = state["running"]
-                owner._save_stored_binding(sender_id, chat_id, message_id)
+            owner._update_runtime_settings(
+                sender_id,
+                chat_id,
+                message_id=message_id,
+                approval_policy=config["approval_policy"],
+                sandbox=config["sandbox"],
+            )
+            running = state["running"]
             message = (
                 f"已切换权限预设：`{config['label']}`\n"
                 f"审批：`{config['approval_policy']}`\n"
@@ -370,10 +386,13 @@ class CodexSettingsDomain:
             mode = arg.strip().lower()
             if mode not in {"default", "plan"}:
                 return CommandResult(text="协作模式仅支持：`default`、`plan`")
-            with owner._lock:
-                state["collaboration_mode"] = mode
-                running = state["running"]
-                owner._save_stored_binding(sender_id, chat_id, message_id)
+            owner._update_runtime_settings(
+                sender_id,
+                chat_id,
+                message_id=message_id,
+                collaboration_mode=mode,
+            )
+            running = state["running"]
             message = f"已切换协作模式：`{mode}`\n作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
@@ -395,10 +414,13 @@ class CodexSettingsDomain:
         if policy not in self._approval_policies:
             return make_card_response(toast="非法审批策略", toast_type="warning")
         state = owner._get_runtime_state(sender_id, chat_id, message_id)
-        with owner._lock:
-            state["approval_policy"] = policy
-            running = state["running"]
-            owner._save_stored_binding(sender_id, chat_id, message_id)
+        owner._update_runtime_settings(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+            approval_policy=policy,
+        )
+        running = state["running"]
         toast = f"已切换审批策略：{policy}"
         if running:
             toast += "；下一轮生效"
@@ -420,10 +442,13 @@ class CodexSettingsDomain:
         if policy not in self._sandbox_policies:
             return make_card_response(toast="非法沙箱策略", toast_type="warning")
         state = owner._get_runtime_state(sender_id, chat_id, message_id)
-        with owner._lock:
-            state["sandbox"] = policy
-            running = state["running"]
-            owner._save_stored_binding(sender_id, chat_id, message_id)
+        owner._update_runtime_settings(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+            sandbox=policy,
+        )
+        running = state["running"]
         toast = f"已切换沙箱策略：{policy}"
         if running:
             toast += "；下一轮生效"
@@ -446,11 +471,14 @@ class CodexSettingsDomain:
         if config is None:
             return make_card_response(toast="非法权限预设", toast_type="warning")
         state = owner._get_runtime_state(sender_id, chat_id, message_id)
-        with owner._lock:
-            state["approval_policy"] = config["approval_policy"]
-            state["sandbox"] = config["sandbox"]
-            running = state["running"]
-            owner._save_stored_binding(sender_id, chat_id, message_id)
+        owner._update_runtime_settings(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+            approval_policy=config["approval_policy"],
+            sandbox=config["sandbox"],
+        )
+        running = state["running"]
         toast = f"已切换权限预设：{config['label']}"
         if running:
             toast += "；下一轮生效"
@@ -476,10 +504,13 @@ class CodexSettingsDomain:
         if mode not in {"default", "plan"}:
             return make_card_response(toast="非法协作模式", toast_type="warning")
         state = owner._get_runtime_state(sender_id, chat_id, message_id)
-        with owner._lock:
-            state["collaboration_mode"] = mode
-            running = state["running"]
-            owner._save_stored_binding(sender_id, chat_id, message_id)
+        owner._update_runtime_settings(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+            collaboration_mode=mode,
+        )
+        running = state["running"]
         toast = f"已切换协作模式：{mode}"
         if running:
             toast += "；下一轮生效"

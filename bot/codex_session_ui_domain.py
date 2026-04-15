@@ -38,7 +38,15 @@ class _SessionUiDomainOwner(Protocol):
     _thread_list_query_limit: int
 
     def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
-    def _save_stored_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> None: ...
+    def _rename_bound_thread_title(
+        self,
+        sender_id: str,
+        chat_id: str,
+        title: str,
+        *,
+        message_id: str = "",
+        thread_id: str = "",
+    ) -> bool: ...
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None: ...
 
@@ -129,9 +137,13 @@ class CodexSessionUiDomain:
         except Exception as exc:
             logger.exception("重命名线程失败")
             return CommandResult(text=f"重命名失败：{exc}")
-        with self._owner._lock:
-            state["current_thread_title"] = arg
-            self._owner._save_stored_binding(sender_id, chat_id, message_id)
+        self._owner._rename_bound_thread_title(
+            sender_id,
+            chat_id,
+            arg,
+            message_id=message_id,
+            thread_id=state["current_thread_id"],
+        )
         return CommandResult(text=f"已重命名为：{arg}")
 
     def handle_rm_command(
@@ -307,9 +319,13 @@ class CodexSessionUiDomain:
         state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
         with self._owner._lock:
             self._owner._pending_rename_forms.pop(message_id, None)
-            if state["current_thread_id"] == thread_id:
-                state["current_thread_title"] = new_title
-                self._owner._save_stored_binding(sender_id, chat_id, message_id)
+        self._owner._rename_bound_thread_title(
+            sender_id,
+            chat_id,
+            new_title,
+            message_id=message_id,
+            thread_id=thread_id,
+        )
         return self._handle_sessions_refresh_action(sender_id, chat_id, message_id=message_id, toast="已重命名。")
 
     def handle_cancel_rename_action(
