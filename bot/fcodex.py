@@ -375,7 +375,11 @@ def _read_subprocess_ready_line(process: subprocess.Popen[str], timeout_seconds:
     return str(result.get("line", ""))
 
 
-def _launch_local_cwd_proxy(backend_url: str, effective_cwd: str) -> tuple[str, subprocess.Popen[str]]:
+def _launch_local_cwd_proxy(
+    backend_url: str,
+    effective_cwd: str,
+    data_dir: pathlib.Path,
+) -> tuple[str, subprocess.Popen[str]]:
     cmd = [
         sys.executable,
         "-m",
@@ -384,6 +388,8 @@ def _launch_local_cwd_proxy(backend_url: str, effective_cwd: str) -> tuple[str, 
         backend_url,
         "--cwd",
         effective_cwd,
+        "--data-dir",
+        str(data_dir),
         "--parent-pid",
         str(os.getpid()),
     ]
@@ -520,7 +526,7 @@ def main() -> None:
             # Without this local proxy, the shared app-server falls back to its own
             # WorkingDirectory (`~/.local/share/feishu-codex`) and fresh `fcodex`
             # sessions don't inherit the caller's shell cwd.
-            proxy_url, proxy_process = _launch_local_cwd_proxy(app_server_url, effective_cwd)
+            proxy_url, proxy_process = _launch_local_cwd_proxy(app_server_url, effective_cwd, data_dir)
         except Exception as exc:
             print(f"启动 fcodex 本地 cwd proxy 失败：{exc}", file=sys.stderr)
             raise SystemExit(2)

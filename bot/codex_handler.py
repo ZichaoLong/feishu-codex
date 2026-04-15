@@ -7,6 +7,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import pathlib
 import threading
 import time
@@ -82,6 +83,13 @@ from bot.session_resolution import (
 )
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.chat_binding_store import ChatBindingStore
+from bot.stores.interaction_lease_store import (
+    InteractionLease,
+    InteractionLeaseAcquireResult,
+    InteractionLeaseStore,
+    feishu_binding_from_holder,
+    make_feishu_interaction_holder,
+)
 from bot.stores.profile_state_store import ProfileStateStore
 from bot.thread_lease_registry import ThreadLeaseRegistry
 from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
@@ -94,7 +102,7 @@ _MIRROR_WATCHDOG_SECONDS_DEFAULT = 8.0
 _APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _LOCAL_THREAD_SAFETY_RULE = (
-    "fcodex 和飞书可以同时读写同一线程；裸 codex 不要与 fcodex 或飞书同时写同一线程。"
+    "同一线程允许多端订阅观察，但同一 live turn 只有一个交互 owner；非 owner 只能看，不能写或处理审批。"
 )
 _EMPTY_RESOLVED_PROFILE = ResolvedProfileConfig()
 ChatBindingKey: TypeAlias = tuple[str, str]
@@ -243,6 +251,7 @@ class CodexHandler(BotHandler):
         self._lock = threading.RLock()
         self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = {}
         self._thread_lease_registry = ThreadLeaseRegistry()
+        self._interaction_lease_store = InteractionLeaseStore(self._data_dir)
         self._pending_requests: dict[str, _PendingRequestState] = {}
         self._pending_rename_forms: dict[str, _PendingRenameFormState] = {}
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
@@ -534,6 +543,7 @@ class CodexHandler(BotHandler):
             self._cancel_patch_timer_locked(state)
             self._cancel_mirror_watchdog_locked(state)
             thread_id = state["current_thread_id"]
+            self._release_interaction_lease_for_binding(key, thread_id)
             if self._unsubscribe_thread_locked(key, thread_id):
                 unsubscribe_thread_id = thread_id
         if unsubscribe_thread_id:
@@ -618,6 +628,16 @@ class CodexHandler(BotHandler):
                 self._subscribe_thread_locked(binding, current_thread_id)
                 owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
                 if owner_thread_id and owner_thread_id == current_thread_id:
+                    interaction_lease = self._acquire_interaction_lease_for_binding(binding, owner_thread_id)
+                    if not interaction_lease.granted and interaction_lease.lease is not None:
+                        logger.warning(
+                            "stored interaction owner conflicted during hydration: thread=%s owner=%s ignored=%s",
+                            owner_thread_id[:12],
+                            interaction_lease.lease.holder.holder_id,
+                            binding,
+                        )
+                        self._sync_stored_binding_locked(binding, state)
+                        continue
                     lease = self._acquire_thread_write_lease_locked(binding, owner_thread_id)
                     if not lease.granted and lease.owner != binding:
                         logger.warning(
@@ -652,6 +672,68 @@ class CodexHandler(BotHandler):
 
     def _release_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
         return self._thread_lease_registry.release_write_lease(binding, thread_id)
+
+    def _feishu_interaction_holder(self, binding: ChatBindingKey):
+        return make_feishu_interaction_holder(
+            binding[0],
+            binding[1],
+            owner_pid=os.getpid(),
+        )
+
+    def _current_interaction_lease_locked(self, thread_id: str) -> InteractionLease | None:
+        return self._interaction_lease_store.load(thread_id)
+
+    def _acquire_interaction_lease_for_binding(
+        self,
+        binding: ChatBindingKey,
+        thread_id: str,
+    ) -> InteractionLeaseAcquireResult:
+        return self._interaction_lease_store.acquire(
+            thread_id,
+            self._feishu_interaction_holder(binding),
+        )
+
+    def _release_interaction_lease_for_binding(
+        self,
+        binding: ChatBindingKey,
+        thread_id: str,
+    ) -> bool:
+        return self._interaction_lease_store.release(
+            thread_id,
+            self._feishu_interaction_holder(binding),
+        )
+
+    def _interactive_binding_for_thread_locked(
+        self,
+        thread_id: str,
+        *,
+        adopt_sole_subscriber: bool = False,
+    ) -> tuple[ChatBindingKey | None, bool]:
+        lease = self._current_interaction_lease_locked(thread_id)
+        if lease is not None:
+            binding = feishu_binding_from_holder(lease.holder)
+            if binding is None:
+                return None, True
+            return binding, False
+        subscribers = self._thread_lease_registry.subscribers(thread_id)
+        if len(subscribers) != 1:
+            return None, False
+        binding = subscribers[0]
+        if adopt_sole_subscriber:
+            self._acquire_interaction_lease_for_binding(binding, thread_id)
+        return binding, False
+
+    def _interactive_binding_for_thread(
+        self,
+        thread_id: str,
+        *,
+        adopt_sole_subscriber: bool = False,
+    ) -> tuple[ChatBindingKey | None, bool]:
+        with self._lock:
+            return self._interactive_binding_for_thread_locked(
+                thread_id,
+                adopt_sole_subscriber=adopt_sole_subscriber,
+            )
 
     def _execution_binding_for_thread_locked(
         self,
@@ -856,6 +938,7 @@ class CodexHandler(BotHandler):
         binding = self._chat_binding_key(sender_id, chat_id)
         with self._lock:
             self._release_thread_write_lease_locked(binding, state["current_thread_id"])
+            self._release_interaction_lease_for_binding(binding, state["current_thread_id"])
             self._apply_runtime_state_message_locked(state, ExecutionRetired())
             self._sync_stored_binding_locked(binding, state)
 
@@ -1752,11 +1835,30 @@ class CodexHandler(BotHandler):
             return
 
         chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
+        interaction_lease: InteractionLeaseAcquireResult
+        lease = None
         with self._lock:
-            lease = self._acquire_thread_write_lease_locked(chat_binding_key, thread_id)
-            if lease.granted:
-                self._sync_stored_binding_locked(chat_binding_key, state)
-        if not lease.granted:
+            interaction_lease = self._acquire_interaction_lease_for_binding(chat_binding_key, thread_id)
+            if not interaction_lease.granted:
+                current_owner = interaction_lease.lease
+                owner_label = "另一终端"
+                if current_owner is not None and current_owner.holder.kind == "feishu":
+                    owner_label = "另一飞书会话"
+            else:
+                lease = self._acquire_thread_write_lease_locked(chat_binding_key, thread_id)
+                if lease.granted:
+                    self._sync_stored_binding_locked(chat_binding_key, state)
+        if not interaction_lease.granted:
+            self._reply_text(
+                chat_id,
+                f"当前线程正由{owner_label}执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
+                message_id=message_id,
+                reply_in_thread=self._message_reply_in_thread(message_id),
+            )
+            return
+        if lease is None or not lease.granted:
+            if interaction_lease.acquired:
+                self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
             self._reply_text(
                 chat_id,
                 "当前线程正由另一飞书会话执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
@@ -2483,6 +2585,7 @@ class CodexHandler(BotHandler):
         with self._lock:
             old_thread_id = state["current_thread_id"]
             if old_thread_id != thread.thread_id:
+                self._release_interaction_lease_for_binding(chat_binding_key, old_thread_id)
                 if self._unsubscribe_thread_locked(
                     chat_binding_key,
                     old_thread_id,
@@ -2511,6 +2614,7 @@ class CodexHandler(BotHandler):
         unsubscribe_thread_id: str = ""
         with self._lock:
             thread_id = state["current_thread_id"]
+            self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
             if self._unsubscribe_thread_locked(chat_binding_key, thread_id):
                 unsubscribe_thread_id = thread_id
             self._cancel_patch_timer_locked(state)
@@ -2618,6 +2722,9 @@ class CodexHandler(BotHandler):
         if method == "turn/completed":
             self._handle_turn_completed(params)
             return
+        if method == "serverRequest/resolved":
+            self._handle_server_request_resolved(params)
+            return
 
     def _handle_adapter_request(self, request_id: int | str, method: str, params: dict[str, Any]) -> None:
         self._runtime_submit(self._handle_adapter_request_impl, request_id, method, params)
@@ -2626,8 +2733,18 @@ class CodexHandler(BotHandler):
         self, request_id: int | str, method: str, params: dict[str, Any]
     ) -> None:
         thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
+        binding, handled_elsewhere = self._interactive_binding_for_thread(
+            thread_id,
+            adopt_sole_subscriber=True,
+        )
         if not binding:
+            if handled_elsewhere:
+                logger.info(
+                    "interactive request suppressed for non-Feishu owner: method=%s thread=%s",
+                    method,
+                    thread_id,
+                )
+                return
             logger.warning("未找到线程绑定，自动 fail-close: method=%s thread=%s", method, thread_id)
             self._auto_reject_request(request_id, method, params)
             return
@@ -2713,6 +2830,34 @@ class CodexHandler(BotHandler):
                 "actor_open_id": actor_open_id,
                 "status": _PENDING_REQUEST_STATUS_PENDING,
             }
+
+    def _handle_server_request_resolved(self, params: dict[str, Any]) -> None:
+        request_key = str(params.get("requestId", "") or "").strip()
+        if not request_key:
+            return
+        with self._lock:
+            pending = self._pending_requests.pop(request_key, None)
+        if not pending:
+            return
+        message_id = str(pending.get("message_id", "") or "").strip()
+        if not message_id:
+            return
+        title = str(pending.get("title", "Codex 请求") or "Codex 请求")
+        if pending.get("method") == "item/tool/requestUserInput":
+            card = build_markdown_card(
+                title,
+                "该请求已在其他终端处理。",
+                template="grey",
+            )
+        else:
+            card = build_approval_handled_card(
+                title,
+                "在其他终端处理",
+            )
+        try:
+            self.bot.patch_message(message_id, json.dumps(card, ensure_ascii=False))
+        except Exception:
+            logger.exception("收口已解决请求卡片失败: request=%s", request_key)
 
     def _auto_reject_request(self, request_id: int | str, method: str, params: dict[str, Any]) -> None:
         if method == "item/commandExecution/requestApproval":

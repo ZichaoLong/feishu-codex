@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, Threa
 from bot.codex_handler import CodexHandler
 from bot.codex_protocol.client import CodexRpcError
 from bot.execution_transcript import ExecutionReplySegment
+from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
 
 
 class _FakeAdapter:
@@ -1165,6 +1167,75 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.start_turn_calls[-1]["thread_id"], "thread-1")
         self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-b"))
 
+    def test_prompt_is_denied_when_shared_interaction_lease_is_owned_by_fcodex(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        InteractionLeaseStore(data_dir).force_acquire(
+            "thread-1",
+            make_fcodex_interaction_holder("fcodex:other", owner_pid=os.getpid()),
+        )
+        handler._bind_thread(
+            "ou_user",
+            "c1",
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="cli",
+                status="idle",
+            ),
+        )
+
+        handler.handle_message("ou_user", "c1", "hello again")
+
+        self.assertEqual(handler._adapter.start_turn_calls, [])
+        self.assertEqual(bot.replies[-1][0], "c1")
+        self.assertIn("当前线程正由另一终端执行", bot.replies[-1][1])
+
+    def test_approval_request_is_suppressed_when_shared_interaction_owner_is_fcodex(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler._bind_thread(
+            "ou_user",
+            "c1",
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="cli",
+                status="idle",
+            ),
+        )
+        InteractionLeaseStore(data_dir).force_acquire(
+            "thread-1",
+            make_fcodex_interaction_holder("fcodex:other", owner_pid=os.getpid()),
+        )
+
+        handler._handle_adapter_request_impl(
+            "req-1",
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread-1",
+                "command": "ls",
+                "cwd": "/tmp/project",
+                "reason": "need approval",
+            },
+        )
+
+        self.assertEqual(bot.sent_messages, [])
+        self.assertEqual(bot.reply_refs, [])
+        self.assertNotIn("req-1", handler._pending_requests)
+
     def test_approval_request_reply_stays_in_topic_after_message_context_is_gone(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
@@ -1221,6 +1292,63 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(bot.sent_messages[-1][0], "chat-a")
         self.assertNotEqual(bot.sent_messages[-1][0], "chat-b")
+
+    def test_server_request_resolved_closes_approval_card_as_handled_elsewhere(self) -> None:
+        handler, bot = self._make_handler()
+        handler._pending_requests["req-1"] = {
+            "message_id": "msg-approval",
+            "title": "Codex 命令执行审批",
+            "method": "item/commandExecution/requestApproval",
+        }
+
+        handler._handle_server_request_resolved({"requestId": "req-1"})
+
+        self.assertNotIn("req-1", handler._pending_requests)
+        self.assertEqual(bot.patches[-1][0], "msg-approval")
+        self.assertIn("在其他终端处理", bot.patches[-1][1])
+
+    def test_server_request_resolved_closes_user_input_card_as_handled_elsewhere(self) -> None:
+        handler, bot = self._make_handler()
+        handler._pending_requests["req-1"] = {
+            "message_id": "msg-input",
+            "title": "Codex 用户输入",
+            "method": "item/tool/requestUserInput",
+        }
+
+        handler._handle_server_request_resolved({"requestId": "req-1"})
+
+        self.assertNotIn("req-1", handler._pending_requests)
+        self.assertEqual(bot.patches[-1][0], "msg-input")
+        self.assertIn("该请求已在其他终端处理", bot.patches[-1][1])
+
+    def test_turn_completion_releases_shared_interaction_lease(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, _ = self._make_handler(data_dir=data_dir)
+        store = InteractionLeaseStore(data_dir)
+        handler._bind_thread(
+            "ou_user",
+            "c1",
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="cli",
+                status="idle",
+            ),
+        )
+
+        handler.handle_message("ou_user", "c1", "first turn")
+
+        self.assertIsNotNone(store.load("thread-1"))
+
+        handler._handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
+
+        self.assertIsNone(store.load("thread-1"))
 
     def test_patch_failure_fallback_does_not_send_duplicate_followup(self) -> None:
         handler, bot = self._make_handler()
@@ -2719,7 +2847,8 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("/help session", content)
         self.assertIn("/help settings", content)
         self.assertIn("/help local", content)
-        self.assertIn("fcodex 和飞书可以同时读写同一线程", content)
+        self.assertIn("同一线程允许多端订阅观察", content)
+        self.assertIn("同一 live turn 只有一个交互 owner", content)
         action = self._first_action(card)
         self.assertEqual(action["layout"], "trisection")
         self.assertEqual([item["text"]["content"] for item in action["actions"]], ["session", "settings", "group"])

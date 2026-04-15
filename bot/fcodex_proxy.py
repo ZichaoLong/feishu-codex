@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import threading
 import time
 from collections.abc import Callable
@@ -24,8 +25,31 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 from websockets.sync.server import serve
 
+from bot.stores.interaction_lease_store import (
+    InteractionLeaseStore,
+    make_fcodex_interaction_holder,
+)
+
 _CWD_PROXY_METHODS = {"thread/start"}
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 5.0
+_INTERACTIVE_SERVER_REQUEST_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+}
+_OWNER_WRITE_METHODS = {
+    "turn/start",
+    "turn/interrupt",
+}
+_NON_ACTIVE_THREAD_STATUS_TYPES = {
+    "idle",
+    "errored",
+    "closed",
+    "archived",
+    "notLoaded",
+}
 
 
 def _rewrite_thread_start_cwd(message: str | bytes, cwd: str) -> str | bytes:
@@ -60,6 +84,188 @@ def _rewrite_thread_start_cwd(message: str | bytes, cwd: str) -> str | bytes:
     if isinstance(message, bytes):
         return encoded.encode("utf-8")
     return encoded
+
+
+def _parse_jsonrpc_message(message: str | bytes) -> tuple[dict[str, Any], bool] | None:
+    raw: str
+    is_bytes = isinstance(message, bytes)
+    if is_bytes:
+        try:
+            raw = message.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    else:
+        raw = message
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload, is_bytes
+
+
+def _encode_jsonrpc_payload(payload: dict[str, Any], *, as_bytes: bool) -> str | bytes:
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if as_bytes:
+        return encoded.encode("utf-8")
+    return encoded
+
+
+def _payload_thread_id(payload: dict[str, Any]) -> str:
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return ""
+    return str(params.get("threadId", "") or "").strip()
+
+
+def _jsonrpc_id_key(value: Any) -> str:
+    return str(value)
+
+
+def _send_local_error(client_ws: Any, request_id: Any, message: str) -> None:
+    if request_id in (None, ""):
+        return
+    client_ws.send(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32002,
+                    "message": message,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _thread_became_non_active(payload: dict[str, Any]) -> bool:
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return False
+    status = params.get("status")
+    if not isinstance(status, dict):
+        return False
+    return str(status.get("type", "") or "").strip() in _NON_ACTIVE_THREAD_STATUS_TYPES
+
+
+class _ProxyInteractionGate:
+    def __init__(
+        self,
+        *,
+        cwd: str,
+        data_dir: pathlib.Path,
+        holder_pid: int,
+    ) -> None:
+        self._cwd = cwd
+        self._holder = make_fcodex_interaction_holder(
+            f"fcodex:{holder_pid}",
+            owner_pid=holder_pid,
+        )
+        self._lease_store = InteractionLeaseStore(data_dir)
+        self._lock = threading.Lock()
+        self._pending_server_request_thread_by_id: dict[str, str] = {}
+        self._pending_client_request_by_id: dict[str, tuple[str, str, bool]] = {}
+
+    def handle_client_message(self, message: str | bytes, *, client_ws: Any, backend_ws: Any) -> None:
+        rewritten = _rewrite_thread_start_cwd(message, self._cwd)
+        parsed = _parse_jsonrpc_message(rewritten)
+        if parsed is None:
+            backend_ws.send(rewritten)
+            return
+        payload, is_bytes = parsed
+
+        method = payload.get("method")
+        if isinstance(method, str):
+            thread_id = _payload_thread_id(payload)
+            if method in _OWNER_WRITE_METHODS and thread_id:
+                request_id = payload.get("id")
+                if method == "turn/start":
+                    lease = self._lease_store.acquire(thread_id, self._holder)
+                    if not lease.granted:
+                        _send_local_error(
+                            client_ws,
+                            request_id,
+                            "当前线程正由其他终端执行；请等待当前 turn 结束后再试。",
+                        )
+                        return
+                    with self._lock:
+                        self._pending_client_request_by_id[_jsonrpc_id_key(request_id)] = (
+                            method,
+                            thread_id,
+                            lease.acquired,
+                        )
+                elif method == "turn/interrupt":
+                    lease = self._lease_store.load(thread_id)
+                    if lease is None or not lease.holder.same_holder(self._holder):
+                        _send_local_error(
+                            client_ws,
+                            request_id,
+                            "当前终端不是该线程的交互 owner，不能取消这次执行。",
+                        )
+                        return
+            backend_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
+            return
+
+        response_id = payload.get("id")
+        if response_id not in (None, ""):
+            request_key = _jsonrpc_id_key(response_id)
+            with self._lock:
+                thread_id = self._pending_server_request_thread_by_id.pop(request_key, "")
+            if thread_id:
+                lease = self._lease_store.load(thread_id)
+                if lease is not None and not lease.holder.same_holder(self._holder):
+                    return
+        backend_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
+
+    def handle_backend_message(self, message: str | bytes, *, client_ws: Any, backend_ws: Any) -> None:
+        del backend_ws
+        parsed = _parse_jsonrpc_message(message)
+        if parsed is None:
+            client_ws.send(message)
+            return
+        payload, is_bytes = parsed
+
+        method = payload.get("method")
+        if isinstance(method, str) and "id" in payload:
+            thread_id = _payload_thread_id(payload)
+            if method in _INTERACTIVE_SERVER_REQUEST_METHODS and thread_id:
+                lease = self._lease_store.load(thread_id)
+                if lease is not None and not lease.holder.same_holder(self._holder):
+                    return
+                with self._lock:
+                    self._pending_server_request_thread_by_id[_jsonrpc_id_key(payload["id"])] = thread_id
+            client_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
+            return
+
+        if isinstance(method, str):
+            params = payload.get("params")
+            if method == "serverRequest/resolved" and isinstance(params, dict):
+                request_id = params.get("requestId")
+                with self._lock:
+                    self._pending_server_request_thread_by_id.pop(_jsonrpc_id_key(request_id), None)
+            thread_id = _payload_thread_id(payload)
+            if thread_id:
+                if method in {"turn/completed", "thread/closed"}:
+                    self._lease_store.release(thread_id, self._holder)
+                elif method == "thread/status/changed" and _thread_became_non_active(payload):
+                    self._lease_store.release(thread_id, self._holder)
+            client_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
+            return
+
+        response_id = payload.get("id")
+        if response_id not in (None, ""):
+            with self._lock:
+                request_context = self._pending_client_request_by_id.pop(_jsonrpc_id_key(response_id), None)
+            if request_context is not None:
+                request_method, thread_id, acquired = request_context
+                if request_method == "turn/start" and acquired and "error" in payload:
+                    self._lease_store.release(thread_id, self._holder)
+        client_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
 
 
 def _close_quietly(ws: Any) -> None:
@@ -102,6 +308,7 @@ def run_proxy(
     *,
     backend_url: str,
     cwd: str,
+    data_dir: str | pathlib.Path | None = None,
     listen_host: str = "127.0.0.1",
     listen_port: int = 0,
     idle_timeout_seconds: float = _DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -165,9 +372,21 @@ def run_proxy(
         _cancel_idle_shutdown()
         try:
             with connect(backend_url, max_size=None, proxy=None) as backend_ws:
+                holder_pid = parent_pid or os.getpid()
+                gate = _ProxyInteractionGate(
+                    cwd=cwd,
+                    data_dir=pathlib.Path(data_dir or os.environ.get("FC_DATA_DIR") or "."),
+                    holder_pid=holder_pid,
+                )
+
                 def _backend_to_client() -> None:
                     try:
-                        _relay_messages(backend_ws, client_ws)
+                        for backend_message in backend_ws:
+                            gate.handle_backend_message(
+                                backend_message,
+                                client_ws=client_ws,
+                                backend_ws=backend_ws,
+                            )
                     finally:
                         _close_quietly(client_ws)
                         _close_quietly(backend_ws)
@@ -175,11 +394,12 @@ def run_proxy(
                 thread = threading.Thread(target=_backend_to_client, daemon=True)
                 thread.start()
                 try:
-                    _relay_messages(
-                        client_ws,
-                        backend_ws,
-                        transform=lambda client_message: _rewrite_thread_start_cwd(client_message, cwd),
-                    )
+                    for client_message in client_ws:
+                        gate.handle_client_message(
+                            client_message,
+                            client_ws=client_ws,
+                            backend_ws=backend_ws,
+                        )
                 finally:
                     _close_quietly(backend_ws)
                     _close_quietly(client_ws)
@@ -211,6 +431,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="fcodex local cwd proxy")
     parser.add_argument("--backend-url", required=True)
     parser.add_argument("--cwd", required=True)
+    parser.add_argument("--data-dir", default="")
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=0)
     parser.add_argument("--parent-pid", type=int, default=0)
@@ -218,6 +439,7 @@ def main(argv: list[str] | None = None) -> None:
     run_proxy(
         backend_url=args.backend_url,
         cwd=args.cwd,
+        data_dir=args.data_dir or None,
         listen_host=args.listen_host,
         listen_port=args.listen_port,
         parent_pid=args.parent_pid or None,

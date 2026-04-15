@@ -16,9 +16,10 @@ from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, Threa
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.codex_protocol.client import CodexRpcClient
 from bot.fcodex import _default_data_dir, _launch_local_cwd_proxy, main as fcodex_main
-from bot.fcodex_proxy import _relay_messages, _rewrite_thread_start_cwd, run_proxy
+from bot.fcodex_proxy import _ProxyInteractionGate, _relay_messages, _rewrite_thread_start_cwd, run_proxy
 from bot.profile_resolution import resolve_local_default_profile
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
+from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
 from bot.session_resolution import (
     format_thread_match,
     looks_like_thread_id,
@@ -372,6 +373,47 @@ class AppServerRuntimeStoreTests(unittest.TestCase):
                 )
 
 
+class InteractionLeaseStoreTests(unittest.TestCase):
+    def test_interaction_lease_store_acquire_and_release_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = InteractionLeaseStore(data_dir)
+            holder = make_fcodex_interaction_holder("fcodex:primary", owner_pid=os.getpid())
+
+            acquired = store.acquire("thread-1", holder)
+
+            self.assertTrue(acquired.granted)
+            self.assertTrue(acquired.acquired)
+            self.assertEqual(store.load("thread-1").holder, holder)
+
+            reacquired = store.acquire("thread-1", holder)
+
+            self.assertTrue(reacquired.granted)
+            self.assertFalse(reacquired.acquired)
+            self.assertEqual(reacquired.lease.holder, holder)
+            self.assertTrue(store.release("thread-1", holder))
+            self.assertIsNone(store.load("thread-1"))
+
+    def test_interaction_lease_store_prunes_stale_owner_before_acquire(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = InteractionLeaseStore(data_dir)
+            stale_holder = make_fcodex_interaction_holder("fcodex:stale", owner_pid=999999)
+            current_holder = make_fcodex_interaction_holder("fcodex:current", owner_pid=os.getpid())
+            store.force_acquire("thread-1", stale_holder)
+
+            with patch(
+                "bot.stores.interaction_lease_store._process_exists",
+                side_effect=lambda pid: pid == os.getpid(),
+            ):
+                acquired = store.acquire("thread-1", current_holder)
+
+            self.assertTrue(acquired.granted)
+            self.assertTrue(acquired.acquired)
+            self.assertEqual(acquired.lease.holder, current_holder)
+            self.assertEqual(store.load("thread-1").holder, current_holder)
+
+
 class CodexRpcClientTests(unittest.TestCase):
     def test_start_initializes_with_experimental_api(self) -> None:
         client = CodexRpcClient()
@@ -511,7 +553,7 @@ class FCodexTests(unittest.TestCase):
                             with patch("sys.argv", ["fcodex", "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"]):
                                 fcodex_main()
 
-        mock_proxy.assert_called_once_with("ws://127.0.0.1:8765", os.getcwd())
+        mock_proxy.assert_called_once_with("ws://127.0.0.1:8765", os.getcwd(), _default_data_dir())
         self.assertEqual(
             mock_exec.call_args[0][1],
             ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
@@ -531,7 +573,7 @@ class FCodexTests(unittest.TestCase):
                                     fcodex_main()
 
         self.assertEqual(mock_profile_resolve.call_args.kwargs["app_server_url"], fallback_url)
-        mock_proxy.assert_called_once_with(fallback_url, os.getcwd())
+        mock_proxy.assert_called_once_with(fallback_url, os.getcwd(), _default_data_dir())
         self.assertEqual(
             mock_exec.call_args[0][1],
             ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
@@ -866,7 +908,7 @@ class FCodexTests(unittest.TestCase):
                             with patch("sys.argv", ["fcodex", "--cd", "/home/tester/project"]):
                                 fcodex_main()
 
-        mock_proxy.assert_called_once_with("ws://127.0.0.1:8765", "/home/tester/project")
+        mock_proxy.assert_called_once_with("ws://127.0.0.1:8765", "/home/tester/project", _default_data_dir())
         self.assertEqual(
             mock_exec.call_args[0][1],
             ["codex", "--remote", "ws://127.0.0.1:9101", "--cd", "/home/tester/project"],
@@ -881,10 +923,13 @@ class FCodexTests(unittest.TestCase):
                 proxy_url, _ = _launch_local_cwd_proxy(
                     "ws://127.0.0.1:8765",
                     "/tmp/project",
+                    Path("/tmp/fcodex-data"),
                 )
 
         self.assertEqual(proxy_url, "ws://127.0.0.1:9100")
         cmd = mock_popen.call_args.args[0]
+        self.assertIn("--data-dir", cmd)
+        self.assertIn("/tmp/fcodex-data", cmd)
         self.assertIn("--parent-pid", cmd)
         self.assertIn("4321", cmd)
 
@@ -1027,6 +1072,115 @@ class FCodexTests(unittest.TestCase):
             if backend_server is not None:
                 backend_server.shutdown()
             backend_thread.join(timeout=1)
+
+
+class ProxyInteractionGateTests(unittest.TestCase):
+    class _FakeWs:
+        def __init__(self) -> None:
+            self.sent: list[str | bytes] = []
+
+        def send(self, payload: str | bytes) -> None:
+            self.sent.append(payload)
+
+    @staticmethod
+    def _decode_payload(payload: str | bytes) -> dict:
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        return json.loads(payload)
+
+    def test_non_owner_turn_start_gets_local_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = InteractionLeaseStore(data_dir)
+            store.force_acquire(
+                "thread-1",
+                make_fcodex_interaction_holder("fcodex:other", owner_pid=os.getpid()),
+            )
+            gate = _ProxyInteractionGate(
+                cwd="/tmp/project",
+                data_dir=data_dir,
+                holder_pid=os.getpid(),
+            )
+            client_ws = self._FakeWs()
+            backend_ws = self._FakeWs()
+
+            gate.handle_client_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "turn/start",
+                        "params": {"threadId": "thread-1"},
+                    }
+                ),
+                client_ws=client_ws,
+                backend_ws=backend_ws,
+            )
+
+            self.assertEqual(backend_ws.sent, [])
+            error = self._decode_payload(client_ws.sent[-1])
+            self.assertEqual(error["id"], 1)
+            self.assertIn("当前线程正由其他终端执行", error["error"]["message"])
+
+    def test_non_owner_does_not_receive_interactive_server_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = InteractionLeaseStore(data_dir)
+            store.force_acquire(
+                "thread-1",
+                make_fcodex_interaction_holder("fcodex:other", owner_pid=os.getpid()),
+            )
+            gate = _ProxyInteractionGate(
+                cwd="/tmp/project",
+                data_dir=data_dir,
+                holder_pid=os.getpid(),
+            )
+            client_ws = self._FakeWs()
+            backend_ws = self._FakeWs()
+
+            gate.handle_backend_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "req-1",
+                        "method": "item/commandExecution/requestApproval",
+                        "params": {"threadId": "thread-1", "command": "ls"},
+                    }
+                ),
+                client_ws=client_ws,
+                backend_ws=backend_ws,
+            )
+
+            self.assertEqual(client_ws.sent, [])
+
+    def test_owner_lease_is_released_when_turn_completes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            gate = _ProxyInteractionGate(
+                cwd="/tmp/project",
+                data_dir=data_dir,
+                holder_pid=os.getpid(),
+            )
+            store = InteractionLeaseStore(data_dir)
+            store.force_acquire("thread-1", gate._holder)
+            client_ws = self._FakeWs()
+            backend_ws = self._FakeWs()
+
+            gate.handle_backend_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "turn/completed",
+                        "params": {"threadId": "thread-1"},
+                    }
+                ),
+                client_ws=client_ws,
+                backend_ws=backend_ws,
+            )
+
+            self.assertIsNone(store.load("thread-1"))
+            forwarded = self._decode_payload(client_ws.sent[-1])
+            self.assertEqual(forwarded["method"], "turn/completed")
 
 
 class SessionResolutionTests(unittest.TestCase):
