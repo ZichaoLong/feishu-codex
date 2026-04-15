@@ -26,11 +26,9 @@ from bot.cards import (
     build_ask_user_answered_card,
     build_ask_user_card,
     build_command_approval_card,
-    build_execution_card,
     build_file_change_approval_card,
     build_history_preview_card,
     build_markdown_card,
-    build_plan_card,
     build_permissions_approval_card,
     make_card_response,
 )
@@ -55,8 +53,13 @@ from bot.codex_help_domain import CodexHelpDomain
 from bot.codex_session_ui_domain import CodexSessionUiDomain
 from bot.codex_settings_domain import CodexSettingsDomain
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
-from bot.execution_transcript import ExecutionReplySegment, ExecutionTranscript
+from bot.execution_transcript import ExecutionTranscript
 from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
+from bot.runtime_card_publisher import (
+    RuntimeCardPublisher,
+    build_execution_card_model,
+    build_plan_card_model,
+)
 from bot.runtime_state import (
     UNSET,
     BindingActivated,
@@ -71,6 +74,7 @@ from bot.runtime_state import (
     ThreadStateChanged,
     apply_runtime_state_message,
 )
+from bot.runtime_view import RuntimeView, build_runtime_view
 from bot.session_resolution import (
     list_global_threads,
     looks_like_thread_id,
@@ -647,6 +651,14 @@ class CodexHandler(BotHandler):
         with self._lock:
             self._sync_stored_binding_locked(binding, state)
 
+    def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView:
+        state = self._get_runtime_state(sender_id, chat_id, message_id)
+        with self._lock:
+            return build_runtime_view(state)
+
+    def _runtime_card_publisher(self) -> RuntimeCardPublisher:
+        return RuntimeCardPublisher(self.bot)
+
     @staticmethod
     def _apply_runtime_state_message_locked(state: _RuntimeState, message: RuntimeStateMessage) -> None:
         apply_runtime_state_message(state, message)
@@ -755,12 +767,13 @@ class CodexHandler(BotHandler):
     def _refresh_terminal_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
-            message_id = state["current_message_id"].strip() or state["last_execution_message_id"].strip()
+            runtime = build_runtime_view(state)
+            message_id = runtime.execution.effective_message_id.strip()
             if not message_id:
                 return False
-            transcript = state["execution_transcript"].clone()
-            elapsed = int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0
-            cancelled = state["cancelled"]
+            transcript = runtime.execution.transcript
+            elapsed = int(max(0.0, time.monotonic() - runtime.execution.started_at)) if runtime.execution.started_at else 0
+            cancelled = runtime.execution.cancelled
         return self._patch_execution_card_message(
             message_id,
             transcript=transcript,
@@ -779,10 +792,11 @@ class CodexHandler(BotHandler):
     ) -> _TerminalReconcileTarget | None:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
-            card_message_id = state["current_message_id"].strip()
+            runtime = build_runtime_view(state)
+            card_message_id = runtime.execution.current_message_id.strip()
             if not card_message_id:
                 return None
-            resolved_turn_id = str(turn_id or state["current_turn_id"] or "").strip()
+            resolved_turn_id = str(turn_id or runtime.execution.current_turn_id or "").strip()
             if not resolved_turn_id:
                 return None
             return _TerminalReconcileTarget(
@@ -790,10 +804,14 @@ class CodexHandler(BotHandler):
                 thread_id=str(thread_id or "").strip(),
                 turn_id=resolved_turn_id,
                 card_message_id=card_message_id,
-                prompt_message_id=state["current_prompt_message_id"].strip(),
-                transcript=state["execution_transcript"].clone(),
-                cancelled=state["cancelled"],
-                elapsed=int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0,
+                prompt_message_id=runtime.execution.current_prompt_message_id.strip(),
+                transcript=runtime.execution.transcript,
+                cancelled=runtime.execution.cancelled,
+                elapsed=(
+                    int(max(0.0, time.monotonic() - runtime.execution.started_at))
+                    if runtime.execution.started_at
+                    else 0
+                ),
             )
 
     def _schedule_terminal_execution_reconcile(self, target: _TerminalReconcileTarget | None) -> None:
@@ -1428,15 +1446,15 @@ class CodexHandler(BotHandler):
         return str(exc)
 
     def _resume_bound_thread(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        thread_id = str(state["current_thread_id"] or "").strip()
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        thread_id = runtime.current_thread_id.strip()
         if not thread_id:
             raise RuntimeError("当前没有可恢复的线程绑定")
         summary = ThreadSummary(
             thread_id=thread_id,
-            cwd=state["working_dir"],
-            name=state["current_thread_title"],
-            preview=state["current_thread_title"],
+            cwd=runtime.working_dir,
+            name=runtime.current_thread_title,
+            preview=runtime.current_thread_title,
             created_at=0,
             updated_at=0,
             source="appServer",
@@ -1472,12 +1490,6 @@ class CodexHandler(BotHandler):
             if parts:
                 return "\n\n".join(parts), items
         return "", []
-
-    def _card_reply_segments(
-        self,
-        transcript: ExecutionTranscript,
-    ) -> list[ExecutionReplySegment]:
-        return transcript.reply_segments_for_card(self._card_reply_limit)
 
     def _finalize_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -1638,9 +1650,16 @@ class CodexHandler(BotHandler):
         if message_id:
             card_id = self._claim_reserved_execution_card(message_id)
             if card_id:
-                self.bot.patch_message(
+                self._runtime_card_publisher().patch_execution_card(
                     card_id,
-                    json.dumps(build_execution_card("", [], running=True), ensure_ascii=False),
+                    build_execution_card_model(
+                        ExecutionTranscript(),
+                        running=True,
+                        elapsed=0,
+                        cancelled=False,
+                        log_limit=self._card_log_limit,
+                        reply_limit=self._card_reply_limit,
+                    ),
                 )
         if not card_id:
             card_id = self._send_execution_card(chat_id, message_id)
@@ -1740,13 +1759,12 @@ class CodexHandler(BotHandler):
 
     def _handle_running_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> bool:
         del text
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if not state["running"]:
-                return False
-            thread_id = state["current_thread_id"].strip()
-            turn_id = state["current_turn_id"].strip()
-            last_runtime_event_at = state["last_runtime_event_at"]
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        if not runtime.running:
+            return False
+        thread_id = runtime.current_thread_id.strip()
+        turn_id = runtime.execution.current_turn_id.strip()
+        last_runtime_event_at = runtime.execution.last_runtime_event_at
         if thread_id and last_runtime_event_at and (
             time.monotonic() - last_runtime_event_at >= self._mirror_watchdog_seconds
         ):
@@ -1756,9 +1774,8 @@ class CodexHandler(BotHandler):
                 thread_id=thread_id,
                 turn_id=turn_id,
             )
-            with self._lock:
-                if not state["running"]:
-                    return False
+            if not self._get_runtime_view(sender_id, chat_id, message_id).running:
+                return False
         self._reply_text(chat_id, "当前线程仍在执行，请等待结束或先执行 `/cancel`。", message_id=message_id)
         return True
 
@@ -1768,22 +1785,22 @@ class CodexHandler(BotHandler):
         self._start_prompt_turn(sender_id, chat_id, text, message_id=message_id)
 
     def _handle_cd_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
         state = self._get_runtime_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if state["running"]:
-                return CommandResult(card=build_markdown_card(
-                    "Codex 目录未切换",
-                    "执行中不能切换目录，请等待结束或先停止当前执行。",
-                    template="orange",
-                ))
+        if runtime.running:
+            return CommandResult(card=build_markdown_card(
+                "Codex 目录未切换",
+                "执行中不能切换目录，请等待结束或先停止当前执行。",
+                template="orange",
+            ))
 
         if not arg:
             return CommandResult(card=build_markdown_card(
                 "Codex 当前目录",
-                f"当前目录：`{display_path(state['working_dir'])}`",
+                f"当前目录：`{display_path(runtime.working_dir)}`",
             ))
 
-        target = resolve_working_dir(arg, fallback=state["working_dir"])
+        target = resolve_working_dir(arg, fallback=runtime.working_dir)
         if not pathlib.Path(target).exists():
             return CommandResult(card=build_markdown_card(
                 "Codex 目录未切换",
@@ -1815,16 +1832,15 @@ class CodexHandler(BotHandler):
         ))
 
     def _handle_new_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        with self._lock:
-            if state["running"]:
-                return CommandResult(text="执行中不能新建线程，请等待结束或先执行 `/cancel`。")
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        if runtime.running:
+            return CommandResult(text="执行中不能新建线程，请等待结束或先执行 `/cancel`。")
         try:
             snapshot = self._adapter.create_thread(
-                cwd=state["working_dir"],
+                cwd=runtime.working_dir,
                 profile=self._effective_default_profile() or None,
-                approval_policy=state["approval_policy"] or None,
-                sandbox=state["sandbox"] or None,
+                approval_policy=runtime.approval_policy or None,
+                sandbox=runtime.sandbox or None,
             )
         except Exception as exc:
             logger.exception("新建线程失败")
@@ -1841,12 +1857,12 @@ class CodexHandler(BotHandler):
         ))
 
     def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        thread_id = state["current_thread_id"]
-        title = state["current_thread_title"] or "（无标题）"
-        running = "是" if state["running"] else "否"
-        turn_id = state["current_turn_id"][:8] + "…" if state["current_turn_id"] else "-"
-        permissions_summary = _permissions_summary(state["approval_policy"], state["sandbox"])
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        thread_id = runtime.current_thread_id
+        title = runtime.current_thread_title or "（无标题）"
+        running = "是" if runtime.running else "否"
+        turn_id = runtime.execution.current_turn_id[:8] + "…" if runtime.execution.current_turn_id else "-"
+        permissions_summary = _permissions_summary(runtime.approval_policy, runtime.sandbox)
         runtime_config = self._safe_read_runtime_config()
         profile_resolution = self._current_default_profile_resolution(runtime_config)
         local_profile = profile_resolution.effective_profile
@@ -1857,11 +1873,11 @@ class CodexHandler(BotHandler):
             profile_line = f"默认 profile：`{local_profile or '（未设置）'}`"
             provider_line = "当前 provider：读取失败"
         header = (
-            f"目录：`{display_path(state['working_dir'])}`\n当前线程：`{thread_id[:8]}…` {title}"
+            f"目录：`{display_path(runtime.working_dir)}`\n当前线程：`{thread_id[:8]}…` {title}"
             if thread_id
-            else f"目录：`{display_path(state['working_dir'])}`\n当前线程：-"
+            else f"目录：`{display_path(runtime.working_dir)}`\n当前线程：-"
         )
-        if state["running"]:
+        if runtime.running:
             next_step = "如需停止当前执行，可点当前执行卡片上的停止按钮。"
         elif not thread_id:
             next_step = "直接发送普通文本，会在当前目录自动新建线程。"
@@ -1874,9 +1890,9 @@ class CodexHandler(BotHandler):
             f"{profile_line}\n"
             f"{provider_line}\n"
             f"权限预设：`{permissions_summary}`\n"
-            f"审批策略：`{state['approval_policy']}`\n"
-            f"沙箱策略：`{state['sandbox']}`\n"
-            f"协作模式：`{state['collaboration_mode']}`"
+            f"审批策略：`{runtime.approval_policy}`\n"
+            f"沙箱策略：`{runtime.sandbox}`\n"
+            f"协作模式：`{runtime.collaboration_mode}`"
             + (
                 f"\n\n注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。"
                 if profile_resolution.stale_profile
@@ -1884,7 +1900,7 @@ class CodexHandler(BotHandler):
             )
             + f"\n\n{next_step}"
         )
-        template = "turquoise" if state["running"] else "blue"
+        template = "turquoise" if runtime.running else "blue"
         return CommandResult(card=build_markdown_card("Codex 当前状态", content, template=template))
 
     def _handle_cancel_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
@@ -1898,11 +1914,12 @@ class CodexHandler(BotHandler):
         *,
         message_id: str = "",
     ) -> tuple[bool, str]:
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
         state = self._get_runtime_state(sender_id, chat_id, message_id)
-        thread_id = state["current_thread_id"]
-        turn_id = state["current_turn_id"]
-        if not state["running"] or not thread_id:
-            if state["current_message_id"] or state["last_execution_message_id"]:
+        thread_id = runtime.current_thread_id
+        turn_id = runtime.execution.current_turn_id
+        if not runtime.running or not thread_id:
+            if runtime.execution.current_message_id or runtime.execution.last_execution_message_id:
                 self._refresh_terminal_execution_card_from_state(sender_id, chat_id)
                 return True, "当前执行已结束，已刷新卡片状态。"
             return False, "当前没有正在执行的 turn。"
@@ -2124,14 +2141,14 @@ class CodexHandler(BotHandler):
         )
 
     def _ensure_thread(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        if state["current_thread_id"]:
-            return state["current_thread_id"]
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        if runtime.current_thread_id:
+            return runtime.current_thread_id
         snapshot = self._adapter.create_thread(
-            cwd=state["working_dir"],
+            cwd=runtime.working_dir,
             profile=self._effective_default_profile() or None,
-            approval_policy=state["approval_policy"] or None,
-            sandbox=state["sandbox"] or None,
+            approval_policy=runtime.approval_policy or None,
+            sandbox=runtime.sandbox or None,
         )
         self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
         return snapshot.summary.thread_id
@@ -2940,11 +2957,7 @@ class CodexHandler(BotHandler):
         self._schedule_execution_card_update(*binding)
 
     def _send_execution_card(self, chat_id: str, parent_message_id: str) -> str | None:
-        card = build_execution_card("", [], running=True)
-        content = json.dumps(card, ensure_ascii=False)
-        if parent_message_id:
-            return self.bot.reply_to_message(parent_message_id, "interactive", content)
-        return self.bot.send_message_get_id(chat_id, "interactive", content)
+        return self._runtime_card_publisher().send_execution_card(chat_id, parent_message_id)
 
     def _patch_execution_card_message(
         self,
@@ -2955,17 +2968,15 @@ class CodexHandler(BotHandler):
         elapsed: int,
         cancelled: bool,
     ) -> bool:
-        normalized_message_id = str(message_id or "").strip()
-        if not normalized_message_id:
-            return False
-        card = build_execution_card(
-            self._card_log_text(transcript.process_text()),
-            self._card_reply_segments(transcript),
+        model = build_execution_card_model(
+            transcript,
             running=running,
             elapsed=elapsed,
-            cancelled=cancelled and not running,
+            cancelled=cancelled,
+            log_limit=self._card_log_limit,
+            reply_limit=self._card_reply_limit,
         )
-        return self.bot.patch_message(normalized_message_id, json.dumps(card, ensure_ascii=False))
+        return self._runtime_card_publisher().patch_execution_card(message_id, model)
 
     def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -3005,18 +3016,23 @@ class CodexHandler(BotHandler):
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
             self._cancel_patch_timer_locked(state)
-            message_id = state["current_message_id"]
-            if not message_id:
-                return
-            transcript = state["execution_transcript"].clone()
-            reply_text = transcript.reply_text()
-            running = state["running"]
-            cancelled = state["cancelled"]
-            prompt_message_id = state["current_prompt_message_id"].strip()
-            elapsed = int(max(0.0, time.monotonic() - state["started_at"])) if state["started_at"] else 0
             self._apply_runtime_state_message_locked(
                 state,
                 ExecutionStateChanged(last_patch_at=time.monotonic()),
+            )
+            runtime = build_runtime_view(state)
+            message_id = runtime.execution.current_message_id
+            if not message_id:
+                return
+            transcript = runtime.execution.transcript
+            reply_text = transcript.reply_text()
+            running = runtime.execution.running
+            cancelled = runtime.execution.cancelled
+            prompt_message_id = runtime.execution.current_prompt_message_id.strip()
+            elapsed = (
+                int(max(0.0, time.monotonic() - runtime.execution.started_at))
+                if runtime.execution.started_at
+                else 0
             )
 
         ok = self._patch_execution_card_message(
@@ -3032,11 +3048,12 @@ class CodexHandler(BotHandler):
     def _send_followup_if_needed(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
-            if state["followup_sent"]:
+            runtime = build_runtime_view(state)
+            if runtime.execution.followup_sent:
                 return
-            reply_text = state["execution_transcript"].reply_text()
-            current_message_id = state["current_message_id"]
-            prompt_message_id = state["current_prompt_message_id"].strip()
+            reply_text = runtime.execution.transcript.reply_text()
+            current_message_id = runtime.execution.current_message_id
+            prompt_message_id = runtime.execution.current_prompt_message_id.strip()
             need_followup = not current_message_id or len(reply_text) > self._card_reply_limit
             if not reply_text or not need_followup:
                 return
@@ -3050,48 +3067,27 @@ class CodexHandler(BotHandler):
         self._apply_runtime_state_message_locked(state, PlanStateChanged(clear=True))
 
     def _flush_plan_card(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            plan_message_id = state["plan_message_id"]
-            parent_message_id = state["current_message_id"]
-            turn_id = state["plan_turn_id"]
-            explanation = state["plan_explanation"]
-            plan_steps = list(state["plan_steps"])
-            plan_text = state["plan_text"]
-        if not explanation and not plan_steps and not plan_text:
+        runtime = self._get_runtime_view(sender_id, chat_id)
+        model = build_plan_card_model(runtime.plan)
+        if model.is_empty:
             return
-
-        card = build_plan_card(
-            turn_id,
-            explanation=explanation,
-            plan_steps=plan_steps,
-            plan_text=plan_text,
+        result = self._runtime_card_publisher().publish_plan_card(
+            chat_id=chat_id,
+            parent_message_id=runtime.execution.current_message_id,
+            plan_message_id=runtime.plan.message_id,
+            model=model,
         )
-        content = json.dumps(card, ensure_ascii=False)
-
-        if plan_message_id:
-            if self.bot.patch_message(plan_message_id, content):
-                return
+        state = self._get_runtime_state(sender_id, chat_id)
+        if result.attempted_existing and not result.reused_existing:
             with self._lock:
-                if state["plan_message_id"] == plan_message_id:
+                if state["plan_message_id"] == runtime.plan.message_id:
                     self._apply_runtime_state_message_locked(
                         state,
                         PlanStateChanged(plan_message_id=""),
                     )
-
-        new_message_id: str | None = None
-        if parent_message_id:
-            new_message_id = self.bot.reply_to_message(parent_message_id, "interactive", content)
-        if not new_message_id:
-            new_message_id = self.bot.send_message_get_id(chat_id, "interactive", content)
-        if new_message_id:
+        if result.message_id and result.message_id != runtime.plan.message_id:
             with self._lock:
                 self._apply_runtime_state_message_locked(
                     state,
-                    PlanStateChanged(plan_message_id=new_message_id),
+                    PlanStateChanged(plan_message_id=result.message_id),
                 )
-
-    def _card_log_text(self, text: str) -> str:
-        if len(text) <= self._card_log_limit:
-            return text
-        return text[-self._card_log_limit :] + "\n\n**[日志已截断，仅保留最近部分]**"

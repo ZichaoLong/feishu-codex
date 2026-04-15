@@ -24,6 +24,7 @@ from bot.cards import (
     build_sessions_pending_card,
     make_card_response,
 )
+from bot.runtime_view import RuntimeView
 from bot.session_resolution import list_current_dir_threads
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ class _SessionUiDomainOwner(Protocol):
     _session_recent_limit: int
     _thread_list_query_limit: int
 
-    def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
+    def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView: ...
     def _rename_bound_thread_title(
         self,
         sender_id: str,
@@ -98,10 +99,9 @@ class CodexSessionUiDomain:
         arg: str,
         message_id: str = "",
     ) -> CommandResult | None:
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
-        with self._owner._lock:
-            if state["running"]:
-                return CommandResult(text="执行中不能切换线程，请等待结束或先执行 `/cancel`。")
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        if runtime.running:
+            return CommandResult(text="执行中不能切换线程，请等待结束或先执行 `/cancel`。")
         if not arg:
             return CommandResult(
                 text="用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。"
@@ -127,13 +127,13 @@ class CodexSessionUiDomain:
         arg: str,
         message_id: str = "",
     ) -> CommandResult:
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
-        if not state["current_thread_id"]:
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        if not runtime.current_thread_id:
             return CommandResult(text="当前没有绑定线程，无法重命名。")
         if not arg:
             return CommandResult(text="用法：`/rename <新标题>`")
         try:
-            self._owner._adapter.rename_thread(state["current_thread_id"], arg)
+            self._owner._adapter.rename_thread(runtime.current_thread_id, arg)
         except Exception as exc:
             logger.exception("重命名线程失败")
             return CommandResult(text=f"重命名失败：{exc}")
@@ -142,7 +142,7 @@ class CodexSessionUiDomain:
             chat_id,
             arg,
             message_id=message_id,
-            thread_id=state["current_thread_id"],
+            thread_id=runtime.current_thread_id,
         )
         return CommandResult(text=f"已重命名为：{arg}")
 
@@ -153,10 +153,9 @@ class CodexSessionUiDomain:
         arg: str,
         message_id: str = "",
     ) -> CommandResult:
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
-        with self._owner._lock:
-            if state["running"]:
-                return CommandResult(text="执行中不能归档线程，请等待结束或先执行 `/cancel`。")
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        if runtime.running:
+            return CommandResult(text="执行中不能归档线程，请等待结束或先执行 `/cancel`。")
         target = arg.strip() if arg else ""
         if target:
             try:
@@ -165,12 +164,12 @@ class CodexSessionUiDomain:
                 logger.exception("解析归档目标失败")
                 return CommandResult(text=f"归档线程失败：{exc}")
         else:
-            if not state["current_thread_id"]:
+            if not runtime.current_thread_id:
                 return CommandResult(text="用法：`/rm [thread_id 或 thread_name]`；省略参数时归档当前线程。")
             try:
                 thread = self._owner._read_thread_summary(
-                    state["current_thread_id"],
-                    original_arg=state["current_thread_id"],
+                    runtime.current_thread_id,
+                    original_arg=runtime.current_thread_id,
                 )
             except Exception as exc:
                 logger.exception("读取当前线程失败")
@@ -182,7 +181,7 @@ class CodexSessionUiDomain:
             logger.exception("归档线程失败")
             return CommandResult(text=f"归档线程失败：{exc}")
 
-        if state["current_thread_id"] == thread.thread_id:
+        if runtime.current_thread_id == thread.thread_id:
             self._owner._clear_thread_binding(sender_id, chat_id, message_id=message_id)
         return CommandResult(text=(
             f"已归档线程：`{thread.thread_id[:8]}…` {thread.title}\n"
@@ -224,13 +223,12 @@ class CodexSessionUiDomain:
         message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
-        with self._owner._lock:
-            if state["running"]:
-                return make_card_response(
-                    toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
-                    toast_type="warning",
-                )
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        if runtime.running:
+            return make_card_response(
+                toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
+                toast_type="warning",
+            )
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
             return make_card_response(toast="缺少 thread_id", toast_type="warning")
@@ -316,7 +314,6 @@ class CodexSessionUiDomain:
             logger.exception("卡片重命名失败")
             return make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
 
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
         with self._owner._lock:
             self._owner._pending_rename_forms.pop(message_id, None)
         self._owner._rename_bound_thread_title(
@@ -346,13 +343,12 @@ class CodexSessionUiDomain:
         message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
-        with self._owner._lock:
-            if state["running"]:
-                return make_card_response(
-                    toast="执行中不能归档线程，请等待结束或先执行 /cancel。",
-                    toast_type="warning",
-                )
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        if runtime.running:
+            return make_card_response(
+                toast="执行中不能归档线程，请等待结束或先执行 /cancel。",
+                toast_type="warning",
+            )
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
             return make_card_response(toast="缺少 thread_id", toast_type="warning")
@@ -366,7 +362,7 @@ class CodexSessionUiDomain:
         except Exception as exc:
             logger.exception("归档线程失败")
             return make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
-        if state["current_thread_id"] == thread.thread_id:
+        if runtime.current_thread_id == thread.thread_id:
             self._owner._clear_thread_binding(sender_id, chat_id, message_id=message_id)
         return self._handle_sessions_refresh_action(
             sender_id,
@@ -449,11 +445,11 @@ class CodexSessionUiDomain:
     ) -> dict:
         threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
         sessions, counts = self._build_session_rows(sender_id, chat_id, threads, message_id=message_id)
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
         return build_sessions_card(
             sessions,
-            state["current_thread_id"],
-            state["working_dir"],
+            runtime.current_thread_id,
+            runtime.working_dir,
             counts["total_all"],
             shown_count=counts["shown"],
             expanded=self._is_session_card_expanded(message_id),
@@ -479,15 +475,15 @@ class CodexSessionUiDomain:
         ]
         rows.sort(key=lambda item: item["updated_at"], reverse=True)
 
-        state = self._owner._get_runtime_state(sender_id, chat_id, message_id)
-        current_id = state["current_thread_id"]
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        current_id = runtime.current_thread_id
         if current_id and all(item["thread_id"] != current_id for item in rows):
             rows.insert(
                 0,
                 {
                     "thread_id": current_id,
-                    "cwd": state["working_dir"],
-                    "title": state["current_thread_title"] or "（无标题）",
+                    "cwd": runtime.working_dir,
+                    "title": runtime.current_thread_title or "（无标题）",
                     "updated_at": int(time.time()),
                     "model_provider": "",
                 },
@@ -514,6 +510,6 @@ class CodexSessionUiDomain:
     def _list_current_dir_threads(self, sender_id: str, chat_id: str, *, message_id: str = "") -> list[ThreadSummary]:
         return list_current_dir_threads(
             self._owner._adapter,
-            cwd=self._owner._get_runtime_state(sender_id, chat_id, message_id)["working_dir"],
+            cwd=self._owner._get_runtime_view(sender_id, chat_id, message_id).working_dir,
             limit=self._owner._thread_list_query_limit,
         )
