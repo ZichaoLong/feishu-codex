@@ -4,6 +4,8 @@ See also:
 
 - `docs/fcodex-shared-backend-runtime.md` for the current shared-backend and
   wrapper runtime model
+- `docs/runtime-control-surface.md` for the shared state vocabulary used by
+  `/status`, `/release-feishu-runtime`, and the local admin surface
 - `docs/session-profile-semantics.md` for exact command and wrapper semantics
 - `docs/feishu-codex-design.md` for architecture and repository boundaries
 
@@ -108,8 +110,12 @@ If the target thread is already loaded in the current `feishu-codex` backend:
 - resume directly
 - bind the current Feishu chat to that thread
 - do not show a risk card
+- `resume` does not use this path to rewrite the live runtime's profile or
+  provider
 
 This is safe because the thread already lives in the same backend.
+If the thread must later be re-resolved under a different profile, it must
+first return to `not-loaded-in-current-backend`.
 
 ### 6.3 Not loaded in current backend
 
@@ -122,11 +128,26 @@ Behavior:
 - bind the current Feishu chat to that thread
 - if the user later attaches through `fcodex` on the same shared backend,
   Feishu and `fcodex` can continue operating on the same live thread safely
+- if this resume does not specify an explicit profile, Feishu and `fcodex`
+  have the same effective behavior: they both use the current `feishu-codex`
+  local default profile
 
 This path assumes:
 
 - local continuation of the same thread uses `fcodex`
 - bare `codex` is not also writing that thread through another backend
+
+One detail should be recorded explicitly: the two clients do not reach that
+behavior through the same execution path.
+
+- Feishu resolves and sends profile / model / model_provider before
+  `thread/resume`
+- `fcodex` injects the default profile in the wrapper layer before entering the
+  upstream `codex resume` path
+
+That difference should not be interpreted as a semantic mismatch. The intended
+contract is the same on both sides: for an unloaded thread, absent an explicit
+profile, resume uses the local default profile.
 
 The current implementation no longer blocks this path with a preview/confirm
 card. Avoiding dual-backend writes for such threads is now an operational rule,

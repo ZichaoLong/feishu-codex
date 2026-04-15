@@ -67,6 +67,14 @@ semantic layers.
 - Archived threads are hidden from default `thread/list` results unless an archived filter is explicitly requested
 - Upstream Codex supports `thread/unarchive`, but `feishu-codex` does not expose a dedicated `/unarchive` command today
 
+### `/release-feishu-runtime`
+
+- This is Feishu-only and is not part of the shared surface between Feishu and the `fcodex` wrapper
+- It only releases Feishu's own runtime residency for the currently bound thread
+- It does not clear the chat binding and does not delete or archive the thread
+- If the thread still remains `loaded` afterward, some external subscriber is still attached, most commonly local `fcodex`
+- If the thread becomes `notLoaded` afterward, whether the next restore may re-profile follows the profile contract in Section 5 below
+
 ## 3. `fcodex` Shell-Wrapper Semantics
 
 ## Plain `fcodex`
@@ -182,6 +190,41 @@ Therefore:
 - changing `fcodex /profile` changes the default seen by Feishu
 - `fcodex -p <profile>` overrides the saved default for that launch only
 - bare `codex -p <profile>` is outside this contract
+
+### Profile Resolution During Resume
+
+- When the target thread is currently `not-loaded-in-current-backend`:
+  - Feishu `/resume`
+  - `fcodex resume <thread_id>`
+  - `fcodex /resume <thread_id|thread_name>`
+  all ultimately use the current `feishu-codex` local default profile when no
+  explicit profile is provided.
+- That is a behavior contract, not a requirement that both paths share the same
+  implementation:
+  - Feishu resolves the local default profile before `thread/resume` and
+    explicitly sends the resolved profile / model / model_provider
+  - the `fcodex` wrapper injects the default profile first, then enters the
+    upstream `codex resume` path
+- Therefore unloaded-thread resume should be understood as "same behavior,
+  different execution path", not as two conflicting profile rules.
+- When the target thread is already `loaded-in-current-backend`, `resume`
+  reuses the existing live runtime.
+  - In that branch, `resume` cannot rewrite the live thread's profile or
+    provider
+  - explicit `-p/--profile` or other resume-time overrides do not become an
+    effective switch there
+- If a Feishu binding still points at the thread but its `feishu runtime` is
+  already `released`, the next ordinary message first reattaches / resumes
+  using the bound thread, then starts the turn.
+  - If the thread is `notLoaded` at that moment, the unloaded-thread rule in
+    this section applies
+  - If the thread is still `loaded`, it only reuses the live runtime and
+    cannot switch provider through that path
+- For that reason, "thread original profile" is not recommended contract
+  language in this project.
+  Prefer:
+  - "resume with the current local default profile"
+  - "resume with an explicit profile"
 
 ## 6. Safety Rule
 

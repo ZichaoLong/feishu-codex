@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # feishu-codex 安装脚本
 # 用法: bash install.sh
-# 功能: 创建 venv、安装代码包与依赖、注册 systemd 用户服务、安装管理命令 feishu-codex
+# 功能: 创建 venv、安装代码包与依赖、注册 systemd 用户服务、安装管理命令 feishu-codex / feishu-codexctl
 
 set -euo pipefail
 
@@ -9,6 +9,7 @@ INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_NAME="feishu-codex"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 SCRIPT_DEST="$HOME/.local/bin/$SERVICE_NAME"
+CODEXCTL_DEST="$HOME/.local/bin/feishu-codexctl"
 FCODEX_DEST="$HOME/.local/bin/fcodex"
 CONFIG_DIR="$HOME/.config/$SERVICE_NAME"
 ENV_DIR="$HOME/.config/environment.d"
@@ -235,7 +236,7 @@ EOF
 fi
 
 echo ""
-echo "[ 5/6 ] 安装管理命令 feishu-codex..."
+echo "[ 5/6 ] 安装管理命令 feishu-codex / feishu-codexctl..."
 
 mkdir -p "$(dirname "$SCRIPT_DEST")"
 
@@ -321,6 +322,7 @@ case "\${1:-}" in
         echo "即将卸载 feishu-codex，将删除以下内容："
         echo "  systemd 服务:  ~/.config/systemd/user/\$SERVICE_NAME.service"
         echo "  管理命令:      ~/.local/bin/feishu-codex"
+        echo "  本地管理 CLI:  ~/.local/bin/feishu-codexctl"
         echo ""
         echo "以下内容不会删除（使用 purge 可一并清除）："
         echo "  配置目录:      $CONFIG_DIR"
@@ -337,7 +339,8 @@ case "\${1:-}" in
         systemctl --user disable "\$SERVICE_NAME" 2>/dev/null || true
         rm -f "\$HOME/.config/systemd/user/\$SERVICE_NAME.service"
         systemctl --user daemon-reload 2>/dev/null || true
-        rm -f "\$HOME/.local/bin/feishu-codex"
+rm -f "\$HOME/.local/bin/feishu-codex"
+        rm -f "\$HOME/.local/bin/feishu-codexctl"
         rm -f "\$HOME/.local/bin/fcodex"
         echo "卸载完成。配置和数据已保留，重新安装只需运行："
         echo "  bash $INSTALL_DIR/install.sh"
@@ -346,6 +349,7 @@ case "\${1:-}" in
         echo "即将彻底清除 feishu-codex 所有数据，将删除以下内容："
         echo "  systemd 服务:  ~/.config/systemd/user/\$SERVICE_NAME.service"
         echo "  管理命令:      ~/.local/bin/feishu-codex"
+        echo "  本地管理 CLI:  ~/.local/bin/feishu-codexctl"
         echo "  配置目录:      $CONFIG_DIR  （含飞书凭证）"
         echo "  数据目录:      $DATA_DIR  （含 venv）"
         echo ""
@@ -363,6 +367,7 @@ case "\${1:-}" in
         rm -f "\$HOME/.config/systemd/user/\$SERVICE_NAME.service"
         systemctl --user daemon-reload 2>/dev/null || true
         rm -f "\$HOME/.local/bin/feishu-codex"
+        rm -f "\$HOME/.local/bin/feishu-codexctl"
         rm -f "\$HOME/.local/bin/fcodex"
         rm -rf "$CONFIG_DIR"
         rm -rf "$DATA_DIR"
@@ -387,6 +392,24 @@ SCRIPT
 
 chmod +x "$SCRIPT_DEST"
 _green "  ✓ 管理命令已安装: $SCRIPT_DEST"
+
+cat > "$CODEXCTL_DEST" << SCRIPT
+#!/usr/bin/env bash
+# feishu-codexctl 本地管理入口（由 install.sh 生成）
+ENV_FILE="$ENV_FILE"
+if [ -f "\$ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "\$ENV_FILE"
+    set +a
+fi
+export FC_CONFIG_DIR="$CONFIG_DIR"
+export FC_DATA_DIR="$DATA_DIR"
+exec "$VENV_DIR/bin/feishu-codexctl" "\$@"
+SCRIPT
+
+chmod +x "$CODEXCTL_DEST"
+_green "  ✓ 本地管理 CLI 已安装: $CODEXCTL_DEST"
 
 cat > "$FCODEX_DEST" << SCRIPT
 #!/usr/bin/env bash

@@ -201,6 +201,11 @@ class CodexAppServerAdapter(AgentAdapter):
         result = self._rpc.request("config/read", _compact({"includeLayers": False, "cwd": cwd}))
         return self._runtime_config_from_result(result)
 
+    def list_loaded_thread_ids(self) -> list[str]:
+        result = self._rpc.request("thread/loaded/list", {})
+        data = result.get("data") or []
+        return [str(item).strip() for item in data if str(item).strip()]
+
     def set_active_profile(self, profile: str) -> RuntimeConfigSummary:
         self._rpc.request(
             "config/batchWrite",

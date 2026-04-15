@@ -5,6 +5,7 @@
 另见：
 
 - `docs/fcodex-shared-backend-runtime.zh-CN.md`：当前 shared backend 与 wrapper 的运行时模型
+- `docs/runtime-control-surface.zh-CN.md`：`/status`、`/release-feishu-runtime` 与本地管理面的共享状态词汇
 - `docs/session-profile-semantics.zh-CN.md`：精确的命令与 wrapper 语义
 - `docs/feishu-codex-design.zh-CN.md`：架构与仓库边界
 
@@ -93,8 +94,10 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared
 - 直接恢复
 - 将当前飞书会话绑定到该线程
 - 不展示风险卡片
+- `resume` 不会借机改写这个 live runtime 的 profile 或 provider
 
 这是安全的，因为该线程已经活在同一个 backend 里。
+如果后续需要按另一套 profile 重新解析这个线程，前提是它先回到 `not-loaded-in-current-backend`。
 
 ### 6.3 未加载于当前 backend
 
@@ -105,11 +108,19 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared
 - 直接恢复目标线程
 - 将当前飞书会话绑定到该线程
 - 如果用户随后通过 `fcodex` 接入同一个 shared backend，则飞书与 `fcodex` 可以继续安全地共同读写这个 live thread
+- 如果这次恢复没有显式指定 profile，则飞书与 `fcodex` 的有效行为一致：都使用 `feishu-codex` 当前本地默认 profile
 
 这条路径的前提是：
 
 - 本地继续同一线程时，使用 `fcodex`
 - 不要再用裸 `codex` 通过另一个 backend 写这个线程
+
+这里需要刻意记住一件事：两端的执行路径并不相同。
+
+- 飞书侧会在请求 `thread/resume` 前解析并显式传入 profile / model / model_provider
+- `fcodex` 则是在 wrapper 启动阶段注入默认 profile，再进入 upstream `codex resume`
+
+这个差异不应被理解为两端语义不一致；它们的目标合同是同一个：对 unloaded 线程，在没有显式 profile 时，都以本地默认 profile 恢复。
 
 当前实现**不再**通过预览/确认卡片拦截这类 resume。
 因此，对“可能同时被另一个 isolated backend 写入”的线程，避免双 backend 写入的责任在操作侧，而不是由 UI 强制保护。

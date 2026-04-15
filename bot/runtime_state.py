@@ -35,6 +35,7 @@ class StoredBindingHydrated(RuntimeStateCommand):
     working_dir: str
     current_thread_id: str
     current_thread_title: str
+    current_thread_runtime_state: str
     approval_policy: str
     sandbox: str
     collaboration_mode: str
@@ -52,6 +53,7 @@ class ThreadStateChanged(RuntimeStateCommand):
     working_dir: Any = UNSET
     current_thread_id: Any = UNSET
     current_thread_title: Any = UNSET
+    current_thread_runtime_state: Any = UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,7 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
             working_dir=working_dir,
             current_thread_id=current_thread_id,
             current_thread_title=current_thread_title,
+            current_thread_runtime_state=current_thread_runtime_state,
             approval_policy=approval_policy,
             sandbox=sandbox,
             collaboration_mode=collaboration_mode,
@@ -120,6 +123,7 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
             state["working_dir"] = working_dir
             state["current_thread_id"] = current_thread_id
             state["current_thread_title"] = current_thread_title
+            state["current_thread_runtime_state"] = current_thread_runtime_state
             state["approval_policy"] = approval_policy
             state["sandbox"] = sandbox
             state["collaboration_mode"] = collaboration_mode
@@ -138,6 +142,7 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
             working_dir=working_dir,
             current_thread_id=current_thread_id,
             current_thread_title=current_thread_title,
+            current_thread_runtime_state=current_thread_runtime_state,
         ):
             if working_dir is not UNSET:
                 state["working_dir"] = working_dir
@@ -145,6 +150,8 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
                 state["current_thread_id"] = current_thread_id
             if current_thread_title is not UNSET:
                 state["current_thread_title"] = current_thread_title
+            if current_thread_runtime_state is not UNSET:
+                state["current_thread_runtime_state"] = current_thread_runtime_state
         case ExecutionAnchorCleared(clear_card_message=clear_card_message):
             if clear_card_message:
                 state["current_message_id"] = ""

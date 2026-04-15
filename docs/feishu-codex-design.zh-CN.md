@@ -98,6 +98,8 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/adapters/codex_app_server.py`：Codex adapter 边界
 - `bot/codex_protocol/client.py`：`codex app-server` 的 websocket JSON-RPC client
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
+- `bot/feishu_codexctl.py` 与 `bot/service_control_plane.py`：本地服务管理 CLI 与运行中服务控制面
+- `bot/binding_identity.py`：admin-facing binding 标识规范
 - `bot/stores/*.py`：本地默认 profile、shared backend 运行时发现状态、群聊状态
 
 ## 6. 数据与行为边界
@@ -247,6 +249,9 @@ feishu-codex/
     codex_handler.py
     fcodex.py
     fcodex_proxy.py
+    feishu_codexctl.py
+    service_control_plane.py
+    binding_identity.py
     config.py
     constants.py
     profile_resolution.py

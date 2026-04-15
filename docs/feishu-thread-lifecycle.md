@@ -9,6 +9,7 @@ still using a different runtime recovery model.
 See also:
 
 - `docs/fcodex-shared-backend-runtime.md`
+- `docs/runtime-control-surface.md`
 - `docs/shared-backend-resume-safety.md`
 - `docs/session-profile-semantics.md`
 
@@ -32,6 +33,18 @@ For one Feishu chat, the following are different facts:
 
 The Feishu implementation uses `binding` as the chat-local source of truth.
 `loaded runtime` is a recoverable runtime fact, not the binding fact.
+
+In the current repo wording, Feishu now explicitly names “whether the service
+connection is still attached to that thread” as `feishu runtime`:
+
+- `attached`
+  - the Feishu service is still subscribed to that thread
+- `released`
+  - the binding remains, but the Feishu service has explicitly released its own
+    runtime residency for that thread
+
+This is only a stricter name for the `subscription` fact. It does not change
+the requirement to keep it distinct from `binding` and `loaded runtime`.
 
 ## 3. Why Feishu Cannot Copy `fcodex` Literally
 

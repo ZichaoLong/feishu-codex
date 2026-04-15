@@ -8,6 +8,7 @@
 另见：
 
 - `docs/fcodex-shared-backend-runtime.zh-CN.md`
+- `docs/runtime-control-surface.zh-CN.md`
 - `docs/shared-backend-resume-safety.zh-CN.md`
 - `docs/session-profile-semantics.zh-CN.md`
 
@@ -31,6 +32,17 @@
 
 飞书侧以 `binding` 作为“这个会话当前接着哪个线程继续聊”的事实来源。
 `loaded runtime` 只是一个可恢复的运行态事实，不是绑定事实。
+
+从当前版本起，飞书面对外把“当前 service 连接是否仍附着该 thread”明确命名为
+`feishu runtime`：
+
+- `attached`
+  - 飞书服务当前仍订阅这个 thread
+- `released`
+  - binding 还在，但飞书服务已主动释放自己对这个 thread 的 runtime 持有
+
+这只是对 `subscription` 的显式命名收紧，不改变它与 `binding` / `loaded runtime`
+必须严格区分的合同。
 
 ## 3. 为什么飞书侧不能照搬 `fcodex`
 

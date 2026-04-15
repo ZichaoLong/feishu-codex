@@ -95,6 +95,10 @@ class AgentAdapter(ABC):
         ...
 
     @abstractmethod
+    def list_loaded_thread_ids(self) -> list[str]:
+        ...
+
+    @abstractmethod
     def set_active_profile(self, profile: str) -> RuntimeConfigSummary:
         ...
 

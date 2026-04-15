@@ -12,6 +12,7 @@ from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, Threa
 from bot.codex_handler import CodexHandler
 from bot.codex_protocol.client import CodexRpcError
 from bot.execution_transcript import ExecutionReplySegment
+from bot.service_control_plane import control_request
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
 
 
@@ -99,6 +100,15 @@ class _FakeAdapter:
             ],
         )
 
+    def list_loaded_thread_ids(self) -> list[str]:
+        return sorted(
+            {
+                thread_id
+                for (thread_id, _include_turns), snapshot in self.thread_snapshots.items()
+                if snapshot is not None and not isinstance(snapshot, Exception)
+            }
+        )
+
     def set_active_profile(self, profile: str) -> RuntimeConfigSummary:
         self.set_active_profile_calls.append(profile)
         self.last_profile = profile
@@ -133,6 +143,28 @@ class _FakeAdapter:
 
     def unsubscribe_thread(self, thread_id: str) -> None:
         self.unsubscribe_thread_calls.append(thread_id)
+
+    def list_threads_all(
+        self,
+        *,
+        cwd: str | None = None,
+        limit: int = 100,
+        search_term: str | None = None,
+        sort_key: str = "updated_at",
+        source_kinds: list[str] | None = None,
+        model_providers: list[str] | None = None,
+    ) -> list[ThreadSummary]:
+        del cwd
+        del limit
+        del search_term
+        del sort_key
+        del source_kinds
+        del model_providers
+        summaries: dict[str, ThreadSummary] = {}
+        for (_thread_id, _include_turns), snapshot in self.thread_snapshots.items():
+            if isinstance(snapshot, ThreadSnapshot):
+                summaries[snapshot.summary.thread_id] = snapshot.summary
+        return list(summaries.values())
 
     def archive_thread(self, thread_id: str) -> None:
         self.archive_thread_calls.append(thread_id)
@@ -2118,6 +2150,165 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("沙箱策略：`workspace-write`", content)
         self.assertIn("直接发送普通文本，会在当前目录自动新建线程。", content)
 
+    def test_status_surfaces_shared_runtime_vocabulary(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        handler.handle_message("ou_user", "c1", "/status")
+
+        _, card = bot.cards[-1]
+        content = card["elements"][0]["content"]
+        self.assertIn("binding：`bound`", content)
+        self.assertIn("feishu runtime：`attached`", content)
+        self.assertIn("backend thread status：`idle`", content)
+        self.assertIn("re-profile possible：`no`", content)
+        self.assertIn("release-feishu-runtime：`available`", content)
+
+    def test_release_feishu_runtime_command_releases_all_bound_bindings_but_keeps_binding(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        unloaded = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="notLoaded",
+        )
+        handler._bind_thread("ou_user", "chat-a", thread)
+        handler._bind_thread("ou_user2", "chat-b", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        def _unsubscribe(thread_id: str) -> None:
+            handler._adapter.unsubscribe_thread_calls.append(thread_id)
+            handler._adapter.thread_snapshots[(thread_id, None)] = ThreadSnapshot(summary=unloaded)
+
+        handler._adapter.unsubscribe_thread = _unsubscribe
+
+        handler.handle_message("ou_user", "chat-a", "/release-feishu-runtime")
+
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
+        self.assertEqual(handler._get_runtime_state("ou_user", "chat-a")["current_thread_id"], "thread-1")
+        self.assertEqual(handler._get_runtime_state("ou_user2", "chat-b")["current_thread_id"], "thread-1")
+        self.assertEqual(handler._get_runtime_state("ou_user", "chat-a")["current_thread_runtime_state"], "released")
+        self.assertEqual(handler._get_runtime_state("ou_user2", "chat-b")["current_thread_runtime_state"], "released")
+        self.assertEqual(handler._thread_subscribers("thread-1"), ())
+        _, card = bot.cards[-1]
+        self.assertIn("backend thread status：`notLoaded`", card["elements"][0]["content"])
+
+    def test_released_binding_hydrates_without_resubscribe_and_next_prompt_reattaches(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, _ = self._make_handler(data_dir=data_dir)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        unloaded = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="notLoaded",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        def _unsubscribe(thread_id: str) -> None:
+            handler._adapter.unsubscribe_thread_calls.append(thread_id)
+            handler._adapter.thread_snapshots[(thread_id, None)] = ThreadSnapshot(summary=unloaded)
+
+        handler._adapter.unsubscribe_thread = _unsubscribe
+        handler._release_feishu_runtime_by_thread_id("thread-1")
+
+        handler2, _ = self._make_handler(data_dir=data_dir)
+        state2 = handler2._get_runtime_state("ou_user", "c1")
+        self.assertEqual(state2["current_thread_id"], "thread-1")
+        self.assertEqual(state2["current_thread_runtime_state"], "released")
+        self.assertEqual(handler2._thread_subscribers("thread-1"), ())
+
+        handler2.handle_message("ou_user", "c1", "hello")
+
+        self.assertEqual(handler2._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
+        self.assertEqual(handler2._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "attached")
+
+    def test_service_control_plane_releases_runtime_via_running_service(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        unloaded = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="notLoaded",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        def _unsubscribe(thread_id: str) -> None:
+            handler._adapter.unsubscribe_thread_calls.append(thread_id)
+            handler._adapter.thread_snapshots[(thread_id, None)] = ThreadSnapshot(summary=unloaded)
+
+        handler._adapter.unsubscribe_thread = _unsubscribe
+
+        status = control_request(data_dir, "service/status")
+        result = control_request(data_dir, "thread/release-feishu-runtime", {"target": "thread-1"})
+
+        self.assertEqual(status["binding_count"], 1)
+        self.assertTrue(status["control_socket_path"].endswith("service-control.sock"))
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["backend_thread_status"], "notLoaded")
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "released")
+
     def test_profile_command_without_arg_shows_runtime_profiles(self) -> None:
         handler, bot = self._make_handler()
 
@@ -2307,7 +2498,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertNotIn("m1", bot.reserved_execution_cards)
         self.assertEqual(bot.patches[-1][0], "reserved-card")
         self.assertIn("Codex 启动失败", bot.patches[-1][1])
-        self.assertIn("创建线程失败：boom", bot.patches[-1][1])
+        self.assertIn("准备线程失败：boom", bot.patches[-1][1])
 
     def test_concurrent_prompts_are_serialized_through_runtime_loop(self) -> None:
         handler, bot = self._make_handler()

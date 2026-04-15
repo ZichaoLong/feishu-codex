@@ -64,6 +64,14 @@
 - 归档线程默认不会出现在 `thread/list` 结果里，只有显式请求 archived 过滤时才会列出
 - upstream Codex 支持 `thread/unarchive`，但 `feishu-codex` 当前还没有单独暴露 `/unarchive` 命令
 
+### `/release-feishu-runtime`
+
+- 这是飞书侧专有命令，不属于 Feishu 与 `fcodex` wrapper 的 shared surface
+- 它只释放 Feishu 服务自己对当前绑定 thread 的 runtime 持有
+- 它不会清空当前 chat 的线程绑定，也不会删除 / archive 线程
+- 如果命令后 thread 仍处于 `loaded`，说明还有外部订阅者仍在附着，最常见的是本地 `fcodex`
+- 如果命令后 thread 已 `notLoaded`，后续再恢复时是否能切 profile / provider，遵守本文第 5 节的 profile 恢复合同
+
 ## 3. `fcodex` Shell Wrapper 语义
 
 ## 直接运行 `fcodex`
@@ -174,6 +182,28 @@ wrapper 额外增加的行为：
 - 修改 `fcodex /profile` 会改变飞书侧看到的默认 profile
 - `fcodex -p <profile>` 只覆盖当前这次启动
 - 裸 `codex -p <profile>` 不在本契约内
+
+### 恢复线程时的 profile 解析
+
+- 当目标线程当前 `not-loaded-in-current-backend` 时：
+  - 飞书 `/resume`
+  - `fcodex resume <thread_id>`
+  - `fcodex /resume <thread_id|thread_name>`
+  在没有显式指定 profile 时，最终都以 `feishu-codex` 当前本地默认 profile 为准。
+- 上一条是行为合同，不要求实现路径相同：
+  - 飞书侧会在恢复请求前解析本地默认 profile，并显式携带解析出的 profile / model / model_provider
+  - `fcodex` wrapper 则会先注入默认 profile，再进入 upstream `codex resume` 路径
+- 因此，对 unloaded 线程，飞书与 `fcodex` 的 resume 行为应视为“行为一致、路径不同”，而不是两套互相矛盾的 profile 规则。
+- 当目标线程当前 `loaded-in-current-backend` 时，`resume` 复用的是现有 live runtime。
+  - 这一分支上，不能通过 `resume` 改写该 live thread 的 profile 或 provider
+  - 显式 `-p/--profile` 或其他 resume 时覆盖项，在这个分支上不构成有效切换
+- 如果某个飞书 binding 当前仍指向该 thread，但其 `feishu runtime` 已是 `released`，则下一条普通消息会先按当前绑定重新附着 / resume，再启动 turn。
+  - 如果当时 thread 已 `notLoaded`，就回到本节的 unloaded-thread 规则
+  - 如果当时 thread 仍 `loaded`，则只是复用现有 live runtime，不能借此切 provider
+- 因此，“线程原始 profile”不是本项目推荐使用的合同术语。
+  更准确的说法是：
+  - “以当前本地默认 profile 恢复”
+  - “以显式 profile 恢复”
 
 ## 6. 安全规则
 

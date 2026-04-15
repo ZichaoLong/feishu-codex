@@ -22,7 +22,8 @@ from typing import Any
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.feishu_types import ChatBindingsFileData, StoredChatBinding
 
-CHAT_BINDING_STORE_SCHEMA_VERSION = 1
+CHAT_BINDING_STORE_SCHEMA_VERSION = 2
+_CHAT_BINDING_STORE_COMPAT_SCHEMA_VERSIONS = {1, CHAT_BINDING_STORE_SCHEMA_VERSION}
 
 
 class ChatBindingStore:
@@ -120,10 +121,10 @@ class ChatBindingStore:
         if not isinstance(raw, dict):
             raise ValueError("invalid chat_bindings.json: root must be an object")
         schema_version = raw.get("schema_version")
-        if schema_version != CHAT_BINDING_STORE_SCHEMA_VERSION:
+        if schema_version not in _CHAT_BINDING_STORE_COMPAT_SCHEMA_VERSIONS:
             raise ValueError(
                 "invalid chat_bindings.json: "
-                f"schema_version must be {CHAT_BINDING_STORE_SCHEMA_VERSION}"
+                f"schema_version must be one of {sorted(_CHAT_BINDING_STORE_COMPAT_SCHEMA_VERSIONS)}"
             )
 
         raw_p2p = raw.get("p2p_bindings", {})
@@ -173,6 +174,7 @@ class ChatBindingStore:
             "working_dir": raw_state.get("working_dir", ""),
             "current_thread_id": raw_state.get("current_thread_id", ""),
             "current_thread_title": raw_state.get("current_thread_title", ""),
+            "current_thread_runtime_state": raw_state.get("current_thread_runtime_state", ""),
             "current_thread_write_owner_thread_id": raw_state.get("current_thread_write_owner_thread_id", ""),
             "approval_policy": raw_state.get("approval_policy", ""),
             "sandbox": raw_state.get("sandbox", ""),
@@ -183,6 +185,26 @@ class ChatBindingStore:
             if not isinstance(value, str):
                 raise ValueError(f"invalid chat_bindings.json: {key} must be a string")
             normalized[key] = value.strip()
+        current_thread_id = normalized["current_thread_id"]
+        runtime_state = normalized["current_thread_runtime_state"]
+        if current_thread_id:
+            if not runtime_state:
+                normalized["current_thread_runtime_state"] = "attached"
+            elif runtime_state not in {"attached", "released"}:
+                raise ValueError(
+                    "invalid chat_bindings.json: current_thread_runtime_state must be attached or released"
+                )
+        else:
+            normalized["current_thread_runtime_state"] = ""
+        if (
+            normalized["current_thread_write_owner_thread_id"]
+            and normalized["current_thread_write_owner_thread_id"] != current_thread_id
+        ):
+            raise ValueError(
+                "invalid chat_bindings.json: current_thread_write_owner_thread_id must match current_thread_id"
+            )
+        if normalized["current_thread_runtime_state"] != "attached":
+            normalized["current_thread_write_owner_thread_id"] = ""
         return normalized
 
     @staticmethod

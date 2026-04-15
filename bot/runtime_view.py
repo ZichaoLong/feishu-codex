@@ -33,10 +33,15 @@ class ThreadBindingView:
     working_dir: str
     thread_id: str
     title: str
+    feishu_runtime_state: str
 
     @property
     def has_thread(self) -> bool:
         return bool(self.thread_id)
+
+    @property
+    def feishu_runtime_attached(self) -> bool:
+        return self.feishu_runtime_state == "attached" and self.has_thread
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +128,7 @@ def build_runtime_view(state: Mapping[str, Any]) -> RuntimeView:
             working_dir=str(state["working_dir"] or ""),
             thread_id=str(state["current_thread_id"] or ""),
             title=str(state["current_thread_title"] or ""),
+            feishu_runtime_state=str(state.get("current_thread_runtime_state") or ""),
         ),
         execution=ExecutionView(
             running=bool(state["running"]),

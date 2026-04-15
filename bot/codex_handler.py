@@ -33,6 +33,7 @@ from bot.cards import (
     build_permissions_approval_card,
     make_card_response,
 )
+from bot.binding_identity import binding_kind, format_binding_id, parse_binding_id
 from bot.config import load_config_file
 from bot.constants import (
     DEFAULT_APP_SERVER_MODE,
@@ -76,6 +77,7 @@ from bot.runtime_state import (
     apply_runtime_state_message,
 )
 from bot.runtime_view import RuntimeView, build_runtime_view
+from bot.service_control_plane import ServiceControlPlane
 from bot.session_resolution import (
     list_global_threads,
     looks_like_thread_id,
@@ -158,6 +160,7 @@ class _RuntimeState(TypedDict):
     working_dir: str
     current_thread_id: str
     current_thread_title: str
+    current_thread_runtime_state: str
     current_turn_id: str
     running: bool
     cancelled: bool
@@ -255,6 +258,10 @@ class CodexHandler(BotHandler):
         self._pending_requests: dict[str, _PendingRequestState] = {}
         self._pending_rename_forms: dict[str, _PendingRenameFormState] = {}
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
+        self._service_control_plane = ServiceControlPlane(
+            data_dir=self._data_dir,
+            dispatch=self._handle_service_control_request,
+        )
         self._last_runtime_config: RuntimeConfigSummary | None = None
 
         self._default_working_dir = resolve_working_dir(
@@ -343,6 +350,7 @@ class CodexHandler(BotHandler):
         try:
             self._runtime_loop.start()
             self._adapter.start()
+            self._service_control_plane.start()
         except Exception:
             logger.exception("启动 Codex app-server 失败")
             raise
@@ -612,6 +620,10 @@ class CodexHandler(BotHandler):
                 self._cancel_patch_timer_locked(state)
                 self._cancel_mirror_watchdog_locked(state)
         try:
+            self._service_control_plane.stop()
+        except Exception:
+            logger.exception("停止本地控制面失败")
+        try:
             self._adapter.stop()
         except Exception:
             logger.exception("停止 Codex adapter 失败")
@@ -625,6 +637,7 @@ class CodexHandler(BotHandler):
             "working_dir": stored_binding["working_dir"],
             "current_thread_id": stored_binding["current_thread_id"],
             "current_thread_title": stored_binding["current_thread_title"],
+            "current_thread_runtime_state": stored_binding["current_thread_runtime_state"],
             "current_turn_id": "",
             "running": False,
             "cancelled": False,
@@ -661,6 +674,7 @@ class CodexHandler(BotHandler):
             "working_dir": self._default_working_dir,
             "current_thread_id": "",
             "current_thread_title": "",
+            "current_thread_runtime_state": "",
             "current_thread_write_owner_thread_id": "",
             "approval_policy": self._adapter_config.approval_policy,
             "sandbox": self._adapter_config.sandbox,
@@ -681,9 +695,14 @@ class CodexHandler(BotHandler):
             for binding, stored_binding in sorted(stored_bindings.items()):
                 state = self._runtime_state_by_binding[binding]
                 current_thread_id = state["current_thread_id"]
-                self._subscribe_thread_locked(binding, current_thread_id)
+                if state["current_thread_runtime_state"] == "attached":
+                    self._subscribe_thread_locked(binding, current_thread_id)
                 owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
-                if owner_thread_id and owner_thread_id == current_thread_id:
+                if (
+                    state["current_thread_runtime_state"] == "attached"
+                    and owner_thread_id
+                    and owner_thread_id == current_thread_id
+                ):
                     interaction_lease = self._acquire_interaction_lease_for_binding(binding, owner_thread_id)
                     if not interaction_lease.granted and interaction_lease.lease is not None:
                         logger.warning(
@@ -711,6 +730,7 @@ class CodexHandler(BotHandler):
                 working_dir=stored_binding["working_dir"],
                 current_thread_id=stored_binding["current_thread_id"],
                 current_thread_title=stored_binding["current_thread_title"],
+                current_thread_runtime_state=stored_binding["current_thread_runtime_state"],
                 approval_policy=stored_binding["approval_policy"],
                 sandbox=stored_binding["sandbox"],
                 collaboration_mode=stored_binding["collaboration_mode"],
@@ -834,13 +854,21 @@ class CodexHandler(BotHandler):
 
     def _stored_binding_from_runtime(self, binding: ChatBindingKey, state: _RuntimeState) -> dict[str, str]:
         current_thread_id = str(state["current_thread_id"]).strip()
+        current_thread_runtime_state = str(state["current_thread_runtime_state"]).strip()
+        if not current_thread_id:
+            current_thread_runtime_state = ""
         current_thread_write_owner_thread_id = ""
-        if current_thread_id and self._thread_lease_registry.lease_owner(current_thread_id) == binding:
+        if (
+            current_thread_id
+            and current_thread_runtime_state == "attached"
+            and self._thread_lease_registry.lease_owner(current_thread_id) == binding
+        ):
             current_thread_write_owner_thread_id = current_thread_id
         return {
             "working_dir": str(state["working_dir"]).strip(),
             "current_thread_id": current_thread_id,
             "current_thread_title": str(state["current_thread_title"]).strip(),
+            "current_thread_runtime_state": current_thread_runtime_state,
             "current_thread_write_owner_thread_id": current_thread_write_owner_thread_id,
             "approval_policy": str(state["approval_policy"]).strip(),
             "sandbox": str(state["sandbox"]).strip(),
@@ -1193,9 +1221,14 @@ class CodexHandler(BotHandler):
                 if stored_binding is not None:
                     self._apply_stored_binding(state, stored_binding)
                     current_thread_id = state["current_thread_id"]
-                    self._subscribe_thread_locked(key, current_thread_id)
+                    if state["current_thread_runtime_state"] == "attached":
+                        self._subscribe_thread_locked(key, current_thread_id)
                     owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
-                    if owner_thread_id and owner_thread_id == current_thread_id:
+                    if (
+                        state["current_thread_runtime_state"] == "attached"
+                        and owner_thread_id
+                        and owner_thread_id == current_thread_id
+                    ):
                         self._acquire_thread_write_lease_locked(key, owner_thread_id)
                 self._runtime_state_by_binding[key] = state
             return self._runtime_state_by_binding[key]
@@ -1507,6 +1540,14 @@ class CodexHandler(BotHandler):
             "/status": _CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._handle_status_command(
                     sender_id, chat_id, message_id=message_id
+                ),
+            ),
+            "/release-feishu-runtime": _CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_release_feishu_runtime_command(
+                    sender_id,
+                    chat_id,
+                    arg,
+                    message_id=message_id,
                 ),
             ),
             "/whoami": _CommandRoute(
@@ -1826,6 +1867,15 @@ class CodexHandler(BotHandler):
         self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
         return snapshot.summary.thread_id
 
+    def _ensure_binding_runtime_attached(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        thread_id = runtime.current_thread_id.strip()
+        if not thread_id:
+            raise RuntimeError("当前没有可恢复的线程绑定")
+        if runtime.binding.feishu_runtime_attached:
+            return thread_id
+        return self._resume_bound_thread(sender_id, chat_id, message_id=message_id)
+
     @staticmethod
     def _snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> tuple[str, list[dict[str, Any]]]:
         target_turns = snapshot.turns
@@ -1996,12 +2046,13 @@ class CodexHandler(BotHandler):
         state = self._get_runtime_state(sender_id, chat_id, message_id)
         try:
             thread_id = self._ensure_thread(sender_id, chat_id, message_id=message_id)
+            thread_id = self._ensure_binding_runtime_attached(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
-            logger.exception("创建线程失败")
+            logger.exception("准备线程失败")
             self._render_start_failure(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=f"创建线程失败：{exc}",
+                text=f"准备线程失败：{exc}",
             )
             return
 
@@ -2288,52 +2339,468 @@ class CodexHandler(BotHandler):
             template="green",
         ))
 
-    def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        thread_id = runtime.current_thread_id
-        title = runtime.current_thread_title or "（无标题）"
-        running = "是" if runtime.running else "否"
-        turn_id = runtime.execution.current_turn_id[:8] + "…" if runtime.execution.current_turn_id else "-"
-        permissions_summary = _permissions_summary(runtime.approval_policy, runtime.sandbox)
-        runtime_config = self._safe_read_runtime_config()
-        profile_resolution = self._current_default_profile_resolution(runtime_config)
-        local_profile = profile_resolution.effective_profile
-        if runtime_config:
-            profile_line = f"默认 profile：`{local_profile or '（未设置）'}`"
-            provider_line = f"当前 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
-        else:
-            profile_line = f"默认 profile：`{local_profile or '（未设置）'}`"
-            provider_line = "当前 provider：读取失败"
-        header = (
-            f"目录：`{display_path(runtime.working_dir)}`\n当前线程：`{thread_id[:8]}…` {title}"
-            if thread_id
-            else f"目录：`{display_path(runtime.working_dir)}`\n当前线程：-"
+    @staticmethod
+    def _binding_has_inflight_turn_locked(state: _RuntimeState) -> bool:
+        return bool(state["running"] or state["awaiting_local_turn_started"] or state["current_turn_id"])
+
+    def _binding_inventory_locked(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for binding, state in sorted(self._runtime_state_by_binding.items(), key=lambda item: format_binding_id(item[0])):
+            thread_id = str(state["current_thread_id"] or "").strip()
+            items.append(
+                {
+                    "binding_id": format_binding_id(binding),
+                    "binding_kind": binding_kind(binding),
+                    "sender_id": binding[0],
+                    "chat_id": binding[1],
+                    "binding_state": "bound" if thread_id else "unbound",
+                    "thread_id": thread_id,
+                    "thread_title": str(state["current_thread_title"] or "").strip(),
+                    "working_dir": str(state["working_dir"] or "").strip(),
+                    "feishu_runtime_state": (
+                        str(state["current_thread_runtime_state"] or "").strip() or "not-applicable"
+                    ),
+                    "feishu_write_owner": bool(
+                        thread_id and self._thread_lease_registry.lease_owner(thread_id) == binding
+                    ),
+                    "running_turn": self._binding_has_inflight_turn_locked(state),
+                    "approval_policy": str(state["approval_policy"] or "").strip(),
+                    "sandbox": str(state["sandbox"] or "").strip(),
+                    "collaboration_mode": str(state["collaboration_mode"] or "").strip(),
+                }
+            )
+        return items
+
+    def _bound_bindings_for_thread_locked(self, thread_id: str) -> list[ChatBindingKey]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return []
+        return sorted(
+            binding
+            for binding, state in self._runtime_state_by_binding.items()
+            if str(state["current_thread_id"] or "").strip() == normalized_thread_id
         )
-        if runtime.running:
+
+    def _attached_bindings_for_thread_locked(self, thread_id: str) -> list[ChatBindingKey]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return []
+        return sorted(
+            binding
+            for binding, state in self._runtime_state_by_binding.items()
+            if (
+                str(state["current_thread_id"] or "").strip() == normalized_thread_id
+                and str(state["current_thread_runtime_state"] or "").strip() == "attached"
+            )
+        )
+
+    def _read_thread_summary_for_status(self, thread_id: str) -> tuple[ThreadSummary | None, str]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return None, ""
+        try:
+            summary = self._adapter.read_thread(normalized_thread_id, include_turns=False).summary
+        except Exception as exc:
+            if self._is_thread_not_found_error(exc):
+                return None, "missing"
+            logger.exception("读取线程状态失败: thread=%s", normalized_thread_id[:12])
+            return None, "error"
+        return summary, str(summary.status or "unknown").strip() or "unknown"
+
+    def _interaction_owner_snapshot_locked(
+        self,
+        thread_id: str,
+        *,
+        current_binding: ChatBindingKey | None = None,
+    ) -> dict[str, str]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return {
+                "kind": "none",
+                "holder_id": "",
+                "binding_id": "",
+                "relation": "none",
+                "label": "none",
+            }
+        lease = self._current_interaction_lease_locked(normalized_thread_id)
+        if lease is None:
+            return {
+                "kind": "none",
+                "holder_id": "",
+                "binding_id": "",
+                "relation": "none",
+                "label": "none",
+            }
+        holder = lease.holder
+        if holder.kind == "feishu":
+            binding = feishu_binding_from_holder(holder)
+            binding_id = format_binding_id(binding) if binding is not None else ""
+            relation = "current" if binding is not None and binding == current_binding else "other"
+            return {
+                "kind": "feishu",
+                "holder_id": holder.holder_id,
+                "binding_id": binding_id,
+                "relation": relation,
+                "label": binding_id or "feishu:unknown",
+            }
+        return {
+            "kind": holder.kind,
+            "holder_id": holder.holder_id,
+            "binding_id": "",
+            "relation": "external",
+            "label": holder.holder_id,
+        }
+
+    def _release_feishu_runtime_availability_locked(self, thread_id: str) -> tuple[bool, str]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return False, "当前没有绑定线程。"
+        attached_bindings = self._attached_bindings_for_thread_locked(normalized_thread_id)
+        if not attached_bindings:
+            return False, "当前 thread 的 Feishu runtime 已经是 `released`。"
+        for binding in attached_bindings:
+            state = self._runtime_state_by_binding.get(binding)
+            if state is None:
+                continue
+            if self._binding_has_inflight_turn_locked(state):
+                return False, "当前有飞书侧 turn 正在运行，不能释放 runtime。"
+        for pending in self._pending_requests.values():
+            if str(pending.get("thread_id", "") or "").strip() == normalized_thread_id:
+                return False, "当前还有飞书侧审批或输入请求未处理，不能释放 runtime。"
+        return True, ""
+
+    def _binding_status_snapshot(self, binding: ChatBindingKey) -> dict[str, Any]:
+        with self._lock:
+            state = self._runtime_state_by_binding.get(binding)
+            if state is None:
+                raise ValueError(f"未找到绑定：{format_binding_id(binding)}")
+            thread_id = str(state["current_thread_id"] or "").strip()
+            thread_title = str(state["current_thread_title"] or "").strip()
+            working_dir = str(state["working_dir"] or "").strip()
+            feishu_runtime_state = str(state["current_thread_runtime_state"] or "").strip() or "not-applicable"
+            running_turn = self._binding_has_inflight_turn_locked(state)
+            current_turn_id = str(state["current_turn_id"] or "").strip()
+            owner = self._thread_lease_registry.lease_owner(thread_id) if thread_id else None
+            interaction_owner = self._interaction_owner_snapshot_locked(
+                thread_id,
+                current_binding=binding,
+            )
+            release_available, release_reason = self._release_feishu_runtime_availability_locked(thread_id)
+            approval_policy = str(state["approval_policy"] or "").strip()
+            sandbox = str(state["sandbox"] or "").strip()
+            collaboration_mode = str(state["collaboration_mode"] or "").strip()
+        summary, backend_thread_status = self._read_thread_summary_for_status(thread_id)
+        if summary is not None:
+            thread_title = summary.title or thread_title
+            working_dir = summary.cwd or working_dir
+        if owner is None:
+            feishu_write_owner_relation = "none"
+            feishu_write_owner_binding_id = ""
+        elif owner == binding:
+            feishu_write_owner_relation = "current"
+            feishu_write_owner_binding_id = format_binding_id(owner)
+        else:
+            feishu_write_owner_relation = "other"
+            feishu_write_owner_binding_id = format_binding_id(owner)
+        return {
+            "binding_id": format_binding_id(binding),
+            "binding_kind": binding_kind(binding),
+            "sender_id": binding[0],
+            "chat_id": binding[1],
+            "binding_state": "bound" if thread_id else "unbound",
+            "thread_id": thread_id,
+            "thread_title": thread_title,
+            "working_dir": working_dir,
+            "feishu_runtime_state": feishu_runtime_state,
+            "backend_thread_status": backend_thread_status or "not-applicable",
+            "backend_running_turn": backend_thread_status == "active",
+            "feishu_write_owner_binding_id": feishu_write_owner_binding_id,
+            "feishu_write_owner_relation": feishu_write_owner_relation,
+            "interaction_owner": interaction_owner,
+            "running_turn": running_turn,
+            "current_turn_id": current_turn_id,
+            "approval_policy": approval_policy,
+            "sandbox": sandbox,
+            "collaboration_mode": collaboration_mode,
+            "reprofile_possible": bool(thread_id and backend_thread_status == "notLoaded"),
+            "release_feishu_runtime_available": bool(thread_id and release_available),
+            "release_feishu_runtime_reason": release_reason,
+        }
+
+    def _render_binding_status_markdown(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        include_profile_lines: bool,
+    ) -> tuple[str, str]:
+        binding_state = snapshot["binding_state"]
+        thread_id = snapshot["thread_id"]
+        if thread_id:
+            thread_line = f"当前线程：`{thread_id[:8]}…` {snapshot['thread_title'] or '（无标题）'}"
+        else:
+            thread_line = "当前线程：-"
+        lines = [
+            f"目录：`{display_path(snapshot['working_dir'])}`",
+            thread_line,
+            f"binding：`{binding_state}`",
+            f"feishu runtime：`{snapshot['feishu_runtime_state']}`",
+            f"backend thread status：`{snapshot['backend_thread_status']}`",
+            f"backend running turn：`{'yes' if snapshot['backend_running_turn'] else 'no'}`",
+            f"Feishu 写入 owner：`{snapshot['feishu_write_owner_binding_id'] or snapshot['feishu_write_owner_relation']}`",
+            f"交互 owner：`{snapshot['interaction_owner']['label']}`",
+            f"re-profile possible：`{'yes' if snapshot['reprofile_possible'] else 'no'}`",
+            (
+                "release-feishu-runtime：`available`"
+                if snapshot["release_feishu_runtime_available"]
+                else f"release-feishu-runtime：`blocked` {snapshot['release_feishu_runtime_reason']}"
+                if thread_id
+                else "release-feishu-runtime：`not-applicable`"
+            ),
+        ]
+        if snapshot["running_turn"]:
+            lines.append(f"当前 Feishu turn：`{snapshot['current_turn_id'][:8]}…`" if snapshot["current_turn_id"] else "当前 Feishu turn：`pending`")
+        if include_profile_lines:
+            runtime_config = self._safe_read_runtime_config()
+            profile_resolution = self._current_default_profile_resolution(runtime_config)
+            local_profile = profile_resolution.effective_profile
+            lines.extend(
+                [
+                    f"默认 profile：`{local_profile or '（未设置）'}`",
+                    (
+                        f"当前 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
+                        if runtime_config
+                        else "当前 provider：读取失败"
+                    ),
+                    f"权限预设：`{_permissions_summary(snapshot['approval_policy'], snapshot['sandbox'])}`",
+                    f"审批策略：`{snapshot['approval_policy']}`",
+                    f"沙箱策略：`{snapshot['sandbox']}`",
+                    f"协作模式：`{snapshot['collaboration_mode']}`",
+                ]
+            )
+            if profile_resolution.stale_profile:
+                lines.append(
+                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。"
+                )
+        if snapshot["running_turn"]:
             next_step = "如需停止当前执行，可点当前执行卡片上的停止按钮。"
-        elif not thread_id:
+        elif binding_state == "unbound":
             next_step = "直接发送普通文本，会在当前目录自动新建线程。"
         else:
-            next_step = "发送 `/help` 查看常用命令。"
-        content = (
-            f"{header}\n"
-            f"执行中：{running}\n"
-            f"当前 turn：{turn_id}\n"
-            f"{profile_line}\n"
-            f"{provider_line}\n"
-            f"权限预设：`{permissions_summary}`\n"
-            f"审批策略：`{runtime.approval_policy}`\n"
-            f"沙箱策略：`{runtime.sandbox}`\n"
-            f"协作模式：`{runtime.collaboration_mode}`"
-            + (
-                f"\n\n注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。"
-                if profile_resolution.stale_profile
-                else ""
-            )
-            + f"\n\n{next_step}"
-        )
-        template = "turquoise" if runtime.running else "blue"
+            next_step = "发送 `/help session` 查看线程恢复、释放 runtime 与本地继续规则。"
+        lines.extend(["", next_step])
+        template = "turquoise" if snapshot["running_turn"] else "blue"
+        return "\n".join(lines), template
+
+    def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
+        binding = self._chat_binding_key(sender_id, chat_id, message_id)
+        snapshot = self._binding_status_snapshot(binding)
+        content, template = self._render_binding_status_markdown(snapshot, include_profile_lines=True)
         return CommandResult(card=build_markdown_card("Codex 当前状态", content, template=template))
+
+    def _handle_release_feishu_runtime_command(
+        self,
+        sender_id: str,
+        chat_id: str,
+        arg: str,
+        *,
+        message_id: str = "",
+    ) -> CommandResult:
+        if str(arg or "").strip():
+            return CommandResult(text="用法：`/release-feishu-runtime`")
+        binding = self._chat_binding_key(sender_id, chat_id, message_id)
+        snapshot = self._binding_status_snapshot(binding)
+        thread_id = str(snapshot["thread_id"] or "").strip()
+        if not thread_id:
+            return CommandResult(text="当前没有绑定线程，无需释放 Feishu runtime。")
+        try:
+            result = self._release_feishu_runtime_by_thread_id(thread_id)
+        except ValueError as exc:
+            return CommandResult(text=str(exc))
+        body = [
+            f"线程：`{thread_id[:8]}…` {result['thread_title'] or '（无标题）'}",
+            f"Feishu runtime：`{'released' if result['changed'] or result['already_released'] else 'attached'}`",
+            f"受影响绑定：{', '.join(result['released_binding_ids']) or '（无）'}",
+            f"backend thread status：`{result['backend_thread_status']}`",
+            f"re-profile possible：`{'yes' if result['reprofile_possible'] else 'no'}`",
+        ]
+        if result["already_released"]:
+            body.append("说明：该线程的 Feishu runtime 原本就已是 `released`。")
+        elif result["backend_still_loaded"]:
+            body.append("说明：backend 仍保持 loaded，说明还有外部订阅者仍附着在这个 thread 上，通常是本地 `fcodex`。")
+        else:
+            body.append("说明：Feishu 已释放自己对该 thread 的 runtime 持有；绑定关系仍保留，之后可继续 resume。")
+        return CommandResult(
+            card=build_markdown_card(
+                "Codex Feishu Runtime 已释放",
+                "\n".join(body),
+                template="green" if result["changed"] else "blue",
+            )
+        )
+
+    def _release_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空。")
+        with self._lock:
+            bound_bindings = self._bound_bindings_for_thread_locked(normalized_thread_id)
+            if not bound_bindings:
+                raise ValueError("当前没有 Feishu 绑定指向该线程。")
+            attached_bindings = self._attached_bindings_for_thread_locked(normalized_thread_id)
+            if attached_bindings:
+                release_available, release_reason = self._release_feishu_runtime_availability_locked(
+                    normalized_thread_id
+                )
+                if not release_available:
+                    raise ValueError(release_reason)
+            released_binding_ids: list[str] = []
+            for binding in attached_bindings:
+                state = self._runtime_state_by_binding.get(binding)
+                if state is None:
+                    continue
+                self._release_thread_write_lease_locked(binding, normalized_thread_id)
+                self._release_interaction_lease_for_binding(binding, normalized_thread_id)
+                self._unsubscribe_thread_locked(binding, normalized_thread_id)
+                self._cancel_patch_timer_locked(state)
+                self._cancel_mirror_watchdog_locked(state)
+                self._apply_persisted_runtime_state_message_locked(
+                    binding,
+                    state,
+                    ThreadStateChanged(current_thread_runtime_state="released"),
+                )
+                released_binding_ids.append(format_binding_id(binding))
+            should_unsubscribe = bool(attached_bindings) and not self._attached_bindings_for_thread_locked(
+                normalized_thread_id
+            )
+            existing_title = ""
+            existing_cwd = ""
+            for binding in bound_bindings:
+                state = self._runtime_state_by_binding.get(binding)
+                if state is None:
+                    continue
+                existing_title = existing_title or str(state["current_thread_title"] or "").strip()
+                existing_cwd = existing_cwd or str(state["working_dir"] or "").strip()
+        if should_unsubscribe:
+            self._adapter.unsubscribe_thread(normalized_thread_id)
+        summary, backend_thread_status = self._read_thread_summary_for_status(normalized_thread_id)
+        thread_title = existing_title
+        working_dir = existing_cwd
+        if summary is not None:
+            thread_title = summary.title or thread_title
+            working_dir = summary.cwd or working_dir
+        return {
+            "thread_id": normalized_thread_id,
+            "thread_title": thread_title,
+            "working_dir": working_dir,
+            "bound_binding_ids": [format_binding_id(binding) for binding in bound_bindings],
+            "released_binding_ids": released_binding_ids,
+            "changed": bool(released_binding_ids),
+            "already_released": bool(bound_bindings) and not attached_bindings,
+            "backend_thread_status": backend_thread_status or "unknown",
+            "backend_still_loaded": backend_thread_status in {"idle", "active", "systemError"},
+            "reprofile_possible": backend_thread_status == "notLoaded",
+        }
+
+    def _thread_status_snapshot(
+        self,
+        thread_id: str,
+        *,
+        summary: ThreadSummary | None = None,
+    ) -> dict[str, Any]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空。")
+        with self._lock:
+            bound_bindings = self._bound_bindings_for_thread_locked(normalized_thread_id)
+            attached_bindings = self._attached_bindings_for_thread_locked(normalized_thread_id)
+            owner = self._thread_lease_registry.lease_owner(normalized_thread_id)
+            interaction_owner = self._interaction_owner_snapshot_locked(normalized_thread_id)
+            release_available, release_reason = self._release_feishu_runtime_availability_locked(
+                normalized_thread_id
+            )
+        resolved_summary, backend_thread_status = self._read_thread_summary_for_status(normalized_thread_id)
+        effective_summary = resolved_summary or summary
+        if not bound_bindings:
+            release_available = False
+            release_reason = "当前没有 Feishu 绑定指向该线程。"
+        return {
+            "thread_id": normalized_thread_id,
+            "thread_title": effective_summary.title if effective_summary is not None else "",
+            "working_dir": effective_summary.cwd if effective_summary is not None else "",
+            "backend_thread_status": backend_thread_status or "unknown",
+            "backend_running_turn": backend_thread_status == "active",
+            "bound_binding_ids": [format_binding_id(binding) for binding in bound_bindings],
+            "attached_binding_ids": [format_binding_id(binding) for binding in attached_bindings],
+            "released_binding_ids": [
+                format_binding_id(binding) for binding in bound_bindings if binding not in set(attached_bindings)
+            ],
+            "feishu_write_owner_binding_id": format_binding_id(owner) if owner is not None else "",
+            "interaction_owner": interaction_owner,
+            "reprofile_possible": backend_thread_status == "notLoaded",
+            "release_feishu_runtime_available": bool(release_available and bound_bindings),
+            "release_feishu_runtime_reason": release_reason,
+        }
+
+    def _handle_service_control_request(self, method: str, params: dict[str, Any]) -> Any:
+        return self._runtime_call(self._handle_service_control_request_impl, method, params)
+
+    def _handle_service_control_request_impl(self, method: str, params: dict[str, Any]) -> Any:
+        if method == "service/status":
+            with self._lock:
+                bindings = self._binding_inventory_locked()
+            bound_thread_ids = {item["thread_id"] for item in bindings if item["thread_id"]}
+            attached_thread_ids = {
+                item["thread_id"] for item in bindings if item["thread_id"] and item["feishu_runtime_state"] == "attached"
+            }
+            try:
+                loaded_thread_ids = self._adapter.list_loaded_thread_ids()
+            except Exception:
+                logger.exception("读取 loaded thread 列表失败")
+                loaded_thread_ids = []
+            return {
+                "pid": os.getpid(),
+                "control_socket_path": str(self._service_control_plane.socket_path),
+                "app_server_url": self._adapter.current_app_server_url(),
+                "binding_count": len(bindings),
+                "bound_binding_count": sum(1 for item in bindings if item["binding_state"] == "bound"),
+                "attached_binding_count": sum(1 for item in bindings if item["feishu_runtime_state"] == "attached"),
+                "thread_count": len(bound_thread_ids),
+                "attached_thread_count": len(attached_thread_ids),
+                "loaded_thread_count": len(loaded_thread_ids),
+                "loaded_thread_ids": loaded_thread_ids,
+                "running_binding_ids": [item["binding_id"] for item in bindings if item["running_turn"]],
+            }
+        if method == "binding/list":
+            with self._lock:
+                return {"bindings": self._binding_inventory_locked()}
+        if method == "binding/status":
+            binding_id = str(params.get("binding_id", "") or "").strip()
+            binding = parse_binding_id(binding_id)
+            return self._binding_status_snapshot(binding)
+        if method in {"thread/status", "thread/bindings", "thread/release-feishu-runtime"}:
+            target = str(params.get("target", "") or "").strip()
+            if not target:
+                raise ValueError("缺少 target。")
+            thread = self._resolve_thread_target_for_control(target)
+            if method == "thread/status":
+                return self._thread_status_snapshot(thread.thread_id, summary=thread)
+            if method == "thread/bindings":
+                snapshot = self._thread_status_snapshot(thread.thread_id, summary=thread)
+                return {
+                    "thread_id": snapshot["thread_id"],
+                    "thread_title": snapshot["thread_title"],
+                    "working_dir": snapshot["working_dir"],
+                    "bindings": [
+                        {
+                            "binding_id": binding_id,
+                            "feishu_runtime_state": (
+                                "attached" if binding_id in set(snapshot["attached_binding_ids"]) else "released"
+                            ),
+                        }
+                        for binding_id in snapshot["bound_binding_ids"]
+                    ],
+                }
+            return self._release_feishu_runtime_by_thread_id(thread.thread_id)
+        raise ValueError(f"未知控制面方法：{method}")
 
     def _handle_cancel_action(self, sender_id: str, chat_id: str) -> P2CardActionTriggerResponse:
         ok, message = self._cancel_current_turn(sender_id, chat_id)
@@ -2687,6 +3154,15 @@ class CodexHandler(BotHandler):
         )
         return self._read_thread_summary(thread.thread_id, original_arg=target)
 
+    def _resolve_thread_target_for_control(self, arg: str) -> ThreadSummary:
+        target = str(arg or "").strip()
+        if not target:
+            raise ValueError("目标不能为空。")
+        try:
+            return self._read_thread_summary(target, original_arg=target)
+        except ValueError:
+            return self._resolve_resume_target(target)
+
     def _resume_snapshot(self, arg: str) -> ThreadSnapshot:
         thread = self._resolve_resume_target(arg)
         return self._resume_snapshot_by_id(
@@ -2790,6 +3266,7 @@ class CodexHandler(BotHandler):
                 ThreadStateChanged(
                     current_thread_id=thread.thread_id,
                     current_thread_title=thread.title,
+                    current_thread_runtime_state="attached",
                     working_dir=thread.cwd or state["working_dir"],
                 ),
             )
@@ -2816,6 +3293,7 @@ class CodexHandler(BotHandler):
                 ThreadStateChanged(
                     current_thread_id="",
                     current_thread_title="",
+                    current_thread_runtime_state="",
                 ),
             )
             self._clear_plan_state(state)

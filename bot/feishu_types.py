@@ -70,6 +70,7 @@ class StoredChatBinding(TypedDict):
     working_dir: str
     current_thread_id: str
     current_thread_title: str
+    current_thread_runtime_state: str
     current_thread_write_owner_thread_id: str
     approval_policy: str
     sandbox: str
