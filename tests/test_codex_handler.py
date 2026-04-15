@@ -1167,6 +1167,59 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.start_turn_calls[-1]["thread_id"], "thread-1")
         self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-b"))
 
+    def test_turn_completion_notifies_active_non_owner_subscribers(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler._bind_thread("ou_user", "chat-a", thread)
+        handler._bind_thread("ou_user", "chat-b", thread)
+        handler.handle_message("ou_user", "chat-a", "first turn")
+        handler.handle_message("ou_user", "chat-b", "second turn")
+
+        handler._handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
+
+        self.assertIn(
+            ("chat-b", "线程 `thread-1…` 的上一轮执行已结束；本会话现在可继续提问。"),
+            bot.replies,
+        )
+        self.assertNotIn(
+            ("chat-a", "线程 `thread-1…` 的上一轮执行已结束；本会话现在可继续提问。"),
+            bot.replies,
+        )
+
+    def test_turn_completion_skips_inactive_non_owner_subscribers(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler._bind_thread("ou_user", "chat-a", thread)
+        handler._bind_thread("ou_user", "chat-b", thread)
+        handler.handle_message("ou_user", "chat-a", "first turn")
+
+        handler._handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
+
+        self.assertNotIn(
+            ("chat-b", "线程 `thread-1…` 的上一轮执行已结束；本会话现在可继续提问。"),
+            bot.replies,
+        )
+
     def test_prompt_is_denied_when_shared_interaction_lease_is_owned_by_fcodex(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)

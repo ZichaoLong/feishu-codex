@@ -1746,8 +1746,38 @@ class CodexHandler(BotHandler):
         )
         finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
         if finalized:
+            self._notify_non_owner_turn_finished(
+                self._chat_binding_key(sender_id, chat_id),
+                thread_id=thread_id,
+            )
             self._schedule_terminal_execution_reconcile(target)
         return finalized
+
+    def _notify_non_owner_turn_finished(
+        self,
+        owner_binding: ChatBindingKey,
+        *,
+        thread_id: str,
+    ) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        notifications: list[str] = []
+        with self._lock:
+            for binding in self._thread_lease_registry.subscribers(normalized_thread_id):
+                if binding == owner_binding:
+                    continue
+                state = self._runtime_state_by_binding.get(binding)
+                if state is None or not state["active"]:
+                    continue
+                if str(state["current_thread_id"] or "").strip() != normalized_thread_id:
+                    continue
+                notifications.append(binding[1])
+        if not notifications:
+            return
+        message = f"线程 `{normalized_thread_id[:8]}…` 的上一轮执行已结束；本会话现在可继续提问。"
+        for chat_id in notifications:
+            self.bot.reply(chat_id, message)
 
     def _reconcile_execution_snapshot(
         self,
