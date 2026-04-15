@@ -93,6 +93,10 @@ from bot.stores.interaction_lease_store import (
     make_feishu_interaction_holder,
 )
 from bot.stores.profile_state_store import ProfileStateStore
+from bot.stores.service_instance_lease import (
+    ServiceInstanceLease,
+    ServiceInstanceLeaseError,
+)
 from bot.thread_lease_registry import ThreadLeaseRegistry
 from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
 
@@ -258,9 +262,11 @@ class CodexHandler(BotHandler):
         self._pending_requests: dict[str, _PendingRequestState] = {}
         self._pending_rename_forms: dict[str, _PendingRenameFormState] = {}
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
+        self._service_instance_lease = ServiceInstanceLease(self._data_dir)
         self._service_control_plane = ServiceControlPlane(
             data_dir=self._data_dir,
             dispatch=self._handle_service_control_request,
+            owns_socket_path=self._service_instance_lease.owns_socket_path,
         )
         self._last_runtime_config: RuntimeConfigSummary | None = None
 
@@ -348,11 +354,16 @@ class CodexHandler(BotHandler):
     def on_register(self, bot) -> None:
         super().on_register(bot)
         try:
+            self._service_instance_lease.acquire(socket_path=self._service_control_plane.socket_path)
             self._runtime_loop.start()
             self._adapter.start()
             self._service_control_plane.start()
+        except ServiceInstanceLeaseError:
+            logger.exception("启动 feishu-codex service 失败：当前 FC_DATA_DIR 已被其他实例占用")
+            raise
         except Exception:
             logger.exception("启动 Codex app-server 失败")
+            self._service_instance_lease.release()
             raise
 
     def handle_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
@@ -629,6 +640,7 @@ class CodexHandler(BotHandler):
             logger.exception("停止 Codex adapter 失败")
         finally:
             self._runtime_loop.stop()
+            self._service_instance_lease.release()
 
     def _build_default_runtime_state(self) -> _RuntimeState:
         stored_binding = self._build_default_stored_binding()
@@ -2837,10 +2849,7 @@ class CodexHandler(BotHandler):
             binding = parse_binding_id(binding_id)
             return self._binding_status_snapshot(binding)
         if method in {"thread/status", "thread/bindings", "thread/release-feishu-runtime"}:
-            target = str(params.get("target", "") or "").strip()
-            if not target:
-                raise ValueError("缺少 target。")
-            thread = self._resolve_thread_target_for_control(target)
+            thread = self._resolve_thread_target_for_control_params(params)
             if method == "thread/status":
                 return self._thread_status_snapshot(thread.thread_id, summary=thread)
             if method == "thread/bindings":
@@ -3214,14 +3223,25 @@ class CodexHandler(BotHandler):
         )
         return self._read_thread_summary(thread.thread_id, original_arg=target)
 
-    def _resolve_thread_target_for_control(self, arg: str) -> ThreadSummary:
-        target = str(arg or "").strip()
+    def _resolve_thread_name_target_for_control(self, thread_name: str) -> ThreadSummary:
+        target = str(thread_name or "").strip()
         if not target:
-            raise ValueError("目标不能为空。")
-        try:
-            return self._read_thread_summary(target, original_arg=target)
-        except ValueError:
-            return self._resolve_resume_target(target)
+            raise ValueError("thread_name 不能为空。")
+        thread = resolve_resume_target_by_name(
+            self._adapter,
+            name=target,
+            limit=self._thread_list_query_limit,
+        )
+        return self._read_thread_summary(thread.thread_id, original_arg=target)
+
+    def _resolve_thread_target_for_control_params(self, params: dict[str, Any]) -> ThreadSummary:
+        thread_id = str(params.get("thread_id", "") or "").strip()
+        thread_name = str(params.get("thread_name", "") or "").strip()
+        if bool(thread_id) == bool(thread_name):
+            raise ValueError("必须且只能提供 `thread_id` 或 `thread_name`。")
+        if thread_id:
+            return self._read_thread_summary(thread_id, original_arg=thread_id)
+        return self._resolve_thread_name_target_for_control(thread_name)
 
     def _resume_snapshot(self, arg: str) -> ThreadSnapshot:
         thread = self._resolve_resume_target(arg)

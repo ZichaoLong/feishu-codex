@@ -317,9 +317,9 @@ Current implementation provides:
 - `feishu-codexctl service status`
 - `feishu-codexctl binding list`
 - `feishu-codexctl binding status <binding_id>`
-- `feishu-codexctl thread status <thread_id|thread_name>`
-- `feishu-codexctl thread bindings <thread_id|thread_name>`
-- `feishu-codexctl thread release-feishu-runtime <thread_id|thread_name>`
+- `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
 
 ### 6.4 `binding_id` shape
 
@@ -329,6 +329,43 @@ The local admin CLI uses stable admin-facing binding ids:
 - p2p binding: `p2p:<sender_id>:<chat_id>`
 
 These are local admin identifiers. They do not need to mirror Feishu command names.
+
+### 6.5 Explicit thread target contract
+
+For the local admin surface, thread targeting is intentionally explicit.
+
+- `--thread-id <id>`
+  - means exact thread-id addressing
+  - does not fall back to name lookup
+- `--thread-name <name>`
+  - means exact thread-name matching
+  - uses the shared cross-provider global listing contract
+  - rejects zero matches
+  - rejects multiple exact-name matches
+
+The control plane follows the same rule.
+It no longer accepts an untyped union `target` that guesses whether the input
+was an id or a name.
+
+### 6.6 Single service owner per `FC_DATA_DIR`
+
+For one `FC_DATA_DIR`, there must be exactly one running `feishu-codex`
+service owner.
+
+The contract is:
+
+- ownership is established before adapter/control-plane startup
+- a second instance must fail fast
+- the control socket is not the ownership primitive
+- the owner writes metadata including `owner_pid`, `owner_token`, and
+  `socket_path`
+- shutdown may only clean up metadata/socket that still belong to the same
+  owner token
+
+Therefore `feishu-codex run` and a systemd-managed service must not coexist on
+the same `FC_DATA_DIR`.
+If both point at the same directory, the later starter must exit instead of
+trying to replace the socket.
 
 ## 7. Shared Vocabulary, Not Forced Command Symmetry
 

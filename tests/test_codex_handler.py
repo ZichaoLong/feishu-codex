@@ -12,7 +12,8 @@ from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, Threa
 from bot.codex_handler import CodexHandler
 from bot.codex_protocol.client import CodexRpcError
 from bot.execution_transcript import ExecutionReplySegment
-from bot.service_control_plane import control_request
+from bot.service_control_plane import ServiceControlError, control_request
+from bot.stores.service_instance_lease import ServiceInstanceLease, ServiceInstanceLeaseError
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
 
 
@@ -424,6 +425,20 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertIs(handler.bot, bot)
         self.assertEqual(handler._adapter.start_calls, 1)
+
+    def test_on_register_fails_fast_when_service_instance_is_already_owned(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        lease = ServiceInstanceLease(data_dir)
+        lease.acquire(socket_path=data_dir / "service-control.sock")
+        self.addCleanup(lease.release)
+
+        with self.assertRaises(ServiceInstanceLeaseError):
+            handler.on_register(bot)
+
+        self.assertEqual(handler._adapter.start_calls, 0)
 
     def test_external_turn_started_opens_new_execution_card(self) -> None:
         handler, bot = self._make_handler()
@@ -2363,7 +2378,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.unsubscribe_thread = _unsubscribe
 
         status = control_request(data_dir, "service/status")
-        result = control_request(data_dir, "thread/release-feishu-runtime", {"target": "thread-1"})
+        result = control_request(data_dir, "thread/release-feishu-runtime", {"thread_id": "thread-1"})
 
         self.assertEqual(status["binding_count"], 1)
         self.assertTrue(status["control_socket_path"].endswith("service-control.sock"))
@@ -2371,6 +2386,58 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(result["backend_thread_status"], "notLoaded")
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
         self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "released")
+
+    def test_service_control_plane_thread_name_target_resolves_explicit_exact_name(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        status = control_request(data_dir, "thread/status", {"thread_name": "demo"})
+
+        self.assertEqual(status["thread_id"], "thread-1")
+        self.assertEqual(status["thread_title"], "demo")
+
+    def test_service_control_plane_thread_target_requires_exactly_one_selector(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        with self.assertRaises(ServiceControlError):
+            control_request(data_dir, "thread/status", {})
+        with self.assertRaises(ServiceControlError):
+            control_request(
+                data_dir,
+                "thread/status",
+                {"thread_id": "thread-1", "thread_name": "demo"},
+            )
 
     def test_profile_command_without_arg_shows_runtime_profiles(self) -> None:
         handler, bot = self._make_handler()

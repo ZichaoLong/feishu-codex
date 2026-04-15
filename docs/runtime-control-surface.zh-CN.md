@@ -317,9 +317,9 @@
 - `feishu-codexctl service status`
 - `feishu-codexctl binding list`
 - `feishu-codexctl binding status <binding_id>`
-- `feishu-codexctl thread status <thread_id|thread_name>`
-- `feishu-codexctl thread bindings <thread_id|thread_name>`
-- `feishu-codexctl thread release-feishu-runtime <thread_id|thread_name>`
+- `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
 
 ### 6.4 `binding_id` 形状
 
@@ -329,6 +329,38 @@
 - 私聊 binding：`p2p:<sender_id>:<chat_id>`
 
 它们只服务于本地管理面，不需要和飞书聊天命令名字保持对称。
+
+### 6.5 显式 thread 目标合同
+
+对本地管理面而言，thread 目标必须显式表达，不再靠输入内容推断。
+
+- `--thread-id <id>`
+  - 表示按 thread id 精确寻址
+  - 不会再回退到名字解析
+- `--thread-name <name>`
+  - 表示按 thread name 精确匹配
+  - 使用共享的跨 provider 全局列表解析合同
+  - 0 个匹配时报错
+  - 多个精确同名匹配时报错
+
+控制面 RPC 也遵守同一规则。
+它不再接受一个未标注类型的 union `target` 字段，让 service 自己猜是 id 还是 name。
+
+### 6.6 每个 `FC_DATA_DIR` 只允许一个 service owner
+
+对同一个 `FC_DATA_DIR`，只允许一个正在运行的 `feishu-codex` service 实例持有所有权。
+
+合同是：
+
+- 所有权必须先于 adapter / control plane 启动建立
+- 第二个实例必须 fail-fast
+- control socket 不是所有权原语
+- owner 会写入包含 `owner_pid`、`owner_token`、`socket_path` 的元数据
+- 停止时只允许清理由同一个 owner token 仍持有的 metadata / socket
+
+因此，`python -m bot` 直接运行和 systemd 管理的 service，不允许在同一个
+`FC_DATA_DIR` 上并存。
+如果二者指向同一目录，后启动的一方必须直接退出，而不是尝试抢 socket。
 
 ## 7. 共享词汇，而不是强求命令同名
 

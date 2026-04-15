@@ -69,9 +69,11 @@ class ServiceControlPlane:
         *,
         data_dir: pathlib.Path,
         dispatch: Callable[[str, dict[str, Any]], Any],
+        owns_socket_path: Callable[[pathlib.Path], bool] | None = None,
     ) -> None:
         self._data_dir = pathlib.Path(data_dir)
         self._dispatch = dispatch
+        self._owns_socket_path = owns_socket_path
         self._lock = threading.Lock()
         self._server: _ServiceControlServer | None = None
         self._thread: threading.Thread | None = None
@@ -85,6 +87,8 @@ class ServiceControlPlane:
             if self._server is not None:
                 return
             path = self.socket_path
+            if self._owns_socket_path is not None and not self._owns_socket_path(path):
+                raise ServiceControlError(f"当前进程不是此控制面的合法 owner：{path}")
             path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 path.unlink()
@@ -115,6 +119,8 @@ class ServiceControlPlane:
             server.server_close()
         if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
             thread.join(timeout=1)
+        if self._owns_socket_path is not None and not self._owns_socket_path(self.socket_path):
+            return
         try:
             self.socket_path.unlink()
         except FileNotFoundError:

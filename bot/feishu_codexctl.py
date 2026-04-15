@@ -24,6 +24,16 @@ def _request(data_dir: pathlib.Path, method: str, params: dict[str, Any] | None 
     return control_request(data_dir, method, params)
 
 
+def _thread_target_params(args: argparse.Namespace) -> dict[str, str]:
+    thread_id = str(getattr(args, "thread_id", "") or "").strip()
+    thread_name = str(getattr(args, "thread_name", "") or "").strip()
+    if bool(thread_id) == bool(thread_name):
+        raise ValueError("必须且只能提供 --thread-id 或 --thread-name。")
+    if thread_id:
+        return {"thread_id": thread_id}
+    return {"thread_name": thread_name}
+
+
 def _print_service_status(data_dir: pathlib.Path) -> int:
     socket_path = control_socket_path(data_dir)
     try:
@@ -100,8 +110,8 @@ def _print_binding_status(data_dir: pathlib.Path, binding_id: str) -> int:
     return 0
 
 
-def _print_thread_status(data_dir: pathlib.Path, target: str) -> int:
-    snapshot = _request(data_dir, "thread/status", {"target": target})
+def _print_thread_status(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
+    snapshot = _request(data_dir, "thread/status", target_params)
     print(f"thread: {snapshot['thread_id']} {snapshot['thread_title'] or ''}".rstrip())
     print(f"working_dir: {display_path(snapshot['working_dir'])}")
     print(f"backend thread status: {snapshot['backend_thread_status']}")
@@ -119,8 +129,8 @@ def _print_thread_status(data_dir: pathlib.Path, target: str) -> int:
     return 0
 
 
-def _print_thread_bindings(data_dir: pathlib.Path, target: str) -> int:
-    result = _request(data_dir, "thread/bindings", {"target": target})
+def _print_thread_bindings(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
+    result = _request(data_dir, "thread/bindings", target_params)
     print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
     print(f"working_dir: {display_path(result['working_dir'])}")
     bindings = result.get("bindings") or []
@@ -133,8 +143,8 @@ def _print_thread_bindings(data_dir: pathlib.Path, target: str) -> int:
     return 0
 
 
-def _release_thread_runtime(data_dir: pathlib.Path, target: str) -> int:
-    result = _request(data_dir, "thread/release-feishu-runtime", {"target": target})
+def _release_thread_runtime(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
+    result = _request(data_dir, "thread/release-feishu-runtime", target_params)
     print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
     print(f"released bindings: {', '.join(result['released_binding_ids']) or '（无）'}")
     print(f"backend thread status: {result['backend_thread_status']}")
@@ -165,11 +175,17 @@ def _build_parser() -> argparse.ArgumentParser:
     thread = subparsers.add_parser("thread")
     thread_sub = thread.add_subparsers(dest="action", required=True)
     thread_status = thread_sub.add_parser("status")
-    thread_status.add_argument("target")
+    thread_status_target = thread_status.add_mutually_exclusive_group(required=True)
+    thread_status_target.add_argument("--thread-id")
+    thread_status_target.add_argument("--thread-name")
     thread_bindings = thread_sub.add_parser("bindings")
-    thread_bindings.add_argument("target")
+    thread_bindings_target = thread_bindings.add_mutually_exclusive_group(required=True)
+    thread_bindings_target.add_argument("--thread-id")
+    thread_bindings_target.add_argument("--thread-name")
     thread_release = thread_sub.add_parser("release-feishu-runtime")
-    thread_release.add_argument("target")
+    thread_release_target = thread_release.add_mutually_exclusive_group(required=True)
+    thread_release_target.add_argument("--thread-id")
+    thread_release_target.add_argument("--thread-name")
     return parser
 
 
@@ -185,13 +201,16 @@ def main() -> None:
         if args.resource == "binding" and args.action == "status":
             raise SystemExit(_print_binding_status(data_dir, args.binding_id))
         if args.resource == "thread" and args.action == "status":
-            raise SystemExit(_print_thread_status(data_dir, args.target))
+            raise SystemExit(_print_thread_status(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "bindings":
-            raise SystemExit(_print_thread_bindings(data_dir, args.target))
+            raise SystemExit(_print_thread_bindings(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "release-feishu-runtime":
-            raise SystemExit(_release_thread_runtime(data_dir, args.target))
+            raise SystemExit(_release_thread_runtime(data_dir, _thread_target_params(args)))
     except ServiceControlError as exc:
         print(f"控制面请求失败：{exc}", file=sys.stderr)
+        raise SystemExit(2)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         raise SystemExit(2)
     parser.print_usage(sys.stderr)
     raise SystemExit(2)
