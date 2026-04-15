@@ -825,6 +825,53 @@ class CodexHandlerTests(unittest.TestCase):
         patched_card = json.loads(bot2.patches[-1][1])
         self.assertIn("群重启后事件正常路由", json.dumps(patched_card, ensure_ascii=False))
 
+    def test_restart_restores_write_owner_for_multi_subscriber_running_thread(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        handler1, _ = self._make_handler(data_dir=data_dir)
+        handler1._bind_thread("ou_user", "chat-a", thread)
+        handler1._bind_thread("ou_user", "chat-b", thread)
+        handler1.handle_message("ou_user", "chat-a", "first turn")
+
+        handler2, bot2 = self._make_handler(data_dir=data_dir)
+
+        self.assertEqual(handler2._thread_subscribers("thread-1"), (("ou_user", "chat-a"), ("ou_user", "chat-b")))
+        self.assertEqual(handler2._thread_write_owner("thread-1"), ("ou_user", "chat-a"))
+
+        handler2._handle_adapter_request_impl(
+            "req-1",
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread-1",
+                "command": "ls",
+                "cwd": "/tmp/project",
+                "reason": "need approval",
+            },
+        )
+        handler2._handle_agent_message_delta({"threadId": "thread-1", "delta": "恢复后继续"})
+
+        self.assertEqual(bot2.sent_messages[-1][0], "chat-a")
+        self.assertEqual(
+            handler2._get_runtime_state("ou_user", "chat-a")["execution_transcript"].reply_text(),
+            "恢复后继续",
+        )
+        self.assertEqual(
+            handler2._get_runtime_state("ou_user", "chat-b")["execution_transcript"].reply_text(),
+            "",
+        )
+
     def test_status_shows_untitled_instead_of_unbound_when_thread_exists(self) -> None:
         handler, bot = self._make_handler()
 
@@ -2851,6 +2898,86 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 目录已切换")
         self.assertIn("当前线程绑定已清空。", card["elements"][0]["content"])
+
+    def test_bind_thread_to_new_thread_clears_previous_execution_anchor(self) -> None:
+        handler, _ = self._make_handler()
+        old_thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="old",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        new_thread = ThreadSummary(
+            thread_id="thread-2",
+            cwd="/tmp/project-2",
+            name="new",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", old_thread)
+        state = handler._get_runtime_state("ou_user", "c1")
+        with handler._lock:
+            state["current_message_id"] = "card-live"
+            state["last_execution_message_id"] = "card-old"
+            state["current_turn_id"] = "turn-1"
+            state["current_prompt_message_id"] = "prompt-1"
+            state["execution_transcript"].set_reply_text("stale")
+
+        handler._bind_thread("ou_user", "c1", new_thread)
+
+        state = handler._get_runtime_state("ou_user", "c1")
+        self.assertEqual(state["current_thread_id"], "thread-2")
+        self.assertEqual(state["current_message_id"], "")
+        self.assertEqual(state["last_execution_message_id"], "")
+        self.assertEqual(state["current_prompt_message_id"], "")
+        self.assertEqual(state["execution_transcript"].reply_text(), "")
+        with patch.object(handler, "_refresh_terminal_execution_card_from_state") as refresh:
+            ok, message = handler._cancel_current_turn("ou_user", "c1")
+        self.assertFalse(ok)
+        self.assertEqual(message, "当前没有正在执行的 turn。")
+        refresh.assert_not_called()
+
+    def test_clear_thread_binding_clears_previous_execution_anchor(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        state = handler._get_runtime_state("ou_user", "c1")
+        with handler._lock:
+            state["current_message_id"] = "card-live"
+            state["last_execution_message_id"] = "card-old"
+            state["current_turn_id"] = "turn-1"
+            state["current_prompt_message_id"] = "prompt-1"
+            state["execution_transcript"].set_reply_text("stale")
+
+        handler._clear_thread_binding("ou_user", "c1")
+
+        state = handler._get_runtime_state("ou_user", "c1")
+        self.assertEqual(state["current_thread_id"], "")
+        self.assertEqual(state["current_message_id"], "")
+        self.assertEqual(state["last_execution_message_id"], "")
+        self.assertEqual(state["current_prompt_message_id"], "")
+        self.assertEqual(state["execution_transcript"].reply_text(), "")
+        with patch.object(handler, "_refresh_terminal_execution_card_from_state") as refresh:
+            ok, message = handler._cancel_current_turn("ou_user", "c1")
+        self.assertFalse(ok)
+        self.assertEqual(message, "当前没有正在执行的 turn。")
+        refresh.assert_not_called()
 
     def test_cd_command_failure_uses_warning_card(self) -> None:
         handler, bot = self._make_handler()

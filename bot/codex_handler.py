@@ -267,6 +267,7 @@ class CodexHandler(BotHandler):
         self._adapter_config = CodexAppServerConfig.from_dict(cfg)
         self._app_server_runtime = AppServerRuntimeStore(self._data_dir)
         self._chat_binding_store = ChatBindingStore(self._data_dir)
+        self._hydrate_stored_bindings()
         if self._adapter_config.app_server_mode == "remote":
             self._adapter_config = replace(
                 self._adapter_config,
@@ -594,10 +595,38 @@ class CodexHandler(BotHandler):
             "working_dir": self._default_working_dir,
             "current_thread_id": "",
             "current_thread_title": "",
+            "current_thread_write_owner_thread_id": "",
             "approval_policy": self._adapter_config.approval_policy,
             "sandbox": self._adapter_config.sandbox,
             "collaboration_mode": self._adapter_config.collaboration_mode,
         }
+
+    def _hydrate_stored_bindings(self) -> None:
+        stored_bindings = self._chat_binding_store.load_all()
+        if not stored_bindings:
+            return
+        with self._lock:
+            for binding, stored_binding in sorted(stored_bindings.items()):
+                if binding in self._runtime_state_by_binding:
+                    continue
+                state = self._build_default_runtime_state()
+                self._apply_stored_binding(state, stored_binding)
+                self._runtime_state_by_binding[binding] = state
+            for binding, stored_binding in sorted(stored_bindings.items()):
+                state = self._runtime_state_by_binding[binding]
+                current_thread_id = state["current_thread_id"]
+                self._subscribe_thread_locked(binding, current_thread_id)
+                owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
+                if owner_thread_id and owner_thread_id == current_thread_id:
+                    lease = self._acquire_thread_write_lease_locked(binding, owner_thread_id)
+                    if not lease.granted and lease.owner != binding:
+                        logger.warning(
+                            "stored write owner conflicted during hydration: thread=%s owner=%s ignored=%s",
+                            owner_thread_id[:12],
+                            lease.owner,
+                            binding,
+                        )
+                        self._sync_stored_binding_locked(binding, state)
 
     def _apply_stored_binding(self, state: _RuntimeState, stored_binding: dict[str, str]) -> None:
         self._apply_runtime_state_message_locked(
@@ -637,7 +666,11 @@ class CodexHandler(BotHandler):
         if len(subscribers) == 1:
             binding = subscribers[0]
             if adopt_sole_subscriber:
-                self._thread_lease_registry.acquire_write_lease(binding, thread_id)
+                lease = self._thread_lease_registry.acquire_write_lease(binding, thread_id)
+                if lease.granted:
+                    state = self._runtime_state_by_binding.get(binding)
+                    if state is not None:
+                        self._sync_stored_binding_locked(binding, state)
             return binding
         return None
 
@@ -661,18 +694,23 @@ class CodexHandler(BotHandler):
         with self._lock:
             return self._thread_lease_registry.lease_owner(thread_id)
 
-    def _stored_binding_from_runtime(self, state: _RuntimeState) -> dict[str, str]:
+    def _stored_binding_from_runtime(self, binding: ChatBindingKey, state: _RuntimeState) -> dict[str, str]:
+        current_thread_id = str(state["current_thread_id"]).strip()
+        current_thread_write_owner_thread_id = ""
+        if current_thread_id and self._thread_lease_registry.lease_owner(current_thread_id) == binding:
+            current_thread_write_owner_thread_id = current_thread_id
         return {
             "working_dir": str(state["working_dir"]).strip(),
-            "current_thread_id": str(state["current_thread_id"]).strip(),
+            "current_thread_id": current_thread_id,
             "current_thread_title": str(state["current_thread_title"]).strip(),
+            "current_thread_write_owner_thread_id": current_thread_write_owner_thread_id,
             "approval_policy": str(state["approval_policy"]).strip(),
             "sandbox": str(state["sandbox"]).strip(),
             "collaboration_mode": str(state["collaboration_mode"]).strip(),
         }
 
     def _sync_stored_binding_locked(self, binding: ChatBindingKey, state: _RuntimeState) -> None:
-        stored_binding = self._stored_binding_from_runtime(state)
+        stored_binding = self._stored_binding_from_runtime(binding, state)
         if stored_binding == self._build_default_stored_binding():
             self._chat_binding_store.clear(binding)
             return
@@ -792,12 +830,34 @@ class CodexHandler(BotHandler):
             ExecutionAnchorCleared(clear_card_message=clear_card_message),
         )
 
+    def _reset_execution_context_locked(self, state: _RuntimeState, *, clear_card_message: bool) -> None:
+        self._clear_execution_anchor_locked(state, clear_card_message=clear_card_message)
+        self._apply_runtime_state_message_locked(
+            state,
+            ExecutionStateChanged(
+                running=False,
+                cancelled=False,
+                pending_cancel=False,
+                current_message_id="" if clear_card_message else UNSET,
+                last_execution_message_id="",
+                current_turn_id="",
+                current_prompt_message_id="",
+                current_prompt_reply_in_thread=False,
+                current_actor_open_id="",
+                followup_sent=False,
+                awaiting_local_turn_started=False,
+                runtime_channel_state="live",
+                reset_transcript=True,
+            ),
+        )
+
     def _retire_execution_anchor(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
         binding = self._chat_binding_key(sender_id, chat_id)
         with self._lock:
             self._release_thread_write_lease_locked(binding, state["current_thread_id"])
             self._apply_runtime_state_message_locked(state, ExecutionRetired())
+            self._sync_stored_binding_locked(binding, state)
 
     def _refresh_terminal_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -993,7 +1053,11 @@ class CodexHandler(BotHandler):
                 stored_binding = self._chat_binding_store.load(key)
                 if stored_binding is not None:
                     self._apply_stored_binding(state, stored_binding)
-                    self._subscribe_thread_locked(key, state["current_thread_id"])
+                    current_thread_id = state["current_thread_id"]
+                    self._subscribe_thread_locked(key, current_thread_id)
+                    owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
+                    if owner_thread_id and owner_thread_id == current_thread_id:
+                        self._acquire_thread_write_lease_locked(key, owner_thread_id)
                 self._runtime_state_by_binding[key] = state
             return self._runtime_state_by_binding[key]
 
@@ -1690,6 +1754,8 @@ class CodexHandler(BotHandler):
         chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
         with self._lock:
             lease = self._acquire_thread_write_lease_locked(chat_binding_key, thread_id)
+            if lease.granted:
+                self._sync_stored_binding_locked(chat_binding_key, state)
         if not lease.granted:
             self._reply_text(
                 chat_id,
@@ -2416,11 +2482,15 @@ class CodexHandler(BotHandler):
         unsubscribe_thread_id: str = ""
         with self._lock:
             old_thread_id = state["current_thread_id"]
-            if old_thread_id != thread.thread_id and self._unsubscribe_thread_locked(
-                chat_binding_key,
-                old_thread_id,
-            ):
-                unsubscribe_thread_id = old_thread_id
+            if old_thread_id != thread.thread_id:
+                if self._unsubscribe_thread_locked(
+                    chat_binding_key,
+                    old_thread_id,
+                ):
+                    unsubscribe_thread_id = old_thread_id
+                self._cancel_patch_timer_locked(state)
+                self._cancel_mirror_watchdog_locked(state)
+                self._reset_execution_context_locked(state, clear_card_message=True)
             self._apply_persisted_runtime_state_message_locked(
                 chat_binding_key,
                 state,
@@ -2430,14 +2500,6 @@ class CodexHandler(BotHandler):
                     working_dir=thread.cwd or state["working_dir"],
                 ),
             )
-            self._apply_runtime_state_message_locked(
-                state,
-                ExecutionStateChanged(
-                    current_turn_id="",
-                    awaiting_local_turn_started=False,
-                ),
-            )
-            self._cancel_mirror_watchdog_locked(state)
             self._clear_plan_state(state)
             self._subscribe_thread_locked(chat_binding_key, thread.thread_id)
         if unsubscribe_thread_id:
@@ -2451,6 +2513,9 @@ class CodexHandler(BotHandler):
             thread_id = state["current_thread_id"]
             if self._unsubscribe_thread_locked(chat_binding_key, thread_id):
                 unsubscribe_thread_id = thread_id
+            self._cancel_patch_timer_locked(state)
+            self._cancel_mirror_watchdog_locked(state)
+            self._reset_execution_context_locked(state, clear_card_message=True)
             self._apply_persisted_runtime_state_message_locked(
                 chat_binding_key,
                 state,
@@ -2459,14 +2524,6 @@ class CodexHandler(BotHandler):
                     current_thread_title="",
                 ),
             )
-            self._apply_runtime_state_message_locked(
-                state,
-                ExecutionStateChanged(
-                    current_turn_id="",
-                    awaiting_local_turn_started=False,
-                ),
-            )
-            self._cancel_mirror_watchdog_locked(state)
             self._clear_plan_state(state)
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)

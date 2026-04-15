@@ -5,6 +5,7 @@ Feishu 绑定级持久化状态。
 - 当前工作目录
 - 当前绑定 thread
 - 当前线程标题
+- 当前 thread 的写租约所属绑定（如果有）
 - 当前飞书会话的权限 / 协作模式设置
 
 运行中的 turn、执行卡片、审批请求等瞬时状态不落盘。
@@ -34,6 +35,17 @@ class ChatBindingStore:
         with self._lock:
             data = self._read_all()
             return self._load_from_data(data, normalized_binding)
+
+    def load_all(self) -> dict[tuple[str, str], StoredChatBinding]:
+        with self._lock:
+            data = self._read_all()
+            bindings: dict[tuple[str, str], StoredChatBinding] = {}
+            for chat_id, raw_chat_bindings in data["p2p_bindings"].items():
+                for sender_open_id, state in raw_chat_bindings.items():
+                    bindings[(sender_open_id, chat_id)] = dict(state)
+            for chat_id, state in data["group_bindings"].items():
+                bindings[(GROUP_SHARED_BINDING_OWNER_ID, chat_id)] = dict(state)
+            return bindings
 
     def save(self, binding: tuple[str, str], state: StoredChatBinding) -> StoredChatBinding:
         normalized_binding = self._normalize_binding(binding)
@@ -161,6 +173,7 @@ class ChatBindingStore:
             "working_dir": raw_state.get("working_dir", ""),
             "current_thread_id": raw_state.get("current_thread_id", ""),
             "current_thread_title": raw_state.get("current_thread_title", ""),
+            "current_thread_write_owner_thread_id": raw_state.get("current_thread_write_owner_thread_id", ""),
             "approval_policy": raw_state.get("approval_policy", ""),
             "sandbox": raw_state.get("sandbox", ""),
             "collaboration_mode": raw_state.get("collaboration_mode", ""),

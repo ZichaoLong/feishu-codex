@@ -22,6 +22,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/p2p",
                 "current_thread_id": "thread-p2p",
                 "current_thread_title": "p2p title",
+                "current_thread_write_owner_thread_id": "thread-p2p",
                 "approval_policy": "on-request",
                 "sandbox": "workspace-write",
                 "collaboration_mode": "default",
@@ -33,6 +34,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/group",
                 "current_thread_id": "thread-group",
                 "current_thread_title": "",
+                "current_thread_write_owner_thread_id": "",
                 "approval_policy": "never",
                 "sandbox": "danger-full-access",
                 "collaboration_mode": "plan",
@@ -42,10 +44,54 @@ class ChatBindingStoreTests(unittest.TestCase):
         raw = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(raw["schema_version"], CHAT_BINDING_STORE_SCHEMA_VERSION)
         self.assertEqual(raw["p2p_bindings"]["oc_p2p"]["ou_user"]["current_thread_id"], "thread-p2p")
+        self.assertEqual(
+            raw["p2p_bindings"]["oc_p2p"]["ou_user"]["current_thread_write_owner_thread_id"],
+            "thread-p2p",
+        )
         self.assertEqual(raw["group_bindings"]["oc_group"]["current_thread_id"], "thread-group")
 
         self.assertEqual(store.load(("ou_user", "oc_p2p"))["current_thread_title"], "p2p title")
         self.assertEqual(store.load(("__group__", "oc_group"))["collaboration_mode"], "plan")
+        self.assertEqual(
+            store.load(("ou_user", "oc_p2p"))["current_thread_write_owner_thread_id"],
+            "thread-p2p",
+        )
+
+    def test_load_all_returns_all_normalized_bindings(self) -> None:
+        _, store, _ = self._make_store()
+
+        store.save(
+            ("ou_user", "oc_p2p"),
+            {
+                "working_dir": "/tmp/p2p",
+                "current_thread_id": "thread-p2p",
+                "current_thread_title": "",
+                "current_thread_write_owner_thread_id": "thread-p2p",
+                "approval_policy": "on-request",
+                "sandbox": "workspace-write",
+                "collaboration_mode": "default",
+            },
+        )
+        store.save(
+            ("__group__", "oc_group"),
+            {
+                "working_dir": "/tmp/group",
+                "current_thread_id": "thread-group",
+                "current_thread_title": "group title",
+                "current_thread_write_owner_thread_id": "",
+                "approval_policy": "never",
+                "sandbox": "danger-full-access",
+                "collaboration_mode": "plan",
+            },
+        )
+
+        loaded = store.load_all()
+
+        self.assertEqual(
+            loaded[("ou_user", "oc_p2p")]["current_thread_write_owner_thread_id"],
+            "thread-p2p",
+        )
+        self.assertEqual(loaded[("__group__", "oc_group")]["current_thread_title"], "group title")
 
     def test_clear_all_removes_state_file(self) -> None:
         _, store, state_path = self._make_store()
@@ -56,6 +102,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/p2p",
                 "current_thread_id": "thread-p2p",
                 "current_thread_title": "",
+                "current_thread_write_owner_thread_id": "",
                 "approval_policy": "on-request",
                 "sandbox": "workspace-write",
                 "collaboration_mode": "default",
