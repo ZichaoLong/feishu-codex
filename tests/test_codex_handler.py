@@ -1,6 +1,8 @@
 import json
 import pathlib
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -1826,6 +1828,17 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
         self.assertEqual(handler._adapter.start_turn_calls[-1]["profile"], "provider2")
 
+    def test_prompt_keeps_last_known_profile_when_runtime_config_read_temporarily_fails(self) -> None:
+        handler, _ = self._make_handler()
+        handler._profile_state.save_default_profile("provider2")
+
+        self.assertIsNotNone(handler._safe_read_runtime_config())
+        handler._adapter.read_runtime_config = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("config down"))
+
+        handler.handle_message("ou_user", "c1", "/new")
+
+        self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
+
     def test_prompt_reuses_reserved_execution_card(self) -> None:
         handler, bot = self._make_handler()
         bot.reserved_execution_cards["m1"] = "reserved-card"
@@ -1835,6 +1848,58 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_message_id"], "reserved-card")
         self.assertEqual(len(bot.sent_messages), 0)
         self.assertEqual(bot.patches[-1][0], "reserved-card")
+
+    def test_prompt_failure_patches_reserved_execution_card(self) -> None:
+        handler, bot = self._make_handler()
+        bot.reserved_execution_cards["m1"] = "reserved-card"
+        handler._adapter.create_thread = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
+
+        handler.handle_message("ou_user", "c1", "hello", message_id="m1")
+
+        self.assertNotIn("m1", bot.reserved_execution_cards)
+        self.assertEqual(bot.patches[-1][0], "reserved-card")
+        self.assertIn("Codex 启动失败", bot.patches[-1][1])
+        self.assertIn("创建线程失败：boom", bot.patches[-1][1])
+
+    def test_concurrent_prompts_are_serialized_through_runtime_loop(self) -> None:
+        handler, bot = self._make_handler()
+        original_create_thread = handler._adapter.create_thread
+        started = threading.Event()
+        release = threading.Event()
+        create_thread_calls = 0
+
+        def blocking_create_thread(**kwargs):
+            nonlocal create_thread_calls
+            create_thread_calls += 1
+            started.set()
+            self.assertTrue(release.wait(timeout=1))
+            return original_create_thread(**kwargs)
+
+        handler._adapter.create_thread = blocking_create_thread
+        first = threading.Thread(target=handler.handle_message, args=("ou_user", "c1", "first"))
+        second = threading.Thread(target=handler.handle_message, args=("ou_user", "c1", "second"))
+
+        first.start()
+        self.assertTrue(started.wait(timeout=1))
+        second.start()
+        time.sleep(0.05)
+        release.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(create_thread_calls, 1)
+        self.assertEqual(len(handler._adapter.start_turn_calls), 1)
+        self.assertEqual(bot.replies[-1], ("c1", "当前线程仍在执行，请等待结束或先执行 `/cancel`。"))
+
+    def test_file_message_reports_explicitly_not_supported_yet(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_file_message("ou_user", "c1", "m-file", "file-key", "spec.pdf")
+
+        self.assertIn("暂不支持直接处理文件消息", bot.replies[-1][1])
+        self.assertIn("spec.pdf", bot.replies[-1][1])
 
     def test_prompt_after_switching_back_to_default_uses_default_collaboration_mode(self) -> None:
         handler, _ = self._make_handler()
@@ -2018,6 +2083,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(pending_card["header"]["title"]["content"], "Codex 正在恢复线程")
         self.assertIn("正在恢复：`demo`", pending_card["elements"][0]["content"])
         recorded_threads[0].run()
+        handler._runtime_call(lambda: None)
         self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
 
     def test_session_card_mentions_global_resume_scope(self) -> None:
@@ -2371,6 +2437,7 @@ class CodexHandlerTests(unittest.TestCase):
             message_id="msg-session",
             refresh_session_message_id="msg-session",
         )
+        handler._runtime_call(lambda: None)
 
         self.assertTrue(any(message_id == "msg-session" for message_id, _ in bot.patches))
 
@@ -2455,6 +2522,7 @@ class CodexHandlerTests(unittest.TestCase):
         args = scheduled["args"]
         kwargs = scheduled["kwargs"]
         target(*args, **kwargs)
+        handler._runtime_call(lambda: None)
 
         patched = json.loads(next(content for message_id, content in bot.patches if message_id == "msg-session"))
         content = "\n".join(
@@ -2724,6 +2792,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(recorded_threads), 1)
         self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 正在恢复线程")
         recorded_threads[0].run()
+        handler._runtime_call(lambda: None)
 
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "线程 thread-1… 最近对话")

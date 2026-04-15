@@ -56,6 +56,7 @@ from bot.codex_session_ui_domain import CodexSessionUiDomain
 from bot.codex_settings_domain import CodexSettingsDomain
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
 from bot.execution_transcript import ExecutionReplySegment, ExecutionTranscript
+from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
 from bot.session_resolution import (
     list_global_threads,
     looks_like_thread_id,
@@ -64,6 +65,7 @@ from bot.session_resolution import (
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.profile_state_store import ProfileStateStore
+from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +225,8 @@ class CodexHandler(BotHandler):
         self._chat_binding_key_by_thread_id: dict[str, ChatBindingKey] = {}
         self._pending_requests: dict[str, _PendingRequestState] = {}
         self._pending_rename_forms: dict[str, _PendingRenameFormState] = {}
+        self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
+        self._last_runtime_config: RuntimeConfigSummary | None = None
 
         self._default_working_dir = resolve_working_dir(
             str(cfg.get("default_working_dir", "")),
@@ -270,6 +274,7 @@ class CodexHandler(BotHandler):
             local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
         )
         self._session_ui_domain = CodexSessionUiDomain(self)
+        self._file_message_domain = FileMessageDomain(self)
         self._command_routes = self._build_command_routes()
         self._action_routes = self._build_action_routes()
         self._prefixed_action_routes = self._build_prefixed_action_routes()
@@ -287,15 +292,35 @@ class CodexHandler(BotHandler):
     def description(self) -> str:
         return "通过飞书与 Codex 交互"
 
+    def _runtime_call(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._runtime_loop.call(fn, *args, **kwargs)
+        except RuntimeLoopClosedError:
+            logger.debug("handler runtime loop already closed; dropping sync call %s", getattr(fn, "__name__", fn))
+            raise
+
+    def _runtime_submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+        try:
+            self._runtime_loop.submit(fn, *args, **kwargs)
+        except RuntimeLoopClosedError:
+            logger.debug(
+                "handler runtime loop already closed; dropping async call %s",
+                getattr(fn, "__name__", fn),
+            )
+
     def on_register(self, bot) -> None:
         super().on_register(bot)
         try:
+            self._runtime_loop.start()
             self._adapter.start()
         except Exception:
             logger.exception("启动 Codex app-server 失败")
             raise
 
     def handle_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
+        self._runtime_call(self._handle_message_impl, sender_id, chat_id, text, message_id=message_id)
+
+    def _handle_message_impl(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
         cleaned = (text or "").strip()
         with self._lock:
@@ -313,6 +338,17 @@ class CodexHandler(BotHandler):
         self._handle_prompt(sender_id, chat_id, cleaned, message_id=message_id)
 
     def handle_card_action(
+        self, sender_id: str, chat_id: str, message_id: str, action_value: dict
+    ) -> P2CardActionTriggerResponse:
+        return self._runtime_call(
+            self._handle_card_action_impl,
+            sender_id,
+            chat_id,
+            message_id,
+            action_value,
+        )
+
+    def _handle_card_action_impl(
         self, sender_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
@@ -350,6 +386,31 @@ class CodexHandler(BotHandler):
         if denied is not None:
             return denied
         return route.handler(sender_id, chat_id, message_id, action_value)
+
+    def handle_file_message(
+        self, sender_id: str, chat_id: str, message_id: str, file_key: str, file_name: str
+    ) -> None:
+        self._runtime_call(
+            self._handle_file_message_impl,
+            sender_id,
+            chat_id,
+            message_id,
+            file_key,
+            file_name,
+        )
+
+    def _handle_file_message_impl(
+        self, sender_id: str, chat_id: str, message_id: str, file_key: str, file_name: str
+    ) -> None:
+        self._file_message_domain.handle_message(
+            IncomingFileMessage(
+                sender_id=sender_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                file_key=file_key,
+                file_name=file_name,
+            )
+        )
 
     def _handle_user_input_form_fallback(
         self,
@@ -467,6 +528,8 @@ class CodexHandler(BotHandler):
             self._adapter.stop()
         except Exception:
             logger.exception("停止 Codex adapter 失败")
+        finally:
+            self._runtime_loop.stop()
 
     def _build_default_runtime_state(self) -> _RuntimeState:
         stored_binding = self._build_default_stored_binding()
@@ -728,12 +791,15 @@ class CodexHandler(BotHandler):
             state["mirror_watchdog_generation"] = generation
             timer = threading.Timer(
                 self._mirror_watchdog_seconds,
-                self._run_mirror_watchdog,
+                self._submit_mirror_watchdog,
                 args=(sender_id, chat_id, generation),
             )
             timer.daemon = True
             state["mirror_watchdog_timer"] = timer
             timer.start()
+
+    def _submit_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
+        self._runtime_submit(self._run_mirror_watchdog, sender_id, chat_id, generation)
 
     def _run_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -920,6 +986,19 @@ class CodexHandler(BotHandler):
             self.bot.reply_card(chat_id, card, parent_message_id=message_id)
             return
         self.bot.reply_card(chat_id, card)
+
+    def _claim_reserved_execution_card(self, trigger_message_id: str) -> str:
+        if not trigger_message_id or not hasattr(self.bot, "claim_reserved_execution_card"):
+            return ""
+        return str(self.bot.claim_reserved_execution_card(trigger_message_id) or "").strip()
+
+    def _render_start_failure(self, *, chat_id: str, message_id: str, text: str) -> None:
+        reserved_card_id = self._claim_reserved_execution_card(message_id)
+        if reserved_card_id:
+            card = build_markdown_card("Codex 启动失败", text, template="red")
+            if self.bot.patch_message(reserved_card_id, json.dumps(card, ensure_ascii=False)):
+                return
+        self._reply_text(chat_id, text, message_id=message_id)
 
     def _build_command_routes(self) -> dict[str, _CommandRoute]:
         return {
@@ -1411,7 +1490,11 @@ class CodexHandler(BotHandler):
             thread_id = self._ensure_thread(sender_id, chat_id, message_id=message_id)
         except Exception as exc:
             logger.exception("创建线程失败")
-            self._reply_text(chat_id, f"创建线程失败：{exc}", message_id=message_id)
+            self._render_start_failure(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"创建线程失败：{exc}",
+            )
             return
 
         with self._lock:
@@ -1432,8 +1515,8 @@ class CodexHandler(BotHandler):
             self._clear_plan_state(state)
 
         card_id = ""
-        if message_id and hasattr(self.bot, "claim_reserved_execution_card"):
-            card_id = str(self.bot.claim_reserved_execution_card(message_id) or "").strip()
+        if message_id:
+            card_id = self._claim_reserved_execution_card(message_id)
             if card_id:
                 self.bot.patch_message(
                     card_id,
@@ -1905,6 +1988,28 @@ class CodexHandler(BotHandler):
         message_id: str = "",
         refresh_session_message_id: str = "",
     ) -> None:
+        self._runtime_submit(
+            self._resume_thread_in_background_impl,
+            sender_id,
+            chat_id,
+            thread_id,
+            original_arg=original_arg,
+            summary=summary,
+            message_id=message_id,
+            refresh_session_message_id=refresh_session_message_id,
+        )
+
+    def _resume_thread_in_background_impl(
+        self,
+        sender_id: str,
+        chat_id: str,
+        thread_id: str,
+        *,
+        original_arg: str | None = None,
+        summary: ThreadSummary | None = None,
+        message_id: str = "",
+        refresh_session_message_id: str = "",
+    ) -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
         try:
             snapshot = self._resume_snapshot_by_id(
@@ -2104,10 +2209,12 @@ class CodexHandler(BotHandler):
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None:
         try:
-            return self._adapter.read_runtime_config()
+            runtime_config = self._adapter.read_runtime_config()
         except Exception:
             logger.exception("读取 Codex 运行时配置失败")
-            return None
+            return self._last_runtime_config
+        self._last_runtime_config = runtime_config
+        return runtime_config
 
     def _effective_default_profile(self) -> str:
         resolution = self._current_default_profile_resolution(self._safe_read_runtime_config())
@@ -2148,6 +2255,9 @@ class CodexHandler(BotHandler):
         return rounds[-self._history_preview_rounds :]
 
     def _handle_adapter_notification(self, method: str, params: dict[str, Any]) -> None:
+        self._runtime_submit(self._handle_adapter_notification_impl, method, params)
+
+    def _handle_adapter_notification_impl(self, method: str, params: dict[str, Any]) -> None:
         if method == "thread/status/changed":
             self._handle_thread_status_changed(params)
             return
@@ -2183,6 +2293,11 @@ class CodexHandler(BotHandler):
             return
 
     def _handle_adapter_request(self, request_id: int | str, method: str, params: dict[str, Any]) -> None:
+        self._runtime_submit(self._handle_adapter_request_impl, request_id, method, params)
+
+    def _handle_adapter_request_impl(
+        self, request_id: int | str, method: str, params: dict[str, Any]
+    ) -> None:
         thread_id = params.get("threadId", "")
         binding = self._chat_binding_key_by_thread_id.get(thread_id)
         if not binding:
@@ -2634,7 +2749,7 @@ class CodexHandler(BotHandler):
                 immediate = True
             elif timer is None:
                 delay = self._stream_patch_interval_ms / 1000 - (now - last_patch)
-                timer = threading.Timer(delay, self._flush_execution_card, args=(sender_id, chat_id))
+                timer = threading.Timer(delay, self._submit_flush_execution_card, args=(sender_id, chat_id))
                 timer.daemon = True
                 state["patch_timer"] = timer
                 timer.start()
@@ -2643,6 +2758,9 @@ class CodexHandler(BotHandler):
                 immediate = False
         if immediate:
             self._flush_execution_card(sender_id, chat_id)
+
+    def _submit_flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
+        self._runtime_submit(self._flush_execution_card, sender_id, chat_id, immediate=immediate)
 
     def _flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
