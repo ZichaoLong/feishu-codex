@@ -124,6 +124,8 @@ shared backend 与 wrapper 的具体机制，见
 并发 ownership 也应继续收紧：
 
 - `RuntimeLoop` 已是当前 handler 运行时状态变更的主要串行化原语
+- binding 解析与 runtime state 的 hydrate/create 应走单一 resolver 入口，
+  不应在多个调用点里继续手写“先挑 binding key，再决定是否建 state”的两段式流程
 - `ThreadLeaseRegistry` 这类对象当前应视为 runtime-owned 内部状态，而不是通用线程安全组件
 - `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面
 

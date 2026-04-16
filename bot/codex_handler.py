@@ -238,6 +238,12 @@ class _TerminalReconcileTarget:
     elapsed: int
 
 
+@dataclass(frozen=True)
+class _ResolvedRuntimeBinding:
+    binding: ChatBindingKey
+    state: _RuntimeState
+
+
 def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
     for preset, config in _PERMISSIONS_PRESETS.items():
         if config["approval_policy"] == approval_policy and config["sandbox"] == sandbox:
@@ -912,13 +918,12 @@ class CodexHandler(BotHandler):
         self._chat_binding_store.save(binding, stored_binding)
 
     def _save_stored_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> None:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        binding = self._chat_binding_key(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
         with self._lock:
-            self._sync_stored_binding_locked(binding, state)
+            self._sync_stored_binding_locked(resolved.binding, resolved.state)
 
     def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
+        state = self._resolve_runtime_binding(sender_id, chat_id, message_id).state
         with self._lock:
             return build_runtime_view(state)
 
@@ -948,12 +953,11 @@ class CodexHandler(BotHandler):
         sandbox: Any = UNSET,
         collaboration_mode: Any = UNSET,
     ) -> None:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        binding = self._chat_binding_key(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
         with self._lock:
             self._apply_persisted_runtime_state_message_locked(
-                binding,
-                state,
+                resolved.binding,
+                resolved.state,
                 RuntimeSettingsChanged(
                     approval_policy=approval_policy,
                     sandbox=sandbox,
@@ -972,15 +976,15 @@ class CodexHandler(BotHandler):
     ) -> bool:
         normalized_title = str(title or "").strip()
         normalized_thread_id = str(thread_id or "").strip()
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        binding = self._chat_binding_key(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
+        state = resolved.state
         with self._lock:
             if normalized_thread_id and state["current_thread_id"] != normalized_thread_id:
                 return False
             if not state["current_thread_id"]:
                 return False
             self._apply_persisted_runtime_state_message_locked(
-                binding,
+                resolved.binding,
                 state,
                 ThreadStateChanged(current_thread_title=normalized_title),
             )
@@ -1047,13 +1051,13 @@ class CodexHandler(BotHandler):
         )
 
     def _retire_execution_anchor(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        binding = self._chat_binding_key(sender_id, chat_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id)
+        state = resolved.state
         with self._lock:
-            self._release_thread_write_lease_locked(binding, state["current_thread_id"])
-            self._release_interaction_lease_for_binding(binding, state["current_thread_id"])
+            self._release_thread_write_lease_locked(resolved.binding, state["current_thread_id"])
+            self._release_interaction_lease_for_binding(resolved.binding, state["current_thread_id"])
             self._apply_runtime_state_message_locked(state, ExecutionRetired())
-            self._sync_stored_binding_locked(binding, state)
+            self._sync_stored_binding_locked(resolved.binding, state)
 
     def _refresh_terminal_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -1234,33 +1238,56 @@ class CodexHandler(BotHandler):
             return sender_binding
         return None
 
+    def _fresh_chat_binding_key(self, sender_id: str, chat_id: str, message_id: str = "") -> ChatBindingKey:
+        if sender_id == GROUP_SHARED_BINDING_OWNER_ID:
+            return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
+        if self._is_group_chat(chat_id, message_id):
+            return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
+        return (sender_id, chat_id)
+
+    def _get_or_create_runtime_state_locked(self, binding: ChatBindingKey) -> _RuntimeState:
+        state = self._runtime_state_by_binding.get(binding)
+        if state is not None:
+            return state
+
+        state = self._build_default_runtime_state()
+        stored_binding = self._chat_binding_store.load(binding)
+        if stored_binding is not None:
+            self._apply_stored_binding(state, stored_binding)
+            current_thread_id = state["current_thread_id"]
+            if state["current_thread_runtime_state"] == "attached":
+                self._subscribe_thread_locked(binding, current_thread_id)
+            owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
+            if (
+                state["current_thread_runtime_state"] == "attached"
+                and owner_thread_id
+                and owner_thread_id == current_thread_id
+            ):
+                self._acquire_thread_write_lease_locked(binding, owner_thread_id)
+        self._runtime_state_by_binding[binding] = state
+        return state
+
+    def _resolve_runtime_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> _ResolvedRuntimeBinding:
+        with self._lock:
+            existing = self._existing_chat_binding_key_locked(sender_id, chat_id)
+            if existing is not None:
+                return _ResolvedRuntimeBinding(
+                    binding=existing,
+                    state=self._get_or_create_runtime_state_locked(existing),
+                )
+
+        binding = self._fresh_chat_binding_key(sender_id, chat_id, message_id)
+        with self._lock:
+            existing = self._existing_chat_binding_key_locked(sender_id, chat_id)
+            if existing is not None:
+                binding = existing
+            return _ResolvedRuntimeBinding(
+                binding=binding,
+                state=self._get_or_create_runtime_state_locked(binding),
+            )
+
     def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> _RuntimeState:
-        with self._lock:
-            existing = self._existing_chat_binding_key_locked(sender_id, chat_id)
-            if existing is not None:
-                return self._runtime_state_by_binding[existing]
-        key = self._chat_binding_key(sender_id, chat_id, message_id)
-        with self._lock:
-            existing = self._existing_chat_binding_key_locked(sender_id, chat_id)
-            if existing is not None:
-                return self._runtime_state_by_binding[existing]
-            if key not in self._runtime_state_by_binding:
-                state = self._build_default_runtime_state()
-                stored_binding = self._chat_binding_store.load(key)
-                if stored_binding is not None:
-                    self._apply_stored_binding(state, stored_binding)
-                    current_thread_id = state["current_thread_id"]
-                    if state["current_thread_runtime_state"] == "attached":
-                        self._subscribe_thread_locked(key, current_thread_id)
-                    owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
-                    if (
-                        state["current_thread_runtime_state"] == "attached"
-                        and owner_thread_id
-                        and owner_thread_id == current_thread_id
-                    ):
-                        self._acquire_thread_write_lease_locked(key, owner_thread_id)
-                self._runtime_state_by_binding[key] = state
-            return self._runtime_state_by_binding[key]
+        return self._resolve_runtime_binding(sender_id, chat_id, message_id).state
 
     def _resolve_chat_type(self, chat_id: str, message_id: str = "") -> str:
         context = self.bot.get_message_context(message_id) if message_id else {}
@@ -1369,15 +1396,11 @@ class CodexHandler(BotHandler):
         return ""
 
     def _chat_binding_key(self, sender_id: str, chat_id: str, message_id: str = "") -> ChatBindingKey:
-        if sender_id == GROUP_SHARED_BINDING_OWNER_ID:
-            return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
         with self._lock:
             existing = self._existing_chat_binding_key_locked(sender_id, chat_id)
             if existing is not None:
                 return existing
-        if self._is_group_chat(chat_id, message_id):
-            return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
-        return (sender_id, chat_id)
+        return self._fresh_chat_binding_key(sender_id, chat_id, message_id)
 
     def _group_actor_open_id(self, message_id: str = "", operator_open_id: str = "") -> str:
         normalized_operator_open_id = str(operator_open_id or "").strip()
@@ -1397,13 +1420,14 @@ class CodexHandler(BotHandler):
     def _preflight_group_prompt_impl(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
         if self._handle_running_prompt(sender_id, chat_id, "", message_id=message_id):
             return False
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
+        with self._lock:
+            runtime = build_runtime_view(resolved.state)
         thread_id = runtime.current_thread_id.strip()
         if not thread_id:
             return True
-        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
         denial_text = self._prompt_write_denial_text(
-            chat_binding_key,
+            resolved.binding,
             chat_id,
             thread_id,
             message_id=message_id,
@@ -2198,12 +2222,12 @@ class CodexHandler(BotHandler):
             return False
 
         reply_text, reply_items = self._snapshot_reply(snapshot, turn_id=turn_id)
-        state = self._get_runtime_state(sender_id, chat_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id)
+        state = resolved.state
         should_finalize = snapshot.summary.status != "active"
-        binding = self._chat_binding_key(sender_id, chat_id)
         with self._lock:
             self._apply_persisted_runtime_state_message_locked(
-                binding,
+                resolved.binding,
                 state,
                 ThreadStateChanged(
                     current_thread_title=snapshot.summary.title or state["current_thread_title"],
@@ -2238,9 +2262,11 @@ class CodexHandler(BotHandler):
         message_id: str = "",
         actor_open_id: str = "",
     ) -> None:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
+        state = resolved.state
+        chat_binding_key = resolved.binding
+        with self._lock:
+            runtime = build_runtime_view(state)
         released_thread_id = runtime.current_thread_id.strip()
         preattached_interaction_lease: InteractionLeaseAcquireResult | None = None
         if released_thread_id and not runtime.binding.feishu_runtime_attached:
@@ -3561,8 +3587,9 @@ class CodexHandler(BotHandler):
         *,
         message_id: str = "",
     ) -> None:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
+        state = resolved.state
+        chat_binding_key = resolved.binding
         unsubscribe_thread_id: str = ""
         with self._lock:
             old_thread_id = state["current_thread_id"]
@@ -3592,8 +3619,9 @@ class CodexHandler(BotHandler):
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        chat_binding_key = self._chat_binding_key(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
+        state = resolved.state
+        chat_binding_key = resolved.binding
         unsubscribe_thread_id: str = ""
         with self._lock:
             thread_id = state["current_thread_id"]

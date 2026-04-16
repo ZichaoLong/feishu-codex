@@ -2050,6 +2050,17 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("plan", response["toast"])
 
+    def test_resolve_runtime_binding_reuses_existing_group_state(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        first = handler._resolve_runtime_binding("ou_user", "chat-group", "m-group")
+        second = handler._resolve_runtime_binding("ou_user2", "chat-group")
+
+        self.assertEqual(first.binding, ("__group__", "chat-group"))
+        self.assertEqual(second.binding, ("__group__", "chat-group"))
+        self.assertIs(first.state, second.state)
+
     def test_sandbox_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
 

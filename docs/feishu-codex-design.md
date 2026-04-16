@@ -154,6 +154,9 @@ Concurrency ownership should also remain explicit:
 
 - `RuntimeLoop` is already the primary serialization mechanism for handler-side
   runtime state mutations
+- binding resolution and runtime-state hydrate/create should go through a
+  single resolver path, rather than open-coding "pick a binding key, then
+  maybe create state" in multiple call sites
 - objects such as `ThreadLeaseRegistry` should currently be treated as
   runtime-owned internal state, not as general-purpose thread-safe components
 - `CodexHandler._lock` still acts as a broad shared-state fallback lock, but the
