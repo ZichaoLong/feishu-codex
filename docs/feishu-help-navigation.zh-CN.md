@@ -64,6 +64,12 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 
 但底层操作、校验、scope guard、状态迁移必须等价。
 
+同时，help / 导航卡片的 payload 也必须保持最小且显式：
+
+- 路由键是 `action`
+- payload 里只放目标 action 实际会消费的参数
+- `plugin`、bot keyword 或其他部署标识字段不属于回调合同，路由时不得依赖它们
+
 ## 5. Session 面
 
 `/help` 下的 `session` 分支负责线程与工作目录相关能力。

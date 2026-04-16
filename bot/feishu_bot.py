@@ -15,7 +15,23 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import lark_oapi as lark
-from lark_oapi.api.im.v1 import *
+from lark_oapi.api.im.v1 import (
+    CreateMessageRequest,
+    CreateMessageRequestBody,
+    DeleteMessageRequest,
+    GetChatRequest,
+    GetMessageRequest,
+    GetMessageResourceRequest,
+    ListMessageRequest,
+    P2ImChatDisbandedV1,
+    P2ImChatMemberBotDeletedV1,
+    P2ImMessageReceiveV1,
+    PatchMessageRequest,
+    PatchMessageRequestBody,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
+    UrgentAppMessageRequest,
+)
 from lark_oapi.api.application.v6.model.p2_application_bot_menu_v6 import (
     P2ApplicationBotMenuV6,
 )

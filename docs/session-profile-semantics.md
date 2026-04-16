@@ -110,6 +110,10 @@ These five commands are the entire shared surface between Feishu and the
 `fcodex` wrapper. Upstream `/help`, `/resume`, `/profile`, and other commands
 inside a running TUI session are intentionally outside this shared surface.
 
+Whenever Feishu help cards, session cards, or wrapper help text reference one
+of these commands, they should reuse this shared surface contract rather than
+carrying a forked hardcoded usage string.
+
 They must be used as standalone wrapper commands. They are intentionally not
 mixed with bare `codex` flags or subcommands.
 

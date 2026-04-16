@@ -15,7 +15,9 @@ from bot.cards import CommandResult, make_card_response
 from bot.shared_command_surface import get_shared_command
 
 
+_SHARED_HELP_COMMAND = get_shared_command("help")
 _SHARED_PROFILE_COMMAND = get_shared_command("profile")
+_SHARED_RM_COMMAND = get_shared_command("rm")
 _SHARED_SESSION_COMMAND = get_shared_command("session")
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
 
@@ -65,10 +67,8 @@ class CodexHelpDomain:
     def __init__(
         self,
         *,
-        plugin_keyword: str,
         local_thread_safety_rule: str,
     ) -> None:
-        self._plugin_keyword = plugin_keyword
         self._local_thread_safety_rule = local_thread_safety_rule
         self._page_specs = self._build_page_specs()
         self._page_aliases = self._build_page_aliases()
@@ -83,7 +83,8 @@ class CodexHelpDomain:
                     "- `settings`：profile、权限预设、审批、沙箱、协作模式、身份初始化\n"
                     "- `group`：群聊工作态、ACL 使用规则、群内触发约束\n\n"
                     f"{self._local_thread_safety_rule}\n\n"
-                    "本地 `fcodex` wrapper 用法不放在飞书 `/help`；请在终端执行 `fcodex /help`。"
+                    f"本地 `fcodex` wrapper 用法不放在飞书 `{_SHARED_HELP_COMMAND.slash_name}`；"
+                    f"请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`。"
                 ),
                 action_rows=(
                     _HelpActionRowSpec(
@@ -107,7 +108,7 @@ class CodexHelpDomain:
                     "- “当前线程”页：查看 `/status`、释放 runtime、重命名、归档当前绑定线程\n\n"
                     "**本地继续**\n"
                     "- 需要在本地继续同一 live thread 时，使用 `fcodex`\n"
-                    "- 本地 wrapper 命令请在终端执行 `fcodex /help`\n\n"
+                    f"- 本地 wrapper 命令请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`\n\n"
                     f"{self._local_thread_safety_rule}"
                 ),
                 action_rows=(
@@ -141,7 +142,7 @@ class CodexHelpDomain:
                     "- `/status`：查看当前 binding、feishu runtime、backend thread status、profile 相关信息\n"
                     "- `/release-feishu-runtime`：释放 Feishu 对当前线程的 runtime 持有，但不解绑 thread\n"
                     "- `/rename <title>`：重命名当前线程\n"
-                    "- `/rm`：归档当前线程\n\n"
+                    f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
                     "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。"
                 ),
                 action_rows=(
@@ -346,7 +347,10 @@ class CodexHelpDomain:
             ),
             "local-wrapper-redirect": _HelpPageSpec(
                 title="Codex 帮助：本地命令",
-                markdown="本地 `fcodex` wrapper 命令不再放在飞书 `/help`。请在终端执行 `fcodex /help`。",
+                markdown=(
+                    f"本地 `fcodex` wrapper 命令不再放在飞书 `{_SHARED_HELP_COMMAND.slash_name}`。"
+                    f"请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`。"
+                ),
                 action_rows=(
                     _HelpActionRowSpec(
                         buttons=(_HelpPageButtonSpec(label="返回帮助", page="overview"),),
@@ -396,7 +400,6 @@ class CodexHelpDomain:
                 "type": spec.button_type,
                 "value": {
                     "action": "show_help_page",
-                    "plugin": self._plugin_keyword,
                     "page": spec.page,
                 },
             }
@@ -406,7 +409,6 @@ class CodexHelpDomain:
             "type": spec.button_type,
             "value": {
                 "action": "help_execute_command",
-                "plugin": self._plugin_keyword,
                 "command": spec.command,
                 "title": spec.title,
             },
@@ -448,7 +450,6 @@ class CodexHelpDomain:
                             "form_action_type": "submit",
                             "value": {
                                 "action": "help_submit_command",
-                                "plugin": self._plugin_keyword,
                                 "command": spec.form.submit_command,
                                 "field_name": spec.form.field_name,
                                 "title": spec.form.submit_title,

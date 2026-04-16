@@ -319,7 +319,6 @@ class CodexHandler(BotHandler):
         )
         self._group_domain = CodexGroupDomain(self)
         self._help_domain = CodexHelpDomain(
-            plugin_keyword=KEYWORD,
             local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
         )
         self._session_ui_domain = CodexSessionUiDomain(self)

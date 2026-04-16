@@ -62,6 +62,12 @@ Different response shape is allowed:
 
 But the underlying operation, validation, scope guard, and state transition must remain equivalent.
 
+Help/navigation card payloads must also stay minimal and explicit:
+
+- routing is keyed by `action`
+- payloads should only carry the parameters the target action actually consumes
+- `plugin`, bot keyword, or other deployment-identifying fields are not part of the callback contract and must not be required for routing
+
 ## 5. Session Surface
 
 The `session` branch of `/help` should cover thread and working-directory operations.

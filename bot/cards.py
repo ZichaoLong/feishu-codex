@@ -13,9 +13,10 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     CallBackToast,
 )
 
-from bot.constants import KEYWORD, display_path, format_timestamp, shorten
+from bot.constants import display_path, format_timestamp, shorten
 from bot.execution_transcript import ExecutionReplySegment
 from bot.feishu_bot import _MAX_CARD_TABLES, count_card_tables, limit_card_tables
+from bot.shared_command_surface import get_shared_command
 
 
 def make_card_response(
@@ -46,6 +47,8 @@ class CommandResult:
 
 _HISTORY_TEXT_MAX = 300
 _PLAN_CONTENT_MAX = 4000
+_SHARED_HELP_COMMAND = get_shared_command("help")
+_SHARED_RESUME_COMMAND = get_shared_command("resume")
 
 
 def _card_config() -> dict:
@@ -87,7 +90,6 @@ def build_profile_card(
                             "type": "primary" if profile_name == current_profile else "default",
                             "value": {
                                 "action": "set_profile",
-                                "plugin": KEYWORD,
                                 "profile": profile_name,
                             },
                         }
@@ -116,7 +118,6 @@ def _back_to_help_action() -> dict:
                 "type": "default",
                 "value": {
                     "action": "show_help_page",
-                    "plugin": KEYWORD,
                     "page": "overview",
                 },
             }
@@ -194,7 +195,7 @@ def build_execution_card(
     elements.append(
         {
             "tag": "markdown",
-            "content": "*提示：发送 `/help` 查看可用命令列表。*",
+            "content": f"*提示：发送 `{_SHARED_HELP_COMMAND.slash_name}` 查看可用命令列表。*",
         }
     )
     elements.append({"tag": "hr"})
@@ -219,7 +220,7 @@ def build_execution_card(
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "取消执行"},
                 "type": "danger",
-                "value": {"action": "cancel_turn", "plugin": KEYWORD},
+                "value": {"action": "cancel_turn"},
             }
         )
 
@@ -265,7 +266,6 @@ def build_command_approval_card(
                         "type": "primary",
                         "value": {
                             "action": "command_allow_once",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -275,7 +275,6 @@ def build_command_approval_card(
                         "type": "default",
                         "value": {
                             "action": "command_allow_session",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -285,7 +284,6 @@ def build_command_approval_card(
                         "type": "danger",
                         "value": {
                             "action": "command_deny",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -295,7 +293,6 @@ def build_command_approval_card(
                         "type": "danger",
                         "value": {
                             "action": "command_abort",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -338,7 +335,6 @@ def build_file_change_approval_card(
                         "type": "primary",
                         "value": {
                             "action": "file_change_accept",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -348,7 +344,6 @@ def build_file_change_approval_card(
                         "type": "default",
                         "value": {
                             "action": "file_change_accept_session",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -358,7 +353,6 @@ def build_file_change_approval_card(
                         "type": "danger",
                         "value": {
                             "action": "file_change_decline",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -368,7 +362,6 @@ def build_file_change_approval_card(
                         "type": "danger",
                         "value": {
                             "action": "file_change_cancel",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -422,7 +415,6 @@ def build_permissions_approval_card(
                         "type": "primary",
                         "value": {
                             "action": "permissions_allow_once",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -432,7 +424,6 @@ def build_permissions_approval_card(
                         "type": "default",
                         "value": {
                             "action": "permissions_allow_session",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -442,7 +433,6 @@ def build_permissions_approval_card(
                         "type": "danger",
                         "value": {
                             "action": "permissions_deny",
-                            "plugin": KEYWORD,
                             "request_id": request_id,
                         },
                     },
@@ -511,7 +501,6 @@ def build_approval_policy_card(current_policy: str, *, running: bool = False) ->
                 "type": "primary" if policy == current_policy else "default",
                 "value": {
                     "action": "set_approval_policy",
-                    "plugin": KEYWORD,
                     "policy": policy,
                 },
             }
@@ -570,7 +559,6 @@ def build_sandbox_policy_card(current_sandbox: str, *, running: bool = False) ->
                 "type": "primary" if policy == current_sandbox else "default",
                 "value": {
                     "action": "set_sandbox_policy",
-                    "plugin": KEYWORD,
                     "policy": policy,
                 },
             }
@@ -664,7 +652,6 @@ def build_permissions_preset_card(
                 "type": "primary" if preset["id"] == current_preset else "default",
                 "value": {
                     "action": "set_permissions_preset",
-                    "plugin": KEYWORD,
                     "preset": preset["id"],
                 },
             }
@@ -721,7 +708,6 @@ def build_collaboration_mode_card(current_mode: str, *, running: bool = False) -
                 "type": "primary" if mode == current_mode else "default",
                 "value": {
                     "action": "set_collaboration_mode",
-                    "plugin": KEYWORD,
                     "mode": mode,
                 },
             }
@@ -776,7 +762,6 @@ def build_group_mode_card(current_mode: str, *, can_manage: bool) -> dict:
                     "type": "primary" if mode == current_mode else "default",
                     "value": {
                         "action": "set_group_mode",
-                        "plugin": KEYWORD,
                         "mode": mode,
                     },
                 }
@@ -851,7 +836,6 @@ def build_group_acl_card(
                     "type": "primary" if policy == access_policy else "default",
                     "value": {
                         "action": "set_group_acl_policy",
-                        "plugin": KEYWORD,
                         "policy": policy,
                     },
                 }
@@ -929,7 +913,6 @@ def build_ask_user_card(
                             "type": "primary" if idx == 0 else "default",
                             "value": {
                                 "action": "answer_user_input_option",
-                                "plugin": KEYWORD,
                                 "request_id": request_id,
                                 "question_id": qid,
                                 "answer": opt.get("label", ""),
@@ -962,7 +945,6 @@ def build_ask_user_card(
                             "form_action_type": "submit",
                             "value": {
                                 "action": "answer_user_input_custom",
-                                "plugin": KEYWORD,
                                 "request_id": request_id,
                                 "question_id": qid,
                             },
@@ -1045,7 +1027,6 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
                     "type": "primary" if current else "default",
                     "value": {
                         "action": "resume_thread",
-                        "plugin": KEYWORD,
                         "thread_id": thread_id,
                     },
                 },
@@ -1055,7 +1036,6 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
                     "type": "default",
                     "value": {
                         "action": "archive_thread",
-                        "plugin": KEYWORD,
                         "thread_id": thread_id,
                     },
                 },
@@ -1084,8 +1064,8 @@ def build_sessions_card(
                 f"当前目录：`{working_dir_display}`\n"
                 "已按当前目录跨 provider 汇总显示线程。\n"
                 f"按最近更新时间排序，共 {total_count} 个线程。\n"
-                "想恢复其他目录的线程，或按名字做全局精确查找，请用 `/resume <thread_id|thread_name>`。\n"
-                "如需在本地继续同一线程，请使用 `fcodex`；本地 wrapper 命令请在终端执行 `fcodex /help`。"
+                f"想恢复其他目录的线程，或按名字做全局精确查找，请用 `{_SHARED_RESUME_COMMAND.feishu_usage}`。\n"
+                f"如需在本地继续同一线程，请使用 `fcodex`；本地 wrapper 命令请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`。"
             ),
         },
         {"tag": "hr"},
@@ -1111,7 +1091,6 @@ def build_sessions_card(
                 "type": "default",
                 "value": {
                     "action": "show_more_sessions",
-                    "plugin": KEYWORD,
                 },
             }
         )
@@ -1122,7 +1101,6 @@ def build_sessions_card(
             "type": "default",
             "value": {
                 "action": "close_sessions_card",
-                "plugin": KEYWORD,
             },
         }
     )
@@ -1155,7 +1133,6 @@ def build_sessions_closed_card() -> dict:
                         "type": "primary",
                         "value": {
                             "action": "reopen_sessions_card",
-                            "plugin": KEYWORD,
                         },
                     }
                 ],
@@ -1221,7 +1198,6 @@ def build_rename_card(session: dict) -> dict:
                         "form_action_type": "submit",
                         "value": {
                             "action": "rename_thread",
-                            "plugin": KEYWORD,
                             "thread_id": session["thread_id"],
                         },
                     },
@@ -1236,7 +1212,6 @@ def build_rename_card(session: dict) -> dict:
                         "type": "default",
                         "value": {
                             "action": "cancel_rename",
-                            "plugin": KEYWORD,
                         },
                     }
                 ],

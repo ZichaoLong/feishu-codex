@@ -103,6 +103,9 @@ wrapper 额外增加的行为：
 这 5 条命令就是 Feishu 与 `fcodex` wrapper 之间完整的 shared surface；
 运行中 TUI 内的 upstream `/help`、`/resume`、`/profile` 等命令不在这个 shared surface 内。
 
+凡是飞书 help 卡片、session 卡片或 wrapper help 文本需要引用这些命令时，
+都应复用这份 shared surface 合同，而不是各自再拷一份硬编码用法字符串。
+
 它们必须以独立 wrapper 命令形式使用，不会与裸 `codex` 的 flags 或 subcommands 混用。
 
 ### `fcodex /session [cwd|global]`
