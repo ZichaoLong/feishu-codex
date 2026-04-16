@@ -115,8 +115,9 @@ def _back_to_help_action() -> dict:
                 "text": {"tag": "plain_text", "content": "返回帮助"},
                 "type": "default",
                 "value": {
-                    "action": "show_help_overview",
+                    "action": "show_help_page",
                     "plugin": KEYWORD,
+                    "page": "overview",
                 },
             }
         ],

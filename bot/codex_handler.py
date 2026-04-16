@@ -1713,14 +1713,8 @@ class CodexHandler(BotHandler):
                 handler=self._session_ui_domain.handle_reopen_sessions_card_action,
                 group_guard="group_admin",
             ),
-            "show_help_topic": _ActionRoute(
-                handler=self._help_domain.handle_show_help_topic_action,
-            ),
             "show_help_page": _ActionRoute(
                 handler=self._help_domain.handle_show_help_page_action,
-            ),
-            "show_help_overview": _ActionRoute(
-                handler=self._help_domain.handle_show_help_overview_action,
             ),
             "help_execute_command": _ActionRoute(
                 handler=self._handle_help_execute_command_action,
