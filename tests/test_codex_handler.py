@@ -466,6 +466,40 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(handler._adapter.start_calls, 0)
 
+    def test_on_register_recovers_from_stale_owner_metadata_and_socket(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        socket_path = data_dir / "service-control.sock"
+        metadata_path = data_dir / "service-instance.json"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        socket_path.write_text("stale", encoding="utf-8")
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "owner_pid": 999999,
+                    "owner_token": "stale-owner-token",
+                    "socket_path": str(socket_path),
+                    "started_at": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        handler, bot = self._make_handler(data_dir=data_dir)
+
+        handler.on_register(bot)
+
+        metadata = handler._service_instance_lease.load_metadata()
+        status = control_request(data_dir, "service/status")
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual(metadata.owner_pid, os.getpid())
+        self.assertNotEqual(metadata.owner_token, "stale-owner-token")
+        self.assertTrue(socket_path.exists())
+        self.assertTrue(handler._service_instance_lease.owns_socket_path(socket_path))
+        self.assertEqual(status["pid"], os.getpid())
+
     def test_on_register_rolls_back_runtime_loop_when_adapter_start_fails(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -2485,6 +2519,110 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(status["thread_id"], "thread-1")
         self.assertEqual(status["thread_title"], "demo")
+
+    def test_service_control_plane_thread_bindings_name_target_resolves_explicit_exact_name(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        result = control_request(data_dir, "thread/bindings", {"thread_name": "demo"})
+
+        self.assertEqual(result["thread_id"], "thread-1")
+        self.assertEqual(result["thread_title"], "demo")
+        self.assertEqual(
+            result["bindings"],
+            [{"binding_id": "p2p:ou_user:c1", "feishu_runtime_state": "attached"}],
+        )
+
+    def test_service_control_plane_release_runtime_name_target_resolves_explicit_exact_name(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        unloaded = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="notLoaded",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        def _unsubscribe(thread_id: str) -> None:
+            handler._adapter.unsubscribe_thread_calls.append(thread_id)
+            handler._adapter.thread_snapshots[(thread_id, None)] = ThreadSnapshot(summary=unloaded)
+
+        handler._adapter.unsubscribe_thread = _unsubscribe
+
+        result = control_request(data_dir, "thread/release-feishu-runtime", {"thread_name": "demo"})
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["thread_id"], "thread-1")
+        self.assertEqual(result["backend_thread_status"], "notLoaded")
+        self.assertEqual(result["released_binding_ids"], ["p2p:ou_user:c1"])
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "released")
+
+    def test_service_control_plane_thread_name_target_rejects_ambiguous_exact_name(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread_1 = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project-a",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=2,
+            source="appServer",
+            status="idle",
+        )
+        thread_2 = ThreadSummary(
+            thread_id="thread-2",
+            cwd="/tmp/project-b",
+            name="demo",
+            preview="world",
+            created_at=0,
+            updated_at=1,
+            source="appServer",
+            status="idle",
+        )
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread_1)
+        handler._adapter.thread_snapshots[("thread-2", None)] = ThreadSnapshot(summary=thread_2)
+
+        with self.assertRaisesRegex(ServiceControlError, "匹配到多个同名线程"):
+            control_request(data_dir, "thread/status", {"thread_name": "demo"})
 
     def test_service_control_plane_thread_target_requires_exactly_one_selector(self) -> None:
         tempdir = tempfile.TemporaryDirectory()

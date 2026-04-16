@@ -63,3 +63,31 @@ class ServiceInstanceLeaseTests(unittest.TestCase):
         lease.release()
 
         self.assertTrue(metadata_path.exists())
+
+    def test_acquire_replaces_stale_metadata_from_dead_owner(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        socket_path = data_dir / "service-control.sock"
+        metadata_path = data_dir / "service-instance.json"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "owner_pid": 999999,
+                    "owner_token": "stale-owner-token",
+                    "socket_path": str(socket_path),
+                    "started_at": 1.0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        lease = ServiceInstanceLease(data_dir)
+        self.addCleanup(lease.release)
+
+        metadata = lease.acquire(socket_path=socket_path)
+
+        self.assertEqual(metadata.owner_pid, os.getpid())
+        self.assertNotEqual(metadata.owner_token, "stale-owner-token")
+        self.assertEqual(metadata.socket_path, str(socket_path))
+        self.assertEqual(lease.load_metadata(), metadata)
