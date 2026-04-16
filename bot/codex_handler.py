@@ -2696,6 +2696,80 @@ class CodexHandler(BotHandler):
                 return False, "当前还有飞书侧审批或输入请求未处理，不能释放 runtime。"
         return True, ""
 
+    def _binding_has_pending_request_locked(self, binding: ChatBindingKey) -> bool:
+        for pending in self._pending_requests.values():
+            pending_binding = (
+                str(pending.get("sender_id", "") or "").strip(),
+                str(pending.get("chat_id", "") or "").strip(),
+            )
+            if pending_binding == binding:
+                return True
+        return False
+
+    def _binding_clear_availability_locked(self, binding: ChatBindingKey) -> tuple[bool, str]:
+        state = self._runtime_state_by_binding.get(binding)
+        if state is None:
+            return False, f"未找到绑定：{format_binding_id(binding)}"
+        if self._binding_has_inflight_turn_locked(state):
+            return False, "当前有飞书侧 turn 正在运行，不能清除 binding。"
+        if self._binding_has_pending_request_locked(binding):
+            return False, "当前还有飞书侧审批或输入请求未处理，不能清除 binding。"
+        return True, ""
+
+    def _clear_binding_for_control(self, binding: ChatBindingKey) -> dict[str, Any]:
+        unsubscribe_thread_id = ""
+        binding_id = format_binding_id(binding)
+        thread_id = ""
+        thread_title = ""
+        with self._lock:
+            allowed, reason = self._binding_clear_availability_locked(binding)
+            if not allowed:
+                raise ValueError(reason)
+            state = self._runtime_state_by_binding.get(binding)
+            assert state is not None
+            thread_id = str(state["current_thread_id"] or "").strip()
+            thread_title = str(state["current_thread_title"] or "").strip()
+            unsubscribe_thread_id = self._deactivate_binding_locked(binding)
+        if unsubscribe_thread_id:
+            self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+        return {
+            "binding_id": binding_id,
+            "thread_id": thread_id,
+            "thread_title": thread_title,
+            "cleared": True,
+        }
+
+    def _clear_all_bindings_for_control(self) -> dict[str, Any]:
+        unsubscribe_thread_ids: list[str] = []
+        cleared_binding_ids: list[str] = []
+        with self._lock:
+            bindings = sorted(self._runtime_state_by_binding)
+            if not bindings:
+                self._chat_binding_store.clear_all()
+                return {
+                    "cleared_binding_ids": [],
+                    "already_empty": True,
+                }
+            blockers: list[str] = []
+            for binding in bindings:
+                allowed, reason = self._binding_clear_availability_locked(binding)
+                if not allowed:
+                    blockers.append(f"{format_binding_id(binding)}: {reason}")
+            if blockers:
+                raise ValueError("以下 binding 当前不能清除：\n" + "\n".join(blockers))
+            for binding in bindings:
+                unsubscribe_thread_id = self._deactivate_binding_locked(binding)
+                cleared_binding_ids.append(format_binding_id(binding))
+                if unsubscribe_thread_id:
+                    unsubscribe_thread_ids.append(unsubscribe_thread_id)
+            self._chat_binding_store.clear_all()
+        for unsubscribe_thread_id in sorted(set(unsubscribe_thread_ids)):
+            self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+        return {
+            "cleared_binding_ids": cleared_binding_ids,
+            "already_empty": False,
+        }
+
     def _binding_status_snapshot(self, binding: ChatBindingKey) -> dict[str, Any]:
         with self._lock:
             state = self._runtime_state_by_binding.get(binding)
@@ -3003,6 +3077,14 @@ class CodexHandler(BotHandler):
             binding_id = str(params.get("binding_id", "") or "").strip()
             binding = parse_binding_id(binding_id)
             return self._binding_status_snapshot(binding)
+        if method == "binding/clear":
+            binding_id = str(params.get("binding_id", "") or "").strip()
+            if not binding_id:
+                raise ValueError("binding/clear 缺少 binding_id。")
+            binding = parse_binding_id(binding_id)
+            return self._clear_binding_for_control(binding)
+        if method == "binding/clear-all":
+            return self._clear_all_bindings_for_control()
         if method in {"thread/status", "thread/bindings", "thread/release-feishu-runtime"}:
             thread = self._resolve_thread_target_for_control_params(params)
             if method == "thread/status":

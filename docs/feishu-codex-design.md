@@ -117,8 +117,68 @@ Current module split:
 - `bot/feishu_codexctl.py` and `bot/service_control_plane.py`: local service-admin
   CLI and the in-process control plane for the running service
 - `bot/binding_identity.py`: stable admin-facing binding identifiers
+- `bot/execution_transcript.py`: an internal transcript assembler for execution-card
+  presentation; it builds reply/log fragments and does not own thread, owner,
+  or binding-level state
 - `bot/stores/*.py`: local default profile, runtime backend discovery state,
   and group-chat state
+
+One maintenance rule should also stay explicit for the Feishu transport layer:
+
+- transport-boundary modules such as `FeishuBot` should keep their SDK
+  dependency surface visible
+- wildcard imports should not be the long-term way to hide which IM API types
+  the module actually depends on
+
+One adapter-boundary contract also needs to stay explicit:
+
+- `resume` request inputs should not be abstracted as only `profile`
+- for an unloaded thread, Feishu already passes `profile / model /
+  model_provider` as resume-time recovery hints
+- for a loaded thread, carrying those inputs does not mean the live runtime can
+  be rewritten in place
+
+So the adapter boundary should describe which resume inputs are accepted by the
+request contract, rather than exposing an older abstract signature that is
+narrower than the real call surface.
+
+Thread-summary access should also keep two contracts separate:
+
+- authoritative read: direct backend read by `thread_id`, used by paths that are
+  about to perform a real operation
+- bounded-list best-effort lookup: only supplements context or error wording
+  from the current global list view, and must not be treated as proof that a
+  thread does not exist
+
+Concurrency ownership should also remain explicit:
+
+- `RuntimeLoop` is already the primary serialization mechanism for handler-side
+  runtime state mutations
+- objects such as `ThreadLeaseRegistry` should currently be treated as
+  runtime-owned internal state, not as general-purpose thread-safe components
+- `CodexHandler._lock` still acts as a broad shared-state fallback lock, but the
+  long-term goal should be reducing the amount of state that must be shared at
+  all, rather than first splitting that lock into smaller locks
+
+This first-layer split already moved help/settings/group/session/file concerns
+out of the old monolithic flow, but it is not yet the final form of "real
+decoupling".
+
+The next step should not be more file-level slicing of `CodexHandler`. It
+should be state-ownership decomposition:
+
+- Feishu runtime management for `binding` / `subscribe` / `attach` /
+  `released`
+- owner/lease rules for Feishu write owner and interaction owner
+- turn / execution lifecycle, including execution anchor, watchdog, and
+  follow-up orchestration
+- service control-plane management
+- adapter notification / request bridge responsibilities
+
+If those state machines continue to live together in `CodexHandler`, the result
+is only lighter file navigation, not a clearer long-term architecture. The
+maintenance burden still comes from remembering implicit ordering constraints
+across unrelated runtime concerns.
 
 ## 6. Data and Behavioral Boundaries
 
@@ -143,6 +203,41 @@ Codex remains the authority for:
 - p2p thread bindings and group-shared thread bindings keyed by `chat_id`
 - group-chat mode, group ACL, group context logs, and boundary state
 - transient approval, rename, and card state
+
+Within that set, `binding` is intentionally a restart-persistent local bookmark:
+
+- it answers which thread a Feishu chat should continue by default next time
+- it is not the same thing as whether Feishu is still attached to the thread
+- it is not the same thing as whether the backend is still loaded
+
+So:
+
+- persistent `binding` is a formal product requirement
+- explicit clearing of one or all bindings is also a legitimate local admin need
+- those reset actions belong to the `feishu-codexctl` binding-management surface
+- they should no longer be treated as a separate architectural concept of
+  directly deleting `chat_bindings.json`
+- the persisted binding schema should also fail closed rather than carrying
+  legacy half-states forward
+- whenever `current_thread_id` is non-empty, `current_thread_runtime_state`
+  must be explicitly present
+- `current_thread_runtime_state` may only be `attached` or `released`
+- a `released` binding must not carry a residual `write_owner`
+- violations should be treated as storage corruption and fail fast instead of
+  being silently normalized during load
+
+`system.yaml.admin_open_ids` follows the same single-source-of-truth rule:
+
+- it is the only authoritative source for the admin set
+- the in-memory admin set in a running service is only a cache, not a second
+  source of truth
+- `/init <token>` is only a controlled convenience write path, and it still
+  writes `system.yaml`
+- manual edits to `system.yaml` do not require hot reload; the authoritative
+  value takes effect after service restart or an explicit reload path
+- the cache must never write back into the authority, and a later
+  "config + runtime merge" must not silently restore admins that were removed
+  from config
 
 ### 6.3 Session and Directory Semantics
 
@@ -178,6 +273,7 @@ The following behaviors are part of the current implementation contract:
 - new groups default to `assistant`
 - new groups default to `admin-only`
 - group administrators come from `system.yaml.admin_open_ids`
+- `system.yaml.admin_open_ids` is authoritative; the runtime admin set is only a cache
 - runtime identity decisions use `open_id` only; `user_id` is retained only for
   logs and `/whoami` diagnostics, and requires
   `contact:user.employee_id:readonly` if you want it to be populated reliably

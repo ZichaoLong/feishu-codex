@@ -14,7 +14,6 @@ dependencies = [
 feishu-codex = "bot.__main__:main"
 feishu-codexctl = "bot.feishu_codexctl:main"
 fcodex = "bot.fcodex:main"
-feishu-codex-clear-bindings = "bot.chat_binding_admin:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

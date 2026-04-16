@@ -22,8 +22,7 @@ from typing import Any
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.feishu_types import ChatBindingsFileData, StoredChatBinding
 
-CHAT_BINDING_STORE_SCHEMA_VERSION = 2
-_CHAT_BINDING_STORE_COMPAT_SCHEMA_VERSIONS = {1, CHAT_BINDING_STORE_SCHEMA_VERSION}
+CHAT_BINDING_STORE_SCHEMA_VERSION = 3
 
 
 class ChatBindingStore:
@@ -121,10 +120,10 @@ class ChatBindingStore:
         if not isinstance(raw, dict):
             raise ValueError("invalid chat_bindings.json: root must be an object")
         schema_version = raw.get("schema_version")
-        if schema_version not in _CHAT_BINDING_STORE_COMPAT_SCHEMA_VERSIONS:
+        if schema_version != CHAT_BINDING_STORE_SCHEMA_VERSION:
             raise ValueError(
                 "invalid chat_bindings.json: "
-                f"schema_version must be one of {sorted(_CHAT_BINDING_STORE_COMPAT_SCHEMA_VERSIONS)}"
+                f"schema_version must be {CHAT_BINDING_STORE_SCHEMA_VERSION}"
             )
 
         raw_p2p = raw.get("p2p_bindings", {})
@@ -188,14 +187,15 @@ class ChatBindingStore:
         current_thread_id = normalized["current_thread_id"]
         runtime_state = normalized["current_thread_runtime_state"]
         if current_thread_id:
-            if not runtime_state:
-                normalized["current_thread_runtime_state"] = "attached"
-            elif runtime_state not in {"attached", "released"}:
+            if runtime_state not in {"attached", "released"}:
                 raise ValueError(
                     "invalid chat_bindings.json: current_thread_runtime_state must be attached or released"
                 )
         else:
-            normalized["current_thread_runtime_state"] = ""
+            if runtime_state:
+                raise ValueError(
+                    "invalid chat_bindings.json: current_thread_runtime_state must be empty when current_thread_id is empty"
+                )
         if (
             normalized["current_thread_write_owner_thread_id"]
             and normalized["current_thread_write_owner_thread_id"] != current_thread_id
@@ -203,8 +203,13 @@ class ChatBindingStore:
             raise ValueError(
                 "invalid chat_bindings.json: current_thread_write_owner_thread_id must match current_thread_id"
             )
-        if normalized["current_thread_runtime_state"] != "attached":
-            normalized["current_thread_write_owner_thread_id"] = ""
+        if (
+            normalized["current_thread_runtime_state"] != "attached"
+            and normalized["current_thread_write_owner_thread_id"]
+        ):
+            raise ValueError(
+                "invalid chat_bindings.json: released binding must not carry current_thread_write_owner_thread_id"
+            )
         return normalized
 
     @staticmethod

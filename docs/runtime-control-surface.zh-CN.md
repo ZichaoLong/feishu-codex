@@ -310,7 +310,7 @@
 
 因此，任何要真正改变“Feishu 是否仍附着该 thread”的动作，都必须由运行中的 `feishu-codex` 服务代为执行。
 
-### 6.3 第一批命令
+### 6.3 当前实现提供的第一批命令
 
 当前实现提供：
 
@@ -321,7 +321,55 @@
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
 
-### 6.4 `binding_id` 形状
+### 6.4 `binding` 持久化与重置的目标合同
+
+`binding` 默认是跨重启保留的本地事实。
+
+这样设计的原因是：
+
+- 飞书会话重启后，仍应记住“下一次默认接着哪个 thread 继续”
+- 这属于 Feishu 集成层自己的 bookmark，不属于 Codex thread 元数据
+
+但“清空一个或全部 binding”也是一个合理的本地管理需求，尤其适用于：
+
+- 开发期批量重置
+- 状态救火
+- 让飞书侧整体回到“重新选择 thread”的初始状态
+
+这类动作的目标合同是：
+
+- 它属于 `binding` 层，不属于 `thread runtime` 层
+- 它不等于 `/release-feishu-runtime`
+- 它的正式入口应属于本地管理面 `feishu-codexctl`
+
+因此，目标控制面应收敛到：
+
+- `feishu-codexctl binding clear <binding_id>`
+- `feishu-codexctl binding clear-all`
+
+这两个动作的语义是：
+
+- 清除 Feishu 侧记住的 binding 事实
+- 同步清理运行中的 Feishu 内存态与持久化态
+- 必要时释放该 binding 相关的 Feishu 本地 lease / 执行锚点 / 订阅关系
+
+它们不承诺：
+
+- 删除 Codex thread
+- archive thread
+- 替代 `/release-feishu-runtime`
+- 替代 thread 级管理命令
+
+明确区分：
+
+- `/release-feishu-runtime`
+  - 释放的是 Feishu 对某个 thread 的 runtime 持有
+  - 不清空 binding
+- `binding clear/clear-all`
+  - 清掉的是 Feishu 本地 bookmark
+  - 不应再作为一个“单独删 `chat_bindings.json` 文件”的独立架构概念存在
+
+### 6.5 `binding_id` 形状
 
 本地管理 CLI 使用稳定的 admin-facing `binding_id`：
 
@@ -329,8 +377,13 @@
 - 私聊 binding：`p2p:<sender_id>:<chat_id>`
 
 它们只服务于本地管理面，不需要和飞书聊天命令名字保持对称。
+`binding_id` 在本项目里被定义为受限的管理语法，而不是任意字符串的通用可逆编码：
 
-### 6.5 显式 thread 目标合同
+- `:` 是保留分隔符
+- `sender_id` 和 `chat_id` 组件不允许包含 `:`
+- 如果未来发现真实上游 ID 可能包含 `:`，应整体替换这套语法，而不是继续依赖当前拼接格式做静默 round-trip
+
+### 6.6 显式 thread 目标合同
 
 对本地管理面而言，thread 目标必须显式表达，不再靠输入内容推断。
 
@@ -347,7 +400,7 @@
 控制面 RPC 也遵守同一规则。
 它不再接受一个未标注类型的 union `target` 字段，让 service 自己猜是 id 还是 name。
 
-### 6.6 每个 `FC_DATA_DIR` 只允许一个 service owner
+### 6.7 每个 `FC_DATA_DIR` 只允许一个 service owner
 
 对同一个 `FC_DATA_DIR`，只允许一个正在运行的 `feishu-codex` service 实例持有所有权。
 

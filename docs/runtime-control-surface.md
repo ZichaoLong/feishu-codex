@@ -310,7 +310,7 @@ it only unsubscribes its own connection, not the Feishu service connection.
 Therefore any action that truly changes whether Feishu is still attached to a
 thread must be executed by the running `feishu-codex` service itself.
 
-### 6.3 First command set
+### 6.3 Current command set
 
 Current implementation provides:
 
@@ -321,7 +321,57 @@ Current implementation provides:
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
 
-### 6.4 `binding_id` shape
+### 6.4 Target contract for binding persistence and reset
+
+`binding` is a local fact that should persist across Feishu service restarts.
+
+That persistence exists so a Feishu chat can still remember which thread it
+should continue with by default after restart. This is a Feishu-side bookmark,
+not Codex-owned thread metadata.
+
+At the same time, "clear one or all bindings" is a legitimate local admin need,
+especially for:
+
+- development-time bulk reset
+- operational recovery
+- forcing Feishu back to a fresh "pick a thread again" state
+
+The target contract is:
+
+- this is a `binding`-layer action, not a `thread runtime` action
+- it is not the same thing as `/release-feishu-runtime`
+- its formal surface belongs to `feishu-codexctl`
+
+So the target admin surface should converge on:
+
+- `feishu-codexctl binding clear <binding_id>`
+- `feishu-codexctl binding clear-all`
+
+Those actions mean:
+
+- clear Feishu-side remembered binding facts
+- consistently clear the running Feishu in-memory state and persisted state
+- release any Feishu-local lease, execution-anchor, or subscription state that
+  must disappear with that binding
+
+They do not mean:
+
+- delete a Codex thread
+- archive a thread
+- replace `/release-feishu-runtime`
+- replace thread-level admin commands
+
+The distinction is intentional:
+
+- `/release-feishu-runtime`
+  - releases Feishu runtime residency for a thread
+  - does not clear the binding bookmark
+- `binding clear/clear-all`
+  - clears Feishu-local binding bookmarks
+  - should no longer exist as a separate architectural concept of "just delete
+    `chat_bindings.json`"
+
+### 6.5 `binding_id` shape
 
 The local admin CLI uses stable admin-facing binding ids:
 
@@ -329,8 +379,15 @@ The local admin CLI uses stable admin-facing binding ids:
 - p2p binding: `p2p:<sender_id>:<chat_id>`
 
 These are local admin identifiers. They do not need to mirror Feishu command names.
+In this project, `binding_id` is a restricted admin-facing syntax, not a
+generic reversible serializer for arbitrary strings:
 
-### 6.5 Explicit thread target contract
+- `:` is a reserved separator
+- `sender_id` and `chat_id` components must not contain `:`
+- if a real upstream id format ever requires `:`, the syntax should be replaced
+  explicitly rather than relying on the current concatenation format to round-trip silently
+
+### 6.6 Explicit thread target contract
 
 For the local admin surface, thread targeting is intentionally explicit.
 
@@ -349,7 +406,7 @@ The control plane follows the same rule.
 It no longer accepts an untyped union `target` that guesses whether the input
 was an id or a name.
 
-### 6.6 Single service owner per `FC_DATA_DIR`
+### 6.7 Single service owner per `FC_DATA_DIR`
 
 For one `FC_DATA_DIR`, there must be exactly one running `feishu-codex`
 service owner.

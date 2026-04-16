@@ -100,7 +100,44 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
 - `bot/feishu_codexctl.py` 与 `bot/service_control_plane.py`：本地服务管理 CLI 与运行中服务控制面
 - `bot/binding_identity.py`：admin-facing binding 标识规范
+- `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 reply/log 片段拼装，不承担 thread、owner 或 binding 级状态职责
 - `bot/stores/*.py`：本地默认 profile、shared backend 运行时发现状态、群聊状态
+
+对飞书传输层还应补一条维护性约束：
+
+- `FeishuBot` 这类 transport-boundary 模块，对飞书 SDK 的依赖面应尽量显式
+- 不应长期依赖通配符导入来隐含“当前到底用了哪些 IM API 类型”
+
+在 adapter 抽象层上，还有一条需要保持清晰的合同：
+
+- `resume` 的请求输入不应只被抽象成一个 `profile`
+- 对 unloaded thread，Feishu 当前已经把 `profile / model / model_provider` 作为恢复提示显式传给 adapter
+- 对 loaded thread，这些输入即使被携带，也不表示 live runtime 一定会被改写
+
+因此，adapter 边界必须准确表达“resume 可以接受哪些输入”，而不是把抽象层写成比真实调用面更窄的旧合同。
+
+线程摘要读取也应保持两类合同分离：
+
+- authoritative read：按 `thread_id` 直接向 backend 读取，供真正要落操作的路径使用
+- bounded-list best-effort lookup：只从当前全局列表视图里补充上下文或错误提示，不能反过来当作 thread 一定不存在的证明
+
+并发 ownership 也应继续收紧：
+
+- `RuntimeLoop` 已是当前 handler 运行时状态变更的主要串行化原语
+- `ThreadLeaseRegistry` 这类对象当前应视为 runtime-owned 内部状态，而不是通用线程安全组件
+- `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面
+
+当前这一层拆分已经把 help/settings/group/session/file 等领域边界从单体逻辑里抽出来，但这还不是最终的“真正解耦”。
+
+下一步的重点不应是继续把 `CodexHandler` 切成更多文件，而是继续拆状态 ownership：
+
+- `binding` / `subscribe` / `attach` / `released` 这一组 Feishu runtime 管理
+- Feishu 写入 owner 与 interaction owner 的 owner/lease 规则
+- turn / execution 生命周期，以及 execution anchor、watchdog、follow-up 发送编排
+- service control plane 管理
+- adapter notification / request bridge
+
+如果这些状态机继续共居在 `CodexHandler`，那只是把导航从一个大文件变成多个文件，维护时仍要依赖调用顺序记忆隐式约束；这不是我们要的长期架构方向。
 
 ## 6. 数据与行为边界
 
@@ -125,6 +162,32 @@ shared backend 与 wrapper 的具体机制，见
 - 私聊当前绑定到哪个 thread，以及群聊按 `chat_id` 共享绑定到哪个 thread
 - 群聊工作态、群 ACL、群上下文日志与上下文边界状态
 - 审批、重命名、卡片等临时 UI 状态
+
+其中，`binding` 默认是跨重启保留的本地 bookmark：
+
+- 它解决的是“飞书会话下次默认继续哪个 thread”
+- 它不等于 Feishu 是否仍附着该 thread
+- 它也不等于 backend 当前是否仍 loaded
+
+因此：
+
+- `binding` 持久化是正式产品需求
+- 显式清空一个或全部 binding 也是合理的本地管理需求
+- 这类清理动作应归入 `feishu-codexctl` 的 binding 管理面
+- 它不应继续以“单独删除 `chat_bindings.json` 文件”的方式被定义为一个独立架构概念
+- 持久化 binding schema 也应 fail-closed：不再为旧半状态做隐式兼容
+- 只要 `current_thread_id` 非空，就必须显式写出 `current_thread_runtime_state`
+- `current_thread_runtime_state` 只能是 `attached` 或 `released`
+- `released` 状态不得携带残留 `write_owner`
+- 这类约束若不满足，应直接视为存储损坏并报错，而不是在 load 时静默补成 `attached` 或静默清理
+
+`system.yaml.admin_open_ids` 也遵守单一事实源原则：
+
+- 它是管理员集合的唯一权威源
+- 运行中的内存管理员集合只是缓存，不是第二事实源
+- `/init <token>` 只是一个受控的便捷写入口，写入的仍是 `system.yaml`
+- 手工修改 `system.yaml` 后，不强求热更新；以重启服务或显式 reload 后的权威值为准
+- 缓存不得反向刷新权威源，也不得通过“config + runtime 合并”重新把已删除管理员写回配置
 
 ### 6.3 Session 与目录语义
 
@@ -158,6 +221,7 @@ shared backend 与 wrapper 的具体机制，见
 - 新群默认工作态是 `assistant`
 - 新群默认 ACL 是 `admin-only`
 - 群聊管理员来自 `system.yaml.admin_open_ids`
+- `system.yaml.admin_open_ids` 是权威源；运行时管理员集合只是缓存
 - 运行时身份判定统一使用 `open_id`；`user_id` 仅保留在日志与 `/whoami` 里做排障展示
 - 若希望 `/whoami` 和日志稳定返回 `user_id`，需要额外开 `contact:user.employee_id:readonly`
 

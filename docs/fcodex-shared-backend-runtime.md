@@ -84,6 +84,8 @@ backend.
 
 - if the user passes `--cd` or `-C`, use that
 - otherwise, use the current shell cwd
+- if the user explicitly passes `--cd` / `-C` but omits the value, the wrapper
+  should fail fast instead of silently falling back to the current cwd
 
 It then does two separate things with that value:
 

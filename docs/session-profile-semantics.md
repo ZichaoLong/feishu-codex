@@ -93,6 +93,8 @@ Wrapper-specific behavior:
 - they connect to the `feishu-codex` shared backend by default
 - they inherit the local default profile unless `-p/--profile` is given
 - their working directory is the explicit `--cd` value, or the current shell cwd
+- if `--cd` / `-C` is passed explicitly but its value is missing, the wrapper
+  should fail fast instead of silently falling back to the current cwd
 
 ## Wrapper Commands
 

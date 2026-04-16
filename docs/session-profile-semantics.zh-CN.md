@@ -88,6 +88,7 @@ wrapper 额外增加的行为：
 - 默认连接到 `feishu-codex` 的 shared backend
 - 如果没有传 `-p/--profile`，会继承本地默认 profile
 - 工作目录取显式的 `--cd` 值；如果没有，则取当前 shell cwd
+- 如果显式传了 `--cd` / `-C` 但缺少值，wrapper 应直接报错，而不是静默回退到当前 cwd
 
 ## Wrapper 命令
 

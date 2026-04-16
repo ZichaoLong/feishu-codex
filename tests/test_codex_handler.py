@@ -2548,6 +2548,112 @@ class CodexHandlerTests(unittest.TestCase):
             [{"binding_id": "p2p:ou_user:c1", "feishu_runtime_state": "attached"}],
         )
 
+    def test_service_control_plane_binding_clear_removes_runtime_state_and_persistence(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+
+        result = control_request(data_dir, "binding/clear", {"binding_id": "p2p:ou_user:c1"})
+
+        self.assertTrue(result["cleared"])
+        self.assertEqual(result["binding_id"], "p2p:ou_user:c1")
+        self.assertNotIn(("ou_user", "c1"), handler._runtime_state_by_binding)
+        self.assertEqual(handler._thread_subscribers("thread-1"), ())
+        self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
+        self.assertIsNone(handler._chat_binding_store.load(("ou_user", "c1")))
+
+    def test_service_control_plane_binding_clear_all_removes_all_bindings(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread_a = ThreadSummary(
+            thread_id="thread-a",
+            cwd="/tmp/project-a",
+            name="demo-a",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        thread_b = ThreadSummary(
+            thread_id="thread-b",
+            cwd="/tmp/project-b",
+            name="demo-b",
+            preview="world",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread_a)
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+        handler._bind_thread("ou_admin", "chat-group", thread_b, message_id="m-group")
+
+        result = control_request(data_dir, "binding/clear-all")
+
+        self.assertFalse(result["already_empty"])
+        self.assertEqual(
+            result["cleared_binding_ids"],
+            ["group:chat-group", "p2p:ou_user:c1"],
+        )
+        self.assertEqual(handler._runtime_state_by_binding, {})
+        self.assertEqual(sorted(handler._adapter.unsubscribe_thread_calls), ["thread-a", "thread-b"])
+        self.assertEqual(handler._chat_binding_store.load_all(), {})
+
+    def test_service_control_plane_binding_clear_rejects_when_binding_has_pending_request(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._pending_requests["req-1"] = {
+            "rpc_request_id": "rpc-1",
+            "method": "item/commandExecution/requestApproval",
+            "params": {},
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "title": "Codex 命令执行审批",
+            "message_id": "msg-1",
+            "questions": [],
+            "answers": {},
+            "chat_id": "c1",
+            "sender_id": "ou_user",
+            "actor_open_id": "ou_user",
+            "status": "pending",
+        }
+
+        with self.assertRaisesRegex(ServiceControlError, "不能清除 binding"):
+            control_request(data_dir, "binding/clear", {"binding_id": "p2p:ou_user:c1"})
+
+        self.assertIn(("ou_user", "c1"), handler._runtime_state_by_binding)
+
     def test_service_control_plane_release_runtime_name_target_resolves_explicit_exact_name(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)

@@ -173,6 +173,9 @@ time:
   only patch that finalized card by its old `card_message_id`
 - only a new local prompt or a new external turn may create the next execution
   card
+- the local reply-length budget for the execution card constrains the final
+  rendered text length; the truncation notice itself must count against that
+  budget rather than being appended outside it
 
 Therefore a soft `thread/read` failure must never clear the current anchor and
 then let later notifications create a second card for the same execution.

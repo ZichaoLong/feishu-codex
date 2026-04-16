@@ -110,6 +110,23 @@ def _print_binding_status(data_dir: pathlib.Path, binding_id: str) -> int:
     return 0
 
 
+def _clear_binding(data_dir: pathlib.Path, binding_id: str) -> int:
+    result = _request(data_dir, "binding/clear", {"binding_id": binding_id})
+    print(f"cleared binding: {result['binding_id']}")
+    print(f"thread: {result['thread_id'] or '-'} {result['thread_title'] or ''}".rstrip())
+    return 0
+
+
+def _clear_all_bindings(data_dir: pathlib.Path) -> int:
+    result = _request(data_dir, "binding/clear-all")
+    cleared_binding_ids = result.get("cleared_binding_ids") or []
+    if result.get("already_empty"):
+        print("当前没有可清除的 binding。")
+        return 0
+    print(f"cleared bindings: {', '.join(cleared_binding_ids) or '（无）'}")
+    return 0
+
+
 def _print_thread_status(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
     snapshot = _request(data_dir, "thread/status", target_params)
     print(f"thread: {snapshot['thread_id']} {snapshot['thread_title'] or ''}".rstrip())
@@ -171,6 +188,9 @@ def _build_parser() -> argparse.ArgumentParser:
     binding_sub.add_parser("list")
     binding_status = binding_sub.add_parser("status")
     binding_status.add_argument("binding_id")
+    binding_clear = binding_sub.add_parser("clear")
+    binding_clear.add_argument("binding_id")
+    binding_sub.add_parser("clear-all")
 
     thread = subparsers.add_parser("thread")
     thread_sub = thread.add_subparsers(dest="action", required=True)
@@ -200,6 +220,10 @@ def main() -> None:
             raise SystemExit(_print_binding_list(data_dir))
         if args.resource == "binding" and args.action == "status":
             raise SystemExit(_print_binding_status(data_dir, args.binding_id))
+        if args.resource == "binding" and args.action == "clear":
+            raise SystemExit(_clear_binding(data_dir, args.binding_id))
+        if args.resource == "binding" and args.action == "clear-all":
+            raise SystemExit(_clear_all_bindings(data_dir))
         if args.resource == "thread" and args.action == "status":
             raise SystemExit(_print_thread_status(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "bindings":

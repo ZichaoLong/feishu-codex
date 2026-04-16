@@ -4,6 +4,21 @@ from bot.feishu_codexctl import _build_parser, _thread_target_params
 
 
 class FeishuCodexCtlTests(unittest.TestCase):
+    def test_binding_clear_accepts_binding_id(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["binding", "clear", "p2p:ou_user:chat-1"])
+
+        self.assertEqual(args.binding_id, "p2p:ou_user:chat-1")
+
+    def test_binding_clear_all_accepts_no_args(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["binding", "clear-all"])
+
+        self.assertEqual(args.resource, "binding")
+        self.assertEqual(args.action, "clear-all")
+
     def test_thread_status_accepts_explicit_thread_id(self) -> None:
         parser = _build_parser()
 
