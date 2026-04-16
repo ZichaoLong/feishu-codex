@@ -363,6 +363,18 @@ class CodexHandler(BotHandler):
             raise
         except Exception:
             logger.exception("启动 Codex app-server 失败")
+            try:
+                self._service_control_plane.stop()
+            except Exception:
+                logger.exception("回滚本地控制面失败")
+            try:
+                self._adapter.stop()
+            except Exception:
+                logger.exception("回滚 Codex adapter 失败")
+            try:
+                self._runtime_loop.stop()
+            except Exception:
+                logger.exception("回滚 handler runtime loop 失败")
             self._service_instance_lease.release()
             raise
 

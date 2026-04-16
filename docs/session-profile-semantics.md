@@ -40,6 +40,9 @@ semantic layers.
 - Matching:
   - exact thread id, or
   - exact thread name
+  - exact-name matching uses the same shared cross-provider global listing
+    filters as the session surface, but it keeps scanning later pages until it
+    can prove a unique match or ambiguity
 - Error behavior:
   - zero matches: error
   - multiple exact-name matches: error
@@ -129,6 +132,8 @@ TUI picker.
   - exact-name match
   - backend-global
   - cross-provider
+  - uses the same shared global listing filters as `fcodex /session global`,
+    but keeps scanning later pages until uniqueness or ambiguity is proven
   - zero matches: error
   - multiple exact-name matches: error
 

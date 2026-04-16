@@ -167,6 +167,32 @@ class _FakeAdapter:
                 summaries[snapshot.summary.thread_id] = snapshot.summary
         return list(summaries.values())
 
+    def list_threads(
+        self,
+        *,
+        cwd: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+        search_term: str | None = None,
+        sort_key: str = "updated_at",
+        source_kinds: list[str] | None = None,
+        model_providers: list[str] | None = None,
+    ) -> tuple[list[ThreadSummary], str | None]:
+        start = max(int(cursor or 0), 0)
+        page_size = max(int(limit or 0), 1)
+        fetch_limit = start + page_size
+        threads = self.list_threads_all(
+            cwd=cwd,
+            limit=fetch_limit,
+            search_term=search_term,
+            sort_key=sort_key,
+            source_kinds=source_kinds,
+            model_providers=model_providers,
+        )
+        end = start + page_size
+        next_cursor = str(end) if end < len(threads) else None
+        return list(threads[start:end]), next_cursor
+
     def archive_thread(self, thread_id: str) -> None:
         self.archive_thread_calls.append(thread_id)
 
@@ -439,6 +465,55 @@ class CodexHandlerTests(unittest.TestCase):
             handler.on_register(bot)
 
         self.assertEqual(handler._adapter.start_calls, 0)
+
+    def test_on_register_rolls_back_runtime_loop_when_adapter_start_fails(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        stop_calls: list[str] = []
+
+        def _stop_adapter() -> None:
+            stop_calls.append("adapter")
+
+        def _start_adapter() -> None:
+            raise RuntimeError("adapter start failed")
+
+        handler._adapter.stop = _stop_adapter
+        handler._adapter.start = _start_adapter
+
+        with self.assertRaisesRegex(RuntimeError, "adapter start failed"):
+            handler.on_register(bot)
+
+        self.assertTrue(handler._runtime_loop._closed)
+        self.assertEqual(stop_calls, ["adapter"])
+        self.assertIsNone(handler._service_instance_lease.load_metadata())
+
+    def test_on_register_rolls_back_adapter_and_socket_when_control_plane_start_fails(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        stop_calls: list[str] = []
+        socket_path = handler._service_control_plane.socket_path
+
+        def _stop_adapter() -> None:
+            stop_calls.append("adapter")
+
+        def _start_control_plane() -> None:
+            socket_path.write_text("stale", encoding="utf-8")
+            raise RuntimeError("control plane start failed")
+
+        handler._adapter.stop = _stop_adapter
+        handler._service_control_plane.start = _start_control_plane
+
+        with self.assertRaisesRegex(RuntimeError, "control plane start failed"):
+            handler.on_register(bot)
+
+        self.assertTrue(handler._runtime_loop._closed)
+        self.assertEqual(stop_calls, ["adapter"])
+        self.assertFalse(socket_path.exists())
+        self.assertIsNone(handler._service_instance_lease.load_metadata())
 
     def test_external_turn_started_opens_new_execution_card(self) -> None:
         handler, bot = self._make_handler()

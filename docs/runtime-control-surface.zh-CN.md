@@ -339,7 +339,8 @@
   - 不会再回退到名字解析
 - `--thread-name <name>`
   - 表示按 thread name 精确匹配
-  - 使用共享的跨 provider 全局列表解析合同
+  - 过滤规则与 session 发现面使用的共享跨 provider 全局列表一致
+  - 会继续扫描后续分页，直到能证明唯一命中或存在歧义
   - 0 个匹配时报错
   - 多个精确同名匹配时报错
 
@@ -356,6 +357,7 @@
 - 第二个实例必须 fail-fast
 - control socket 不是所有权原语
 - owner 会写入包含 `owner_pid`、`owner_token`、`socket_path` 的元数据
+- 如果在拿到 owner 之后启动失败，所有已部分启动的 runtime 组件都必须先完整回滚，再释放 lease
 - 停止时只允许清理由同一个 owner token 仍持有的 metadata / socket
 
 因此，`python -m bot` 直接运行和 systemd 管理的 service，不允许在同一个

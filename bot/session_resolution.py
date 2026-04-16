@@ -16,6 +16,19 @@ from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerC
 
 
 class ThreadListingAdapter(Protocol):
+    def list_threads(
+        self,
+        *,
+        cwd: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+        search_term: str | None = None,
+        sort_key: str = "updated_at",
+        source_kinds: list[str] | None = None,
+        model_providers: list[str] | None = None,
+    ) -> tuple[list[ThreadSummary], str | None]:
+        ...
+
     def list_threads_all(
         self,
         *,
@@ -81,13 +94,27 @@ def resolve_resume_target_by_name(
     if not target:
         raise ValueError("恢复目标不能为空")
 
-    threads = list_global_threads(adapter, limit=limit, sort_key=sort_key)
-    exact_name = [thread for thread in threads if thread.name == target]
+    exact_name: list[ThreadSummary] = []
+    cursor: str | None = None
+    page_size = max(int(limit or 0), 1)
+    while True:
+        page, cursor = adapter.list_threads(
+            limit=page_size,
+            cursor=cursor,
+            sort_key=sort_key,
+            model_providers=[],
+        )
+        for thread in page:
+            if thread.name != target:
+                continue
+            exact_name.append(thread)
+            if len(exact_name) > 1:
+                ids = ", ".join(format_thread_match(item) for item in exact_name[:5])
+                raise ValueError(f"匹配到多个同名线程：{ids}")
+        if not cursor:
+            break
     if not exact_name:
         raise ValueError(f"未找到匹配的线程：`{target}`")
-    if len(exact_name) > 1:
-        ids = ", ".join(format_thread_match(item) for item in exact_name[:5])
-        raise ValueError(f"匹配到多个同名线程：{ids}")
     return exact_name[0]
 
 

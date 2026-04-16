@@ -1188,6 +1188,27 @@ class SessionResolutionTests(unittest.TestCase):
         def __init__(self, threads: list[ThreadSummary]) -> None:
             self.threads = threads
 
+        def list_threads(
+            self,
+            *,
+            cwd=None,
+            limit=100,
+            cursor=None,
+            search_term=None,
+            sort_key="updated_at",
+            source_kinds=None,
+            model_providers=None,
+        ):
+            del cwd
+            del search_term
+            del sort_key
+            del source_kinds
+            self.kwargs = {"limit": limit, "cursor": cursor, "model_providers": model_providers}
+            start = int(cursor or 0)
+            end = start + limit
+            next_cursor = str(end) if end < len(self.threads) else None
+            return list(self.threads[start:end]), next_cursor
+
         def list_threads_all(self, **kwargs):
             self.kwargs = kwargs
             return list(self.threads)
@@ -1251,6 +1272,25 @@ class SessionResolutionTests(unittest.TestCase):
             status="notLoaded",
         )
         adapter = self._Adapter([thread_1, thread_2])
+
+        with self.assertRaisesRegex(ValueError, "匹配到多个同名线程"):
+            resolve_resume_target_by_name(adapter, name="demo", limit=100)
+
+    def test_resolve_resume_target_by_name_scans_beyond_first_page_for_duplicate(self) -> None:
+        threads = [
+            ThreadSummary(
+                thread_id=f"thread-{index}",
+                cwd=f"/tmp/project-{index}",
+                name="demo" if index in {1, 150} else f"name-{index}",
+                preview="hello",
+                created_at=0,
+                updated_at=200 - index,
+                source="cli",
+                status="notLoaded",
+            )
+            for index in range(1, 151)
+        ]
+        adapter = self._Adapter(threads)
 
         with self.assertRaisesRegex(ValueError, "匹配到多个同名线程"):
             resolve_resume_target_by_name(adapter, name="demo", limit=100)

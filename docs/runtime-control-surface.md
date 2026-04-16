@@ -339,7 +339,9 @@ For the local admin surface, thread targeting is intentionally explicit.
   - does not fall back to name lookup
 - `--thread-name <name>`
   - means exact thread-name matching
-  - uses the shared cross-provider global listing contract
+  - uses the same shared cross-provider global listing filters as the session
+    discovery surface
+  - keeps scanning later pages until uniqueness or ambiguity is proven
   - rejects zero matches
   - rejects multiple exact-name matches
 
@@ -359,6 +361,8 @@ The contract is:
 - the control socket is not the ownership primitive
 - the owner writes metadata including `owner_pid`, `owner_token`, and
   `socket_path`
+- if startup fails after ownership is acquired, partially started runtime
+  components must be fully rolled back before the lease is released
 - shutdown may only clean up metadata/socket that still belong to the same
   owner token
 
