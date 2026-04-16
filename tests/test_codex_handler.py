@@ -3140,6 +3140,15 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(row_action["actions"][0]["text"]["content"], "当前")
         self.assertEqual(row_action["actions"][0]["type"], "primary")
 
+    def test_session_command_rejects_extra_args(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "/session extra")
+
+        self.assertEqual(bot.cards, [])
+        self.assertIn("用法：`/session`", bot.replies[-1][1])
+        self.assertIn("不接受额外参数", bot.replies[-1][1])
+
     def test_close_sessions_card_action_returns_closed_card(self) -> None:
         handler, _ = self._make_handler()
 

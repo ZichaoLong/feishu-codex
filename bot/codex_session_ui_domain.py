@@ -81,10 +81,8 @@ class CodexSessionUiDomain:
         self,
         sender_id: str,
         chat_id: str,
-        arg: str,
         message_id: str = "",
     ) -> CommandResult:
-        del arg
         try:
             card = self._render_sessions_card(sender_id, chat_id, message_id=message_id)
         except Exception as exc:

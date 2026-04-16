@@ -136,6 +136,29 @@ class CodexAppServerAdapterTests(unittest.TestCase):
             ),
         )
 
+    def test_resume_thread_can_attach_model_and_provider_hints(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.resume_thread(
+            "thread-1",
+            model="gpt-5.4",
+            model_provider="provider2_api",
+        )
+
+        self.assertEqual(
+            fake_rpc.calls[0],
+            (
+                "thread/resume",
+                {
+                    "threadId": "thread-1",
+                    "model": "gpt-5.4",
+                    "modelProvider": "provider2_api",
+                },
+            ),
+        )
+
     def test_start_turn_default_mode_sends_explicit_collaboration_mode(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
         fake_rpc = _FakeRpc()
@@ -1181,6 +1204,110 @@ class ProxyInteractionGateTests(unittest.TestCase):
             self.assertIsNone(store.load("thread-1"))
             forwarded = self._decode_payload(client_ws.sent[-1])
             self.assertEqual(forwarded["method"], "turn/completed")
+
+    def test_gate_close_releases_started_turn_lease_after_success_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            gate = _ProxyInteractionGate(
+                cwd="/tmp/project",
+                data_dir=data_dir,
+                holder_pid=os.getpid(),
+            )
+            store = InteractionLeaseStore(data_dir)
+            client_ws = self._FakeWs()
+            backend_ws = self._FakeWs()
+
+            gate.handle_client_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "turn/start",
+                        "params": {"threadId": "thread-1"},
+                    }
+                ),
+                client_ws=client_ws,
+                backend_ws=backend_ws,
+            )
+            self.assertIsNotNone(store.load("thread-1"))
+
+            gate.handle_backend_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {"ok": True},
+                    }
+                ),
+                client_ws=client_ws,
+                backend_ws=backend_ws,
+            )
+            self.assertIsNotNone(store.load("thread-1"))
+
+            gate.close()
+
+            self.assertIsNone(store.load("thread-1"))
+
+    def test_gate_close_releases_pending_turn_start_lease_without_backend_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            gate = _ProxyInteractionGate(
+                cwd="/tmp/project",
+                data_dir=data_dir,
+                holder_pid=os.getpid(),
+            )
+            store = InteractionLeaseStore(data_dir)
+            client_ws = self._FakeWs()
+            backend_ws = self._FakeWs()
+
+            gate.handle_client_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "turn/start",
+                        "params": {"threadId": "thread-1"},
+                    }
+                ),
+                client_ws=client_ws,
+                backend_ws=backend_ws,
+            )
+            self.assertIsNotNone(store.load("thread-1"))
+
+            gate.close()
+
+            self.assertIsNone(store.load("thread-1"))
+
+    def test_gate_close_releases_existing_owner_lease_after_interactive_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            gate = _ProxyInteractionGate(
+                cwd="/tmp/project",
+                data_dir=data_dir,
+                holder_pid=os.getpid(),
+            )
+            store = InteractionLeaseStore(data_dir)
+            store.force_acquire("thread-1", gate._holder)
+            client_ws = self._FakeWs()
+            backend_ws = self._FakeWs()
+
+            gate.handle_backend_message(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "req-1",
+                        "method": "item/commandExecution/requestApproval",
+                        "params": {"threadId": "thread-1", "command": "ls"},
+                    }
+                ),
+                client_ws=client_ws,
+                backend_ws=backend_ws,
+            )
+            self.assertIsNotNone(store.load("thread-1"))
+
+            gate.close()
+
+            self.assertIsNone(store.load("thread-1"))
 
 
 class SessionResolutionTests(unittest.TestCase):

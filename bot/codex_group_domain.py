@@ -75,12 +75,10 @@ class CodexGroupDomain:
 
     def handle_groupmode_command(
         self,
-        sender_id: str,
         chat_id: str,
         arg: str,
         message_id: str = "",
     ) -> CommandResult:
-        del sender_id
         context = self._group_command_context(message_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
@@ -113,12 +111,10 @@ class CodexGroupDomain:
 
     def handle_acl_command(
         self,
-        sender_id: str,
         chat_id: str,
         arg: str,
         message_id: str = "",
     ) -> CommandResult:
-        del sender_id
         context = self._group_command_context(message_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
@@ -160,12 +156,10 @@ class CodexGroupDomain:
 
     def handle_show_group_mode_card_action(
         self,
-        sender_id: str,
         chat_id: str,
         message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        del sender_id
         if not self._owner._is_group_chat(chat_id, message_id):
             return make_card_response(toast="该命令仅支持群聊使用。", toast_type="warning")
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
@@ -175,12 +169,10 @@ class CodexGroupDomain:
 
     def handle_set_group_mode_action(
         self,
-        sender_id: str,
         chat_id: str,
         message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        del sender_id
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
         mode = self._normalize_group_mode(str(action_value.get("mode", "")))
         if mode not in GROUP_MODES:
@@ -199,13 +191,9 @@ class CodexGroupDomain:
 
     def handle_set_group_acl_policy_action(
         self,
-        sender_id: str,
         chat_id: str,
-        message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        del sender_id
-        del message_id
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in ACCESS_POLICIES:

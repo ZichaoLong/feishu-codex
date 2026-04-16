@@ -1648,7 +1648,17 @@ class CodexHandler(BotHandler):
                 ),
             ),
             "/session": _CommandRoute(
-                handler=self._session_ui_domain.handle_session_command,
+                handler=lambda sender_id, chat_id, arg, message_id: (
+                    CommandResult(
+                        text="用法：`/session`\n说明：该命令不接受额外参数；发送 `/help session` 查看会话相关操作。"
+                    )
+                    if arg.strip()
+                    else self._session_ui_domain.handle_session_command(
+                        sender_id,
+                        chat_id,
+                        message_id=message_id,
+                    )
+                ),
             ),
             "/resume": _CommandRoute(
                 handler=self._session_ui_domain.handle_resume_command,
@@ -1680,11 +1690,19 @@ class CodexHandler(BotHandler):
                 ),
             ),
             "/groupmode": _CommandRoute(
-                handler=self._group_domain.handle_groupmode_command,
+                handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_groupmode_command(
+                    chat_id,
+                    arg,
+                    message_id=message_id,
+                ),
                 scope="group",
             ),
             "/acl": _CommandRoute(
-                handler=self._group_domain.handle_acl_command,
+                handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_acl_command(
+                    chat_id,
+                    arg,
+                    message_id=message_id,
+                ),
                 scope="group",
             ),
         }
@@ -1735,7 +1753,11 @@ class CodexHandler(BotHandler):
                 group_guard="group_admin",
             ),
             "show_group_mode_card": _ActionRoute(
-                handler=self._group_domain.handle_show_group_mode_card_action,
+                handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_show_group_mode_card_action(
+                    chat_id,
+                    message_id,
+                    action_value,
+                ),
                 group_guard="group_admin",
             ),
             "archive_thread": _ActionRoute(
@@ -1785,11 +1807,18 @@ class CodexHandler(BotHandler):
                 group_guard="group_admin",
             ),
             "set_group_mode": _ActionRoute(
-                handler=self._group_domain.handle_set_group_mode_action,
+                handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_set_group_mode_action(
+                    chat_id,
+                    message_id,
+                    action_value,
+                ),
                 group_guard="group_admin",
             ),
             "set_group_acl_policy": _ActionRoute(
-                handler=self._group_domain.handle_set_group_acl_policy_action,
+                handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_set_group_acl_policy_action(
+                    chat_id,
+                    action_value,
+                ),
                 group_guard="group_admin",
             ),
         }

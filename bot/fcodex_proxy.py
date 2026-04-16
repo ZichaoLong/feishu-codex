@@ -170,6 +170,40 @@ class _ProxyInteractionGate:
         self._lock = threading.Lock()
         self._pending_server_request_thread_by_id: dict[str, str] = {}
         self._pending_client_request_by_id: dict[str, tuple[str, str, bool]] = {}
+        self._owned_thread_ids: set[str] = set()
+
+    def _remember_owned_thread(self, thread_id: str) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        with self._lock:
+            self._owned_thread_ids.add(normalized_thread_id)
+
+    def _forget_owned_thread(self, thread_id: str) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        with self._lock:
+            self._owned_thread_ids.discard(normalized_thread_id)
+
+    def close(self) -> None:
+        with self._lock:
+            owned_thread_ids = set(self._owned_thread_ids)
+            owned_thread_ids.update(
+                thread_id
+                for thread_id in self._pending_server_request_thread_by_id.values()
+                if thread_id
+            )
+            owned_thread_ids.update(
+                thread_id
+                for _, thread_id, _ in self._pending_client_request_by_id.values()
+                if thread_id
+            )
+            self._owned_thread_ids.clear()
+            self._pending_server_request_thread_by_id.clear()
+            self._pending_client_request_by_id.clear()
+        for thread_id in owned_thread_ids:
+            self._lease_store.release(thread_id, self._holder)
 
     def handle_client_message(self, message: str | bytes, *, client_ws: Any, backend_ws: Any) -> None:
         rewritten = _rewrite_thread_start_cwd(message, self._cwd)
@@ -193,6 +227,7 @@ class _ProxyInteractionGate:
                             "当前线程正由其他终端执行；请等待当前 turn 结束后再试。",
                         )
                         return
+                    self._remember_owned_thread(thread_id)
                     with self._lock:
                         self._pending_client_request_by_id[_jsonrpc_id_key(request_id)] = (
                             method,
@@ -208,6 +243,7 @@ class _ProxyInteractionGate:
                             "当前终端不是该线程的交互 owner，不能取消这次执行。",
                         )
                         return
+                    self._remember_owned_thread(thread_id)
             backend_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
             return
 
@@ -237,6 +273,7 @@ class _ProxyInteractionGate:
                 lease = self._lease_store.load(thread_id)
                 if lease is not None and not lease.holder.same_holder(self._holder):
                     return
+                self._remember_owned_thread(thread_id)
                 with self._lock:
                     self._pending_server_request_thread_by_id[_jsonrpc_id_key(payload["id"])] = thread_id
             client_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
@@ -252,8 +289,10 @@ class _ProxyInteractionGate:
             if thread_id:
                 if method in {"turn/completed", "thread/closed"}:
                     self._lease_store.release(thread_id, self._holder)
+                    self._forget_owned_thread(thread_id)
                 elif method == "thread/status/changed" and _thread_became_non_active(payload):
                     self._lease_store.release(thread_id, self._holder)
+                    self._forget_owned_thread(thread_id)
             client_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
             return
 
@@ -265,6 +304,7 @@ class _ProxyInteractionGate:
                 request_method, thread_id, acquired = request_context
                 if request_method == "turn/start" and acquired and "error" in payload:
                     self._lease_store.release(thread_id, self._holder)
+                    self._forget_owned_thread(thread_id)
         client_ws.send(_encode_jsonrpc_payload(payload, as_bytes=is_bytes))
 
 
@@ -404,6 +444,7 @@ def run_proxy(
                     _close_quietly(backend_ws)
                     _close_quietly(client_ws)
                     thread.join(timeout=1)
+                    gate.close()
         finally:
             with state_lock:
                 active_connections = max(0, active_connections - 1)

@@ -1,6 +1,7 @@
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 
@@ -890,6 +891,27 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(reply_id, "reply-1")
         self.assertEqual(len(captured), 1)
         self.assertTrue(captured[0].request_body.reply_in_thread)
+
+    def test_get_message_context_returns_empty_after_entry_expires(self) -> None:
+        bot = self._make_bot()
+        bot._remember_message_context("m-ctx", {"thread_id": "th-1"})
+        bot._message_contexts["m-ctx"].created_at = time.time() - 601
+
+        self.assertEqual(bot.get_message_context("m-ctx"), {})
+
+    def test_lookup_chat_type_returns_empty_after_entry_expires(self) -> None:
+        bot = self._make_bot()
+        bot.remember_chat_type("chat-1", "group")
+        bot._chat_type_cache["chat-1"].created_at = time.time() - (24 * 3600 + 1)
+
+        self.assertEqual(bot.lookup_chat_type("chat-1"), "")
+
+    def test_claim_reserved_execution_card_returns_empty_after_entry_expires(self) -> None:
+        bot = self._make_bot()
+        bot.reserve_execution_card("m-1", "card-1")
+        bot._pending_execution_cards["m-1"].created_at = time.time() - 601
+
+        self.assertEqual(bot.claim_reserved_execution_card("m-1"), "")
 
     def test_raw_handler_defensively_ignores_group_app_sender_before_logging(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": ""})

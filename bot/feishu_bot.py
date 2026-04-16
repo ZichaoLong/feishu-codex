@@ -9,6 +9,7 @@ import pathlib
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -80,6 +81,43 @@ def _non_negative_int(value: Any, default: int) -> int:
         return max(int(value), 0)
     except (TypeError, ValueError):
         return max(int(default), 0)
+
+
+def _evict_expired_fifo_entries(
+    entries: OrderedDict[str, Any],
+    *,
+    now: float,
+    ttl_seconds: float,
+    created_at: Callable[[Any], float],
+) -> None:
+    while entries:
+        oldest_key, oldest_value = next(iter(entries.items()))
+        if now - created_at(oldest_value) > ttl_seconds:
+            entries.pop(oldest_key, None)
+        else:
+            break
+
+
+def _store_fifo_ttl_entry(
+    entries: OrderedDict[str, Any],
+    *,
+    key: str,
+    value: Any,
+    ttl_seconds: float,
+    max_size: int,
+    created_at: Callable[[Any], float],
+) -> None:
+    now = time.time()
+    _evict_expired_fifo_entries(
+        entries,
+        now=now,
+        ttl_seconds=ttl_seconds,
+        created_at=created_at,
+    )
+    entries.pop(key, None)
+    entries[key] = value
+    while len(entries) > max_size:
+        entries.popitem(last=False)
 
 
 @dataclass
@@ -342,14 +380,17 @@ class FeishuBot(ABC):
         if not normalized_chat_id or not normalized_chat_type:
             return
         with self._chat_type_cache_lock:
-            self._cleanup_chat_type_cache()
-            self._chat_type_cache.pop(normalized_chat_id, None)
-            self._chat_type_cache[normalized_chat_id] = _CachedChatType(
-                chat_type=normalized_chat_type,
-                created_at=time.time(),
+            _store_fifo_ttl_entry(
+                self._chat_type_cache,
+                key=normalized_chat_id,
+                value=_CachedChatType(
+                    chat_type=normalized_chat_type,
+                    created_at=time.time(),
+                ),
+                ttl_seconds=_CHAT_TYPE_CACHE_TTL,
+                max_size=_CHAT_TYPE_CACHE_MAX_SIZE,
+                created_at=lambda item: item.created_at,
             )
-            while len(self._chat_type_cache) > _CHAT_TYPE_CACHE_MAX_SIZE:
-                self._chat_type_cache.popitem(last=False)
 
     def lookup_chat_type(self, chat_id: str) -> str:
         normalized_chat_id = str(chat_id or "").strip()
@@ -391,14 +432,17 @@ class FeishuBot(ABC):
         if not normalized_trigger_id or not normalized_card_id:
             return
         with self._pending_execution_cards_lock:
-            self._cleanup_pending_execution_cards()
-            self._pending_execution_cards.pop(normalized_trigger_id, None)
-            self._pending_execution_cards[normalized_trigger_id] = _PendingExecutionCard(
-                card_message_id=normalized_card_id,
-                created_at=time.time(),
+            _store_fifo_ttl_entry(
+                self._pending_execution_cards,
+                key=normalized_trigger_id,
+                value=_PendingExecutionCard(
+                    card_message_id=normalized_card_id,
+                    created_at=time.time(),
+                ),
+                ttl_seconds=_PENDING_EXECUTION_CARD_TTL,
+                max_size=_PENDING_EXECUTION_CARD_MAX_SIZE,
+                created_at=lambda item: item.created_at,
             )
-            while len(self._pending_execution_cards) > _PENDING_EXECUTION_CARD_MAX_SIZE:
-                self._pending_execution_cards.popitem(last=False)
 
     def claim_reserved_execution_card(self, trigger_message_id: str) -> str:
         normalized_trigger_id = str(trigger_message_id or "").strip()
@@ -459,37 +503,38 @@ class FeishuBot(ABC):
         if not message_id:
             return
         with self._message_context_lock:
-            self._cleanup_message_contexts()
-            self._message_contexts[message_id] = _MessageContext(payload=payload.copy(), created_at=time.time())
-            while len(self._message_contexts) > _MESSAGE_CONTEXT_MAX_SIZE:
-                self._message_contexts.popitem(last=False)
+            _store_fifo_ttl_entry(
+                self._message_contexts,
+                key=message_id,
+                value=_MessageContext(payload=payload.copy(), created_at=time.time()),
+                ttl_seconds=_MESSAGE_CONTEXT_TTL,
+                max_size=_MESSAGE_CONTEXT_MAX_SIZE,
+                created_at=lambda item: item.created_at,
+            )
 
     def _cleanup_message_contexts(self) -> None:
-        now = time.time()
-        while self._message_contexts:
-            oldest_id, ctx = next(iter(self._message_contexts.items()))
-            if now - ctx.created_at > _MESSAGE_CONTEXT_TTL:
-                self._message_contexts.pop(oldest_id, None)
-            else:
-                break
+        _evict_expired_fifo_entries(
+            self._message_contexts,
+            now=time.time(),
+            ttl_seconds=_MESSAGE_CONTEXT_TTL,
+            created_at=lambda item: item.created_at,
+        )
 
     def _cleanup_chat_type_cache(self) -> None:
-        now = time.time()
-        while self._chat_type_cache:
-            oldest_chat_id, cached = next(iter(self._chat_type_cache.items()))
-            if now - cached.created_at > _CHAT_TYPE_CACHE_TTL:
-                self._chat_type_cache.pop(oldest_chat_id, None)
-            else:
-                break
+        _evict_expired_fifo_entries(
+            self._chat_type_cache,
+            now=time.time(),
+            ttl_seconds=_CHAT_TYPE_CACHE_TTL,
+            created_at=lambda item: item.created_at,
+        )
 
     def _cleanup_pending_execution_cards(self) -> None:
-        now = time.time()
-        while self._pending_execution_cards:
-            oldest_message_id, pending = next(iter(self._pending_execution_cards.items()))
-            if now - pending.created_at > _PENDING_EXECUTION_CARD_TTL:
-                self._pending_execution_cards.pop(oldest_message_id, None)
-            else:
-                break
+        _evict_expired_fifo_entries(
+            self._pending_execution_cards,
+            now=time.time(),
+            ttl_seconds=_PENDING_EXECUTION_CARD_TTL,
+            created_at=lambda item: item.created_at,
+        )
 
     def _forget_chat_state(self, chat_id: str) -> None:
         normalized_chat_id = str(chat_id or "").strip()

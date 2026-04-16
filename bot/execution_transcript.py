@@ -18,6 +18,9 @@ _SNAPSHOT_WORK_ITEM_TYPES = {
     "webSearch",
 }
 
+_CARD_REPLY_TRUNCATION_NOTICE = "\n\n**[回复过长，完整内容已另行发送为文本消息]**"
+_CARD_REPLY_COMPACT_TRUNCATION_NOTICE = "[回复过长]"
+
 
 @dataclass(frozen=True)
 class ExecutionReplySegment:
@@ -190,7 +193,6 @@ class ExecutionTranscript:
         remaining = max(int(char_limit), 0)
         rendered: list[ExecutionReplySegment] = []
         pending_divider = False
-        truncation_notice = "\n\n**[回复过长，完整内容已另行发送为文本消息]**"
 
         for segment in self.reply_segments:
             if segment.kind == "divider":
@@ -203,7 +205,7 @@ class ExecutionTranscript:
                 break
             text = segment.text
             if len(text) > remaining:
-                text = text[:remaining] + truncation_notice
+                text = self._truncate_card_reply_text(text, remaining)
                 remaining = 0
             else:
                 remaining -= len(text)
@@ -214,3 +216,15 @@ class ExecutionTranscript:
             if remaining <= 0:
                 break
         return rendered
+
+    @staticmethod
+    def _truncate_card_reply_text(text: str, char_limit: int) -> str:
+        limit = max(int(char_limit), 0)
+        if limit <= 0:
+            return ""
+        full_notice = _CARD_REPLY_TRUNCATION_NOTICE
+        compact_notice = _CARD_REPLY_COMPACT_TRUNCATION_NOTICE
+        notice = full_notice if limit > len(compact_notice) + 16 else compact_notice
+        if len(notice) >= limit:
+            return notice[:limit]
+        return text[: limit - len(notice)] + notice

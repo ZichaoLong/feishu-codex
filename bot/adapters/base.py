@@ -69,7 +69,14 @@ class AgentAdapter(ABC):
         ...
 
     @abstractmethod
-    def resume_thread(self, thread_id: str, profile: str | None = None) -> ThreadSnapshot:
+    def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        profile: str | None = None,
+        model: str | None = None,
+        model_provider: str | None = None,
+    ) -> ThreadSnapshot:
         ...
 
     @abstractmethod
