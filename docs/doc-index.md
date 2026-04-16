@@ -17,6 +17,7 @@ This directory is the source of truth for repository architecture, runtime bound
 | What is the current architecture, layering, module split, and repository structure? | [`feishu-codex-design.md`](./feishu-codex-design.md) |
 | What is the Feishu-side thread lifecycle, and what states must stay distinct? | [`feishu-thread-lifecycle.md`](./feishu-thread-lifecycle.md) |
 | What shared state vocabulary and admin-surface contract apply to `/status`, `/release-feishu-runtime`, and `feishu-codexctl`? | [`runtime-control-surface.md`](./runtime-control-surface.md) |
+| What information architecture and semantic rules does the Feishu `/help` navigation surface follow? | [`feishu-help-navigation.md`](./feishu-help-navigation.md) |
 | How does `fcodex` shared-backend mode work, including wrapper, proxy, and `--cd` semantics? | [`fcodex-shared-backend-runtime.md`](./fcodex-shared-backend-runtime.md) |
 | What do `/session`, `/resume`, `/profile`, and `/rm` mean across Feishu, `fcodex`, and the TUI? | [`session-profile-semantics.md`](./session-profile-semantics.md) |
 | What safety rules apply to shared backend reuse and `/resume`? | [`shared-backend-resume-safety.md`](./shared-backend-resume-safety.md) |
@@ -27,6 +28,7 @@ This directory is the source of truth for repository architecture, runtime bound
 
 - For architecture or large refactors: read [`feishu-codex-design.md`](./feishu-codex-design.md) first, then follow the topic-specific docs above.
 - For session or runtime bugs: read [`feishu-thread-lifecycle.md`](./feishu-thread-lifecycle.md), [`runtime-control-surface.md`](./runtime-control-surface.md), [`session-profile-semantics.md`](./session-profile-semantics.md), and [`shared-backend-resume-safety.md`](./shared-backend-resume-safety.md).
+- For Feishu help, command discoverability, or button/slash consistency work: read [`feishu-help-navigation.md`](./feishu-help-navigation.md) and then the feature-specific docs it references.
 - For wrapper or backend work: read [`fcodex-shared-backend-runtime.md`](./fcodex-shared-backend-runtime.md) and [`shared-backend-resume-safety.md`](./shared-backend-resume-safety.md).
 - For permission or execution issues: read [`codex-permissions-model.md`](./codex-permissions-model.md) before changing product wording or runtime behavior.
 

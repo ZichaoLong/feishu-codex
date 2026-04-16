@@ -154,6 +154,12 @@ class _ActionRoute:
     group_guard: str = "none"
 
 
+@dataclass(frozen=True)
+class _CommandExecution:
+    result: CommandResult | None = None
+    error_text: str = ""
+
+
 class _PlanStepState(TypedDict):
     step: str
     status: str
@@ -1426,33 +1432,49 @@ class CodexHandler(BotHandler):
         return self.bot.is_group_admin(open_id=actor_open_id)
 
     def _ensure_group_command_admin(self, chat_id: str, message_id: str = "") -> bool:
-        if not self._is_group_chat(chat_id, message_id):
+        denial_text = self._group_command_admin_denial_text(chat_id, message_id=message_id)
+        if not denial_text:
             return True
-        if self._is_group_admin_actor(chat_id, message_id=message_id):
-            return True
-        self._reply_text(
-            chat_id,
-            "群里的 `/` 命令仅管理员可用；已授权成员请直接提问或显式 mention 触发机器人。",
-            message_id=message_id,
-        )
+        self._reply_text(chat_id, denial_text, message_id=message_id)
         return False
 
+    def _group_command_admin_denial_text(self, chat_id: str, message_id: str = "") -> str:
+        if not self._is_group_chat(chat_id, message_id):
+            return ""
+        if self._is_group_admin_actor(chat_id, message_id=message_id):
+            return ""
+        return "群里的 `/` 命令仅管理员可用；已授权成员请直接提问或显式 mention 触发机器人。"
+
     def _ensure_command_scope(self, route: _CommandRoute, chat_id: str, message_id: str = "") -> bool:
-        if route.scope == "any":
+        denied_text = self._command_scope_denial_text(route, chat_id, message_id=message_id)
+        if not denied_text:
             return True
+        self._reply_text(chat_id, denied_text, message_id=message_id)
+        return False
+
+    def _command_scope_denial_text(self, route: _CommandRoute, chat_id: str, message_id: str = "") -> str:
+        if route.scope == "any":
+            return ""
         chat_type = self._resolve_chat_type(chat_id, message_id)
         if route.scope == "group" and chat_type == "group":
-            return True
+            return ""
         if route.scope == "p2p" and chat_type != "group":
-            return True
+            return ""
         denied_text = route.scope_denied_text
         if not denied_text:
             if route.scope == "group":
                 denied_text = "该命令仅支持群聊使用。"
             else:
                 denied_text = "该命令仅支持私聊使用。"
-        self._reply_text(chat_id, denied_text, message_id=message_id)
-        return False
+        return denied_text
+
+    def _command_denial_text(self, route: _CommandRoute, chat_id: str, message_id: str = "") -> str:
+        scope_denial = self._command_scope_denial_text(route, chat_id, message_id=message_id)
+        if scope_denial:
+            return scope_denial
+        if route.admin_only_in_group:
+            return self._group_command_admin_denial_text(chat_id, message_id=message_id)
+        return ""
 
     def _is_group_turn_actor(
         self,
@@ -1694,8 +1716,17 @@ class CodexHandler(BotHandler):
             "show_help_topic": _ActionRoute(
                 handler=self._help_domain.handle_show_help_topic_action,
             ),
+            "show_help_page": _ActionRoute(
+                handler=self._help_domain.handle_show_help_page_action,
+            ),
             "show_help_overview": _ActionRoute(
                 handler=self._help_domain.handle_show_help_overview_action,
+            ),
+            "help_execute_command": _ActionRoute(
+                handler=self._handle_help_execute_command_action,
+            ),
+            "help_submit_command": _ActionRoute(
+                handler=self._handle_help_submit_command_action,
             ),
             "show_permissions_card": _ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_show_permissions_card_action(
@@ -1855,28 +1886,117 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_command(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
+        execution = self._execute_command_text(sender_id, chat_id, text, message_id=message_id)
+        if execution.error_text:
+            self._reply_text(chat_id, execution.error_text, message_id=message_id)
+            return
+        if execution.result is not None:
+            self._dispatch_command_result(chat_id, execution.result, message_id=message_id)
+
+    def _execute_command_text(
+        self,
+        sender_id: str,
+        chat_id: str,
+        text: str,
+        *,
+        message_id: str = "",
+    ) -> _CommandExecution:
         command, _, arg = text.partition(" ")
         arg = arg.strip()
         cmd = command.lower()
         route = self._command_routes.get(cmd)
         if route is None:
-            self._reply_text(chat_id, f"未知命令：`{command}`\n发送 `/help` 查看可用命令。", message_id=message_id)
-            return
-        # 先做 scope guard，保证群/私聊专属命令优先返回精确拒绝文本；
-        # 只有 scope 允许通过后，才需要进入"群里是否仅管理员可用"的判断。
-        if not self._ensure_command_scope(route, chat_id, message_id):
-            return
-        if route.admin_only_in_group and not self._ensure_group_command_admin(chat_id, message_id):
-            return
-        result = route.handler(sender_id, chat_id, arg, message_id)
-        if result is not None:
-            self._dispatch_command_result(chat_id, result, message_id=message_id)
+            return _CommandExecution(
+                error_text=f"未知命令：`{command}`\n发送 `/help` 查看可用命令。"
+            )
+        denied_text = self._command_denial_text(route, chat_id, message_id=message_id)
+        if denied_text:
+            return _CommandExecution(error_text=denied_text)
+        return _CommandExecution(result=route.handler(sender_id, chat_id, arg, message_id))
 
     def _dispatch_command_result(self, chat_id: str, result: CommandResult, *, message_id: str = "") -> None:
         if result.card is not None:
             self._reply_card(chat_id, result.card, message_id=message_id)
         elif result.text:
             self._reply_text(chat_id, result.text, message_id=message_id)
+
+    def _command_action_response(
+        self,
+        execution: _CommandExecution,
+        *,
+        title: str,
+    ) -> P2CardActionTriggerResponse:
+        if execution.error_text:
+            return make_card_response(
+                toast=execution.error_text,
+                toast_type="warning",
+            )
+        result = execution.result
+        if result is None:
+            return make_card_response(
+                toast="命令已执行。",
+                toast_type="success",
+            )
+        if result.card is not None:
+            return make_card_response(card=result.card)
+        if result.text:
+            return make_card_response(card=build_markdown_card(title or "Codex 命令结果", result.text))
+        return P2CardActionTriggerResponse()
+
+    def _handle_help_execute_command_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse:
+        command = str(action_value.get("command", "") or "").strip()
+        if not command.startswith("/"):
+            return make_card_response(
+                toast="帮助按钮配置异常：缺少合法命令。",
+                toast_type="warning",
+            )
+        title = str(action_value.get("title", "") or "").strip() or f"Codex {command.split()[0]}"
+        execution = self._execute_command_text(
+            sender_id,
+            chat_id,
+            command,
+            message_id=message_id,
+        )
+        return self._command_action_response(execution, title=title)
+
+    def _handle_help_submit_command_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse:
+        command = str(action_value.get("command", "") or "").strip()
+        field_name = str(action_value.get("field_name", "") or "").strip()
+        required_text = str(action_value.get("required_text", "") or "").strip() or "请输入必填参数。"
+        form_value = action_value.get("_form_value") or {}
+        if not command.startswith("/"):
+            return make_card_response(
+                toast="帮助表单配置异常：缺少合法命令。",
+                toast_type="warning",
+            )
+        if not field_name or not isinstance(form_value, dict):
+            return make_card_response(
+                toast="帮助表单配置异常：缺少参数字段。",
+                toast_type="warning",
+            )
+        arg = str(form_value.get(field_name, "") or "").strip()
+        if not arg:
+            return make_card_response(toast=required_text, toast_type="warning")
+        title = str(action_value.get("title", "") or "").strip() or f"Codex {command}"
+        execution = self._execute_command_text(
+            sender_id,
+            chat_id,
+            f"{command} {arg}",
+            message_id=message_id,
+        )
+        return self._command_action_response(execution, title=title)
 
     @staticmethod
     def _is_turn_thread_not_found_error(exc: Exception) -> bool:

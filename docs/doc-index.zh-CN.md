@@ -17,6 +17,7 @@
 | 当前总体架构、分层、模块划分、仓库结构是什么？ | [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md) |
 | 飞书侧线程生命周期是什么？哪些状态绝不能混淆？ | [`feishu-thread-lifecycle.zh-CN.md`](./feishu-thread-lifecycle.zh-CN.md) |
 | `/status`、`/release-feishu-runtime`、`feishu-codexctl` 共享的状态词汇与管理面合同是什么？ | [`runtime-control-surface.zh-CN.md`](./runtime-control-surface.zh-CN.md) |
+| 飞书 `/help` 的信息架构、按钮导航与 slash 语义一致性合同是什么？ | [`feishu-help-navigation.zh-CN.md`](./feishu-help-navigation.zh-CN.md) |
 | `fcodex` shared-backend 的运行时模型是什么？wrapper、本地代理、`--cd` 语义如何工作？ | [`fcodex-shared-backend-runtime.zh-CN.md`](./fcodex-shared-backend-runtime.zh-CN.md) |
 | `/session`、`/resume`、`/profile`、`/rm` 在飞书、`fcodex`、TUI 三层里分别是什么意思？ | [`session-profile-semantics.zh-CN.md`](./session-profile-semantics.zh-CN.md) |
 | shared backend 复用与 `/resume` 有哪些安全规则？ | [`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md) |
@@ -27,6 +28,7 @@
 
 - 做架构调整或较大重构时：先读 [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md)，再按主题补读对应文档。
 - 排查 session、线程恢复、运行时切换问题时：重点读 [`feishu-thread-lifecycle.zh-CN.md`](./feishu-thread-lifecycle.zh-CN.md)、[`runtime-control-surface.zh-CN.md`](./runtime-control-surface.zh-CN.md)、[`session-profile-semantics.zh-CN.md`](./session-profile-semantics.zh-CN.md)、[`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md)。
+- 改飞书 `/help`、命令可发现性、按钮与 slash 语义一致性时：先读 [`feishu-help-navigation.zh-CN.md`](./feishu-help-navigation.zh-CN.md)，再按它引用的专题文档继续读。
 - 改 `fcodex` wrapper、shared backend、本地代理相关逻辑时：重点读 [`fcodex-shared-backend-runtime.zh-CN.md`](./fcodex-shared-backend-runtime.zh-CN.md) 和 [`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md)。
 - 处理权限、执行审批、沙箱报错或产品文案时：先读 [`codex-permissions-model.zh-CN.md`](./codex-permissions-model.zh-CN.md)。
 

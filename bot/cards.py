@@ -106,111 +106,6 @@ def build_profile_card(
     }
 
 
-def build_help_dashboard_card(content: str) -> dict:
-    """构造 /help 总览仪表盘。"""
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "Codex 帮助"},
-            "template": "blue",
-        },
-        "elements": [
-            {"tag": "markdown", "content": content},
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "layout": "trisection",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "session"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_help_topic",
-                            "plugin": KEYWORD,
-                            "topic": "session",
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "settings"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_help_topic",
-                            "plugin": KEYWORD,
-                            "topic": "settings",
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "group"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_help_topic",
-                            "plugin": KEYWORD,
-                            "topic": "group",
-                        },
-                    },
-                ],
-            },
-        ],
-    }
-
-
-def build_help_topic_card(title: str, content: str) -> dict:
-    """构造 /help 子主题卡片。"""
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "template": "blue",
-        },
-        "elements": [
-            {"tag": "markdown", "content": content},
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "返回帮助"},
-                        "type": "default",
-                        "value": {
-                            "action": "show_help_overview",
-                            "plugin": KEYWORD,
-                        },
-                    }
-                ],
-            },
-        ],
-    }
-
-
-def build_help_topic_actions_card(
-    title: str,
-    content: str,
-    actions: list[dict],
-    *,
-    layout: str = "",
-) -> dict:
-    """构造带快捷按钮的 /help 子主题卡片。"""
-    action_element = {"tag": "action", "actions": actions}
-    if layout:
-        action_element["layout"] = layout
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "template": "blue",
-        },
-        "elements": [
-            {"tag": "markdown", "content": content},
-            {"tag": "hr"},
-            action_element,
-        ],
-    }
-
-
 def _back_to_help_action() -> dict:
     return {
         "tag": "action",
@@ -1189,7 +1084,7 @@ def build_sessions_card(
                 "已按当前目录跨 provider 汇总显示线程。\n"
                 f"按最近更新时间排序，共 {total_count} 个线程。\n"
                 "想恢复其他目录的线程，或按名字做全局精确查找，请用 `/resume <thread_id|thread_name>`。\n"
-                "如需在本地继续同一线程，请使用 `fcodex`；详情见 `/help local`。"
+                "如需在本地继续同一线程，请使用 `fcodex`；本地 wrapper 命令请在终端执行 `fcodex /help`。"
             ),
         },
         {"tag": "hr"},

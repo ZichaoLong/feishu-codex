@@ -31,7 +31,7 @@ _SHARED_COMMAND_SPECS = (
     SharedCommandSpec(
         key="help",
         slash_name="/help",
-        feishu_usage="/help [session|settings|group|local]",
+        feishu_usage="/help [session|settings|group]",
         wrapper_usage="fcodex /help",
         feishu_summary="查看帮助概览与主题入口。",
         wrapper_summary="查看 wrapper 自命令说明与 shared surface 边界。",
