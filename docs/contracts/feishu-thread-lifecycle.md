@@ -200,20 +200,26 @@ So the rule is:
 
 ## 7. Implementation Contract
 
-Current Feishu-side implementation should satisfy all of these:
+This document only fixes the implementation constraints that belong to the
+thread-lifecycle contract itself:
 
 - one Feishu chat keeps one logical current thread binding
-- group chats share binding by `chat_id`
 - runtime loss does not clear binding automatically
+- `thread/closed` is handled as a runtime transition, not a logical unbind
 - `thread/read` timeout/transport errors only degrade the runtime channel; they
   do not immediately declare runtime loss
 - one Feishu chat has at most one active execution card at a time
 - `/new` and `/resume` explicitly replace the binding
-- if runtime is gone, the next prompt may rehydrate it from the bound
-  `thread_id`, but only after normal prompt preflight passes
-- a rejected prompt on a `bound + released` binding is pure reject and does not
-  reattach runtime
-- `thread/closed` is handled as a runtime transition, not a logical unbind
+
+The following rules are closely related, but their formal ownership lives
+elsewhere:
+
+- pure-reject / reattach rules for prompts on `bound + released` bindings:
+  `docs/contracts/runtime-control-surface.md`
+- profile / provider resolution on unloaded-thread restore paths:
+  `docs/contracts/session-profile-semantics.md`
+- group-chat binding-by-`chat_id` and group session-scope rules:
+  `docs/contracts/group-chat-contract.md`
 
 ## 8. Relevant Files
 

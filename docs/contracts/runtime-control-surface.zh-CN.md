@@ -272,13 +272,15 @@
 
 ### 5.6 之后再发普通消息会怎样
 
-如果某个 Feishu binding 当前仍 `bound`，但其 `feishu runtime == released`，那么之后在这个 chat 里直接发送普通消息时，会先执行正常的 prompt preflight。
+如果某个 Feishu binding 当前仍 `bound`，但其 `feishu runtime == released`，那么之后在这个 chat 里直接发送普通消息时：
 
-1. 如果 prompt 被拒绝，这次拒绝必须是 pure reject，binding 继续保持 `released`。
-2. 只有在 prompt 被接受时，Feishu 才会按当前绑定的 `thread_id` 重新附着 / resume，然后启动 turn。
+- 先走正常的 prompt preflight
+- 如果 prompt 被拒绝，这次拒绝必须是 pure reject，binding 继续保持 `released`
+- 只有在 prompt 被接受时，Feishu 才允许按当前绑定重新附着 / resume，然后启动 turn
 
-如果当时该 thread 已 `notLoaded`，这条“已通过 preflight 的重新附着路径”会遵守
-`docs/contracts/session-profile-semantics.zh-CN.md` 里关于 unloaded thread 的 profile 恢复合同。
+本文只定义这里的 runtime 准入与 pure reject 规则。
+如果 accepted 路径命中了 unloaded thread，profile / provider 如何解析，统一以
+`docs/contracts/session-profile-semantics.zh-CN.md` 为准。
 
 ## 6. 本地管理面：`feishu-codexctl`
 

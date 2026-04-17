@@ -73,10 +73,10 @@ semantic layers.
 ### `/release-feishu-runtime`
 
 - This is Feishu-only and is not part of the shared surface between Feishu and the `fcodex` wrapper
-- It only releases Feishu's own runtime residency for the currently bound thread
+- It targets the current chat's bound thread, but what it releases is Feishu service runtime residency on that thread
 - It does not clear the chat binding and does not delete or archive the thread
-- If the thread still remains `loaded` afterward, some external subscriber is still attached, most commonly local `fcodex`
-- If the thread becomes `notLoaded` afterward, whether the next restore may re-profile follows the profile contract in Section 5 below
+- It shares the same runtime vocabulary as `feishu-codexctl thread release-feishu-runtime`, but it is not the same entry surface
+- Its exact state transitions, blockers, and pure-reject rules are defined in `docs/contracts/runtime-control-surface.md`
 
 ## 3. `fcodex` Shell-Wrapper Semantics
 
@@ -225,15 +225,14 @@ Therefore:
   - explicit `-p/--profile` or other resume-time overrides do not become an
     effective switch there
 - If a Feishu binding still points at the thread but its `feishu runtime` is
-  already `released`, the next ordinary message first runs the normal prompt
-  preflight.
-  - If that prompt is denied, the denial is pure reject and the binding must
-    stay `released`
-  - Only if the prompt is accepted does Feishu reattach / resume using the
-    bound thread, then start the turn
-  - If the thread is `notLoaded` at that moment, the unloaded-thread rule in
-    this section applies
-  - If the thread is still `loaded`, it only reuses the live runtime and
+  already `released`, later ordinary prompts first follow the reattach /
+  pure-reject rule defined in `docs/contracts/runtime-control-surface.md`.
+  - a denied prompt must remain a pure reject, with the binding staying
+    `released`
+  - only an accepted prompt may reattach / resume using the bound thread
+  - if that accepted path hits a `notLoaded` thread, the unloaded-thread rule
+    in this section applies
+  - if the thread is still `loaded`, it only reuses the live runtime and
     cannot switch provider through that path
 - For that reason, "thread original profile" is not recommended contract
   language in this project.

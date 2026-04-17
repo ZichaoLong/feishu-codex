@@ -177,17 +177,20 @@ flowchart TD
 
 ## 7. 当前实现合同
 
-当前飞书侧实现应满足：
+当前文档只固化线程生命周期自身负责的实现约束：
 
 - 一个飞书会话只维护一个逻辑上的当前 thread 绑定
-- 群聊按 `chat_id` 共享绑定
 - runtime 丢失不会自动清空绑定
+- `thread/closed` 被视为 runtime 状态迁移，而不是逻辑解绑
 - `thread/read` timeout/transport error 只会标记运行通道降级，不会直接宣告“当前运行态已失联”
 - 同一飞书会话同一时刻最多只有一张活动执行卡
 - `/new` 与 `/resume` 才是显式改绑操作
-- 如果 runtime 已丢失，下一条消息只有在通过正常 prompt preflight 后，才会根据已绑定的 `thread_id` 自动恢复
-- 对 `bound + released` binding 而言，被拒绝的 prompt 必须是 pure reject，不能偷偷重附着 runtime
-- `thread/closed` 被视为 runtime 状态迁移，而不是逻辑解绑
+
+下列规则虽然和生命周期紧密相关，但正式归属不在本文：
+
+- `bound + released` 下 prompt 的 pure reject / 重新附着规则：见 `docs/contracts/runtime-control-surface.zh-CN.md`
+- unloaded thread 恢复路径上的 profile / provider 解析合同：见 `docs/contracts/session-profile-semantics.zh-CN.md`
+- 群聊按 `chat_id` 共享 binding 以及群会话范围规则：见 `docs/contracts/group-chat-contract.zh-CN.md`
 
 ## 8. 相关实现文件
 

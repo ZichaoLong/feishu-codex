@@ -68,10 +68,10 @@
 ### `/release-feishu-runtime`
 
 - 这是飞书侧专有命令，不属于 Feishu 与 `fcodex` wrapper 的 shared surface
-- 它只释放 Feishu 服务自己对当前绑定 thread 的 runtime 持有
+- 它面向“当前 chat 绑定的 thread”，但释放的是 Feishu 服务对该 thread 的 runtime residency
 - 它不会清空当前 chat 的线程绑定，也不会删除 / archive 线程
-- 如果命令后 thread 仍处于 `loaded`，说明还有外部订阅者仍在附着，最常见的是本地 `fcodex`
-- 如果命令后 thread 已 `notLoaded`，后续再恢复时是否能切 profile / provider，遵守本文第 5 节的 profile 恢复合同
+- 它与 `feishu-codexctl thread release-feishu-runtime` 共享同一组 runtime 词汇，但不是同一个入口层
+- `/release-feishu-runtime` 的精确状态迁移、阻塞条件与 pure reject 规则，统一以 `docs/contracts/runtime-control-surface.zh-CN.md` 为准
 
 ## 3. `fcodex` Shell Wrapper 语义
 
@@ -203,11 +203,11 @@ wrapper 额外增加的行为：
 - 当目标线程当前 `loaded-in-current-backend` 时，`resume` 复用的是现有 live runtime。
   - 这一分支上，不能通过 `resume` 改写该 live thread 的 profile 或 provider
   - 显式 `-p/--profile` 或其他 resume 时覆盖项，在这个分支上不构成有效切换
-- 如果某个飞书 binding 当前仍指向该 thread，但其 `feishu runtime` 已是 `released`，则下一条普通消息会先走正常的 prompt preflight。
-  - 如果这条 prompt 被拒绝，则这次拒绝必须是 pure reject，binding 继续保持 `released`
-  - 只有在 prompt 被接受时，Feishu 才会按当前绑定重新附着 / resume，再启动 turn
-  - 如果当时 thread 已 `notLoaded`，就回到本节的 unloaded-thread 规则
-  - 如果当时 thread 仍 `loaded`，则只是复用现有 live runtime，不能借此切 provider
+- 如果某个飞书 binding 当前仍指向该 thread，但其 `feishu runtime` 已是 `released`，则后续普通消息会先走 `docs/contracts/runtime-control-surface.zh-CN.md` 定义的 reattach / pure-reject 规则。
+  - 被拒绝时必须 pure reject，binding 继续保持 `released`
+  - 只有被接受时，Feishu 才会按当前 binding 重新附着 / resume
+  - 若 accepted 路径命中了 `notLoaded` thread，则回到本节的 unloaded-thread 规则
+  - 若 thread 仍 `loaded`，则只是复用现有 live runtime，不能借此切 provider
 - 因此，“线程原始 profile”不是本项目推荐使用的合同术语。
   更准确的说法是：
   - “以当前本地默认 profile 恢复”

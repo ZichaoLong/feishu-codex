@@ -273,17 +273,17 @@ If the command succeeds and:
 
 ### 5.6 What happens on the next normal prompt
 
-If a Feishu binding remains `bound` but its `feishu runtime == released`, then the
-next ordinary prompt in that chat first runs the normal prompt preflight.
+If a Feishu binding remains `bound` but its `feishu runtime == released`, then
+the next ordinary prompt in that chat:
 
-1. If the prompt is denied, the rejection is pure reject and the binding stays
-   `released`.
-2. Only if the prompt is accepted does Feishu reattach / resume using the bound
-   `thread_id`, then start the new turn.
+- runs the normal prompt preflight first
+- must be a pure reject if preflight denies it, with the binding staying
+  `released`
+- may only reattach / resume and start a new turn after preflight accepts it
 
-If the thread is `notLoaded` at that moment, that accepted reattach path follows
-the unloaded-thread profile contract defined in
-`docs/contracts/session-profile-semantics.md`.
+This document owns the runtime-admission and pure-reject rule only.
+If the accepted path hits an unloaded thread, profile / provider resolution is
+owned by `docs/contracts/session-profile-semantics.md`.
 
 ## 6. Local Admin Surface: `feishu-codexctl`
 
