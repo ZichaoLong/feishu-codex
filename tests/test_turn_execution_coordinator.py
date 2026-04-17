@@ -144,6 +144,115 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertFalse(state["running"])
         self.assertFalse(state["pending_cancel"])
 
+    def test_transcript_mutations_and_snapshot_reconcile_are_coordinator_owned(self) -> None:
+        coordinator = TurnExecutionCoordinator()
+        state = self._make_state()
+
+        coordinator.append_assistant_delta_locked(state, delta="第一段")
+        coordinator.start_process_block_locked(
+            state,
+            text="\n$ (/tmp/project) ls\n",
+            marks_work=True,
+        )
+        coordinator.finish_process_block_locked(
+            state,
+            suffix="\n[命令结束 status=completed exit=0]\n",
+        )
+        updated = coordinator.reconcile_current_assistant_text_locked(state, text="第二段")
+
+        self.assertTrue(updated)
+        self.assertIn("命令结束", state["execution_transcript"].process_text())
+        self.assertEqual(state["execution_transcript"].reply_text(), "第一段\n\n第二段")
+
+        coordinator.apply_snapshot_reply_locked(
+            state,
+            reply_text="第一段\n\n第二段",
+            reply_items=[
+                {"type": "agentMessage", "text": "第一段"},
+                {"type": "commandExecution"},
+                {"type": "agentMessage", "text": "第二段"},
+            ],
+        )
+
+        self.assertEqual(
+            [segment.kind for segment in state["execution_transcript"].reply_segments],
+            ["assistant", "divider", "assistant"],
+        )
+
+    def test_followup_preparation_is_idempotent_and_uses_prompt_anchor(self) -> None:
+        coordinator = TurnExecutionCoordinator()
+        state = self._make_state()
+        state["current_prompt_message_id"] = "msg-1"
+        state["current_prompt_reply_in_thread"] = True
+        state["execution_transcript"].set_reply_text("123456789")
+
+        followup = coordinator.prepare_patch_failure_followup_locked(state)
+
+        assert followup is not None
+        self.assertEqual(followup.reply_text, "123456789")
+        self.assertEqual(followup.prompt_message_id, "msg-1")
+        self.assertTrue(followup.prompt_reply_in_thread)
+        self.assertTrue(state["followup_sent"])
+        self.assertIsNone(coordinator.prepare_patch_failure_followup_locked(state))
+
+        state = self._make_state()
+        state["current_prompt_message_id"] = "msg-2"
+        state["execution_transcript"].set_reply_text("abcdef")
+        state["current_message_id"] = "card-1"
+        followup = coordinator.prepare_terminal_followup_locked(state, card_reply_limit=3)
+        assert followup is not None
+        self.assertEqual(followup.reply_text, "abcdef")
+        self.assertTrue(state["followup_sent"])
+
+    def test_plan_state_updates_are_scoped_to_current_turn(self) -> None:
+        coordinator = TurnExecutionCoordinator()
+        state = self._make_state()
+        state["current_turn_id"] = "turn-1"
+
+        updated = coordinator.update_plan_outline_locked(
+            state,
+            turn_id="turn-1",
+            explanation="先分析",
+            plan=[{"step": "确认需求", "status": "completed"}],
+        )
+
+        self.assertTrue(updated)
+        self.assertEqual(state["plan_turn_id"], "turn-1")
+        self.assertEqual(state["plan_explanation"], "先分析")
+        self.assertEqual(state["plan_steps"], [{"step": "确认需求", "status": "completed"}])
+
+        rejected = coordinator.update_plan_outline_locked(
+            state,
+            turn_id="turn-2",
+            explanation="不应覆盖",
+            plan=[{"step": "新步骤", "status": "pending"}],
+        )
+
+        self.assertFalse(rejected)
+        self.assertEqual(state["plan_explanation"], "先分析")
+
+        text_updated = coordinator.update_plan_text_locked(
+            state,
+            turn_id="turn-1",
+            text="1. 确认需求\n2. 实现",
+        )
+        self.assertTrue(text_updated)
+        self.assertEqual(state["plan_text"], "1. 确认需求\n2. 实现")
+
+        shorter = coordinator.update_plan_text_locked(
+            state,
+            turn_id="turn-1",
+            text="1.",
+        )
+        self.assertFalse(shorter)
+        self.assertEqual(state["plan_text"], "1. 确认需求\n2. 实现")
+
+        coordinator.clear_plan_state_locked(state)
+        self.assertEqual(state["plan_turn_id"], "")
+        self.assertEqual(state["plan_explanation"], "")
+        self.assertEqual(state["plan_steps"], [])
+        self.assertEqual(state["plan_text"], "")
+
     def test_apply_turn_completed_locked_sets_reply_or_error_note(self) -> None:
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()

@@ -2002,22 +2002,16 @@ class CodexHandler(BotHandler):
                     working_dir=snapshot.summary.cwd or state["working_dir"],
                 ),
             )
-            transcript = state["execution_transcript"]
-            if reply_text and len(reply_text) >= len(transcript.reply_text()):
-                if not transcript.rebuild_reply_from_snapshot_items(
-                    reply_items,
-                    fallback_text=reply_text,
-                ):
-                    transcript.set_reply_text(reply_text)
+            self._turn_execution.apply_snapshot_reply_locked(
+                state,
+                reply_text=reply_text,
+                reply_items=reply_items,
+            )
             if not should_finalize:
-                self._apply_runtime_state_message_locked(
+                self._turn_execution.acknowledge_running_snapshot_locked(
                     state,
-                    ExecutionStateChanged(
-                        running=True,
-                        awaiting_local_turn_started=False,
-                    ),
+                    occurred_at=time.monotonic(),
                 )
-                self._mark_runtime_event_locked(state)
                 return False
         return self._finalize_execution_card_from_state(sender_id, chat_id)
 
@@ -3568,21 +3562,13 @@ class CodexHandler(BotHandler):
         plan = params.get("plan") or []
         explanation = params.get("explanation") or ""
         with self._lock:
-            current_turn_id = state["current_turn_id"]
-            if current_turn_id and turn_id and current_turn_id != turn_id:
-                return
-            self._apply_runtime_state_message_locked(
+            if not self._turn_execution.update_plan_outline_locked(
                 state,
-                PlanStateChanged(
-                    plan_turn_id=turn_id or state["plan_turn_id"],
-                    plan_explanation=explanation,
-                    plan_steps=[
-                        {"step": str(item.get("step", "")).strip(), "status": str(item.get("status", "")).strip()}
-                        for item in plan
-                        if str(item.get("step", "")).strip()
-                    ],
-                ),
-            )
+                turn_id=turn_id,
+                explanation=explanation,
+                plan=plan,
+            ):
+                return
         self._flush_plan_card(*binding)
 
     def _handle_item_started(self, params: dict[str, Any]) -> None:
@@ -3599,19 +3585,25 @@ class CodexHandler(BotHandler):
             command = item.get("command") or ""
             cwd = item.get("cwd") or ""
             with self._lock:
-                state["execution_transcript"].start_process_block(
-                    f"\n$ ({display_path(cwd)}) {command}\n",
+                self._turn_execution.start_process_block_locked(
+                    state,
+                    text=f"\n$ ({display_path(cwd)}) {command}\n",
                     marks_work=True,
                 )
             self._schedule_execution_card_update(*binding)
         elif item_type == "fileChange":
             with self._lock:
-                state["execution_transcript"].start_process_block("\n[准备应用文件修改]\n", marks_work=True)
+                self._turn_execution.start_process_block_locked(
+                    state,
+                    text="\n[准备应用文件修改]\n",
+                    marks_work=True,
+                )
             self._schedule_execution_card_update(*binding)
         elif item_type in _WORK_ITEM_LABELS:
             with self._lock:
-                state["execution_transcript"].append_process_note(
-                    f"\n[{_WORK_ITEM_LABELS[item_type]}]\n",
+                self._turn_execution.append_process_note_locked(
+                    state,
+                    text=f"\n[{_WORK_ITEM_LABELS[item_type]}]\n",
                     marks_work=True,
                 )
             self._schedule_execution_card_update(*binding)
@@ -3624,7 +3616,10 @@ class CodexHandler(BotHandler):
         self._note_runtime_event(*binding)
         state = self._get_runtime_state(*binding)
         with self._lock:
-            state["execution_transcript"].append_assistant_delta(str(params.get("delta", "") or ""))
+            self._turn_execution.append_assistant_delta_locked(
+                state,
+                delta=str(params.get("delta", "") or ""),
+            )
         self._schedule_execution_card_update(*binding)
 
     def _handle_command_delta(self, params: dict[str, Any]) -> None:
@@ -3654,8 +3649,9 @@ class CodexHandler(BotHandler):
             state = self._get_runtime_state(*binding) if binding else None
             if state is not None:
                 with self._lock:
-                    state["execution_transcript"].finish_process_block(
-                        f"\n[命令结束 status={status} exit={exit_code}]\n"
+                    self._turn_execution.finish_process_block_locked(
+                        state,
+                        suffix=f"\n[命令结束 status={status} exit={exit_code}]\n",
                     )
                 self._schedule_execution_card_update(*binding)
         elif item_type == "fileChange":
@@ -3670,7 +3666,7 @@ class CodexHandler(BotHandler):
                     )
                     suffix = f"\n[文件变更]\n{summary}\n"
                 with self._lock:
-                    state["execution_transcript"].finish_process_block(suffix)
+                    self._turn_execution.finish_process_block_locked(state, suffix=suffix)
                 self._schedule_execution_card_update(*binding)
         elif item_type == "agentMessage" and item.get("text"):
             binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
@@ -3678,15 +3674,16 @@ class CodexHandler(BotHandler):
                 return
             state = self._get_runtime_state(*binding)
             with self._lock:
-                transcript = state["execution_transcript"]
-                if len(item["text"]) >= len(transcript.reply_text()):
-                    transcript.reconcile_current_assistant_text(str(item["text"] or ""))
+                self._turn_execution.reconcile_current_assistant_text_locked(
+                    state,
+                    text=str(item["text"] or ""),
+                )
             self._schedule_execution_card_update(*binding)
         elif item_type in _WORK_ITEM_LABELS:
             state = self._get_runtime_state(*binding) if binding else None
             if state is not None:
                 with self._lock:
-                    state["execution_transcript"].finish_process_block()
+                    self._turn_execution.finish_process_block_locked(state)
                 self._schedule_execution_card_update(*binding)
         elif item_type == "plan" and item.get("text"):
             binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
@@ -3695,18 +3692,12 @@ class CodexHandler(BotHandler):
             state = self._get_runtime_state(*binding)
             turn_id = params.get("turnId", "")
             with self._lock:
-                current_turn_id = state["current_turn_id"]
-                if current_turn_id and turn_id and current_turn_id != turn_id:
+                if not self._turn_execution.update_plan_text_locked(
+                    state,
+                    turn_id=turn_id,
+                    text=item["text"],
+                ):
                     return
-                plan_turn_id = turn_id or state["plan_turn_id"]
-                if len(item["text"]) >= len(state["plan_text"]):
-                    self._apply_runtime_state_message_locked(
-                        state,
-                        PlanStateChanged(
-                            plan_turn_id=plan_turn_id,
-                            plan_text=item["text"],
-                        ),
-                    )
             self._flush_plan_card(*binding)
 
     def _handle_turn_completed(self, params: dict[str, Any]) -> None:
@@ -3739,7 +3730,7 @@ class CodexHandler(BotHandler):
             return
         state = self._get_runtime_state(*binding)
         with self._lock:
-            state["execution_transcript"].append_process_delta(text)
+            self._turn_execution.append_process_delta_locked(state, text=text)
         self._schedule_execution_card_update(*binding)
 
     def _send_execution_card(
@@ -3841,43 +3832,33 @@ class CodexHandler(BotHandler):
         )
         if not ok and immediate and reply_text:
             with self._lock:
-                self._apply_runtime_state_message_locked(
-                    state,
-                    ExecutionStateChanged(followup_sent=True),
+                followup = self._turn_execution.prepare_patch_failure_followup_locked(state)
+            if followup is not None:
+                self._reply_text(
+                    chat_id,
+                    followup.reply_text,
+                    message_id=followup.prompt_message_id,
+                    reply_in_thread=followup.prompt_reply_in_thread,
                 )
-            self._reply_text(
-                chat_id,
-                reply_text,
-                message_id=prompt_message_id,
-                reply_in_thread=prompt_reply_in_thread,
-            )
 
     def _send_followup_if_needed(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
-            runtime = build_runtime_view(state)
-            if runtime.execution.followup_sent:
-                return
-            reply_text = runtime.execution.transcript.reply_text()
-            current_message_id = runtime.execution.current_message_id
-            prompt_message_id = runtime.execution.current_prompt_message_id.strip()
-            prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
-            need_followup = not current_message_id or len(reply_text) > self._card_reply_limit
-            if not reply_text or not need_followup:
-                return
-            self._apply_runtime_state_message_locked(
+            followup = self._turn_execution.prepare_terminal_followup_locked(
                 state,
-                ExecutionStateChanged(followup_sent=True),
+                card_reply_limit=self._card_reply_limit,
             )
+        if followup is None:
+            return
         self._reply_text(
             chat_id,
-            reply_text,
-            message_id=prompt_message_id,
-            reply_in_thread=prompt_reply_in_thread,
+            followup.reply_text,
+            message_id=followup.prompt_message_id,
+            reply_in_thread=followup.prompt_reply_in_thread,
         )
 
     def _clear_plan_state(self, state: _RuntimeState) -> None:
-        self._apply_runtime_state_message_locked(state, PlanStateChanged(clear=True))
+        self._turn_execution.clear_plan_state_locked(state)
 
     def _flush_plan_card(self, sender_id: str, chat_id: str) -> None:
         runtime = self._get_runtime_view(sender_id, chat_id)

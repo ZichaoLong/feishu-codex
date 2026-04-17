@@ -9,6 +9,7 @@ from bot.runtime_state import (
     ExecutionAnchorCleared,
     ExecutionRetired,
     ExecutionStateChanged,
+    PlanStateChanged,
     RuntimeHeartbeat,
     apply_runtime_state_message,
 )
@@ -34,6 +35,13 @@ class TurnStartedTransition:
 @dataclass(frozen=True)
 class FinalizeExecutionTransition:
     had_card: bool
+
+
+@dataclass(frozen=True)
+class ExecutionFollowupMessage:
+    reply_text: str
+    prompt_message_id: str
+    prompt_reply_in_thread: bool
 
 
 class TurnExecutionCoordinator:
@@ -158,6 +166,86 @@ class TurnExecutionCoordinator:
             ),
         )
 
+    @staticmethod
+    def _followup_message_from_state(state: RuntimeState, reply_text: str) -> ExecutionFollowupMessage:
+        return ExecutionFollowupMessage(
+            reply_text=reply_text,
+            prompt_message_id=str(state["current_prompt_message_id"] or "").strip(),
+            prompt_reply_in_thread=bool(state["current_prompt_reply_in_thread"]),
+        )
+
+    def start_process_block_locked(self, state: RuntimeState, *, text: str, marks_work: bool) -> None:
+        state["execution_transcript"].start_process_block(text, marks_work=marks_work)
+
+    def append_process_note_locked(self, state: RuntimeState, *, text: str, marks_work: bool = False) -> None:
+        state["execution_transcript"].append_process_note(text, marks_work=marks_work)
+
+    def finish_process_block_locked(self, state: RuntimeState, *, suffix: str = "") -> None:
+        state["execution_transcript"].finish_process_block(suffix)
+
+    def append_assistant_delta_locked(self, state: RuntimeState, *, delta: str) -> None:
+        state["execution_transcript"].append_assistant_delta(delta)
+
+    def append_process_delta_locked(self, state: RuntimeState, *, text: str) -> None:
+        state["execution_transcript"].append_process_delta(text)
+
+    def reconcile_current_assistant_text_locked(self, state: RuntimeState, *, text: str) -> bool:
+        transcript = state["execution_transcript"]
+        if len(text) < len(transcript.reply_text()):
+            return False
+        transcript.reconcile_current_assistant_text(text)
+        return True
+
+    def apply_snapshot_reply_locked(
+        self,
+        state: RuntimeState,
+        *,
+        reply_text: str,
+        reply_items: list[dict[str, Any]],
+    ) -> None:
+        transcript = state["execution_transcript"]
+        if reply_text and len(reply_text) >= len(transcript.reply_text()):
+            if not transcript.rebuild_reply_from_snapshot_items(
+                reply_items,
+                fallback_text=reply_text,
+            ):
+                transcript.set_reply_text(reply_text)
+
+    def acknowledge_running_snapshot_locked(self, state: RuntimeState, *, occurred_at: float) -> None:
+        self.acknowledge_active_thread_locked(state)
+        self.mark_runtime_event_locked(state, occurred_at=occurred_at)
+
+    def prepare_patch_failure_followup_locked(self, state: RuntimeState) -> ExecutionFollowupMessage | None:
+        if state["followup_sent"]:
+            return None
+        reply_text = state["execution_transcript"].reply_text()
+        if not reply_text:
+            return None
+        self.apply_runtime_state_message_locked(
+            state,
+            ExecutionStateChanged(followup_sent=True),
+        )
+        return self._followup_message_from_state(state, reply_text)
+
+    def prepare_terminal_followup_locked(
+        self,
+        state: RuntimeState,
+        *,
+        card_reply_limit: int,
+    ) -> ExecutionFollowupMessage | None:
+        if state["followup_sent"]:
+            return None
+        reply_text = state["execution_transcript"].reply_text()
+        current_message_id = str(state["current_message_id"] or "").strip()
+        need_followup = not current_message_id or len(reply_text) > card_reply_limit
+        if not reply_text or not need_followup:
+            return None
+        self.apply_runtime_state_message_locked(
+            state,
+            ExecutionStateChanged(followup_sent=True),
+        )
+        return self._followup_message_from_state(state, reply_text)
+
     def acknowledge_active_thread_locked(self, state: RuntimeState) -> None:
         self.apply_runtime_state_message_locked(
             state,
@@ -187,6 +275,57 @@ class TurnExecutionCoordinator:
                 pending_cancel=False,
             ),
         )
+
+    def clear_plan_state_locked(self, state: RuntimeState) -> None:
+        self.apply_runtime_state_message_locked(state, PlanStateChanged(clear=True))
+
+    def update_plan_outline_locked(
+        self,
+        state: RuntimeState,
+        *,
+        turn_id: str,
+        explanation: str,
+        plan: list[dict[str, Any]],
+    ) -> bool:
+        current_turn_id = str(state["current_turn_id"] or "").strip()
+        normalized_turn_id = str(turn_id or "").strip()
+        if current_turn_id and normalized_turn_id and current_turn_id != normalized_turn_id:
+            return False
+        self.apply_runtime_state_message_locked(
+            state,
+            PlanStateChanged(
+                plan_turn_id=normalized_turn_id or state["plan_turn_id"],
+                plan_explanation=explanation,
+                plan_steps=[
+                    {"step": str(item.get("step", "")).strip(), "status": str(item.get("status", "")).strip()}
+                    for item in plan
+                    if str(item.get("step", "")).strip()
+                ],
+            ),
+        )
+        return True
+
+    def update_plan_text_locked(
+        self,
+        state: RuntimeState,
+        *,
+        turn_id: str,
+        text: str,
+    ) -> bool:
+        current_turn_id = str(state["current_turn_id"] or "").strip()
+        normalized_turn_id = str(turn_id or "").strip()
+        if current_turn_id and normalized_turn_id and current_turn_id != normalized_turn_id:
+            return False
+        if len(text) < len(str(state["plan_text"] or "")):
+            return False
+        self.apply_runtime_state_message_locked(
+            state,
+            PlanStateChanged(
+                plan_turn_id=normalized_turn_id or state["plan_turn_id"],
+                plan_text=text,
+            ),
+        )
+        return True
 
     def prepare_turn_started_locked(
         self,
