@@ -86,9 +86,10 @@ The recommended rollout is:
 1. extract `BindingRuntimeManager`
 2. extract the execution-lifecycle components
 3. extract `RuntimeAdminController`
-4. finish remaining contract and naming cleanup
+4. extract `InboundSurfaceController`
+5. finish remaining contract and naming cleanup
 
-These four phases are intentionally ordered and should not be inverted.
+These five phases are intentionally ordered and should not be inverted.
 
 Current progress:
 
@@ -106,12 +107,16 @@ Current progress:
   - owns `/status` and `/release-feishu-runtime`
   - owns binding clear / clear-all and thread status / bindings /
     release-feishu-runtime
+- Phase 4 is complete: `InboundSurfaceController`
+  - owns inbound message-command parsing and dispatch
+  - owns card-action routing and help-card command reuse
+  - owns command-scope and group-guard surface semantics
 - `CodexHandler` is not yet a pure orchestrator, but it no longer directly
   owns those implementation details
 - The main remaining handler ownership is now:
-  - inbound Feishu message / card-action / command glue
-  - action guards and permission gates
-  - top-level runtime entrypoints and cross-domain orchestration
+  - prompt start / cancel / attach-resume entry orchestration
+  - live-turn write-lease and interaction-lease coordination
+  - top-level runtime lifecycle and cross-domain orchestration
 
 ## 7. Phase 1: BindingRuntimeManager
 
@@ -332,9 +337,56 @@ Those stay in a thinner orchestration entry layer.
   - `service/status` aggregate view
   - attached vs released binding rendering under `thread/bindings`
 
-## 10. Phase 4: Remaining Contract Cleanup
+## 10. Phase 4: InboundSurfaceController
 
-After the first three ownership extractions, clean up the remaining items that
+### 10.1 Goal
+
+Extract inbound Feishu surface ownership from `CodexHandler` so that message
+command parsing, card-action routing, help-card command reuse, and group guard
+semantics stop living as scattered handler methods.
+
+### 10.2 Responsibilities
+
+This component owns:
+
+- message-level dispatch between help / command / prompt
+- command-route parsing, scope validation, and result dispatch
+- help-card execute / submit command reuse
+- card-action route and prefixed-action route dispatch
+- group-chat action guards and permission gates
+- stale form-action fallback behavior
+
+### 10.3 Boundary With Other Components
+
+`InboundSurfaceController` does not own the runtime/binding state machine and
+does not own turn lifecycle.
+
+It should:
+
+- call prompt start / cancel / session / settings / group / admin entrypoints
+  through explicit callbacks
+- keep route / guard / fallback semantics at the surface boundary instead of
+  pushing them back into domain components
+
+In short:
+
+- runtime/domain components own "what does this action do?"
+- `InboundSurfaceController` owns "how is an inbound user event parsed,
+  validated, and routed to the right entrypoint?"
+
+### 10.4 Exit Criteria
+
+- existing help-card command reuse, form fallback, group guard, and running
+  prompt rejection tests still pass
+- new controller-level tests cover:
+  - blank message / keyword -> help
+  - help submit preserving command scope denial
+  - group guard rejection
+  - prefixed action-route dispatch
+
+## 11. Phase 5: Remaining Contract Cleanup
+
+After the first four ownership extractions, clean up the remaining items that
 fit better once boundaries are explicit:
 
 - `#2` single-source-of-truth contract for `admin_open_ids`
@@ -344,9 +396,9 @@ fit better once boundaries are explicit:
 This cleanup is intentionally later because doing it earlier would mostly add
 more helpers back into `CodexHandler`.
 
-## 11. Why Not Start Elsewhere
+## 12. Why Not Start Elsewhere
 
-### 11.1 Do Not Start With Lock Splitting
+### 12.1 Do Not Start With Lock Splitting
 
 Starting with locks risks getting:
 
@@ -355,19 +407,19 @@ Starting with locks risks getting:
 
 That is not the desired long-term architecture.
 
-### 11.2 Do Not Prioritize More Scattered Review Fixes
+### 12.2 Do Not Prioritize More Scattered Review Fixes
 
 Many local bugs and local contracts have already been tightened. More isolated
 fixes now have lower marginal value than reducing total reasoning cost.
 
-### 11.3 Do Not Start With File-Level Slicing
+### 12.3 Do Not Start With File-Level Slicing
 
 If the work only turns one big file into multiple files while leaving state
 ownership implicit, it is still navigation refactoring, not real decoupling.
 
-## 12. Rollout Constraints
+## 13. Rollout Constraints
 
-The first two phases should follow these constraints:
+The first four phases should follow these constraints:
 
 - default to no user-visible behavior changes
 - extract the boundary before moving all call sites
@@ -376,7 +428,7 @@ The first two phases should follow these constraints:
 - allow internal API renames; do not preserve intermediate compatibility layers
   just for their own sake
 
-## 13. Suggested Commit Shape
+## 14. Suggested Commit Shape
 
 Each phase should be split into commits roughly like:
 
@@ -389,18 +441,18 @@ Each phase should be split into commits roughly like:
 This keeps review clearer, rollback smaller, and boundary definition separate
 from behavior movement.
 
-## 14. Recommended Next Step
+## 15. Recommended Next Step
 
 The immediate next step should not be another round of scattered fixes. It
-should be the remaining inbound-surface extraction from `CodexHandler`.
+should be the remaining prompt-entry extraction from `CodexHandler`.
 
 The next controller should own:
 
-- Feishu message-command parsing
-- card-action routing
-- action guards and permission gates
-- orchestration from inbound UI events into runtime / execution / admin
-  components
+- running-prompt rejection and watchdog-reconcile entry
+- released -> attached recovery flow
+- write-lease and interaction-lease acquisition / denial at prompt entry
+- turn start / cancel entry orchestration
 
-That would leave `CodexHandler` much closer to a true runtime orchestrator
-instead of mixing frontend-adapter surface code with domain orchestration.
+That would leave `CodexHandler` much closer to a true runtime lifecycle
+orchestrator instead of still owning the most complicated live-turn entry
+control flow.

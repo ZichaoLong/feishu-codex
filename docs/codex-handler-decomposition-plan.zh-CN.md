@@ -73,14 +73,15 @@
 
 ## 6. 总体方案
 
-建议按四个阶段推进：
+建议按五个阶段推进：
 
 1. `BindingRuntimeManager` 拆分
 2. 执行生命周期组件拆分
 3. `RuntimeAdminController` 拆分
-4. 剩余合同与命名收尾
+4. `InboundSurfaceController` 拆分
+5. 剩余合同与命名收尾
 
-这四个阶段之间是前后依赖关系，不建议调换顺序。
+这五个阶段之间是前后依赖关系，不建议调换顺序。
 
 当前进度：
 
@@ -95,11 +96,15 @@
   - 负责 runtime admin / control-plane 状态查询
   - 负责 `/status` 与 `/release-feishu-runtime`
   - 负责 binding clear / clear-all 与 thread status / bindings / release-feishu-runtime
+- 第四阶段已完成：`InboundSurfaceController`
+  - 负责入站消息命令解析与分发
+  - 负责卡片 action 路由与帮助卡片命令复用
+  - 负责 command scope / group guard 的 surface 语义
 - `CodexHandler` 仍未完全收成编排器，但已不再直接拥有上述三类实现细节
 - 当前剩余的主要 handler ownership 是：
-  - 飞书入站消息 / 卡片动作 / 命令解析 glue
-  - action guard 与 permission gate
-  - 顶层 runtime entrypoint 与跨域编排
+  - prompt start / cancel / attach-resume 的入口编排
+  - live turn 的写入 / interaction lease 协调
+  - 顶层 runtime 生命周期与跨域编排
 
 ## 7. 第一阶段：BindingRuntimeManager
 
@@ -305,9 +310,49 @@
   - `service/status` 聚合视图
   - attached / released binding 在 thread/bindings 下的呈现
 
-## 10. 第四阶段：剩余合同与命名收尾
+## 10. 第四阶段：InboundSurfaceController
 
-前两阶段完成后，再处理剩余更适合落在清晰边界内的条目：
+### 10.1 目标
+
+把“飞书入站 surface ownership”从 `CodexHandler` 中抽出，避免消息命令解析、卡片动作路由、帮助卡片命令复用和群权限守卫继续散落在 handler 里。
+
+### 10.2 负责的状态与职责
+
+第四阶段组件负责：
+
+- 入站消息的 help / command / prompt 分发
+- command route 的解析、scope 校验与结果分发
+- help 卡片里的 execute / submit command 复用
+- 卡片 action route 与 prefixed action route 分发
+- 群聊场景下的 action guard / permission gate
+- 表单型 action 的失效兜底
+
+### 10.3 与其他组件的边界
+
+`InboundSurfaceController` 不拥有 runtime/binding 状态机，也不拥有 turn lifecycle。
+
+它应：
+
+- 通过显式 callback 调用 prompt start / cancel / session / settings / group / admin 这些领域入口
+- 将 route / guard / fallback 语义留在 surface 层，而不是回流到 domain 组件
+
+也就是说：
+
+- domain / runtime 组件决定“动作做什么”
+- `InboundSurfaceController` 决定“用户侧入站事件如何被解析、校验并路由到正确入口”
+
+### 10.4 验收标准
+
+- 现有帮助卡片命令复用、表单 fallback、群 guard、running prompt 拒绝等测试继续通过
+- 新增 controller 级测试，覆盖：
+  - 空消息 / keyword -> help
+  - help submit 保留命令 scope 拒绝
+  - group guard 拒绝路径
+  - prefixed action route 分发
+
+## 11. 第五阶段：剩余合同与命名收尾
+
+前四阶段完成后，再处理剩余更适合落在清晰边界内的条目：
 
 - `#2` `admin_open_ids` 单一事实源
 - `#9` authoritative read 与 bounded-list best-effort lookup 的命名与文档
@@ -315,9 +360,9 @@
 
 这一步之所以后置，是因为它们在当前结构下继续修，只会继续把 helper 堆回 `CodexHandler`。
 
-## 11. 为什么不建议别的顺序
+## 12. 为什么不建议别的顺序
 
-### 11.1 不建议先拆锁
+### 12.1 不建议先拆锁
 
 先拆锁很容易得到：
 
@@ -326,19 +371,19 @@
 
 这不是我们要的长期架构。
 
-### 11.2 不建议先做更多散点 review 修补
+### 12.2 不建议先做更多散点 review 修补
 
 当前局部 bug 与局部合同已收口不少，继续做散点修补的边际收益会下降。
 
 更高价值的是先降低整体推理成本。
 
-### 11.3 不建议先做文件级切分
+### 12.3 不建议先做文件级切分
 
 如果只是把 handler 拆成更多文件，但状态 ownership 仍不清楚，那只是“把大文件导航变成多文件导航”，不是真正解耦。
 
-## 12. 执行约束
+## 13. 执行约束
 
-前两阶段建议遵守以下约束：
+前四阶段建议遵守以下约束：
 
 - 默认不改变用户可见行为
 - 每阶段都先抽边界，再迁移调用点
@@ -346,7 +391,7 @@
 - 不在同一批改动里同时处理无关合同条目
 - 允许重命名内部 API，但不保留为了兼容而存在的中间层
 
-## 13. 建议提交节奏
+## 14. 建议提交节奏
 
 建议每个阶段按类似节奏拆成多次提交：
 
@@ -362,15 +407,15 @@
 - 回滚粒度更小
 - 不会把“边界定义”和“行为改动”混成一个超大提交
 
-## 14. 当前推荐的下一步
+## 15. 当前推荐的下一步
 
-下一步不应回到散点 review 修补，而应继续把 `CodexHandler` 剩余的“入站 surface ownership”抽出来。
+下一步不应回到散点 review 修补，而应继续把 `CodexHandler` 剩余的“prompt entry ownership”抽出来。
 
-建议优先抽出一个更薄的 command / action surface controller，负责：
+建议优先抽出一个更薄的 prompt / turn entry controller，负责：
 
-- 飞书消息命令解析
-- 卡片 action 路由
-- action guard 与 permission gate
-- 将入站事件编排到 runtime / execution / admin 组件
+- running prompt 的拒绝 / watchdog 对账入口
+- released -> attached 的恢复路径
+- 写入 lease / interaction lease 的抢占与拒绝
+- turn start / cancel 的入口编排
 
-这样 `CodexHandler` 就能更接近纯 runtime orchestrator，而不是同时承担前端适配层与领域编排层。
+这样 `CodexHandler` 就能更接近纯 runtime lifecycle orchestrator，而不是继续持有最复杂的 live-turn 入口控制流。

@@ -10,7 +10,7 @@ import logging
 import pathlib
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any, Callable, TypedDict, TypeAlias
 from uuid import UUID
 
@@ -54,6 +54,7 @@ from bot.execution_output_controller import ExecutionOutputController
 from bot.execution_recovery_controller import ExecutionRecoveryController, TerminalReconcileTarget
 from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
 from bot.interaction_request_controller import InteractionRequestController
+from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSurfaceController
 from bot.runtime_admin_controller import RuntimeAdminController
 from bot.runtime_card_publisher import (
     RuntimeCardPublisher,
@@ -120,26 +121,6 @@ _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
         "sandbox": "danger-full-access",
     },
 }
-
-@dataclass(frozen=True)
-class _CommandRoute:
-    handler: Callable[[str, str, str, str], CommandResult | None]
-    scope: str = "any"
-    admin_only_in_group: bool = True
-    scope_denied_text: str = ""
-
-
-@dataclass(frozen=True)
-class _ActionRoute:
-    handler: Callable[[str, str, str, dict[str, Any]], P2CardActionTriggerResponse]
-    group_guard: str = "none"
-
-
-@dataclass(frozen=True)
-class _CommandExecution:
-    result: CommandResult | None = None
-    error_text: str = ""
-
 
 class _PlanStepState(TypedDict):
     step: str
@@ -408,9 +389,35 @@ class CodexHandler(BotHandler):
         )
         self._session_ui_domain = CodexSessionUiDomain(self)
         self._file_message_domain = FileMessageDomain(self)
-        self._command_routes = self._build_command_routes()
-        self._action_routes = self._build_action_routes()
-        self._prefixed_action_routes = self._build_prefixed_action_routes()
+        self._inbound_surface = InboundSurfaceController(
+            keyword=KEYWORD,
+            activate_binding_if_needed=self._activate_binding_if_needed,
+            help_reply=lambda chat_id, message_id: self._help_domain.reply_help(
+                chat_id,
+                message_id=message_id,
+            ),
+            handle_prompt=lambda sender_id, chat_id, text, message_id: self._handle_prompt(
+                sender_id,
+                chat_id,
+                text,
+                message_id=message_id,
+            ),
+            reply_text=self._reply_text,
+            reply_card=self._reply_card,
+            resolve_chat_type=self._resolve_chat_type,
+            group_command_admin_denial_text=self._group_command_admin_denial_text,
+            is_group_chat=self._is_group_chat,
+            is_group_admin_actor=self._is_group_admin_actor,
+            is_group_turn_actor=self._is_group_turn_actor,
+            is_group_request_actor_or_admin=self._is_group_request_actor_or_admin,
+            handle_rename_form_fallback=self._handle_rename_form_fallback,
+            handle_user_input_form_fallback=self._handle_user_input_form_fallback,
+        )
+        self._inbound_surface.install_routes(
+            command_routes=self._build_command_routes(),
+            action_routes=self._build_action_routes(),
+            prefixed_action_routes=self._build_prefixed_action_routes(),
+        )
         atexit.register(self.shutdown)
 
     @property
@@ -472,21 +479,18 @@ class CodexHandler(BotHandler):
         self._runtime_call(self._handle_message_impl, sender_id, chat_id, text, message_id=message_id)
 
     def _handle_message_impl(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
+        self._inbound_surface.handle_message(
+            sender_id,
+            chat_id,
+            text,
+            message_id=message_id,
+        )
+
+    def _activate_binding_if_needed(self, sender_id: str, chat_id: str, message_id: str = "") -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
-        cleaned = (text or "").strip()
         with self._lock:
             if not state["active"]:
                 self._apply_runtime_state_message_locked(state, BindingActivated())
-
-        if not cleaned or cleaned.upper() == KEYWORD:
-            self._dispatch_command_result(chat_id, self._help_domain.reply_help(chat_id))
-            return
-
-        if cleaned.startswith("/"):
-            self._handle_command(sender_id, chat_id, cleaned, message_id=message_id)
-            return
-
-        self._handle_prompt(sender_id, chat_id, cleaned, message_id=message_id)
 
     def handle_card_action(
         self, sender_id: str, chat_id: str, message_id: str, action_value: dict
@@ -502,41 +506,12 @@ class CodexHandler(BotHandler):
     def _handle_card_action_impl(
         self, sender_id: str, chat_id: str, message_id: str, action_value: dict
     ) -> P2CardActionTriggerResponse:
-        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
-        is_group_chat = self._is_group_chat(chat_id, message_id)
-        action = action_value.get("action", "")
-        if not action:
-            rename_fallback = self._handle_rename_form_fallback(sender_id, chat_id, message_id, action_value)
-            if rename_fallback is not None:
-                return rename_fallback
-            fallback = self._handle_user_input_form_fallback(sender_id, chat_id, message_id, action_value)
-            if fallback is not None:
-                return fallback
-            form_value = action_value.get("_form_value") or {}
-            if isinstance(form_value, dict) and form_value:
-                return make_card_response(
-                    toast="表单已失效或未找到对应问题，请重新触发该请求。",
-                    toast_type="warning",
-                )
-        route = self._action_routes.get(action)
-        if route is None:
-            for prefix, prefixed_route in self._prefixed_action_routes:
-                if action.startswith(prefix):
-                    route = prefixed_route
-                    break
-        if route is None:
-            return P2CardActionTriggerResponse()
-        denied = self._check_action_group_guard(
-            route,
-            is_group_chat=is_group_chat,
-            chat_id=chat_id,
-            message_id=message_id,
-            operator_open_id=operator_open_id,
-            action_value=action_value,
+        return self._inbound_surface.handle_card_action(
+            sender_id,
+            chat_id,
+            message_id,
+            action_value,
         )
-        if denied is not None:
-            return denied
-        return route.handler(sender_id, chat_id, message_id, action_value)
 
     def handle_file_message(
         self, sender_id: str, chat_id: str, message_id: str, file_key: str, file_name: str
@@ -1161,37 +1136,6 @@ class CodexHandler(BotHandler):
             return ""
         return "群里的 `/` 命令仅管理员可用；已授权成员请直接提问或显式 mention 触发机器人。"
 
-    def _ensure_command_scope(self, route: _CommandRoute, chat_id: str, message_id: str = "") -> bool:
-        denied_text = self._command_scope_denial_text(route, chat_id, message_id=message_id)
-        if not denied_text:
-            return True
-        self._reply_text(chat_id, denied_text, message_id=message_id)
-        return False
-
-    def _command_scope_denial_text(self, route: _CommandRoute, chat_id: str, message_id: str = "") -> str:
-        if route.scope == "any":
-            return ""
-        chat_type = self._resolve_chat_type(chat_id, message_id)
-        if route.scope == "group" and chat_type == "group":
-            return ""
-        if route.scope == "p2p" and chat_type != "group":
-            return ""
-        denied_text = route.scope_denied_text
-        if not denied_text:
-            if route.scope == "group":
-                denied_text = "该命令仅支持群聊使用。"
-            else:
-                denied_text = "该命令仅支持私聊使用。"
-        return denied_text
-
-    def _command_denial_text(self, route: _CommandRoute, chat_id: str, message_id: str = "") -> str:
-        scope_denial = self._command_scope_denial_text(route, chat_id, message_id=message_id)
-        if scope_denial:
-            return scope_denial
-        if route.admin_only_in_group:
-            return self._group_command_admin_denial_text(chat_id, message_id=message_id)
-        return ""
-
     def _is_group_turn_actor(
         self,
         chat_id: str,
@@ -1294,46 +1238,46 @@ class CodexHandler(BotHandler):
             reply_in_thread=self._message_reply_in_thread(message_id),
         )
 
-    def _build_command_routes(self) -> dict[str, _CommandRoute]:
+    def _build_command_routes(self) -> dict[str, CommandRoute]:
         return {
-            "/help": _CommandRoute(
+            "/help": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._help_domain.reply_help(
                     chat_id, arg, message_id=message_id
                 ),
             ),
-            "/h": _CommandRoute(
+            "/h": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._help_domain.reply_help(
                     chat_id, arg, message_id=message_id
                 ),
             ),
-            "/init": _CommandRoute(
+            "/init": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_init_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
                 scope="p2p",
                 scope_denied_text="请私聊机器人执行 `/init <token>`。",
             ),
-            "/pwd": _CommandRoute(
+            "/pwd": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: CommandResult(
                     text=f"当前目录：`{display_path(self._get_runtime_state(sender_id, chat_id, message_id)['working_dir'])}`",
                 ),
             ),
-            "/cd": _CommandRoute(
+            "/cd": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._handle_cd_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/new": _CommandRoute(
+            "/new": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._handle_new_command(
                     sender_id, chat_id, message_id=message_id
                 ),
             ),
-            "/status": _CommandRoute(
+            "/status": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._handle_status_command(
                     sender_id, chat_id, message_id=message_id
                 ),
             ),
-            "/release-feishu-runtime": _CommandRoute(
+            "/release-feishu-runtime": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._handle_release_feishu_runtime_command(
                     sender_id,
                     chat_id,
@@ -1341,29 +1285,29 @@ class CodexHandler(BotHandler):
                     message_id=message_id,
                 ),
             ),
-            "/whoami": _CommandRoute(
+            "/whoami": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_whoami_command(
                     sender_id, chat_id, message_id=message_id
                 ),
                 scope="p2p",
                 scope_denied_text="请私聊机器人执行 `/whoami`。",
             ),
-            "/whoareyou": _CommandRoute(
+            "/whoareyou": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_botinfo_command(
                     chat_id, message_id=message_id
                 ),
             ),
-            "/profile": _CommandRoute(
+            "/profile": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_profile_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/cancel": _CommandRoute(
+            "/cancel": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: CommandResult(
                     text=self._cancel_current_turn(sender_id, chat_id, message_id=message_id)[1],
                 ),
             ),
-            "/session": _CommandRoute(
+            "/session": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: (
                     CommandResult(
                         text="用法：`/session`\n说明：该命令不接受额外参数；发送 `/help session` 查看会话相关操作。"
@@ -1376,36 +1320,36 @@ class CodexHandler(BotHandler):
                     )
                 ),
             ),
-            "/resume": _CommandRoute(
+            "/resume": CommandRoute(
                 handler=self._session_ui_domain.handle_resume_command,
             ),
-            "/rm": _CommandRoute(
+            "/rm": CommandRoute(
                 handler=self._session_ui_domain.handle_rm_command,
             ),
-            "/rename": _CommandRoute(
+            "/rename": CommandRoute(
                 handler=self._session_ui_domain.handle_rename_command,
             ),
-            "/approval": _CommandRoute(
+            "/approval": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_approval_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/sandbox": _CommandRoute(
+            "/sandbox": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_sandbox_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/permissions": _CommandRoute(
+            "/permissions": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_permissions_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/mode": _CommandRoute(
+            "/mode": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_mode_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/groupmode": _CommandRoute(
+            "/groupmode": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_groupmode_command(
                     chat_id,
                     arg,
@@ -1413,7 +1357,7 @@ class CodexHandler(BotHandler):
                 ),
                 scope="group",
             ),
-            "/acl": _CommandRoute(
+            "/acl": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_acl_command(
                     chat_id,
                     arg,
@@ -1423,52 +1367,52 @@ class CodexHandler(BotHandler):
             ),
         }
 
-    def _build_action_routes(self) -> dict[str, _ActionRoute]:
+    def _build_action_routes(self) -> dict[str, ActionRoute]:
         return {
-            "cancel_turn": _ActionRoute(
+            "cancel_turn": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._handle_cancel_action(
                     sender_id, chat_id
                 ),
                 group_guard="turn_actor",
             ),
-            "resume_thread": _ActionRoute(
+            "resume_thread": ActionRoute(
                 handler=self._session_ui_domain.handle_resume_thread_action,
                 group_guard="group_admin",
             ),
-            "show_more_sessions": _ActionRoute(
+            "show_more_sessions": ActionRoute(
                 handler=self._session_ui_domain.handle_show_more_sessions_action,
                 group_guard="group_admin",
             ),
-            "close_sessions_card": _ActionRoute(
+            "close_sessions_card": ActionRoute(
                 handler=self._session_ui_domain.handle_close_sessions_card_action,
                 group_guard="group_admin",
             ),
-            "reopen_sessions_card": _ActionRoute(
+            "reopen_sessions_card": ActionRoute(
                 handler=self._session_ui_domain.handle_reopen_sessions_card_action,
                 group_guard="group_admin",
             ),
-            "show_help_page": _ActionRoute(
+            "show_help_page": ActionRoute(
                 handler=self._help_domain.handle_show_help_page_action,
             ),
-            "help_execute_command": _ActionRoute(
-                handler=self._handle_help_execute_command_action,
+            "help_execute_command": ActionRoute(
+                handler=self._inbound_surface.handle_help_execute_command_action,
             ),
-            "help_submit_command": _ActionRoute(
-                handler=self._handle_help_submit_command_action,
+            "help_submit_command": ActionRoute(
+                handler=self._inbound_surface.handle_help_submit_command_action,
             ),
-            "show_permissions_card": _ActionRoute(
+            "show_permissions_card": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_show_permissions_card_action(
                     sender_id, chat_id, message_id
                 ),
                 group_guard="group_admin",
             ),
-            "show_mode_card": _ActionRoute(
+            "show_mode_card": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_show_mode_card_action(
                     sender_id, chat_id, message_id
                 ),
                 group_guard="group_admin",
             ),
-            "show_group_mode_card": _ActionRoute(
+            "show_group_mode_card": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_show_group_mode_card_action(
                     chat_id,
                     message_id,
@@ -1476,53 +1420,53 @@ class CodexHandler(BotHandler):
                 ),
                 group_guard="group_admin",
             ),
-            "archive_thread": _ActionRoute(
+            "archive_thread": ActionRoute(
                 handler=self._session_ui_domain.handle_archive_thread_action,
                 group_guard="group_admin",
             ),
-            "show_rename_form": _ActionRoute(
+            "show_rename_form": ActionRoute(
                 handler=self._session_ui_domain.handle_show_rename_action,
                 group_guard="group_admin",
             ),
-            "rename_thread": _ActionRoute(
+            "rename_thread": ActionRoute(
                 handler=self._session_ui_domain.handle_rename_submit_action,
                 group_guard="group_admin",
             ),
-            "cancel_rename": _ActionRoute(
+            "cancel_rename": ActionRoute(
                 handler=self._session_ui_domain.handle_cancel_rename_action,
                 group_guard="group_admin",
             ),
-            "set_approval_policy": _ActionRoute(
+            "set_approval_policy": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_approval_policy(
                     sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",
             ),
-            "set_sandbox_policy": _ActionRoute(
+            "set_sandbox_policy": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_sandbox_policy(
                     sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",
             ),
-            "set_permissions_preset": _ActionRoute(
+            "set_permissions_preset": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_permissions_preset(
                     sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",
             ),
-            "set_profile": _ActionRoute(
+            "set_profile": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_profile(
                     sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",
             ),
-            "set_collaboration_mode": _ActionRoute(
+            "set_collaboration_mode": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_collaboration_mode(
                     sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",
             ),
-            "set_group_mode": _ActionRoute(
+            "set_group_mode": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_set_group_mode_action(
                     chat_id,
                     message_id,
@@ -1530,7 +1474,7 @@ class CodexHandler(BotHandler):
                 ),
                 group_guard="group_admin",
             ),
-            "set_group_acl_policy": _ActionRoute(
+            "set_group_acl_policy": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_set_group_acl_policy_action(
                     chat_id,
                     action_value,
@@ -1539,8 +1483,8 @@ class CodexHandler(BotHandler):
             ),
         }
 
-    def _build_prefixed_action_routes(self) -> list[tuple[str, _ActionRoute]]:
-        approval_route = _ActionRoute(
+    def _build_prefixed_action_routes(self) -> list[tuple[str, ActionRoute]]:
+        approval_route = ActionRoute(
             handler=lambda sender_id, chat_id, message_id, action_value: self._handle_approval_card_action(
                 action_value
             ),
@@ -1552,7 +1496,7 @@ class CodexHandler(BotHandler):
             ("permissions_", approval_route),
             (
                 "answer_user_input_",
-                _ActionRoute(
+                ActionRoute(
                     handler=lambda sender_id, chat_id, message_id, action_value: self._handle_user_input_action(
                         action_value
                     ),
@@ -1560,182 +1504,6 @@ class CodexHandler(BotHandler):
                 ),
             ),
         ]
-
-    def _check_action_group_guard(
-        self,
-        route: _ActionRoute,
-        *,
-        is_group_chat: bool,
-        chat_id: str,
-        message_id: str,
-        operator_open_id: str,
-        action_value: dict[str, Any],
-    ) -> P2CardActionTriggerResponse | None:
-        if not is_group_chat or route.group_guard == "none":
-            return None
-        if route.group_guard == "group_admin":
-            if self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return None
-            return make_card_response(
-                toast="仅管理员可操作群共享会话或群设置。",
-                toast_type="warning",
-            )
-        if route.group_guard == "turn_actor":
-            if self._is_group_turn_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return None
-            return make_card_response(
-                toast="仅管理员或当前提问者可停止当前群聊执行。",
-                toast_type="warning",
-            )
-        if route.group_guard == "approval_admin":
-            if self._is_group_admin_actor(
-                chat_id,
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return None
-            return make_card_response(
-                toast="仅管理员可审批群共享会话请求。",
-                toast_type="warning",
-            )
-        if route.group_guard == "request_actor_or_admin":
-            if self._is_group_request_actor_or_admin(
-                chat_id,
-                request_key=str(action_value.get("request_id", "")).strip(),
-                message_id=message_id,
-                operator_open_id=operator_open_id,
-            ):
-                return None
-            return make_card_response(
-                toast="仅管理员或当前提问者可提交群里的补充输入。",
-                toast_type="warning",
-            )
-        logger.warning("未知卡片群权限守卫: %s", route.group_guard)
-        return make_card_response(
-            toast="当前卡片动作配置异常。",
-            toast_type="warning",
-        )
-
-    def _handle_command(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
-        execution = self._execute_command_text(sender_id, chat_id, text, message_id=message_id)
-        if execution.error_text:
-            self._reply_text(chat_id, execution.error_text, message_id=message_id)
-            return
-        if execution.result is not None:
-            self._dispatch_command_result(chat_id, execution.result, message_id=message_id)
-
-    def _execute_command_text(
-        self,
-        sender_id: str,
-        chat_id: str,
-        text: str,
-        *,
-        message_id: str = "",
-    ) -> _CommandExecution:
-        command, _, arg = text.partition(" ")
-        arg = arg.strip()
-        cmd = command.lower()
-        route = self._command_routes.get(cmd)
-        if route is None:
-            return _CommandExecution(
-                error_text=f"未知命令：`{command}`\n发送 `/help` 查看可用命令。"
-            )
-        denied_text = self._command_denial_text(route, chat_id, message_id=message_id)
-        if denied_text:
-            return _CommandExecution(error_text=denied_text)
-        return _CommandExecution(result=route.handler(sender_id, chat_id, arg, message_id))
-
-    def _dispatch_command_result(self, chat_id: str, result: CommandResult, *, message_id: str = "") -> None:
-        if result.card is not None:
-            self._reply_card(chat_id, result.card, message_id=message_id)
-        elif result.text:
-            self._reply_text(chat_id, result.text, message_id=message_id)
-
-    def _command_action_response(
-        self,
-        execution: _CommandExecution,
-        *,
-        title: str,
-    ) -> P2CardActionTriggerResponse:
-        if execution.error_text:
-            return make_card_response(
-                toast=execution.error_text,
-                toast_type="warning",
-            )
-        result = execution.result
-        if result is None:
-            return make_card_response(
-                toast="命令已执行。",
-                toast_type="success",
-            )
-        if result.card is not None:
-            return make_card_response(card=result.card)
-        if result.text:
-            return make_card_response(card=build_markdown_card(title or "Codex 命令结果", result.text))
-        return P2CardActionTriggerResponse()
-
-    def _handle_help_execute_command_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-        action_value: dict[str, Any],
-    ) -> P2CardActionTriggerResponse:
-        command = str(action_value.get("command", "") or "").strip()
-        if not command.startswith("/"):
-            return make_card_response(
-                toast="帮助按钮配置异常：缺少合法命令。",
-                toast_type="warning",
-            )
-        title = str(action_value.get("title", "") or "").strip() or f"Codex {command.split()[0]}"
-        execution = self._execute_command_text(
-            sender_id,
-            chat_id,
-            command,
-            message_id=message_id,
-        )
-        return self._command_action_response(execution, title=title)
-
-    def _handle_help_submit_command_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-        action_value: dict[str, Any],
-    ) -> P2CardActionTriggerResponse:
-        command = str(action_value.get("command", "") or "").strip()
-        field_name = str(action_value.get("field_name", "") or "").strip()
-        required_text = str(action_value.get("required_text", "") or "").strip() or "请输入必填参数。"
-        form_value = action_value.get("_form_value") or {}
-        if not command.startswith("/"):
-            return make_card_response(
-                toast="帮助表单配置异常：缺少合法命令。",
-                toast_type="warning",
-            )
-        if not field_name or not isinstance(form_value, dict):
-            return make_card_response(
-                toast="帮助表单配置异常：缺少参数字段。",
-                toast_type="warning",
-            )
-        arg = str(form_value.get(field_name, "") or "").strip()
-        if not arg:
-            return make_card_response(toast=required_text, toast_type="warning")
-        title = str(action_value.get("title", "") or "").strip() or f"Codex {command}"
-        execution = self._execute_command_text(
-            sender_id,
-            chat_id,
-            f"{command} {arg}",
-            message_id=message_id,
-        )
-        return self._command_action_response(execution, title=title)
 
     @staticmethod
     def _is_turn_thread_not_found_error(exc: Exception) -> bool:
