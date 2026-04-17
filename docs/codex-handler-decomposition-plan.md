@@ -97,6 +97,7 @@ Current progress:
   - `ExecutionOutputController` owns execution-card and follow-up publishing
   - `ExecutionRecoveryController` owns watchdog, snapshot reconcile, terminal
     backfill, and degraded-channel marking
+  - `InteractionRequestController` owns approval / ask-user request lifecycle
 - `CodexHandler` is not yet a pure orchestrator, but it no longer directly
   owns those execution details
 
@@ -205,6 +206,11 @@ Phase 2 is now realized as three cooperating components that together own:
   - snapshot reconcile
   - terminal reconcile backfill
   - runtime degraded marking
+- `InteractionRequestController`
+  - pending approval requests
+  - pending ask-user requests
+  - request fail-close / resolved cleanup
+  - request-card delivery / patch driving
 
 ### 8.3 Boundary With BindingRuntimeManager
 
@@ -235,7 +241,6 @@ Recommended order:
 Current status: most of steps 3 and 4 are now extracted into dedicated
 execution components, but `CodexHandler` still owns:
 
-- pending approval / ask-user request lifecycle
 - adapter-notification dispatch orchestration
 - non-execution command/UI glue
 

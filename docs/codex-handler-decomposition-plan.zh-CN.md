@@ -88,6 +88,7 @@
   - `TurnExecutionCoordinator` 负责执行状态迁移
   - `ExecutionOutputController` 负责执行卡片与 follow-up 发布
   - `ExecutionRecoveryController` 负责 watchdog、快照对账、终态补账、降级判定
+  - `InteractionRequestController` 负责审批 / ask-user request 生命周期
 - `CodexHandler` 仍未完全收成编排器，但已不再直接拥有上述三类实现细节
 
 ## 7. 第一阶段：BindingRuntimeManager
@@ -190,6 +191,11 @@
   - snapshot reconcile
   - terminal reconcile 补账
   - runtime degraded 标记
+- `InteractionRequestController`
+  - pending approval request
+  - pending ask-user request
+  - request fail-close / resolved 收口
+  - request card send / patch 驱动
 
 ### 8.3 与 BindingRuntimeManager 的边界
 
@@ -218,7 +224,6 @@
 
 当前已完成到第 3 步和第 4 步中的大部分执行状态路径，但 `CodexHandler` 仍持有：
 
-- pending approval / ask-user request 生命周期
 - adapter notification 到具体 domain / controller 的分发编排
 - 非执行类 UI 与命令面 glue code
 
