@@ -112,12 +112,23 @@ Current progress:
   - owns inbound message-command parsing and dispatch
   - owns card-action routing and help-card command reuse
   - owns command-scope and group-guard surface semantics
-- `CodexHandler` is not yet a pure orchestrator, but it no longer directly
-  owns those implementation details
+- Phase 5 is complete: `PromptTurnEntryController`
+  - owns running-prompt rejection and watchdog-reconcile entry
+  - owns released -> attached recovery flow
+  - owns prompt start / cancel and lease-acquisition entry orchestration
+- Phase 6 is complete: remaining contract and naming cleanup
+  - `admin_open_ids` is now tightened to `system.yaml` as the sole authority
+  - authoritative read vs bounded-list best-effort lookup is now separated by
+    explicit names
+  - `ThreadLeaseRegistry` is now explicitly documented as outer-serialized
+    runtime-owned state
+- `CodexHandler` is not a zero-responsibility object, but the ownership moves
+  in this plan are now complete
 - The main remaining handler ownership is now:
-  - prompt start / cancel / attach-resume entry orchestration
-  - live-turn write-lease and interaction-lease coordination
-  - top-level runtime lifecycle and cross-domain orchestration
+  - top-level runtime lifecycle and bootstrap / shutdown
+  - assembly and cross-domain orchestration across controllers / domains /
+    adapter
+  - a small set of helpers that still belong in the top-level orchestrator
 
 ## 7. Phase 1: BindingRuntimeManager
 
@@ -444,6 +455,11 @@ fit better once boundaries are explicit:
 This cleanup is intentionally later because doing it earlier would mostly add
 more helpers back into `CodexHandler`.
 
+Current status:
+
+- complete. The related contracts are now reflected in code, tests, or formal
+  design docs.
+
 ## 13. Why Not Start Elsewhere
 
 ### 13.1 Do Not Start With Lock Splitting
@@ -467,7 +483,7 @@ ownership implicit, it is still navigation refactoring, not real decoupling.
 
 ## 14. Rollout Constraints
 
-The first five phases should follow these constraints:
+All six phases in this rollout should follow these constraints:
 
 - default to no user-visible behavior changes
 - extract the boundary before moving all call sites
@@ -491,16 +507,14 @@ from behavior movement.
 
 ## 16. Recommended Next Step
 
-The immediate next step should not be another round of scattered fixes. It
-should be the remaining prompt-entry extraction from `CodexHandler`.
+This decomposition plan is complete.
 
-The next controller should own:
+If future work still needs to shrink `CodexHandler`, start a new plan focused
+on the remaining higher-level orchestrator responsibilities, for example:
 
-- running-prompt rejection and watchdog-reconcile entry
-- released -> attached recovery flow
-- write-lease and interaction-lease acquisition / denial at prompt entry
-- turn start / cancel entry orchestration
+- top-level runtime lifecycle / bootstrap / shutdown orchestration
+- tighter assembly boundaries around adapter / control-plane / domain wiring
+- reducing helper surface in the top-level orchestrator without collapsing the
+  ownership boundaries already extracted here
 
-That would leave `CodexHandler` much closer to a true runtime lifecycle
-orchestrator instead of still owning the most complicated live-turn entry
-control flow.
+Do not reopen the ownership slices already completed by this plan.

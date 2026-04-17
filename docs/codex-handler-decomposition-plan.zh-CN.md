@@ -101,11 +101,19 @@
   - 负责入站消息命令解析与分发
   - 负责卡片 action 路由与帮助卡片命令复用
   - 负责 command scope / group guard 的 surface 语义
-- `CodexHandler` 仍未完全收成编排器，但已不再直接拥有上述三类实现细节
+- 第五阶段已完成：`PromptTurnEntryController`
+  - 负责 running prompt 拒绝与 watchdog 对账入口
+  - 负责 released -> attached 恢复路径
+  - 负责 prompt start / cancel 与 lease 抢占入口编排
+- 第六阶段已完成：剩余合同与命名收尾
+  - `admin_open_ids` 已收紧为 `system.yaml` 单一事实源
+  - authoritative read / bounded-list best-effort lookup 已用显式命名区分
+  - `ThreadLeaseRegistry` 已明确标注为外层串行化保护下的 runtime-owned 状态对象
+- `CodexHandler` 仍不是“零职责对象”，但这份拆分计划里的 ownership 迁移已经完成
 - 当前剩余的主要 handler ownership 是：
-  - prompt start / cancel / attach-resume 的入口编排
-  - live turn 的写入 / interaction lease 协调
-  - 顶层 runtime 生命周期与跨域编排
+  - 顶层 runtime 生命周期与 bootstrap / shutdown
+  - 各 controller / domain / adapter 的装配与跨域编排
+  - 少量仍合理保留在总编排层的 helper
 
 ## 7. 第一阶段：BindingRuntimeManager
 
@@ -401,6 +409,10 @@
 
 这一步之所以后置，是因为它们在当前结构下继续修，只会继续把 helper 堆回 `CodexHandler`。
 
+当前状态：
+
+- 已完成。相关合同已分别落到代码、测试或正式设计文档中。
+
 ## 13. 为什么不建议别的顺序
 
 ### 13.1 不建议先拆锁
@@ -424,7 +436,7 @@
 
 ## 14. 执行约束
 
-前五阶段建议遵守以下约束：
+本轮六个阶段建议遵守以下约束：
 
 - 默认不改变用户可见行为
 - 每阶段都先抽边界，再迁移调用点
@@ -450,13 +462,12 @@
 
 ## 16. 当前推荐的下一步
 
-下一步不应回到散点 review 修补，而应继续把 `CodexHandler` 剩余的“prompt entry ownership”抽出来。
+这份拆分计划已完成。
 
-建议优先抽出一个更薄的 prompt / turn entry controller，负责：
+如果后续还要继续缩小 `CodexHandler`，应另起一份新计划，聚焦剩余但更高层的 orchestrator 责任，例如：
 
-- running prompt 的拒绝 / watchdog 对账入口
-- released -> attached 的恢复路径
-- 写入 lease / interaction lease 的抢占与拒绝
-- turn start / cancel 的入口编排
+- 顶层 runtime lifecycle / bootstrap / shutdown 编排
+- adapter / control-plane / domain 装配层进一步收口
+- 在不破坏现有 ownership 边界前提下，继续减少总编排层 helper
 
-这样 `CodexHandler` 就能更接近纯 runtime lifecycle orchestrator，而不是继续持有最复杂的 live-turn 入口控制流。
+不建议再回头重开本计划已经完成的 ownership 切分项。
