@@ -55,9 +55,12 @@ class _SessionUiDomainOwner(Protocol):
 
     def _resolve_resume_target(self, arg: str) -> ThreadSummary: ...
 
-    def _read_thread_summary(self, thread_id: str, *, original_arg: str) -> ThreadSummary: ...
-
-    def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None: ...
+    def _read_thread_summary_authoritatively(
+        self,
+        thread_id: str,
+        *,
+        original_arg: str,
+    ) -> ThreadSummary: ...
 
     def _resume_thread_in_background(
         self,
@@ -165,7 +168,7 @@ class CodexSessionUiDomain:
             if not runtime.current_thread_id:
                 return CommandResult(text="用法：`/rm [thread_id 或 thread_name]`；省略参数时归档当前线程。")
             try:
-                thread = self._owner._read_thread_summary(
+                thread = self._owner._read_thread_summary_authoritatively(
                     runtime.current_thread_id,
                     original_arg=runtime.current_thread_id,
                 )
@@ -231,7 +234,7 @@ class CodexSessionUiDomain:
         if not thread_id:
             return make_card_response(toast="缺少 thread_id", toast_type="warning")
         try:
-            thread = self._owner._read_thread_summary(thread_id, original_arg=thread_id)
+            thread = self._owner._read_thread_summary_authoritatively(thread_id, original_arg=thread_id)
         except Exception as exc:
             logger.exception("查询恢复目标失败")
             return make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
@@ -351,7 +354,7 @@ class CodexSessionUiDomain:
         if not thread_id:
             return make_card_response(toast="缺少 thread_id", toast_type="warning")
         try:
-            thread = self._owner._read_thread_summary(thread_id, original_arg=thread_id)
+            thread = self._owner._read_thread_summary_authoritatively(thread_id, original_arg=thread_id)
         except Exception as exc:
             logger.exception("读取归档目标失败")
             return make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")

@@ -100,7 +100,6 @@ class CodexSettingsDomain:
             for item in config.get("admin_open_ids", [])
             if isinstance(item, str) and str(item).strip()
         }
-        admin_open_ids.update(owner.bot.list_admin_open_ids())
         admin_added = sender_open_id not in admin_open_ids
         admin_open_ids.add(sender_open_id)
         configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()

@@ -28,6 +28,15 @@ class WriteLeaseAcquireResult:
 
 
 class ThreadLeaseRegistry:
+    """
+    Runtime-owned thread subscription and single-writer lease state.
+
+    This object is intentionally not internally synchronized. Callers must only
+    use it under an outer serialization boundary such as `RuntimeLoop` plus the
+    handler/runtime lock. If it ever needs standalone concurrent use, that is a
+    contract change and this type should gain its own synchronization.
+    """
+
     def __init__(self) -> None:
         self._subscribers_by_thread_id: dict[str, set[ChatBindingKey]] = {}
         self._write_owner_by_thread_id: dict[str, ChatBindingKey] = {}

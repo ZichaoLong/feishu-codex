@@ -55,10 +55,10 @@ from bot.execution_recovery_controller import ExecutionRecoveryController, Termi
 from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
 from bot.interaction_request_controller import InteractionRequestController
 from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSurfaceController
+from bot.prompt_turn_entry_controller import PromptTurnEntryController
 from bot.runtime_admin_controller import RuntimeAdminController
 from bot.runtime_card_publisher import (
     RuntimeCardPublisher,
-    build_execution_card_model,
 )
 from bot.runtime_state import (
     UNSET,
@@ -69,7 +69,7 @@ from bot.runtime_state import (
     ThreadStateChanged,
     apply_runtime_state_message,
 )
-from bot.runtime_view import RuntimeView, build_runtime_view
+from bot.runtime_view import RuntimeView
 from bot.service_control_plane import ServiceControlPlane
 from bot.session_resolution import (
     list_global_threads,
@@ -389,6 +389,72 @@ class CodexHandler(BotHandler):
         )
         self._session_ui_domain = CodexSessionUiDomain(self)
         self._file_message_domain = FileMessageDomain(self)
+        self._prompt_turn_entry = PromptTurnEntryController(
+            lock=self._lock,
+            turn_execution=self._turn_execution,
+            resolve_runtime_binding=lambda sender_id, chat_id, message_id="": self._resolve_runtime_binding(
+                sender_id,
+                chat_id,
+                message_id,
+            ),
+            get_runtime_state=lambda sender_id, chat_id, message_id="": self._get_runtime_state(
+                sender_id,
+                chat_id,
+                message_id,
+            ),
+            get_runtime_view=lambda sender_id, chat_id, message_id="": self._get_runtime_view(
+                sender_id,
+                chat_id,
+                message_id,
+            ),
+            bind_thread=lambda sender_id, chat_id, thread, message_id="": self._bind_thread(
+                sender_id,
+                chat_id,
+                thread,
+                message_id=message_id,
+            ),
+            clear_thread_binding=lambda sender_id, chat_id, message_id="": self._clear_thread_binding(
+                sender_id,
+                chat_id,
+                message_id=message_id,
+            ),
+            resume_snapshot_by_id=self._resume_snapshot_by_id,
+            create_thread=lambda **kwargs: self._adapter.create_thread(**kwargs),
+            effective_default_profile=self._effective_default_profile,
+            message_reply_in_thread=self._message_reply_in_thread,
+            group_actor_open_id=self._group_actor_open_id,
+            prompt_write_denial_text=self._prompt_write_denial_text,
+            thread_sharing_policy_violation=self._thread_sharing_policy_violation,
+            interaction_denied_text=self._interaction_denied_text,
+            acquire_interaction_lease_for_binding=self._acquire_interaction_lease_for_binding,
+            release_interaction_lease_for_binding=self._release_interaction_lease_for_binding,
+            acquire_thread_write_lease_locked=self._acquire_thread_write_lease_locked,
+            sync_stored_binding_locked=self._sync_stored_binding_locked,
+            clear_plan_state=self._clear_plan_state,
+            apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
+            claim_reserved_execution_card=self._claim_reserved_execution_card,
+            patch_message=lambda message_id, content: self.bot.patch_message(message_id, content),
+            card_publisher_factory=self._runtime_card_publisher,
+            send_execution_card=self._send_execution_card,
+            flush_execution_card=self._flush_execution_card,
+            retire_execution_anchor=self._retire_execution_anchor,
+            schedule_mirror_watchdog=self._schedule_mirror_watchdog,
+            reconcile_execution_snapshot=self._reconcile_execution_snapshot,
+            refresh_terminal_execution_card_from_state=self._refresh_terminal_execution_card_from_state,
+            finalize_execution_card_from_state=self._finalize_execution_card_from_state,
+            mark_runtime_degraded=self._mark_runtime_degraded,
+            runtime_recovery_reason=self._runtime_recovery_reason,
+            is_turn_thread_not_found_error=self._is_turn_thread_not_found_error,
+            is_thread_not_found_error=self._is_thread_not_found_error,
+            is_transport_disconnect=self._is_transport_disconnect,
+            is_request_timeout_error=self._is_request_timeout_error,
+            start_turn=lambda **kwargs: self._adapter.start_turn(**kwargs),
+            interrupt_running_turn=self._interrupt_running_turn,
+            reply_text=self._reply_text,
+            mirror_watchdog_seconds=lambda: self._mirror_watchdog_seconds,
+            card_reply_limit=lambda: self._card_reply_limit,
+            card_log_limit=lambda: self._card_log_limit,
+        )
         self._inbound_surface = InboundSurfaceController(
             keyword=KEYWORD,
             activate_binding_if_needed=self._activate_binding_if_needed,
@@ -1086,29 +1152,11 @@ class CodexHandler(BotHandler):
         return bool(str(context.get("thread_id", "") or "").strip())
 
     def _preflight_group_prompt_impl(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
-        if self._handle_running_prompt(sender_id, chat_id, "", message_id=message_id):
-            return False
-        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
-        with self._lock:
-            runtime = build_runtime_view(resolved.state)
-        thread_id = runtime.current_thread_id.strip()
-        if not thread_id:
-            return True
-        denial_text = self._prompt_write_denial_text(
-            resolved.binding,
+        return self._prompt_turn_entry.preflight_group_prompt(
+            sender_id,
             chat_id,
-            thread_id,
             message_id=message_id,
         )
-        if not denial_text:
-            return True
-        self._reply_text(
-            chat_id,
-            denial_text,
-            message_id=message_id,
-            reply_in_thread=self._message_reply_in_thread(message_id),
-        )
-        return False
 
     def _is_group_admin_actor(
         self,
@@ -1224,19 +1272,6 @@ class CodexHandler(BotHandler):
         if not trigger_message_id or not hasattr(self.bot, "claim_reserved_execution_card"):
             return ""
         return str(self.bot.claim_reserved_execution_card(trigger_message_id) or "").strip()
-
-    def _render_start_failure(self, *, chat_id: str, message_id: str, text: str) -> None:
-        reserved_card_id = self._claim_reserved_execution_card(message_id)
-        if reserved_card_id:
-            card = build_markdown_card("Codex 启动失败", text, template="red")
-            if self.bot.patch_message(reserved_card_id, json.dumps(card, ensure_ascii=False)):
-                return
-        self._reply_text(
-            chat_id,
-            text,
-            message_id=message_id,
-            reply_in_thread=self._message_reply_in_thread(message_id),
-        )
 
     def _build_command_routes(self) -> dict[str, CommandRoute]:
         return {
@@ -1524,38 +1559,6 @@ class CodexHandler(BotHandler):
             return str(exc.error.get("message", "") or exc)
         return str(exc)
 
-    def _resume_bound_thread(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        thread_id = runtime.current_thread_id.strip()
-        if not thread_id:
-            raise RuntimeError("当前没有可恢复的线程绑定")
-        summary = ThreadSummary(
-            thread_id=thread_id,
-            cwd=runtime.working_dir,
-            name=runtime.current_thread_title,
-            preview=runtime.current_thread_title,
-            created_at=0,
-            updated_at=0,
-            source="appServer",
-            status="idle",
-        )
-        snapshot = self._resume_snapshot_by_id(
-            thread_id,
-            original_arg=thread_id,
-            summary=summary,
-        )
-        self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
-        return snapshot.summary.thread_id
-
-    def _ensure_binding_runtime_attached(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        thread_id = runtime.current_thread_id.strip()
-        if not thread_id:
-            raise RuntimeError("当前没有可恢复的线程绑定")
-        if runtime.binding.feishu_runtime_attached:
-            return thread_id
-        return self._resume_bound_thread(sender_id, chat_id, message_id=message_id)
-
     @staticmethod
     def _snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> tuple[str, list[dict[str, Any]]]:
         return ExecutionRecoveryController.snapshot_reply(snapshot, turn_id=turn_id)
@@ -1637,245 +1640,13 @@ class CodexHandler(BotHandler):
             turn_id=turn_id,
         )
 
-    def _start_prompt_turn(
-        self,
-        sender_id: str,
-        chat_id: str,
-        text: str,
-        *,
-        message_id: str = "",
-        actor_open_id: str = "",
-    ) -> None:
-        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
-        state = resolved.state
-        chat_binding_key = resolved.binding
-        with self._lock:
-            runtime = build_runtime_view(state)
-        released_thread_id = runtime.current_thread_id.strip()
-        preattached_interaction_lease: InteractionLeaseAcquireResult | None = None
-        if released_thread_id and not runtime.binding.feishu_runtime_attached:
-            denial_text = self._prompt_write_denial_text(
-                chat_binding_key,
-                chat_id,
-                released_thread_id,
-                message_id=message_id,
-            )
-            if denial_text:
-                self._reply_text(
-                    chat_id,
-                    denial_text,
-                    message_id=message_id,
-                    reply_in_thread=self._message_reply_in_thread(message_id),
-                )
-                return
-            with self._lock:
-                preattached_interaction_lease = self._acquire_interaction_lease_for_binding(
-                    chat_binding_key,
-                    released_thread_id,
-                )
-            if not preattached_interaction_lease.granted:
-                self._reply_text(
-                    chat_id,
-                    self._interaction_denied_text(preattached_interaction_lease.lease),
-                    message_id=message_id,
-                    reply_in_thread=self._message_reply_in_thread(message_id),
-                )
-                return
-        try:
-            thread_id = self._ensure_thread(sender_id, chat_id, message_id=message_id)
-            thread_id = self._ensure_binding_runtime_attached(sender_id, chat_id, message_id=message_id)
-        except Exception as exc:
-            if preattached_interaction_lease is not None and preattached_interaction_lease.acquired:
-                self._release_interaction_lease_for_binding(chat_binding_key, released_thread_id)
-            logger.exception("准备线程失败")
-            self._render_start_failure(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"准备线程失败：{exc}",
-            )
-            return
-
-        sharing_violation = self._thread_sharing_policy_violation(chat_id, thread_id, message_id=message_id)
-        if sharing_violation:
-            if preattached_interaction_lease is not None and preattached_interaction_lease.acquired:
-                self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
-            self._reply_text(
-                chat_id,
-                sharing_violation,
-                message_id=message_id,
-                reply_in_thread=self._message_reply_in_thread(message_id),
-            )
-            return
-        interaction_lease = preattached_interaction_lease
-        lease = None
-        with self._lock:
-            if interaction_lease is None:
-                interaction_lease = self._acquire_interaction_lease_for_binding(chat_binding_key, thread_id)
-            if interaction_lease.granted:
-                lease = self._acquire_thread_write_lease_locked(chat_binding_key, thread_id)
-                if lease.granted:
-                    self._sync_stored_binding_locked(chat_binding_key, state)
-        if not interaction_lease.granted:
-            self._reply_text(
-                chat_id,
-                self._interaction_denied_text(interaction_lease.lease),
-                message_id=message_id,
-                reply_in_thread=self._message_reply_in_thread(message_id),
-            )
-            return
-        if lease is None or not lease.granted:
-            if interaction_lease.acquired:
-                self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
-            self._reply_text(
-                chat_id,
-                "当前线程正由另一飞书会话执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
-                message_id=message_id,
-                reply_in_thread=self._message_reply_in_thread(message_id),
-            )
-            return
-
-        prompt_reply_in_thread = self._message_reply_in_thread(message_id)
-        with self._lock:
-            started_at = time.monotonic()
-            self._turn_execution.prime_prompt_turn_locked(
-                state,
-                prompt_message_id=str(message_id or "").strip(),
-                prompt_reply_in_thread=prompt_reply_in_thread,
-                actor_open_id=str(actor_open_id or "").strip() or self._group_actor_open_id(message_id),
-                started_at=started_at,
-            )
-            self._clear_plan_state(state)
-
-        card_id = ""
-        if message_id:
-            card_id = self._claim_reserved_execution_card(message_id)
-            if card_id:
-                self._runtime_card_publisher().patch_execution_card(
-                    card_id,
-                    build_execution_card_model(
-                        ExecutionTranscript(),
-                        running=True,
-                        elapsed=0,
-                        cancelled=False,
-                        log_limit=self._card_log_limit,
-                        reply_limit=self._card_reply_limit,
-                    ),
-                )
-        if not card_id:
-            card_id = self._send_execution_card(
-                chat_id,
-                message_id,
-                reply_in_thread=prompt_reply_in_thread,
-            )
-        with self._lock:
-            self._apply_runtime_state_message_locked(
-                state,
-                ExecutionStateChanged(current_message_id=card_id or ""),
-            )
-
-        def _start_turn_once(bound_thread_id: str) -> dict[str, Any]:
-            return self._adapter.start_turn(
-                thread_id=bound_thread_id,
-                text=text,
-                cwd=state["working_dir"],
-                model=state["model"] or None,
-                profile=self._effective_default_profile() or None,
-                approval_policy=state["approval_policy"] or None,
-                sandbox=state["sandbox"] or None,
-                reasoning_effort=state["reasoning_effort"] or None,
-                collaboration_mode=state["collaboration_mode"] or None,
-            )
-
-        try:
-            start_response = _start_turn_once(thread_id)
-        except Exception as exc:
-            if self._is_turn_thread_not_found_error(exc) and str(state["current_thread_id"] or "").strip():
-                logger.info("检测到线程未加载，自动恢复后重试: thread=%s", thread_id[:12])
-                try:
-                    thread_id = self._resume_bound_thread(sender_id, chat_id, message_id=message_id)
-                    start_response = _start_turn_once(thread_id)
-                except Exception as retry_exc:
-                    logger.exception("自动恢复线程后重试 turn 失败")
-                    with self._lock:
-                        self._turn_execution.record_start_failure_locked(
-                            state,
-                            error_text=f"启动失败：{retry_exc}",
-                        )
-                    if self._is_thread_not_found_error(retry_exc):
-                        self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
-                    self._flush_execution_card(sender_id, chat_id, immediate=True)
-                    self._retire_execution_anchor(sender_id, chat_id)
-                    if not card_id:
-                        self._reply_text(
-                            chat_id,
-                            f"启动失败：{retry_exc}",
-                            message_id=message_id,
-                            reply_in_thread=prompt_reply_in_thread,
-                        )
-                    return
-            else:
-                logger.exception("启动 turn 失败")
-                with self._lock:
-                    self._turn_execution.record_start_failure_locked(
-                        state,
-                        error_text=f"启动失败：{exc}",
-                    )
-                self._flush_execution_card(sender_id, chat_id, immediate=True)
-                self._retire_execution_anchor(sender_id, chat_id)
-                if not card_id:
-                    self._reply_text(
-                        chat_id,
-                        f"启动失败：{exc}",
-                        message_id=message_id,
-                        reply_in_thread=prompt_reply_in_thread,
-                    )
-                return
-
-        turn_id = self._extract_turn_id_from_start_response(start_response)
-        with self._lock:
-            should_interrupt_started_turn = self._turn_execution.record_started_turn_id_locked(
-                state,
-                turn_id=turn_id,
-            )
-        if should_interrupt_started_turn:
-            try:
-                self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
-            except Exception:
-                logger.exception("延迟取消 turn 失败")
-            else:
-                with self._lock:
-                    self._apply_runtime_state_message_locked(
-                        state,
-                        ExecutionStateChanged(pending_cancel=False),
-                    )
-        self._schedule_mirror_watchdog(sender_id, chat_id)
-
-    def _handle_running_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> bool:
-        del text
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        if not runtime.running:
-            return False
-        thread_id = runtime.current_thread_id.strip()
-        turn_id = runtime.execution.current_turn_id.strip()
-        last_runtime_event_at = runtime.execution.last_runtime_event_at
-        if thread_id and last_runtime_event_at and (
-            time.monotonic() - last_runtime_event_at >= self._mirror_watchdog_seconds
-        ):
-            self._reconcile_execution_snapshot(
-                sender_id,
-                chat_id,
-                thread_id=thread_id,
-                turn_id=turn_id,
-            )
-            if not self._get_runtime_view(sender_id, chat_id, message_id).running:
-                return False
-        self._reply_text(chat_id, "当前线程仍在执行，请等待结束或先执行 `/cancel`。", message_id=message_id)
-        return True
-
     def _handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
-        if self._handle_running_prompt(sender_id, chat_id, text, message_id=message_id):
-            return
-        self._start_prompt_turn(sender_id, chat_id, text, message_id=message_id)
+        self._prompt_turn_entry.handle_prompt(
+            sender_id,
+            chat_id,
+            text,
+            message_id=message_id,
+        )
 
     def _handle_cd_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         runtime = self._get_runtime_view(sender_id, chat_id, message_id)
@@ -2048,48 +1819,11 @@ class CodexHandler(BotHandler):
         *,
         message_id: str = "",
     ) -> tuple[bool, str]:
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
-        thread_id = runtime.current_thread_id
-        turn_id = runtime.execution.current_turn_id
-        if not runtime.running or not thread_id:
-            if runtime.execution.current_message_id or runtime.execution.last_execution_message_id:
-                self._refresh_terminal_execution_card_from_state(sender_id, chat_id)
-                return True, "当前执行已结束，已刷新卡片状态。"
-            return False, "当前没有正在执行的 turn。"
-        if not turn_id:
-            with self._lock:
-                self._turn_execution.request_cancel_without_turn_id_locked(state)
-            return True, "已请求停止当前执行。"
-        try:
-            self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
-        except Exception as exc:
-            if self._is_turn_thread_not_found_error(exc) or self._is_thread_not_found_error(exc):
-                self._finalize_execution_card_from_state(sender_id, chat_id)
-                return True, "当前执行已结束，已刷新卡片状态。"
-            if self._is_transport_disconnect(exc) or self._is_request_timeout_error(exc):
-                self._mark_runtime_degraded(
-                    sender_id,
-                    chat_id,
-                    reason=self._runtime_recovery_reason(exc),
-                )
-                return True, "取消请求已发送，但当前后端状态暂不可确认；稍后会自动对账。"
-            logger.exception("取消 turn 失败")
-            return False, f"取消失败：{exc}"
-        with self._lock:
-            self._turn_execution.confirm_cancel_requested_locked(state)
-        return True, "已请求停止当前执行。"
-
-    @staticmethod
-    def _extract_turn_id_from_start_response(response: Any) -> str:
-        if not isinstance(response, dict):
-            return ""
-        turn = response.get("turn")
-        if isinstance(turn, dict):
-            turn_id = str(turn.get("id", "") or "").strip()
-            if turn_id:
-                return turn_id
-        return str(response.get("turnId", "") or "").strip()
+        return self._prompt_turn_entry.cancel_current_turn(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+        )
 
     def _interrupt_running_turn(self, *, thread_id: str, turn_id: str) -> None:
         self._adapter.interrupt_turn(thread_id=thread_id, turn_id=turn_id)
@@ -2106,19 +1840,6 @@ class CodexHandler(BotHandler):
 
     def _handle_user_input_action(self, action_value: dict) -> P2CardActionTriggerResponse:
         return self._interaction_requests.handle_user_input_action(action_value)
-
-    def _ensure_thread(self, sender_id: str, chat_id: str, *, message_id: str = "") -> str:
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        if runtime.current_thread_id:
-            return runtime.current_thread_id
-        snapshot = self._adapter.create_thread(
-            cwd=runtime.working_dir,
-            profile=self._effective_default_profile() or None,
-            approval_policy=runtime.approval_policy or None,
-            sandbox=runtime.sandbox or None,
-        )
-        self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
-        return snapshot.summary.thread_id
 
     def _resume_thread_in_background(
         self,
@@ -2214,13 +1935,13 @@ class CodexHandler(BotHandler):
     def _resolve_resume_target(self, arg: str) -> ThreadSummary:
         target = arg.strip()
         if looks_like_thread_id(target):
-            return self._read_thread_summary(target, original_arg=target)
+            return self._read_thread_summary_authoritatively(target, original_arg=target)
         thread = resolve_resume_target_by_name(
             self._adapter,
             name=target,
             limit=self._thread_list_query_limit,
         )
-        return self._read_thread_summary(thread.thread_id, original_arg=target)
+        return self._read_thread_summary_authoritatively(thread.thread_id, original_arg=target)
 
     def _resolve_thread_name_target_for_control(self, thread_name: str) -> ThreadSummary:
         target = str(thread_name or "").strip()
@@ -2231,7 +1952,7 @@ class CodexHandler(BotHandler):
             name=target,
             limit=self._thread_list_query_limit,
         )
-        return self._read_thread_summary(thread.thread_id, original_arg=target)
+        return self._read_thread_summary_authoritatively(thread.thread_id, original_arg=target)
 
     def _resolve_thread_target_for_control_params(self, params: dict[str, Any]) -> ThreadSummary:
         thread_id = str(params.get("thread_id", "") or "").strip()
@@ -2239,7 +1960,7 @@ class CodexHandler(BotHandler):
         if bool(thread_id) == bool(thread_name):
             raise ValueError("必须且只能提供 `thread_id` 或 `thread_name`。")
         if thread_id:
-            return self._read_thread_summary(thread_id, original_arg=thread_id)
+            return self._read_thread_summary_authoritatively(thread_id, original_arg=thread_id)
         return self._resolve_thread_name_target_for_control(thread_name)
 
     def _resume_snapshot(self, arg: str) -> ThreadSnapshot:
@@ -2250,7 +1971,7 @@ class CodexHandler(BotHandler):
             summary=thread,
         )
 
-    def _read_thread_snapshot(
+    def _read_thread_snapshot_authoritatively(
         self,
         thread_id: str,
         *,
@@ -2264,8 +1985,8 @@ class CodexHandler(BotHandler):
                 raise ValueError(f"未找到匹配的线程：`{original_arg}`") from exc
             raise
 
-    def _read_thread_summary(self, thread_id: str, *, original_arg: str) -> ThreadSummary:
-        return self._read_thread_snapshot(
+    def _read_thread_summary_authoritatively(self, thread_id: str, *, original_arg: str) -> ThreadSummary:
+        return self._read_thread_snapshot_authoritatively(
             thread_id,
             original_arg=original_arg,
             include_turns=False,
@@ -2278,7 +1999,7 @@ class CodexHandler(BotHandler):
         original_arg: str,
         summary: ThreadSummary | None = None,
     ) -> ThreadSnapshot:
-        thread = summary or self._find_thread_summary(thread_id)
+        thread = summary or self._lookup_thread_summary_in_bounded_list(thread_id)
         profile = self._effective_default_profile()
         resolved = resolve_profile_from_codex_config(profile) if profile else _EMPTY_RESOLVED_PROFILE
         try:
@@ -2298,7 +2019,7 @@ class CodexHandler(BotHandler):
                 ) from exc
             raise
 
-    def _find_thread_summary(self, thread_id: str) -> ThreadSummary | None:
+    def _lookup_thread_summary_in_bounded_list(self, thread_id: str) -> ThreadSummary | None:
         threads = self._list_global_threads()
         for thread in threads:
             if thread.thread_id == thread_id:

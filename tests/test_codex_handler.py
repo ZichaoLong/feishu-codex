@@ -1810,7 +1810,11 @@ class CodexHandlerTests(unittest.TestCase):
         }
         with patch("bot.codex_settings_domain.ensure_init_token", return_value="secret-1"), patch(
             "bot.codex_settings_domain.load_system_config_raw",
-            return_value={"app_id": "cli_test_app", "app_secret": "secret"},
+            return_value={
+                "app_id": "cli_test_app",
+                "app_secret": "secret",
+                "admin_open_ids": ["ou_admin"],
+            },
         ), patch("bot.codex_settings_domain.save_system_config") as save_config:
             handler.handle_message("ou_user2", "chat-p2p", "/init secret-1", message_id="m-p2p")
 
@@ -1823,6 +1827,36 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("初始化结果", reply)
         self.assertIn("已加入 `Alice`", reply)
         self.assertIn("`ou_bot_new`", reply)
+
+    def test_init_command_does_not_write_runtime_only_admins_back_to_config(self) -> None:
+        handler, bot = self._make_handler()
+        bot.admin_open_ids = {"ou_admin", "ou_stale_runtime"}
+        bot.message_contexts["m-p2p"] = {
+            "chat_type": "p2p",
+            "sender_open_id": "ou_user2",
+            "sender_type": "user",
+        }
+        bot.bot_identity = {
+            "app_id": "cli_test_app",
+            "open_id": "",
+            "source": "auto-discovered",
+            "configured_open_id": "",
+            "discovered_open_id": "",
+            "trigger_open_ids": "",
+        }
+        with patch("bot.codex_settings_domain.ensure_init_token", return_value="secret-1"), patch(
+            "bot.codex_settings_domain.load_system_config_raw",
+            return_value={
+                "app_id": "cli_test_app",
+                "app_secret": "secret",
+                "admin_open_ids": ["ou_admin"],
+            },
+        ), patch("bot.codex_settings_domain.save_system_config") as save_config:
+            handler.handle_message("ou_user2", "chat-p2p", "/init secret-1", message_id="m-p2p")
+
+        saved = save_config.call_args.args[0]
+        self.assertEqual(saved["admin_open_ids"], ["ou_admin", "ou_user2"])
+        self.assertNotIn("ou_stale_runtime", saved["admin_open_ids"])
 
     def test_init_command_rejects_invalid_token(self) -> None:
         handler, bot = self._make_handler()
