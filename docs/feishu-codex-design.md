@@ -5,6 +5,7 @@ See also:
 - `docs/session-profile-semantics.md`
 - `docs/fcodex-shared-backend-runtime.md`
 - `docs/shared-backend-resume-safety.md`
+- `docs/codex-handler-decomposition-plan.md`
 
 ## 1. Background
 
@@ -182,6 +183,9 @@ If those state machines continue to live together in `CodexHandler`, the result
 is only lighter file navigation, not a clearer long-term architecture. The
 maintenance burden still comes from remembering implicit ordering constraints
 across unrelated runtime concerns.
+
+For the recommended rollout order and phase boundaries of that ownership
+decomposition, see `docs/codex-handler-decomposition-plan.md`.
 
 ## 6. Data and Behavioral Boundaries
 

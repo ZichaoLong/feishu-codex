@@ -15,6 +15,7 @@
 | 你想确认什么 | 应阅读的文档 |
 | --- | --- |
 | 当前总体架构、分层、模块划分、仓库结构是什么？ | [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md) |
+| 计划继续做 `CodexHandler` ownership 拆分时，推荐的阶段和边界是什么？ | [`codex-handler-decomposition-plan.zh-CN.md`](./codex-handler-decomposition-plan.zh-CN.md) |
 | 飞书侧线程生命周期是什么？哪些状态绝不能混淆？ | [`feishu-thread-lifecycle.zh-CN.md`](./feishu-thread-lifecycle.zh-CN.md) |
 | `/status`、`/release-feishu-runtime`、`feishu-codexctl` 共享的状态词汇与管理面合同是什么？ | [`runtime-control-surface.zh-CN.md`](./runtime-control-surface.zh-CN.md) |
 | 飞书 `/help` 的信息架构、按钮导航与 slash 语义一致性合同是什么？ | [`feishu-help-navigation.zh-CN.md`](./feishu-help-navigation.zh-CN.md) |
@@ -27,6 +28,7 @@
 ## 常见阅读路径
 
 - 做架构调整或较大重构时：先读 [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md)，再按主题补读对应文档。
+- 计划继续做 `CodexHandler` / runtime ownership 拆分时：先读 [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md)，再读 [`codex-handler-decomposition-plan.zh-CN.md`](./codex-handler-decomposition-plan.zh-CN.md)。
 - 排查 session、线程恢复、运行时切换问题时：重点读 [`feishu-thread-lifecycle.zh-CN.md`](./feishu-thread-lifecycle.zh-CN.md)、[`runtime-control-surface.zh-CN.md`](./runtime-control-surface.zh-CN.md)、[`session-profile-semantics.zh-CN.md`](./session-profile-semantics.zh-CN.md)、[`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md)。
 - 改飞书 `/help`、命令可发现性、按钮与 slash 语义一致性时：先读 [`feishu-help-navigation.zh-CN.md`](./feishu-help-navigation.zh-CN.md)，再按它引用的专题文档继续读。
 - 改 `fcodex` wrapper、shared backend、本地代理相关逻辑时：重点读 [`fcodex-shared-backend-runtime.zh-CN.md`](./fcodex-shared-backend-runtime.zh-CN.md) 和 [`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md)。

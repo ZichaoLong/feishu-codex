@@ -33,7 +33,8 @@ from bot.cards import (
     build_permissions_approval_card,
     make_card_response,
 )
-from bot.binding_identity import binding_kind, format_binding_id, parse_binding_id
+from bot.binding_identity import format_binding_id, parse_binding_id
+from bot.binding_runtime_manager import BindingRuntimeManager, ResolvedRuntimeBinding
 from bot.config import load_config_file
 from bot.constants import (
     DEFAULT_APP_SERVER_MODE,
@@ -72,7 +73,6 @@ from bot.runtime_state import (
     RuntimeHeartbeat,
     RuntimeSettingsChanged,
     RuntimeStateMessage,
-    StoredBindingHydrated,
     ThreadStateChanged,
     apply_runtime_state_message,
 )
@@ -89,8 +89,6 @@ from bot.stores.interaction_lease_store import (
     InteractionLease,
     InteractionLeaseAcquireResult,
     InteractionLeaseStore,
-    feishu_binding_from_holder,
-    make_feishu_interaction_holder,
 )
 from bot.stores.profile_state_store import ProfileStateStore
 from bot.stores.service_instance_lease import (
@@ -237,13 +235,6 @@ class _TerminalReconcileTarget:
     cancelled: bool
     elapsed: int
 
-
-@dataclass(frozen=True)
-class _ResolvedRuntimeBinding:
-    binding: ChatBindingKey
-    state: _RuntimeState
-
-
 def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
     for preset, config in _PERMISSIONS_PRESETS.items():
         if config["approval_policy"] == approval_policy and config["sandbox"] == sandbox:
@@ -268,7 +259,6 @@ class CodexHandler(BotHandler):
         self._data_dir = data_dir or FC_DATA_DIR
         self._config_dir = config_dir
         self._lock = threading.RLock()
-        self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = {}
         self._thread_lease_registry = ThreadLeaseRegistry()
         self._interaction_lease_store = InteractionLeaseStore(self._data_dir)
         self._pending_requests: dict[str, _PendingRequestState] = {}
@@ -301,6 +291,20 @@ class CodexHandler(BotHandler):
         self._adapter_config = CodexAppServerConfig.from_dict(cfg)
         self._app_server_runtime = AppServerRuntimeStore(self._data_dir)
         self._chat_binding_store = ChatBindingStore(self._data_dir)
+        self._binding_runtime = BindingRuntimeManager(
+            lock=self._lock,
+            default_working_dir=self._default_working_dir,
+            default_approval_policy=self._adapter_config.approval_policy,
+            default_sandbox=self._adapter_config.sandbox,
+            default_collaboration_mode=self._adapter_config.collaboration_mode,
+            default_model=self._adapter_config.model,
+            default_reasoning_effort=self._adapter_config.reasoning_effort,
+            chat_binding_store=self._chat_binding_store,
+            thread_lease_registry=self._thread_lease_registry,
+            interaction_lease_store=self._interaction_lease_store,
+            is_group_chat=self._is_group_chat,
+        )
+        self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = self._binding_runtime.runtime_state_by_binding
         self._hydrate_stored_bindings()
         if self._adapter_config.app_server_mode == "remote":
             self._adapter_config = replace(
@@ -576,18 +580,13 @@ class CodexHandler(BotHandler):
         return self._get_runtime_state(sender_id, chat_id, message_id)["active"]
 
     def _deactivate_binding_locked(self, key: ChatBindingKey) -> str:
-        state = self._runtime_state_by_binding.pop(key, None)
-        self._chat_binding_store.clear(key)
-        if not state:
-            return ""
-        self._cancel_patch_timer_locked(state)
-        self._cancel_mirror_watchdog_locked(state)
-        thread_id = str(state["current_thread_id"] or "").strip()
-        self._release_thread_write_lease_locked(key, thread_id)
-        self._release_interaction_lease_for_binding(key, thread_id)
-        if self._unsubscribe_thread_locked(key, thread_id):
-            return thread_id
-        return ""
+        return self._binding_runtime.deactivate_binding_locked(
+            key,
+            on_deactivate_state=lambda state: (
+                self._cancel_patch_timer_locked(state),
+                self._cancel_mirror_watchdog_locked(state),
+            ),
+        )
 
     def deactivate_sender(self, sender_id: str, chat_id: str = "", message_id: str = "") -> None:
         key = self._chat_binding_key(sender_id, chat_id, message_id)
@@ -666,153 +665,48 @@ class CodexHandler(BotHandler):
             self._service_instance_lease.release()
 
     def _build_default_runtime_state(self) -> _RuntimeState:
-        stored_binding = self._build_default_stored_binding()
-        return {
-            "active": False,
-            "working_dir": stored_binding["working_dir"],
-            "current_thread_id": stored_binding["current_thread_id"],
-            "current_thread_title": stored_binding["current_thread_title"],
-            "current_thread_runtime_state": stored_binding["current_thread_runtime_state"],
-            "current_turn_id": "",
-            "running": False,
-            "cancelled": False,
-            "pending_cancel": False,
-            "current_message_id": "",
-            "last_execution_message_id": "",
-            "current_prompt_message_id": "",
-            "current_prompt_reply_in_thread": False,
-            "current_actor_open_id": "",
-            "execution_transcript": ExecutionTranscript(),
-            "runtime_channel_state": "live",
-            "started_at": 0.0,
-            "last_runtime_event_at": 0.0,
-            "last_patch_at": 0.0,
-            "patch_timer": None,
-            "mirror_watchdog_timer": None,
-            "mirror_watchdog_generation": 0,
-            "followup_sent": False,
-            "awaiting_local_turn_started": False,
-            "approval_policy": stored_binding["approval_policy"],
-            "sandbox": stored_binding["sandbox"],
-            "collaboration_mode": stored_binding["collaboration_mode"],
-            "model": self._adapter_config.model,
-            "reasoning_effort": self._adapter_config.reasoning_effort,
-            "plan_message_id": "",
-            "plan_turn_id": "",
-            "plan_explanation": "",
-            "plan_steps": [],
-            "plan_text": "",
-        }
+        return self._binding_runtime.build_default_runtime_state()  # type: ignore[return-value]
 
     def _build_default_stored_binding(self) -> dict[str, str]:
-        return {
-            "working_dir": self._default_working_dir,
-            "current_thread_id": "",
-            "current_thread_title": "",
-            "current_thread_runtime_state": "",
-            "current_thread_write_owner_thread_id": "",
-            "approval_policy": self._adapter_config.approval_policy,
-            "sandbox": self._adapter_config.sandbox,
-            "collaboration_mode": self._adapter_config.collaboration_mode,
-        }
+        return self._binding_runtime.build_default_stored_binding()
 
     def _hydrate_stored_bindings(self) -> None:
-        stored_bindings = self._chat_binding_store.load_all()
-        if not stored_bindings:
-            return
-        with self._lock:
-            for binding, stored_binding in sorted(stored_bindings.items()):
-                if binding in self._runtime_state_by_binding:
-                    continue
-                state = self._build_default_runtime_state()
-                self._apply_stored_binding(state, stored_binding)
-                self._runtime_state_by_binding[binding] = state
-            for binding, stored_binding in sorted(stored_bindings.items()):
-                state = self._runtime_state_by_binding[binding]
-                current_thread_id = state["current_thread_id"]
-                if state["current_thread_runtime_state"] == "attached":
-                    self._subscribe_thread_locked(binding, current_thread_id)
-                owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
-                if (
-                    state["current_thread_runtime_state"] == "attached"
-                    and owner_thread_id
-                    and owner_thread_id == current_thread_id
-                ):
-                    interaction_lease = self._acquire_interaction_lease_for_binding(binding, owner_thread_id)
-                    if not interaction_lease.granted and interaction_lease.lease is not None:
-                        logger.warning(
-                            "stored interaction owner conflicted during hydration: thread=%s owner=%s ignored=%s",
-                            owner_thread_id[:12],
-                            interaction_lease.lease.holder.holder_id,
-                            binding,
-                        )
-                        self._sync_stored_binding_locked(binding, state)
-                        continue
-                    lease = self._acquire_thread_write_lease_locked(binding, owner_thread_id)
-                    if not lease.granted and lease.owner != binding:
-                        logger.warning(
-                            "stored write owner conflicted during hydration: thread=%s owner=%s ignored=%s",
-                            owner_thread_id[:12],
-                            lease.owner,
-                            binding,
-                        )
-                        self._sync_stored_binding_locked(binding, state)
+        self._binding_runtime.hydrate_stored_bindings()
 
     def _apply_stored_binding(self, state: _RuntimeState, stored_binding: dict[str, str]) -> None:
-        self._apply_runtime_state_message_locked(
-            state,
-            StoredBindingHydrated(
-                working_dir=stored_binding["working_dir"],
-                current_thread_id=stored_binding["current_thread_id"],
-                current_thread_title=stored_binding["current_thread_title"],
-                current_thread_runtime_state=stored_binding["current_thread_runtime_state"],
-                approval_policy=stored_binding["approval_policy"],
-                sandbox=stored_binding["sandbox"],
-                collaboration_mode=stored_binding["collaboration_mode"],
-            ),
-        )
+        self._binding_runtime.apply_stored_binding(state, stored_binding)
 
     def _subscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._thread_lease_registry.subscribe(binding, thread_id)
+        return self._binding_runtime.subscribe_thread_locked(binding, thread_id)
 
     def _unsubscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._thread_lease_registry.unsubscribe(binding, thread_id).thread_orphaned
+        return self._binding_runtime.unsubscribe_thread_locked(binding, thread_id)
 
     def _acquire_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str):
-        return self._thread_lease_registry.acquire_write_lease(binding, thread_id)
+        return self._binding_runtime.acquire_thread_write_lease_locked(binding, thread_id)
 
     def _release_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._thread_lease_registry.release_write_lease(binding, thread_id)
+        return self._binding_runtime.release_thread_write_lease_locked(binding, thread_id)
 
     def _feishu_interaction_holder(self, binding: ChatBindingKey):
-        return make_feishu_interaction_holder(
-            binding[0],
-            binding[1],
-            owner_pid=os.getpid(),
-        )
+        return self._binding_runtime.feishu_interaction_holder(binding)
 
     def _current_interaction_lease_locked(self, thread_id: str) -> InteractionLease | None:
-        return self._interaction_lease_store.load(thread_id)
+        return self._binding_runtime.current_interaction_lease_locked(thread_id)
 
     def _acquire_interaction_lease_for_binding(
         self,
         binding: ChatBindingKey,
         thread_id: str,
     ) -> InteractionLeaseAcquireResult:
-        return self._interaction_lease_store.acquire(
-            thread_id,
-            self._feishu_interaction_holder(binding),
-        )
+        return self._binding_runtime.acquire_interaction_lease_for_binding(binding, thread_id)
 
     def _release_interaction_lease_for_binding(
         self,
         binding: ChatBindingKey,
         thread_id: str,
     ) -> bool:
-        return self._interaction_lease_store.release(
-            thread_id,
-            self._feishu_interaction_holder(binding),
-        )
+        return self._binding_runtime.release_interaction_lease_for_binding(binding, thread_id)
 
     def _interactive_binding_for_thread_locked(
         self,
@@ -820,19 +714,10 @@ class CodexHandler(BotHandler):
         *,
         adopt_sole_subscriber: bool = False,
     ) -> tuple[ChatBindingKey | None, bool]:
-        lease = self._current_interaction_lease_locked(thread_id)
-        if lease is not None:
-            binding = feishu_binding_from_holder(lease.holder)
-            if binding is None:
-                return None, True
-            return binding, False
-        subscribers = self._thread_lease_registry.subscribers(thread_id)
-        if len(subscribers) != 1:
-            return None, False
-        binding = subscribers[0]
-        if adopt_sole_subscriber:
-            self._acquire_interaction_lease_for_binding(binding, thread_id)
-        return binding, False
+        return self._binding_runtime.interactive_binding_for_thread_locked(
+            thread_id,
+            adopt_sole_subscriber=adopt_sole_subscriber,
+        )
 
     def _interactive_binding_for_thread(
         self,
@@ -852,20 +737,10 @@ class CodexHandler(BotHandler):
         *,
         adopt_sole_subscriber: bool = False,
     ) -> ChatBindingKey | None:
-        owner = self._thread_lease_registry.lease_owner(thread_id)
-        if owner is not None:
-            return owner
-        subscribers = self._thread_lease_registry.subscribers(thread_id)
-        if len(subscribers) == 1:
-            binding = subscribers[0]
-            if adopt_sole_subscriber:
-                lease = self._thread_lease_registry.acquire_write_lease(binding, thread_id)
-                if lease.granted:
-                    state = self._runtime_state_by_binding.get(binding)
-                    if state is not None:
-                        self._sync_stored_binding_locked(binding, state)
-            return binding
-        return None
+        return self._binding_runtime.execution_binding_for_thread_locked(
+            thread_id,
+            adopt_sole_subscriber=adopt_sole_subscriber,
+        )
 
     def _execution_binding_for_thread(
         self,
@@ -881,51 +756,23 @@ class CodexHandler(BotHandler):
 
     def _thread_subscribers(self, thread_id: str) -> tuple[ChatBindingKey, ...]:
         with self._lock:
-            return self._thread_lease_registry.subscribers(thread_id)
+            return self._binding_runtime.thread_subscribers(thread_id)
 
     def _thread_write_owner(self, thread_id: str) -> ChatBindingKey | None:
         with self._lock:
-            return self._thread_lease_registry.lease_owner(thread_id)
+            return self._binding_runtime.thread_write_owner(thread_id)
 
     def _stored_binding_from_runtime(self, binding: ChatBindingKey, state: _RuntimeState) -> dict[str, str]:
-        current_thread_id = str(state["current_thread_id"]).strip()
-        current_thread_runtime_state = str(state["current_thread_runtime_state"]).strip()
-        if not current_thread_id:
-            current_thread_runtime_state = ""
-        current_thread_write_owner_thread_id = ""
-        if (
-            current_thread_id
-            and current_thread_runtime_state == "attached"
-            and self._thread_lease_registry.lease_owner(current_thread_id) == binding
-        ):
-            current_thread_write_owner_thread_id = current_thread_id
-        return {
-            "working_dir": str(state["working_dir"]).strip(),
-            "current_thread_id": current_thread_id,
-            "current_thread_title": str(state["current_thread_title"]).strip(),
-            "current_thread_runtime_state": current_thread_runtime_state,
-            "current_thread_write_owner_thread_id": current_thread_write_owner_thread_id,
-            "approval_policy": str(state["approval_policy"]).strip(),
-            "sandbox": str(state["sandbox"]).strip(),
-            "collaboration_mode": str(state["collaboration_mode"]).strip(),
-        }
+        return self._binding_runtime.stored_binding_from_runtime(binding, state)
 
     def _sync_stored_binding_locked(self, binding: ChatBindingKey, state: _RuntimeState) -> None:
-        stored_binding = self._stored_binding_from_runtime(binding, state)
-        if stored_binding == self._build_default_stored_binding():
-            self._chat_binding_store.clear(binding)
-            return
-        self._chat_binding_store.save(binding, stored_binding)
+        self._binding_runtime.sync_stored_binding_locked(binding, state)
 
     def _save_stored_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> None:
-        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
-        with self._lock:
-            self._sync_stored_binding_locked(resolved.binding, resolved.state)
+        self._binding_runtime.save_stored_binding(sender_id, chat_id, message_id)
 
     def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView:
-        state = self._resolve_runtime_binding(sender_id, chat_id, message_id).state
-        with self._lock:
-            return build_runtime_view(state)
+        return self._binding_runtime.get_runtime_view(sender_id, chat_id, message_id)
 
     def _runtime_card_publisher(self) -> RuntimeCardPublisher:
         return RuntimeCardPublisher(self.bot)
@@ -940,8 +787,7 @@ class CodexHandler(BotHandler):
         state: _RuntimeState,
         message: RuntimeStateMessage,
     ) -> None:
-        self._apply_runtime_state_message_locked(state, message)
-        self._sync_stored_binding_locked(binding, state)
+        self._binding_runtime.apply_persisted_runtime_state_message_locked(binding, state, message)
 
     def _update_runtime_settings(
         self,
@@ -1230,64 +1076,19 @@ class CodexHandler(BotHandler):
             self._schedule_mirror_watchdog(sender_id, chat_id)
 
     def _existing_chat_binding_key_locked(self, sender_id: str, chat_id: str) -> ChatBindingKey | None:
-        group_binding = (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
-        if group_binding in self._runtime_state_by_binding:
-            return group_binding
-        sender_binding = (sender_id, chat_id)
-        if sender_binding in self._runtime_state_by_binding:
-            return sender_binding
-        return None
+        return self._binding_runtime.existing_chat_binding_key_locked(sender_id, chat_id)
 
     def _fresh_chat_binding_key(self, sender_id: str, chat_id: str, message_id: str = "") -> ChatBindingKey:
-        if sender_id == GROUP_SHARED_BINDING_OWNER_ID:
-            return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
-        if self._is_group_chat(chat_id, message_id):
-            return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
-        return (sender_id, chat_id)
+        return self._binding_runtime.fresh_chat_binding_key(sender_id, chat_id, message_id)
 
     def _get_or_create_runtime_state_locked(self, binding: ChatBindingKey) -> _RuntimeState:
-        state = self._runtime_state_by_binding.get(binding)
-        if state is not None:
-            return state
+        return self._binding_runtime.get_or_create_runtime_state_locked(binding)  # type: ignore[return-value]
 
-        state = self._build_default_runtime_state()
-        stored_binding = self._chat_binding_store.load(binding)
-        if stored_binding is not None:
-            self._apply_stored_binding(state, stored_binding)
-            current_thread_id = state["current_thread_id"]
-            if state["current_thread_runtime_state"] == "attached":
-                self._subscribe_thread_locked(binding, current_thread_id)
-            owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
-            if (
-                state["current_thread_runtime_state"] == "attached"
-                and owner_thread_id
-                and owner_thread_id == current_thread_id
-            ):
-                self._acquire_thread_write_lease_locked(binding, owner_thread_id)
-        self._runtime_state_by_binding[binding] = state
-        return state
-
-    def _resolve_runtime_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> _ResolvedRuntimeBinding:
-        with self._lock:
-            existing = self._existing_chat_binding_key_locked(sender_id, chat_id)
-            if existing is not None:
-                return _ResolvedRuntimeBinding(
-                    binding=existing,
-                    state=self._get_or_create_runtime_state_locked(existing),
-                )
-
-        binding = self._fresh_chat_binding_key(sender_id, chat_id, message_id)
-        with self._lock:
-            existing = self._existing_chat_binding_key_locked(sender_id, chat_id)
-            if existing is not None:
-                binding = existing
-            return _ResolvedRuntimeBinding(
-                binding=binding,
-                state=self._get_or_create_runtime_state_locked(binding),
-            )
+    def _resolve_runtime_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> ResolvedRuntimeBinding:
+        return self._binding_runtime.resolve_runtime_binding(sender_id, chat_id, message_id)
 
     def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> _RuntimeState:
-        return self._resolve_runtime_binding(sender_id, chat_id, message_id).state
+        return self._binding_runtime.get_runtime_state(sender_id, chat_id, message_id)  # type: ignore[return-value]
 
     def _resolve_chat_type(self, chat_id: str, message_id: str = "") -> str:
         context = self.bot.get_message_context(message_id) if message_id else {}
@@ -2593,58 +2394,16 @@ class CodexHandler(BotHandler):
 
     @staticmethod
     def _binding_has_inflight_turn_locked(state: _RuntimeState) -> bool:
-        return bool(state["running"] or state["awaiting_local_turn_started"] or state["current_turn_id"])
+        return BindingRuntimeManager.binding_has_inflight_turn_locked(state)
 
     def _binding_inventory_locked(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for binding, state in sorted(self._runtime_state_by_binding.items(), key=lambda item: format_binding_id(item[0])):
-            thread_id = str(state["current_thread_id"] or "").strip()
-            items.append(
-                {
-                    "binding_id": format_binding_id(binding),
-                    "binding_kind": binding_kind(binding),
-                    "sender_id": binding[0],
-                    "chat_id": binding[1],
-                    "binding_state": "bound" if thread_id else "unbound",
-                    "thread_id": thread_id,
-                    "thread_title": str(state["current_thread_title"] or "").strip(),
-                    "working_dir": str(state["working_dir"] or "").strip(),
-                    "feishu_runtime_state": (
-                        str(state["current_thread_runtime_state"] or "").strip() or "not-applicable"
-                    ),
-                    "feishu_write_owner": bool(
-                        thread_id and self._thread_lease_registry.lease_owner(thread_id) == binding
-                    ),
-                    "running_turn": self._binding_has_inflight_turn_locked(state),
-                    "approval_policy": str(state["approval_policy"] or "").strip(),
-                    "sandbox": str(state["sandbox"] or "").strip(),
-                    "collaboration_mode": str(state["collaboration_mode"] or "").strip(),
-                }
-            )
-        return items
+        return self._binding_runtime.binding_inventory_locked()
 
     def _bound_bindings_for_thread_locked(self, thread_id: str) -> list[ChatBindingKey]:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return []
-        return sorted(
-            binding
-            for binding, state in self._runtime_state_by_binding.items()
-            if str(state["current_thread_id"] or "").strip() == normalized_thread_id
-        )
+        return self._binding_runtime.bound_bindings_for_thread_locked(thread_id)
 
     def _attached_bindings_for_thread_locked(self, thread_id: str) -> list[ChatBindingKey]:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return []
-        return sorted(
-            binding
-            for binding, state in self._runtime_state_by_binding.items()
-            if (
-                str(state["current_thread_id"] or "").strip() == normalized_thread_id
-                and str(state["current_thread_runtime_state"] or "").strip() == "attached"
-            )
-        )
+        return self._binding_runtime.attached_bindings_for_thread_locked(thread_id)
 
     def _read_thread_summary_for_status(self, thread_id: str) -> tuple[ThreadSummary | None, str]:
         normalized_thread_id = str(thread_id or "").strip()
@@ -2665,43 +2424,10 @@ class CodexHandler(BotHandler):
         *,
         current_binding: ChatBindingKey | None = None,
     ) -> dict[str, str]:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return {
-                "kind": "none",
-                "holder_id": "",
-                "binding_id": "",
-                "relation": "none",
-                "label": "none",
-            }
-        lease = self._current_interaction_lease_locked(normalized_thread_id)
-        if lease is None:
-            return {
-                "kind": "none",
-                "holder_id": "",
-                "binding_id": "",
-                "relation": "none",
-                "label": "none",
-            }
-        holder = lease.holder
-        if holder.kind == "feishu":
-            binding = feishu_binding_from_holder(holder)
-            binding_id = format_binding_id(binding) if binding is not None else ""
-            relation = "current" if binding is not None and binding == current_binding else "other"
-            return {
-                "kind": "feishu",
-                "holder_id": holder.holder_id,
-                "binding_id": binding_id,
-                "relation": relation,
-                "label": binding_id or "feishu:unknown",
-            }
-        return {
-            "kind": holder.kind,
-            "holder_id": holder.holder_id,
-            "binding_id": "",
-            "relation": "external",
-            "label": holder.holder_id,
-        }
+        return self._binding_runtime.interaction_owner_snapshot_locked(
+            thread_id,
+            current_binding=current_binding,
+        )
 
     def _release_feishu_runtime_availability_locked(self, thread_id: str) -> tuple[bool, str]:
         normalized_thread_id = str(thread_id or "").strip()
@@ -2796,62 +2522,11 @@ class CodexHandler(BotHandler):
         }
 
     def _binding_status_snapshot(self, binding: ChatBindingKey) -> dict[str, Any]:
-        with self._lock:
-            state = self._runtime_state_by_binding.get(binding)
-            if state is None:
-                raise ValueError(f"未找到绑定：{format_binding_id(binding)}")
-            thread_id = str(state["current_thread_id"] or "").strip()
-            thread_title = str(state["current_thread_title"] or "").strip()
-            working_dir = str(state["working_dir"] or "").strip()
-            feishu_runtime_state = str(state["current_thread_runtime_state"] or "").strip() or "not-applicable"
-            running_turn = self._binding_has_inflight_turn_locked(state)
-            current_turn_id = str(state["current_turn_id"] or "").strip()
-            owner = self._thread_lease_registry.lease_owner(thread_id) if thread_id else None
-            interaction_owner = self._interaction_owner_snapshot_locked(
-                thread_id,
-                current_binding=binding,
-            )
-            release_available, release_reason = self._release_feishu_runtime_availability_locked(thread_id)
-            approval_policy = str(state["approval_policy"] or "").strip()
-            sandbox = str(state["sandbox"] or "").strip()
-            collaboration_mode = str(state["collaboration_mode"] or "").strip()
-        summary, backend_thread_status = self._read_thread_summary_for_status(thread_id)
-        if summary is not None:
-            thread_title = summary.title or thread_title
-            working_dir = summary.cwd or working_dir
-        if owner is None:
-            feishu_write_owner_relation = "none"
-            feishu_write_owner_binding_id = ""
-        elif owner == binding:
-            feishu_write_owner_relation = "current"
-            feishu_write_owner_binding_id = format_binding_id(owner)
-        else:
-            feishu_write_owner_relation = "other"
-            feishu_write_owner_binding_id = format_binding_id(owner)
-        return {
-            "binding_id": format_binding_id(binding),
-            "binding_kind": binding_kind(binding),
-            "sender_id": binding[0],
-            "chat_id": binding[1],
-            "binding_state": "bound" if thread_id else "unbound",
-            "thread_id": thread_id,
-            "thread_title": thread_title,
-            "working_dir": working_dir,
-            "feishu_runtime_state": feishu_runtime_state,
-            "backend_thread_status": backend_thread_status or "not-applicable",
-            "backend_running_turn": backend_thread_status == "active",
-            "feishu_write_owner_binding_id": feishu_write_owner_binding_id,
-            "feishu_write_owner_relation": feishu_write_owner_relation,
-            "interaction_owner": interaction_owner,
-            "running_turn": running_turn,
-            "current_turn_id": current_turn_id,
-            "approval_policy": approval_policy,
-            "sandbox": sandbox,
-            "collaboration_mode": collaboration_mode,
-            "reprofile_possible": bool(thread_id and backend_thread_status == "notLoaded"),
-            "release_feishu_runtime_available": bool(thread_id and release_available),
-            "release_feishu_runtime_reason": release_reason,
-        }
+        return self._binding_runtime.binding_status_snapshot(
+            binding,
+            read_thread_summary_for_status=self._read_thread_summary_for_status,
+            release_feishu_runtime_availability=self._release_feishu_runtime_availability_locked,
+        )
 
     def _render_binding_status_markdown(
         self,
@@ -2965,62 +2640,31 @@ class CodexHandler(BotHandler):
 
     def _release_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
         normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            raise ValueError("thread_id 不能为空。")
         with self._lock:
-            bound_bindings = self._bound_bindings_for_thread_locked(normalized_thread_id)
-            if not bound_bindings:
-                raise ValueError("当前没有 Feishu 绑定指向该线程。")
-            attached_bindings = self._attached_bindings_for_thread_locked(normalized_thread_id)
-            if attached_bindings:
-                release_available, release_reason = self._release_feishu_runtime_availability_locked(
-                    normalized_thread_id
-                )
-                if not release_available:
-                    raise ValueError(release_reason)
-            released_binding_ids: list[str] = []
-            for binding in attached_bindings:
-                state = self._runtime_state_by_binding.get(binding)
-                if state is None:
-                    continue
-                self._release_thread_write_lease_locked(binding, normalized_thread_id)
-                self._release_interaction_lease_for_binding(binding, normalized_thread_id)
-                self._unsubscribe_thread_locked(binding, normalized_thread_id)
-                self._cancel_patch_timer_locked(state)
-                self._cancel_mirror_watchdog_locked(state)
-                self._apply_persisted_runtime_state_message_locked(
-                    binding,
-                    state,
-                    ThreadStateChanged(current_thread_runtime_state="released"),
-                )
-                released_binding_ids.append(format_binding_id(binding))
-            should_unsubscribe = bool(attached_bindings) and not self._attached_bindings_for_thread_locked(
-                normalized_thread_id
+            result = self._binding_runtime.release_feishu_runtime_by_thread_id_locked(
+                normalized_thread_id,
+                release_feishu_runtime_availability=self._release_feishu_runtime_availability_locked,
+                on_release_binding_state=lambda state: (
+                    self._cancel_patch_timer_locked(state),
+                    self._cancel_mirror_watchdog_locked(state),
+                ),
             )
-            existing_title = ""
-            existing_cwd = ""
-            for binding in bound_bindings:
-                state = self._runtime_state_by_binding.get(binding)
-                if state is None:
-                    continue
-                existing_title = existing_title or str(state["current_thread_title"] or "").strip()
-                existing_cwd = existing_cwd or str(state["working_dir"] or "").strip()
-        if should_unsubscribe:
-            self._adapter.unsubscribe_thread(normalized_thread_id)
-        summary, backend_thread_status = self._read_thread_summary_for_status(normalized_thread_id)
-        thread_title = existing_title
-        working_dir = existing_cwd
-        if summary is not None:
-            thread_title = summary.title or thread_title
-            working_dir = summary.cwd or working_dir
+        if result.unsubscribe_thread_id:
+            self._adapter.unsubscribe_thread(result.unsubscribe_thread_id)
+        resolved_summary, backend_thread_status = self._read_thread_summary_for_status(normalized_thread_id)
+        thread_title = result.thread_title
+        working_dir = result.working_dir
+        if resolved_summary is not None:
+            thread_title = resolved_summary.title or thread_title
+            working_dir = resolved_summary.cwd or working_dir
         return {
-            "thread_id": normalized_thread_id,
+            "thread_id": result.thread_id,
             "thread_title": thread_title,
             "working_dir": working_dir,
-            "bound_binding_ids": [format_binding_id(binding) for binding in bound_bindings],
-            "released_binding_ids": released_binding_ids,
-            "changed": bool(released_binding_ids),
-            "already_released": bool(bound_bindings) and not attached_bindings,
+            "bound_binding_ids": result.bound_binding_ids,
+            "released_binding_ids": result.released_binding_ids,
+            "changed": result.changed,
+            "already_released": result.already_released,
             "backend_thread_status": backend_thread_status or "unknown",
             "backend_still_loaded": backend_thread_status in {"idle", "active", "systemError"},
             "reprofile_possible": backend_thread_status == "notLoaded",
@@ -3033,37 +2677,27 @@ class CodexHandler(BotHandler):
         summary: ThreadSummary | None = None,
     ) -> dict[str, Any]:
         normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            raise ValueError("thread_id 不能为空。")
         with self._lock:
-            bound_bindings = self._bound_bindings_for_thread_locked(normalized_thread_id)
-            attached_bindings = self._attached_bindings_for_thread_locked(normalized_thread_id)
-            owner = self._thread_lease_registry.lease_owner(normalized_thread_id)
-            interaction_owner = self._interaction_owner_snapshot_locked(normalized_thread_id)
-            release_available, release_reason = self._release_feishu_runtime_availability_locked(
-                normalized_thread_id
+            snapshot = self._binding_runtime.thread_binding_snapshot_locked(
+                normalized_thread_id,
+                release_feishu_runtime_availability=self._release_feishu_runtime_availability_locked,
             )
         resolved_summary, backend_thread_status = self._read_thread_summary_for_status(normalized_thread_id)
         effective_summary = resolved_summary or summary
-        if not bound_bindings:
-            release_available = False
-            release_reason = "当前没有 Feishu 绑定指向该线程。"
         return {
-            "thread_id": normalized_thread_id,
+            "thread_id": snapshot["thread_id"],
             "thread_title": effective_summary.title if effective_summary is not None else "",
             "working_dir": effective_summary.cwd if effective_summary is not None else "",
             "backend_thread_status": backend_thread_status or "unknown",
             "backend_running_turn": backend_thread_status == "active",
-            "bound_binding_ids": [format_binding_id(binding) for binding in bound_bindings],
-            "attached_binding_ids": [format_binding_id(binding) for binding in attached_bindings],
-            "released_binding_ids": [
-                format_binding_id(binding) for binding in bound_bindings if binding not in set(attached_bindings)
-            ],
-            "feishu_write_owner_binding_id": format_binding_id(owner) if owner is not None else "",
-            "interaction_owner": interaction_owner,
+            "bound_binding_ids": snapshot["bound_binding_ids"],
+            "attached_binding_ids": snapshot["attached_binding_ids"],
+            "released_binding_ids": snapshot["released_binding_ids"],
+            "feishu_write_owner_binding_id": snapshot["feishu_write_owner_binding_id"],
+            "interaction_owner": snapshot["interaction_owner"],
             "reprofile_possible": backend_thread_status == "notLoaded",
-            "release_feishu_runtime_available": bool(release_available and bound_bindings),
-            "release_feishu_runtime_reason": release_reason,
+            "release_feishu_runtime_available": snapshot["release_feishu_runtime_available"],
+            "release_feishu_runtime_reason": snapshot["release_feishu_runtime_reason"],
         }
 
     def _handle_service_control_request(self, method: str, params: dict[str, Any]) -> Any:
@@ -3592,29 +3226,19 @@ class CodexHandler(BotHandler):
         chat_binding_key = resolved.binding
         unsubscribe_thread_id: str = ""
         with self._lock:
-            old_thread_id = state["current_thread_id"]
-            if old_thread_id != thread.thread_id:
-                self._release_interaction_lease_for_binding(chat_binding_key, old_thread_id)
-                if self._unsubscribe_thread_locked(
-                    chat_binding_key,
-                    old_thread_id,
-                ):
-                    unsubscribe_thread_id = old_thread_id
-                self._cancel_patch_timer_locked(state)
-                self._cancel_mirror_watchdog_locked(state)
-                self._reset_execution_context_locked(state, clear_card_message=True)
-            self._apply_persisted_runtime_state_message_locked(
+            unsubscribe_thread_id = self._binding_runtime.bind_thread_locked(
                 chat_binding_key,
                 state,
-                ThreadStateChanged(
-                    current_thread_id=thread.thread_id,
-                    current_thread_title=thread.title,
-                    current_thread_runtime_state="attached",
-                    working_dir=thread.cwd or state["working_dir"],
+                thread_id=thread.thread_id,
+                thread_title=thread.title,
+                working_dir=thread.cwd or state["working_dir"],
+                on_thread_replaced=lambda state: (
+                    self._cancel_patch_timer_locked(state),
+                    self._cancel_mirror_watchdog_locked(state),
+                    self._reset_execution_context_locked(state, clear_card_message=True),
                 ),
+                on_after_bind=self._clear_plan_state,
             )
-            self._clear_plan_state(state)
-            self._subscribe_thread_locked(chat_binding_key, thread.thread_id)
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
 
@@ -3624,23 +3248,16 @@ class CodexHandler(BotHandler):
         chat_binding_key = resolved.binding
         unsubscribe_thread_id: str = ""
         with self._lock:
-            thread_id = state["current_thread_id"]
-            self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
-            if self._unsubscribe_thread_locked(chat_binding_key, thread_id):
-                unsubscribe_thread_id = thread_id
-            self._cancel_patch_timer_locked(state)
-            self._cancel_mirror_watchdog_locked(state)
-            self._reset_execution_context_locked(state, clear_card_message=True)
-            self._apply_persisted_runtime_state_message_locked(
+            unsubscribe_thread_id = self._binding_runtime.clear_thread_binding_locked(
                 chat_binding_key,
                 state,
-                ThreadStateChanged(
-                    current_thread_id="",
-                    current_thread_title="",
-                    current_thread_runtime_state="",
+                on_clear_state=lambda state: (
+                    self._cancel_patch_timer_locked(state),
+                    self._cancel_mirror_watchdog_locked(state),
+                    self._reset_execution_context_locked(state, clear_card_message=True),
+                    self._clear_plan_state(state),
                 ),
             )
-            self._clear_plan_state(state)
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
 

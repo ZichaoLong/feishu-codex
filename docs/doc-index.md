@@ -15,6 +15,7 @@ This directory is the source of truth for repository architecture, runtime bound
 | Question | Read |
 | --- | --- |
 | What is the current architecture, layering, module split, and repository structure? | [`feishu-codex-design.md`](./feishu-codex-design.md) |
+| What phased plan should be followed for further `CodexHandler` ownership decomposition? | [`codex-handler-decomposition-plan.md`](./codex-handler-decomposition-plan.md) |
 | What is the Feishu-side thread lifecycle, and what states must stay distinct? | [`feishu-thread-lifecycle.md`](./feishu-thread-lifecycle.md) |
 | What shared state vocabulary and admin-surface contract apply to `/status`, `/release-feishu-runtime`, and `feishu-codexctl`? | [`runtime-control-surface.md`](./runtime-control-surface.md) |
 | What information architecture and semantic rules does the Feishu `/help` navigation surface follow? | [`feishu-help-navigation.md`](./feishu-help-navigation.md) |
@@ -27,6 +28,7 @@ This directory is the source of truth for repository architecture, runtime bound
 ## Practical Reading Paths
 
 - For architecture or large refactors: read [`feishu-codex-design.md`](./feishu-codex-design.md) first, then follow the topic-specific docs above.
+- For continued `CodexHandler` / runtime ownership decomposition: read [`feishu-codex-design.md`](./feishu-codex-design.md) first, then [`codex-handler-decomposition-plan.md`](./codex-handler-decomposition-plan.md).
 - For session or runtime bugs: read [`feishu-thread-lifecycle.md`](./feishu-thread-lifecycle.md), [`runtime-control-surface.md`](./runtime-control-surface.md), [`session-profile-semantics.md`](./session-profile-semantics.md), and [`shared-backend-resume-safety.md`](./shared-backend-resume-safety.md).
 - For Feishu help, command discoverability, or button/slash consistency work: read [`feishu-help-navigation.md`](./feishu-help-navigation.md) and then the feature-specific docs it references.
 - For wrapper or backend work: read [`fcodex-shared-backend-runtime.md`](./fcodex-shared-backend-runtime.md) and [`shared-backend-resume-safety.md`](./shared-backend-resume-safety.md).

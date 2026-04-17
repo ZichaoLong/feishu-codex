@@ -7,6 +7,7 @@
 - `docs/session-profile-semantics.zh-CN.md`
 - `docs/fcodex-shared-backend-runtime.zh-CN.md`
 - `docs/shared-backend-resume-safety.zh-CN.md`
+- `docs/codex-handler-decomposition-plan.zh-CN.md`
 
 ## 1. 背景
 
@@ -140,6 +141,9 @@ shared backend 与 wrapper 的具体机制，见
 - adapter notification / request bridge
 
 如果这些状态机继续共居在 `CodexHandler`，那只是把导航从一个大文件变成多个文件，维护时仍要依赖调用顺序记忆隐式约束；这不是我们要的长期架构方向。
+
+继续推进这条 ownership 拆分路线时，推荐的实施顺序与阶段边界见
+`docs/codex-handler-decomposition-plan.zh-CN.md`。
 
 ## 6. 数据与行为边界
 
