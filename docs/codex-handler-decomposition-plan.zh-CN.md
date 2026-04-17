@@ -81,6 +81,15 @@
 
 这三个阶段之间是前后依赖关系，不建议调换顺序。
 
+当前进度：
+
+- 第一阶段已完成：`BindingRuntimeManager`
+- 第二阶段已进入细化拆分：
+  - `TurnExecutionCoordinator` 负责执行状态迁移
+  - `ExecutionOutputController` 负责执行卡片与 follow-up 发布
+  - `ExecutionRecoveryController` 负责 watchdog、快照对账、终态补账、降级判定
+- `CodexHandler` 仍未完全收成编排器，但已不再直接拥有上述三类实现细节
+
 ## 7. 第一阶段：BindingRuntimeManager
 
 ### 7.1 目标
@@ -162,20 +171,25 @@
 
 ### 8.2 负责的状态与职责
 
-第二阶段新组件应负责：
+第二阶段执行生命周期边界现已细化为三个协作组件，共同负责：
 
-- prompt turn start
-- cancel turn
-- pending approval request
-- pending ask-user request
-- execution anchor
-- execution transcript
-- plan state
-- patch timer
-- mirror watchdog
-- follow-up 发送决策
-- snapshot reconcile
-- terminal finalize / retire
+- `TurnExecutionCoordinator`
+  - prompt turn start
+  - cancel turn
+  - execution anchor
+  - execution transcript
+  - plan state
+  - terminal finalize 前的显式状态迁移
+- `ExecutionOutputController`
+  - patch timer
+  - 执行卡片 send / patch
+  - follow-up 发送决策
+  - plan card publish / patch
+- `ExecutionRecoveryController`
+  - mirror watchdog
+  - snapshot reconcile
+  - terminal reconcile 补账
+  - runtime degraded 标记
 
 ### 8.3 与 BindingRuntimeManager 的边界
 
@@ -201,6 +215,12 @@
 2. 再搬 pending request 与 execution anchor
 3. 再搬 transcript / plan / patch / watchdog / follow-up
 4. 最后把 snapshot reconcile / finalize 收进去
+
+当前已完成到第 3 步和第 4 步中的大部分执行状态路径，但 `CodexHandler` 仍持有：
+
+- pending approval / ask-user request 生命周期
+- adapter notification 到具体 domain / controller 的分发编排
+- 非执行类 UI 与命令面 glue code
 
 ### 8.5 验收标准
 

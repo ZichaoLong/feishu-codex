@@ -58,6 +58,7 @@ from bot.codex_settings_domain import CodexSettingsDomain
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
 from bot.execution_transcript import ExecutionTranscript
 from bot.execution_output_controller import ExecutionOutputController
+from bot.execution_recovery_controller import ExecutionRecoveryController, TerminalReconcileTarget
 from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
 from bot.runtime_card_publisher import (
     RuntimeCardPublisher,
@@ -220,18 +221,6 @@ class _PendingRequestState(TypedDict):
 _PENDING_REQUEST_STATUS_PENDING = "pending"
 _PENDING_REQUEST_STATUS_PROCESSING = "processing"
 
-
-@dataclass(frozen=True)
-class _TerminalReconcileTarget:
-    chat_id: str
-    thread_id: str
-    turn_id: str
-    card_message_id: str
-    prompt_message_id: str
-    transcript: ExecutionTranscript
-    cancelled: bool
-    elapsed: int
-
 def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
     for preset, config in _PERMISSIONS_PRESETS.items():
         if config["approval_policy"] == approval_policy and config["sandbox"] == sandbox:
@@ -315,6 +304,24 @@ class CodexHandler(BotHandler):
             card_reply_limit=lambda: self._card_reply_limit,
             card_log_limit=lambda: self._card_log_limit,
             stream_patch_interval_ms=lambda: self._stream_patch_interval_ms,
+        )
+        self._execution_recovery = ExecutionRecoveryController(
+            lock=self._lock,
+            runtime_submit=self._runtime_submit,
+            turn_execution=self._turn_execution,
+            get_runtime_state=lambda sender_id, chat_id: self._get_runtime_state(sender_id, chat_id),
+            resolve_runtime_binding=lambda sender_id, chat_id: self._resolve_runtime_binding(sender_id, chat_id),
+            apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
+            apply_persisted_runtime_state_message_locked=self._apply_persisted_runtime_state_message_locked,
+            finalize_execution_card_from_state=self._finalize_execution_card_from_state,
+            patch_execution_card_message=self._patch_execution_card_message,
+            read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=True),
+            is_thread_not_found_error=self._is_thread_not_found_error,
+            is_turn_thread_not_found_error=self._is_turn_thread_not_found_error,
+            is_transport_disconnect=self._is_transport_disconnect,
+            is_request_timeout_error=self._is_request_timeout_error,
+            runtime_recovery_reason=self._runtime_recovery_reason,
+            mirror_watchdog_seconds=lambda: self._mirror_watchdog_seconds,
         )
         self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = self._binding_runtime.runtime_state_by_binding
         self._hydrate_stored_bindings()
@@ -858,20 +865,7 @@ class CodexHandler(BotHandler):
         self._apply_runtime_state_message_locked(state, ExecutionStateChanged(patch_timer=None))
 
     def _cancel_mirror_watchdog_locked(self, state: _RuntimeState) -> None:
-        self._cancel_timer(state["mirror_watchdog_timer"])
-        self._apply_runtime_state_message_locked(
-            state,
-            ExecutionStateChanged(
-                mirror_watchdog_timer=None,
-                bump_mirror_watchdog_generation=True,
-            ),
-        )
-
-    def _mark_runtime_event_locked(self, state: _RuntimeState) -> None:
-        self._turn_execution.mark_runtime_event_locked(
-            state,
-            occurred_at=time.monotonic(),
-        )
+        self._execution_recovery.cancel_mirror_watchdog_locked(state)
 
     @staticmethod
     def _has_active_execution_locked(state: _RuntimeState) -> bool:
@@ -908,146 +902,34 @@ class CodexHandler(BotHandler):
         *,
         thread_id: str,
         turn_id: str = "",
-    ) -> _TerminalReconcileTarget | None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            runtime = build_runtime_view(state)
-            card_message_id = runtime.execution.current_message_id.strip()
-            if not card_message_id:
-                return None
-            resolved_turn_id = str(turn_id or runtime.execution.current_turn_id or "").strip()
-            if not resolved_turn_id:
-                return None
-            return _TerminalReconcileTarget(
-                chat_id=chat_id,
-                thread_id=str(thread_id or "").strip(),
-                turn_id=resolved_turn_id,
-                card_message_id=card_message_id,
-                prompt_message_id=runtime.execution.current_prompt_message_id.strip(),
-                transcript=runtime.execution.transcript,
-                cancelled=runtime.execution.cancelled,
-                elapsed=(
-                    int(max(0.0, time.monotonic() - runtime.execution.started_at))
-                    if runtime.execution.started_at
-                    else 0
-                ),
-            )
-
-    def _schedule_terminal_execution_reconcile(self, target: _TerminalReconcileTarget | None) -> None:
-        if target is None or not target.thread_id or not target.card_message_id:
-            return
-        worker = threading.Thread(
-            target=self._run_terminal_execution_reconcile,
-            args=(target,),
-            daemon=True,
-        )
-        worker.start()
-
-    def _run_terminal_execution_reconcile(self, target: _TerminalReconcileTarget) -> None:
-        try:
-            snapshot = self._adapter.read_thread(target.thread_id, include_turns=True)
-        except Exception as exc:
-            logger.info(
-                "终态补账跳过: chat=%s thread=%s reason=%s",
-                target.chat_id,
-                target.thread_id[:12],
-                self._runtime_recovery_reason(exc),
-            )
-            return
-
-        reply_text, reply_items = self._snapshot_reply(snapshot, turn_id=target.turn_id)
-        if not reply_text:
-            return
-
-        transcript = target.transcript.clone()
-        if not transcript.rebuild_reply_from_snapshot_items(reply_items, fallback_text=reply_text):
-            transcript.set_reply_text(reply_text)
-        if transcript.reply_text() == target.transcript.reply_text():
-            return
-
-        self._patch_execution_card_message(
-            target.card_message_id,
-            transcript=transcript,
-            running=False,
-            elapsed=target.elapsed,
-            cancelled=target.cancelled,
-        )
-
-    def _mark_runtime_degraded(self, sender_id: str, chat_id: str, *, reason: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            if not self._turn_execution.mark_runtime_degraded_locked(state):
-                return
-            thread_id = state["current_thread_id"].strip()
-        logger.warning(
-            "执行通道暂时降级，保留当前执行锚点: chat=%s thread=%s reason=%s",
-            chat_id,
-            thread_id[:12],
-            reason,
-        )
-
-    def _note_runtime_event(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            self._mark_runtime_event_locked(state)
-        self._schedule_mirror_watchdog(sender_id, chat_id)
-
-    def _schedule_mirror_watchdog(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            self._cancel_timer(state["mirror_watchdog_timer"])
-            self._apply_runtime_state_message_locked(
-                state,
-                ExecutionStateChanged(mirror_watchdog_timer=None),
-            )
-            if not state["running"] or not state["current_thread_id"]:
-                self._apply_runtime_state_message_locked(
-                    state,
-                    ExecutionStateChanged(bump_mirror_watchdog_generation=True),
-                )
-                return
-            generation = state["mirror_watchdog_generation"] + 1
-            timer = threading.Timer(
-                self._mirror_watchdog_seconds,
-                self._submit_mirror_watchdog,
-                args=(sender_id, chat_id, generation),
-            )
-            timer.daemon = True
-            self._apply_runtime_state_message_locked(
-                state,
-                ExecutionStateChanged(
-                    mirror_watchdog_timer=timer,
-                    mirror_watchdog_generation=generation,
-                ),
-            )
-            timer.start()
-
-    def _submit_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
-        self._runtime_submit(self._run_mirror_watchdog, sender_id, chat_id, generation)
-
-    def _run_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            if state["mirror_watchdog_generation"] != generation:
-                return
-            self._apply_runtime_state_message_locked(
-                state,
-                ExecutionStateChanged(mirror_watchdog_timer=None),
-            )
-            if not state["running"]:
-                return
-            thread_id = state["current_thread_id"].strip()
-            turn_id = state["current_turn_id"].strip()
-        if not thread_id:
-            return
-        finalized = self._reconcile_execution_snapshot(
+    ) -> TerminalReconcileTarget | None:
+        return self._execution_recovery.capture_terminal_reconcile_target(
             sender_id,
             chat_id,
             thread_id=thread_id,
             turn_id=turn_id,
         )
-        if not finalized:
-            self._schedule_mirror_watchdog(sender_id, chat_id)
+
+    def _schedule_terminal_execution_reconcile(self, target: TerminalReconcileTarget | None) -> None:
+        self._execution_recovery.schedule_terminal_execution_reconcile(target)
+
+    def _run_terminal_execution_reconcile(self, target: TerminalReconcileTarget) -> None:
+        self._execution_recovery.run_terminal_execution_reconcile(target)
+
+    def _mark_runtime_degraded(self, sender_id: str, chat_id: str, *, reason: str) -> None:
+        self._execution_recovery.mark_runtime_degraded(sender_id, chat_id, reason=reason)
+
+    def _note_runtime_event(self, sender_id: str, chat_id: str) -> None:
+        self._execution_recovery.note_runtime_event(sender_id, chat_id)
+
+    def _schedule_mirror_watchdog(self, sender_id: str, chat_id: str) -> None:
+        self._execution_recovery.schedule_mirror_watchdog(sender_id, chat_id)
+
+    def _submit_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
+        self._execution_recovery.submit_mirror_watchdog(sender_id, chat_id, generation)
+
+    def _run_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
+        self._execution_recovery.run_mirror_watchdog(sender_id, chat_id, generation)
 
     def _existing_chat_binding_key_locked(self, sender_id: str, chat_id: str) -> ChatBindingKey | None:
         return self._binding_runtime.existing_chat_binding_key_locked(sender_id, chat_id)
@@ -1872,26 +1754,7 @@ class CodexHandler(BotHandler):
 
     @staticmethod
     def _snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> tuple[str, list[dict[str, Any]]]:
-        target_turns = snapshot.turns
-        normalized_turn_id = str(turn_id or "").strip()
-        if normalized_turn_id:
-            matched_turns = [
-                turn
-                for turn in snapshot.turns
-                if str(turn.get("id", "") or "").strip() == normalized_turn_id
-            ]
-            if matched_turns:
-                target_turns = matched_turns[-1:]
-        for turn in reversed(target_turns):
-            items = turn.get("items") or []
-            parts = [
-                str(item.get("text", "") or "").strip()
-                for item in items
-                if item.get("type") == "agentMessage" and str(item.get("text", "") or "").strip()
-            ]
-            if parts:
-                return "\n\n".join(parts), items
-        return "", []
+        return ExecutionRecoveryController.snapshot_reply(snapshot, turn_id=turn_id)
 
     def _finalize_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -1963,55 +1826,12 @@ class CodexHandler(BotHandler):
         thread_id: str,
         turn_id: str = "",
     ) -> bool:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return self._finalize_execution_card_from_state(sender_id, chat_id)
-        try:
-            snapshot = self._adapter.read_thread(normalized_thread_id, include_turns=True)
-        except Exception as exc:
-            if self._is_thread_not_found_error(exc) or self._is_turn_thread_not_found_error(exc):
-                logger.info(
-                    "执行快照缺失，按当前本地 transcript 收口: chat=%s thread=%s reason=%s",
-                    chat_id,
-                    normalized_thread_id[:12],
-                    self._runtime_recovery_reason(exc),
-                )
-                return self._finalize_execution_card_from_state(sender_id, chat_id)
-            if self._is_transport_disconnect(exc) or self._is_request_timeout_error(exc):
-                self._mark_runtime_degraded(
-                    sender_id,
-                    chat_id,
-                    reason=self._runtime_recovery_reason(exc),
-                )
-                return False
-            logger.exception("读取线程快照失败: thread=%s", normalized_thread_id[:12])
-            return False
-
-        reply_text, reply_items = self._snapshot_reply(snapshot, turn_id=turn_id)
-        resolved = self._resolve_runtime_binding(sender_id, chat_id)
-        state = resolved.state
-        should_finalize = snapshot.summary.status != "active"
-        with self._lock:
-            self._apply_persisted_runtime_state_message_locked(
-                resolved.binding,
-                state,
-                ThreadStateChanged(
-                    current_thread_title=snapshot.summary.title or state["current_thread_title"],
-                    working_dir=snapshot.summary.cwd or state["working_dir"],
-                ),
-            )
-            self._turn_execution.apply_snapshot_reply_locked(
-                state,
-                reply_text=reply_text,
-                reply_items=reply_items,
-            )
-            if not should_finalize:
-                self._turn_execution.acknowledge_running_snapshot_locked(
-                    state,
-                    occurred_at=time.monotonic(),
-                )
-                return False
-        return self._finalize_execution_card_from_state(sender_id, chat_id)
+        return self._execution_recovery.reconcile_execution_snapshot(
+            sender_id,
+            chat_id,
+            thread_id=thread_id,
+            turn_id=turn_id,
+        )
 
     def _start_prompt_turn(
         self,

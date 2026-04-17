@@ -89,6 +89,17 @@ The recommended rollout is:
 
 These phases are intentionally ordered and should not be inverted.
 
+Current progress:
+
+- Phase 1 is complete: `BindingRuntimeManager`
+- Phase 2 is now split into narrower execution-lifecycle ownership slices:
+  - `TurnExecutionCoordinator` owns execution state transitions
+  - `ExecutionOutputController` owns execution-card and follow-up publishing
+  - `ExecutionRecoveryController` owns watchdog, snapshot reconcile, terminal
+    backfill, and degraded-channel marking
+- `CodexHandler` is not yet a pure orchestrator, but it no longer directly
+  owns those execution details
+
 ## 7. Phase 1: BindingRuntimeManager
 
 ### 7.1 Goal
@@ -175,20 +186,25 @@ separate from binding/runtime management.
 
 ### 8.2 Responsibilities
 
-The new component should own:
+Phase 2 is now realized as three cooperating components that together own:
 
-- prompt turn start
-- cancel turn
-- pending approval requests
-- pending ask-user requests
-- execution anchor
-- execution transcript
-- plan state
-- patch timer
-- mirror watchdog
-- follow-up send decisions
-- snapshot reconcile
-- terminal finalize / retire
+- `TurnExecutionCoordinator`
+  - prompt turn start
+  - cancel turn
+  - execution anchor
+  - execution transcript
+  - plan state
+  - explicit state transitions before terminal finalize
+- `ExecutionOutputController`
+  - patch timer
+  - execution-card send / patch
+  - follow-up send decisions
+  - plan-card publish / patch
+- `ExecutionRecoveryController`
+  - mirror watchdog
+  - snapshot reconcile
+  - terminal reconcile backfill
+  - runtime degraded marking
 
 ### 8.3 Boundary With BindingRuntimeManager
 
@@ -215,6 +231,13 @@ Recommended order:
 2. move pending requests and execution anchor
 3. move transcript / plan / patch / watchdog / follow-up
 4. move snapshot reconcile / finalize last
+
+Current status: most of steps 3 and 4 are now extracted into dedicated
+execution components, but `CodexHandler` still owns:
+
+- pending approval / ask-user request lifecycle
+- adapter-notification dispatch orchestration
+- non-execution command/UI glue
 
 ### 8.5 Exit Criteria
 
