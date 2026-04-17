@@ -1,6 +1,6 @@
 # Runtime Control Surface
 
-Chinese original: `docs/runtime-control-surface.zh-CN.md`
+Chinese original: `docs/contracts/runtime-control-surface.zh-CN.md`
 
 This document defines the shared state vocabulary and control contract across:
 
@@ -16,9 +16,9 @@ It answers three questions:
 
 See also:
 
-- `docs/feishu-thread-lifecycle.md`
-- `docs/session-profile-semantics.md`
-- `docs/shared-backend-resume-safety.md`
+- `docs/contracts/feishu-thread-lifecycle.md`
+- `docs/contracts/session-profile-semantics.md`
+- `docs/decisions/shared-backend-resume-safety.md`
 
 ## 1. Upstream Baseline
 
@@ -283,7 +283,7 @@ next ordinary prompt in that chat first runs the normal prompt preflight.
 
 If the thread is `notLoaded` at that moment, that accepted reattach path follows
 the unloaded-thread profile contract defined in
-`docs/session-profile-semantics.md`.
+`docs/contracts/session-profile-semantics.md`.
 
 ## 6. Local Admin Surface: `feishu-codexctl`
 

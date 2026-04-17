@@ -4,35 +4,100 @@
 
 `AGENTS.md` 只记录仓库所有者的工程偏好，不替代这里的设计与合同文档。
 
-## 使用方式
+## 阅读原则
 
-- 当你需要整体架构、当前仓库结构、模块边界时，先读 [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md)。
-- 然后只按需继续阅读和当前修改直接相关的专题文档。
-- 如果代码行为与文档不一致，把它视为合同缺口，收紧代码、文档，或两者一起修正。
+如果代码行为与文档不一致，把它视为合同缺口，收紧代码、文档，或两者一起修正。
+
+## 文档类型
+
+当前 active 文档按角色分层：
+
+- `docs/contracts/`
+  - 正式功能合同与运行时行为合同
+- `docs/architecture/`
+  - 当前架构、分层、模块边界与实现形状
+- `docs/decisions/`
+  - 基于上游调查与安全边界分析形成的决策记录
+- `docs/verification/`
+  - 手测清单与验证辅助材料
+- `docs/archive/`
+  - 已完成计划与历史 rollout 记录；可用于理解来路，但不再是当前运行时合同
+
+状态口径：
+
+- `contracts/`、`architecture/`、`decisions/` 视为 active repository facts
+- `verification/` 只用于验证，不定义产品语义
+- `archive/` 只作历史参考
+- `docs/_work/` 下的本地工作笔记不属于仓库事实源
+
+## 按类型读
+
+### 用户入口
+
+- [README.md](../README.md)
+  - 快速开始、安装、常用命令、运维避坑，以及继续深挖该看哪里
+
+### 功能合同
+
+- [`feishu-thread-lifecycle.zh-CN.md`](./contracts/feishu-thread-lifecycle.zh-CN.md)
+- [`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md)
+- [`session-profile-semantics.zh-CN.md`](./contracts/session-profile-semantics.zh-CN.md)
+- [`feishu-help-navigation.zh-CN.md`](./contracts/feishu-help-navigation.zh-CN.md)
+- [`codex-permissions-model.zh-CN.md`](./contracts/codex-permissions-model.zh-CN.md)
+- [`group-chat-contract.zh-CN.md`](./contracts/group-chat-contract.zh-CN.md)
+
+### 架构设计
+
+- [`feishu-codex-design.zh-CN.md`](./architecture/feishu-codex-design.zh-CN.md)
+- [`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md)
+
+### 决策记录
+
+- [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md)
+
+### 验证材料
+
+- [`group-chat-manual-test-checklist.zh-CN.md`](./verification/group-chat-manual-test-checklist.zh-CN.md)
+
+### 历史归档
+
+- [`codex-handler-decomposition-plan.zh-CN.md`](./archive/codex-handler-decomposition-plan.zh-CN.md)
 
 ## 按问题选文档
 
 | 你想确认什么 | 应阅读的文档 |
 | --- | --- |
-| 当前总体架构、分层、模块划分、仓库结构是什么？ | [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md) |
-| 计划继续做 `CodexHandler` ownership 拆分时，推荐的阶段和边界是什么？ | [`codex-handler-decomposition-plan.zh-CN.md`](./codex-handler-decomposition-plan.zh-CN.md) |
-| 飞书侧线程生命周期是什么？哪些状态绝不能混淆？ | [`feishu-thread-lifecycle.zh-CN.md`](./feishu-thread-lifecycle.zh-CN.md) |
-| `/status`、`/release-feishu-runtime`、`feishu-codexctl` 共享的状态词汇与管理面合同是什么？ | [`runtime-control-surface.zh-CN.md`](./runtime-control-surface.zh-CN.md) |
-| 飞书 `/help` 的信息架构、按钮导航与 slash 语义一致性合同是什么？ | [`feishu-help-navigation.zh-CN.md`](./feishu-help-navigation.zh-CN.md) |
-| `fcodex` shared-backend 的运行时模型是什么？wrapper、本地代理、`--cd` 语义如何工作？ | [`fcodex-shared-backend-runtime.zh-CN.md`](./fcodex-shared-backend-runtime.zh-CN.md) |
-| `/session`、`/resume`、`/profile`、`/rm` 在飞书、`fcodex`、TUI 三层里分别是什么意思？ | [`session-profile-semantics.zh-CN.md`](./session-profile-semantics.zh-CN.md) |
-| shared backend 复用与 `/resume` 有哪些安全规则？ | [`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md) |
-| approval、sandbox、writable roots、受保护路径的语义是什么？ | [`codex-permissions-model.zh-CN.md`](./codex-permissions-model.zh-CN.md) |
-| 群聊相关功能需要做哪些手工回归检查？ | [`group-chat-manual-test-checklist.zh-CN.md`](./group-chat-manual-test-checklist.zh-CN.md) |
+| 当前总体架构、分层、模块划分、仓库结构是什么？ | [`feishu-codex-design.zh-CN.md`](./architecture/feishu-codex-design.zh-CN.md) |
+| 飞书侧线程生命周期是什么？哪些状态绝不能混淆？ | [`feishu-thread-lifecycle.zh-CN.md`](./contracts/feishu-thread-lifecycle.zh-CN.md) |
+| `/status`、`/release-feishu-runtime`、`feishu-codexctl` 共享的状态词汇与管理面合同是什么？ | [`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md) |
+| `/session`、`/resume`、`/profile`、`/rm` 在飞书、`fcodex`、TUI 三层里分别是什么意思？ | [`session-profile-semantics.zh-CN.md`](./contracts/session-profile-semantics.zh-CN.md) |
+| 飞书 `/help` 的信息架构、按钮导航与 slash 语义一致性合同是什么？ | [`feishu-help-navigation.zh-CN.md`](./contracts/feishu-help-navigation.zh-CN.md) |
+| 群聊模式、ACL、历史回捞、群命令触发的正式合同是什么？ | [`group-chat-contract.zh-CN.md`](./contracts/group-chat-contract.zh-CN.md) |
+| approval、sandbox、writable roots、受保护路径的语义是什么？ | [`codex-permissions-model.zh-CN.md`](./contracts/codex-permissions-model.zh-CN.md) |
+| `fcodex` shared-backend 的运行时模型是什么？wrapper、本地代理、`--cd` 语义如何工作？ | [`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md) |
+| shared backend 复用与 `/resume` 有哪些安全规则？ | [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md) |
+| 群聊相关功能需要做哪些手工回归检查？ | [`group-chat-manual-test-checklist.zh-CN.md`](./verification/group-chat-manual-test-checklist.zh-CN.md) |
+| `CodexHandler` ownership 拆分当时的 rollout 计划是什么？ | [`codex-handler-decomposition-plan.zh-CN.md`](./archive/codex-handler-decomposition-plan.zh-CN.md) |
 
 ## 常见阅读路径
 
-- 做架构调整或较大重构时：先读 [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md)，再按主题补读对应文档。
-- 计划继续做 `CodexHandler` / runtime ownership 拆分时：先读 [`feishu-codex-design.zh-CN.md`](./feishu-codex-design.zh-CN.md)，再读 [`codex-handler-decomposition-plan.zh-CN.md`](./codex-handler-decomposition-plan.zh-CN.md)。
-- 排查 session、线程恢复、运行时切换问题时：重点读 [`feishu-thread-lifecycle.zh-CN.md`](./feishu-thread-lifecycle.zh-CN.md)、[`runtime-control-surface.zh-CN.md`](./runtime-control-surface.zh-CN.md)、[`session-profile-semantics.zh-CN.md`](./session-profile-semantics.zh-CN.md)、[`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md)。
-- 改飞书 `/help`、命令可发现性、按钮与 slash 语义一致性时：先读 [`feishu-help-navigation.zh-CN.md`](./feishu-help-navigation.zh-CN.md)，再按它引用的专题文档继续读。
-- 改 `fcodex` wrapper、shared backend、本地代理相关逻辑时：重点读 [`fcodex-shared-backend-runtime.zh-CN.md`](./fcodex-shared-backend-runtime.zh-CN.md) 和 [`shared-backend-resume-safety.zh-CN.md`](./shared-backend-resume-safety.zh-CN.md)。
-- 处理权限、执行审批、沙箱报错或产品文案时：先读 [`codex-permissions-model.zh-CN.md`](./codex-permissions-model.zh-CN.md)。
+- 做架构调整或较大重构时：
+  - [`feishu-codex-design.zh-CN.md`](./architecture/feishu-codex-design.zh-CN.md)
+  - 再按需补读相关 `contracts/` 与 `decisions/`
+- 排查 session、线程恢复、运行时切换问题时：
+  - [`feishu-thread-lifecycle.zh-CN.md`](./contracts/feishu-thread-lifecycle.zh-CN.md)
+  - [`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md)
+  - [`session-profile-semantics.zh-CN.md`](./contracts/session-profile-semantics.zh-CN.md)
+  - [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md)
+- 改群聊相关能力时：
+  - [`group-chat-contract.zh-CN.md`](./contracts/group-chat-contract.zh-CN.md)
+  - [`feishu-help-navigation.zh-CN.md`](./contracts/feishu-help-navigation.zh-CN.md)
+  - [`group-chat-manual-test-checklist.zh-CN.md`](./verification/group-chat-manual-test-checklist.zh-CN.md)
+- 改 `fcodex` wrapper、shared backend、本地代理相关逻辑时：
+  - [`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md)
+  - [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md)
+- 处理权限、执行审批、沙箱报错或产品文案时：
+  - [`codex-permissions-model.zh-CN.md`](./contracts/codex-permissions-model.zh-CN.md)
 
 ## 语言说明
 

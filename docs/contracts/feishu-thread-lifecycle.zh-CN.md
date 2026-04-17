@@ -1,16 +1,16 @@
 # 飞书侧线程生命周期
 
-英文原文：`docs/feishu-thread-lifecycle.md`
+英文原文：`docs/contracts/feishu-thread-lifecycle.md`
 
 本文定义飞书侧当前的线程生命周期合同。它解释了：为什么 Feishu 侧必须遵守和 `fcodex`
 相同的 backend 协议合同，但运行时恢复策略不能照搬 `fcodex`。
 
 另见：
 
-- `docs/fcodex-shared-backend-runtime.zh-CN.md`
-- `docs/runtime-control-surface.zh-CN.md`
-- `docs/shared-backend-resume-safety.zh-CN.md`
-- `docs/session-profile-semantics.zh-CN.md`
+- `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`
+- `docs/contracts/runtime-control-surface.zh-CN.md`
+- `docs/decisions/shared-backend-resume-safety.zh-CN.md`
+- `docs/contracts/session-profile-semantics.zh-CN.md`
 
 ## 1. 上游基线
 
@@ -50,7 +50,7 @@
 - `交互 owner`
 
 它们都是临时租约，不属于 binding/runtime 这两条状态轴。
-精确定义见 `docs/runtime-control-surface.zh-CN.md`。
+精确定义见 `docs/contracts/runtime-control-surface.zh-CN.md`。
 
 ## 3. 为什么飞书侧不能照搬 `fcodex`
 
@@ -91,7 +91,7 @@ flowchart TD
 这张图有意把多条状态轴压缩展示。
 真正权威的 binding/runtime/backend 状态转移表，以及 `bound + released`
 下被拒绝 prompt 必须 pure reject 的规则，都定义在
-`docs/runtime-control-surface.zh-CN.md`。
+`docs/contracts/runtime-control-surface.zh-CN.md`。
 
 ## 5. 运行时恢复规则
 
@@ -195,5 +195,5 @@ flowchart TD
 - `bot/adapters/codex_app_server.py`
 - `bot/fcodex.py`
 - `bot/fcodex_proxy.py`
-- `docs/fcodex-shared-backend-runtime.zh-CN.md`
-- `docs/shared-backend-resume-safety.zh-CN.md`
+- `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`
+- `docs/decisions/shared-backend-resume-safety.zh-CN.md`

@@ -1,6 +1,6 @@
 # 运行时控制面
 
-英文原文：`docs/runtime-control-surface.md`
+英文原文：`docs/contracts/runtime-control-surface.md`
 
 本文定义 Feishu 命令面、本地 `feishu-codexctl` 管理面，以及 shared backend
 之间共享的一组状态词汇与控制合同。它主要回答三件事：
@@ -11,9 +11,9 @@
 
 另见：
 
-- `docs/feishu-thread-lifecycle.zh-CN.md`
-- `docs/session-profile-semantics.zh-CN.md`
-- `docs/shared-backend-resume-safety.zh-CN.md`
+- `docs/contracts/feishu-thread-lifecycle.zh-CN.md`
+- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/decisions/shared-backend-resume-safety.zh-CN.md`
 
 ## 1. 上游基线
 
@@ -278,7 +278,7 @@
 2. 只有在 prompt 被接受时，Feishu 才会按当前绑定的 `thread_id` 重新附着 / resume，然后启动 turn。
 
 如果当时该 thread 已 `notLoaded`，这条“已通过 preflight 的重新附着路径”会遵守
-`docs/session-profile-semantics.zh-CN.md` 里关于 unloaded thread 的 profile 恢复合同。
+`docs/contracts/session-profile-semantics.zh-CN.md` 里关于 unloaded thread 的 profile 恢复合同。
 
 ## 6. 本地管理面：`feishu-codexctl`
 

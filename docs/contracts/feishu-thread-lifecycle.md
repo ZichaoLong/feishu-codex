@@ -1,6 +1,6 @@
 # Feishu Thread Lifecycle
 
-Chinese version: `docs/feishu-thread-lifecycle.zh-CN.md`
+Chinese version: `docs/contracts/feishu-thread-lifecycle.zh-CN.md`
 
 This document defines the current thread lifecycle contract for the Feishu side.
 It explains why Feishu must follow the same backend contract as `fcodex`, while
@@ -8,10 +8,10 @@ still using a different runtime recovery model.
 
 See also:
 
-- `docs/fcodex-shared-backend-runtime.md`
-- `docs/runtime-control-surface.md`
-- `docs/shared-backend-resume-safety.md`
-- `docs/session-profile-semantics.md`
+- `docs/architecture/fcodex-shared-backend-runtime.md`
+- `docs/contracts/runtime-control-surface.md`
+- `docs/decisions/shared-backend-resume-safety.md`
+- `docs/contracts/session-profile-semantics.md`
 
 ## 1. Verified Baseline
 
@@ -52,7 +52,7 @@ For operational control, also keep these separate from:
 - `interaction owner`
 
 Those are temporary leases, not binding/runtime state axes.
-The exact contract is defined in `docs/runtime-control-surface.md`.
+The exact contract is defined in `docs/contracts/runtime-control-surface.md`.
 
 ## 3. Why Feishu Cannot Copy `fcodex` Literally
 
@@ -96,7 +96,7 @@ flowchart TD
 This diagram intentionally compresses several axes.
 The authoritative binding/runtime/backend transition table, including the
 pure-reject rule for `bound + released` prompts, lives in
-`docs/runtime-control-surface.md`.
+`docs/contracts/runtime-control-surface.md`.
 
 ## 5. Runtime Recovery Rules
 
@@ -221,5 +221,5 @@ Current Feishu-side implementation should satisfy all of these:
 - `bot/adapters/codex_app_server.py`
 - `bot/fcodex.py`
 - `bot/fcodex_proxy.py`
-- `docs/fcodex-shared-backend-runtime.md`
-- `docs/shared-backend-resume-safety.md`
+- `docs/architecture/fcodex-shared-backend-runtime.md`
+- `docs/decisions/shared-backend-resume-safety.md`

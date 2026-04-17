@@ -1,6 +1,6 @@
 # `fcodex` Shared Backend 运行时模型
 
-英文原文：`docs/fcodex-shared-backend-runtime.md`
+英文原文：`docs/architecture/fcodex-shared-backend-runtime.md`
 
 本文是 `feishu-codex` 当前 shared-backend / wrapper 运行时模型的实现说明。
 如果你想知道 `fcodex`、shared backend、动态端口、cwd 代理这些机制为什么存在，应优先看本文。
@@ -13,9 +13,9 @@
 
 另见：
 
-- `docs/session-profile-semantics.zh-CN.md`
-- `docs/shared-backend-resume-safety.zh-CN.md`
-- `docs/feishu-codex-design.zh-CN.md`
+- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/decisions/shared-backend-resume-safety.zh-CN.md`
+- `docs/architecture/feishu-codex-design.zh-CN.md`
 
 ## 1. 上游基线
 

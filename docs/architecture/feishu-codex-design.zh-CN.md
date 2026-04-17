@@ -1,13 +1,13 @@
 # feishu-codex 技术设计
 
-英文原文：`docs/feishu-codex-design.md`
+英文原文：`docs/architecture/feishu-codex-design.md`
 
 另见：
 
-- `docs/session-profile-semantics.zh-CN.md`
-- `docs/fcodex-shared-backend-runtime.zh-CN.md`
-- `docs/shared-backend-resume-safety.zh-CN.md`
-- `docs/codex-handler-decomposition-plan.zh-CN.md`
+- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`
+- `docs/decisions/shared-backend-resume-safety.zh-CN.md`
+- `docs/archive/codex-handler-decomposition-plan.zh-CN.md`
 
 ## 1. 背景
 
@@ -88,7 +88,7 @@
 - 当 upstream remote 模式需要 cwd 修正时，`fcodex` 会额外加一个很薄的本地 websocket 代理
 
 shared backend 与 wrapper 的具体机制，见
-`docs/fcodex-shared-backend-runtime.zh-CN.md`。
+`docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`。
 
 ### 5.3 核心模块
 
@@ -151,7 +151,7 @@ shared backend 与 wrapper 的具体机制，见
 如果这些状态机继续共居在 `CodexHandler`，那只是把导航从一个大文件变成多个文件，维护时仍要依赖调用顺序记忆隐式约束；这不是我们要的长期架构方向。
 
 继续推进这条 ownership 拆分路线时，推荐的实施顺序与阶段边界见
-`docs/codex-handler-decomposition-plan.zh-CN.md`。
+`docs/archive/codex-handler-decomposition-plan.zh-CN.md`。
 
 ## 6. 数据与行为边界
 
@@ -207,8 +207,8 @@ shared backend 与 wrapper 的具体机制，见
 
 精确命令语义不在本文展开，而是交给专门文档：
 
-- `docs/session-profile-semantics.zh-CN.md` 说明 `/session`、`/resume`、`/profile`、`/rm` 与 wrapper 语义
-- `docs/shared-backend-resume-safety.zh-CN.md` 说明当前 `/resume` 合同与 backend 安全规则
+- `docs/contracts/session-profile-semantics.zh-CN.md` 说明 `/session`、`/resume`、`/profile`、`/rm` 与 wrapper 语义
+- `docs/decisions/shared-backend-resume-safety.zh-CN.md` 说明当前 `/resume` 合同与 backend 安全规则
 
 本文只固定这些边界：
 
@@ -228,89 +228,19 @@ shared backend 与 wrapper 的具体机制，见
 
 ### 6.5 群聊功能合同
 
-以下行为应视为当前实现的正式合同：
+群聊已不再埋在本设计文档里定义细则。
 
-#### 默认值
+当前设计层只保留几条架构边界：
 
-- 新群默认工作态是 `assistant`
-- 新群默认 ACL 是 `admin-only`
-- 群聊管理员来自 `system.yaml.admin_open_ids`
-- `system.yaml.admin_open_ids` 是权威源；运行时管理员集合只是缓存
-- 运行时身份判定统一使用 `open_id`；`user_id` 仅保留在日志与 `/whoami` 里做排障展示
-- 若希望 `/whoami` 和日志稳定返回 `user_id`，需要额外开 `contact:user.employee_id:readonly`
+- 群底层会话按 `chat_id` 共享，而不是按群成员拆分
+- `assistant` 的主聊天流与群话题分别维护上下文边界，但共享同一个群 backend 会话
+- ACL 只决定人类成员“是否有资格”，是否仍需显式 mention 由群工作态决定
+- 其他机器人不会直接触发当前机器人；如其消息要进入上下文，依赖历史回捞路径
 
-#### 人类成员权限
+正式行为合同见：
 
-- 人类成员是否具备某个群里的触发资格，由该群 ACL 决定
-- ACL 只决定“谁有资格”，是否还需要显式 mention 由群工作态决定
-- 群 ACL 只管理人类成员，不管理其他机器人
-- ACL 策略包括：
-  - `admin-only`
-  - `allowlist`
-  - `all-members`
-
-#### 群聊工作态
-
-- 严格群聊显式 mention 判定依赖 `system.yaml.bot_open_id`
-- `/whoareyou` 与 `/init` 中的实时探测只用于诊断和初始化，不会替代运行时读取的 `system.yaml.bot_open_id`
-- 如配置 `system.yaml.trigger_open_ids`，命中这些 `open_id` 的 mentions 也视为有效触发
-- `trigger_open_ids` 只扩展“哪些 mentions 算触发”，不绕过 ACL，也不替代 `bot_open_id`
-- 私聊底层会话按用户隔离；群聊底层会话按 `chat_id` 共享
-- `assistant`
-  - 接收并缓存群里消息
-  - 只有被有效 mention 时才回复
-  - 回复时附带自上次触发边界以来的群上下文
-  - 主聊天流与每个群话题分别维护上下文边界；主聊天流不会自动读入话题回复，话题也不会自动读入主聊天流
-  - 虽然上下文边界按主聊天流 / 话题分开，但底层仍是同一个群共享会话；模型可以记住本群其他讨论里已经明确的结论
-- `mention-only`
-  - 不缓存群上下文
-  - 只有被有效 mention 时才触发
-- `all`
-  - 人类群消息可直接触发
-  - 风险最高，容易刷屏
-
-#### 群命令触发规则
-
-- 私聊命令可直接发送
-- 群里的所有 `/` 命令都只给管理员
-- 群聊 `assistant` 和 `mention-only` 工作态下，管理员群命令本身也必须先显式 mention 触发对象
-- 群聊 `all` 工作态下，管理员可直接发送群命令
-- 群命令不会写入 `assistant` 上下文日志，也不会推进上下文边界
-
-#### 助理模式上下文
-
-- `assistant` 会把群消息写入本地日志
-- 只有人类成员的有效触发 mention 会真正触发回复
-- 由于飞书不会把其他机器人发言实时推给机器人，`assistant` 会在每次有效触发时按配置回捞最近历史消息
-- 历史回捞与实时日志会合并成同一份上下文，而不是两套独立逻辑
-- 下一次有效触发时，上下文由两部分组成：
-  - 本地实时日志中，上次边界之后到本次触发之前的消息
-  - 飞书历史接口返回、但本地日志里尚未出现的缺失消息
-- 主聊天流（`chat` 容器）的历史回捞受 `group_history_fetch_limit` 和 `group_history_fetch_lookback_seconds` 限制
-- 主聊天流在边界时间附近会向前留一个很小的冗余秒级窗口，再用边界 `message_id` 去重，避免时间窗卡边时漏消息
-- `group_history_fetch_limit` 和 `group_history_fetch_lookback_seconds` 同时也是“是否启用任何历史回捞”的总开关；任一项为 `0` 都会关闭主聊天流和话题回捞
-- 话题内（`thread` 容器）的历史回捞当前不承诺严格受 `group_history_fetch_lookback_seconds` 限制；因为飞书公开接口对 `thread` 容器不支持 `start_time/end_time`，当前实现只保证受上下文边界和 `group_history_fetch_limit` 约束
-- 话题内优先按 `ByCreateTimeDesc` 倒序回捞，并在到达边界后尽早停止；只有在该排序方式不可用时才回退到升序扫描
-- 当时间窗内缺失消息数量超过 `group_history_fetch_limit` 时，当前实现保留“最近的缺失消息”，而不是最早的一批
-- 上下文边界同时记录：
-  - 本地日志序号 `seq`
-  - 边界时间戳 `created_at`
-  - 边界时间戳下已消费的 `message_id` 集合
-- 记录边界 `message_id` 集合的目的，是避免下一次有效触发时把“与上次边界同毫秒但尚未消费”的缺失消息误判为旧消息而漏掉
-- 当前实现保证“不漏掉同毫秒未消费消息”和“不重复同毫秒已消费消息”，但不承诺把不同来源、同毫秒消息恢复成绝对全序
-- 如果本次有效触发发生在群话题内，执行卡片、ACL 拒绝和过长文本 follow-up 会尽量留在原话题，而不是回到主聊天流
-
-#### ACL 拒绝反馈
-
-- 未获授权成员在 `assistant` / `mention-only` 中显式 mention 触发对象时，会收到拒绝提示
-- 未获授权成员在 `all` 中直接发普通消息会静默忽略，以避免刷屏
-- 未获授权成员在 `all` 中显式 mention 触发对象或发群命令时，仍会收到拒绝提示
-
-#### 其他机器人与历史消息
-
-- 其他机器人不会直接触发 `feishu-codex`
-- 如果群消息历史对机器人可见，其他机器人消息可以通过每次有效触发时的历史回捞进入上下文
-- 如果关闭历史回捞，其他机器人消息不会自动进入 `assistant` 上下文
+- `docs/contracts/group-chat-contract.zh-CN.md`
+- 手测清单见 `docs/verification/group-chat-manual-test-checklist.zh-CN.md`
 
 ## 7. 当前仓库结构
 
@@ -346,8 +276,13 @@ feishu-codex/
     system.yaml.example
     codex.yaml.example
   docs/
-    *.md
-    *.zh-CN.md
+    contracts/
+    architecture/
+    decisions/
+    verification/
+    archive/
+    doc-index.md
+    doc-index.zh-CN.md
   tests/
     test_codex_app_server.py
     test_codex_handler.py
@@ -361,7 +296,11 @@ feishu-codex/
 - 飞书传输与 handler 逻辑留在 `bot/`
 - Codex 集成边界留在 `bot/adapters/` 与 `bot/codex_protocol/`
 - 本地持久化状态留在 `bot/stores/`
-- 语义、运行时、安全模型与设计约束留在 `docs/`
+- 正式功能合同留在 `docs/contracts/`
+- 当前架构与实现边界留在 `docs/architecture/`
+- 上游调查结论与安全决策留在 `docs/decisions/`
+- 手测清单留在 `docs/verification/`
+- 已完成 rollout 与历史计划留在 `docs/archive/`
 
 ## 8. 演进边界
 

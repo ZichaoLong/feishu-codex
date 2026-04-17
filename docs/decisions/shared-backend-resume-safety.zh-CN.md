@@ -1,13 +1,13 @@
 # Shared Backend 与 Resume 安全性
 
-英文原文：`docs/shared-backend-resume-safety.md`
+英文原文：`docs/decisions/shared-backend-resume-safety.md`
 
 另见：
 
-- `docs/fcodex-shared-backend-runtime.zh-CN.md`：当前 shared backend 与 wrapper 的运行时模型
-- `docs/runtime-control-surface.zh-CN.md`：`/status`、`/release-feishu-runtime` 与本地管理面的共享状态词汇
-- `docs/session-profile-semantics.zh-CN.md`：精确的命令与 wrapper 语义
-- `docs/feishu-codex-design.zh-CN.md`：架构与仓库边界
+- `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`：当前 shared backend 与 wrapper 的运行时模型
+- `docs/contracts/runtime-control-surface.zh-CN.md`：`/status`、`/release-feishu-runtime` 与本地管理面的共享状态词汇
+- `docs/contracts/session-profile-semantics.zh-CN.md`：精确的命令与 wrapper 语义
+- `docs/architecture/feishu-codex-design.zh-CN.md`：架构与仓库边界
 
 ## 1. 上游基线
 
@@ -63,7 +63,7 @@
 - 已加载线程状态在这个 backend 内共享
 - 多个本地 TUI 窗口附着到同一个 backend，也不会引入跨进程分叉
 
-shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared-backend-runtime.zh-CN.md`。
+shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`。
 
 ### 5.2 Isolated backend
 
@@ -173,6 +173,6 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/fcodex-shared
 
 ## 9. 相关文档
 
-- `docs/session-profile-semantics.zh-CN.md`：`/session`、`/resume`、`fcodex` 与 profile 的精确命令语义
-- `docs/fcodex-shared-backend-runtime.zh-CN.md`：shared backend、动态端口发现、cwd 代理与 wrapper 运行时行为
-- `docs/feishu-codex-design.zh-CN.md`：架构、设计约束与当前仓库结构
+- `docs/contracts/session-profile-semantics.zh-CN.md`：`/session`、`/resume`、`fcodex` 与 profile 的精确命令语义
+- `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`：shared backend、动态端口发现、cwd 代理与 wrapper 运行时行为
+- `docs/architecture/feishu-codex-design.zh-CN.md`：架构、设计约束与当前仓库结构

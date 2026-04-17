@@ -1,6 +1,6 @@
 # 飞书 Help 导航合同
 
-英文原文：`docs/feishu-help-navigation.md`
+英文原文：`docs/contracts/feishu-help-navigation.md`
 
 本文定义飞书侧 `/help` 的导航面合同。
 
@@ -158,6 +158,6 @@ Help 面不需要再做一个“全局线程浏览器”或“全局归档表单
 
 相关合同见：
 
-- `docs/session-profile-semantics.zh-CN.md`
-- `docs/runtime-control-surface.zh-CN.md`
-- `docs/feishu-thread-lifecycle.zh-CN.md`
+- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/runtime-control-surface.zh-CN.md`
+- `docs/contracts/feishu-thread-lifecycle.zh-CN.md`

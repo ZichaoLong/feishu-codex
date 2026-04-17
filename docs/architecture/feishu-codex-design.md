@@ -2,10 +2,10 @@
 
 See also:
 
-- `docs/session-profile-semantics.md`
-- `docs/fcodex-shared-backend-runtime.md`
-- `docs/shared-backend-resume-safety.md`
-- `docs/codex-handler-decomposition-plan.md`
+- `docs/contracts/session-profile-semantics.md`
+- `docs/architecture/fcodex-shared-backend-runtime.md`
+- `docs/decisions/shared-backend-resume-safety.md`
+- `docs/archive/codex-handler-decomposition-plan.md`
 
 ## 1. Background
 
@@ -104,7 +104,7 @@ Current runtime behavior:
   cwd correction for upstream remote-mode behavior
 
 The exact wrapper/runtime mechanics are documented in
-`docs/fcodex-shared-backend-runtime.md`.
+`docs/architecture/fcodex-shared-backend-runtime.md`.
 
 ### 5.3 Key Application Modules
 
@@ -200,7 +200,7 @@ maintenance burden still comes from remembering implicit ordering constraints
 across unrelated runtime concerns.
 
 For the recommended rollout order and phase boundaries of that ownership
-decomposition, see `docs/codex-handler-decomposition-plan.md`.
+decomposition, see `docs/archive/codex-handler-decomposition-plan.md`.
 
 ## 6. Data and Behavioral Boundaries
 
@@ -265,9 +265,9 @@ So:
 
 Exact command semantics are documented outside this design document:
 
-- `docs/session-profile-semantics.md` covers `/session`, `/resume`, `/profile`,
+- `docs/contracts/session-profile-semantics.md` covers `/session`, `/resume`, `/profile`,
   `/rm`, and wrapper semantics
-- `docs/shared-backend-resume-safety.md` covers current `/resume` semantics and
+- `docs/decisions/shared-backend-resume-safety.md` covers current `/resume` semantics and
   backend safety rules
 
 This document only fixes the boundary:
@@ -288,109 +288,24 @@ The integration does not depend on Claude-style shell hook interception.
 
 ### 6.5 Group Chat Contract
 
-The following behaviors are part of the current implementation contract:
+The detailed group-chat behavior contract no longer lives inline in this design
+document.
 
-#### Defaults
+At the design level, the important boundaries are:
 
-- new groups default to `assistant`
-- new groups default to `admin-only`
-- group administrators come from `system.yaml.admin_open_ids`
-- `system.yaml.admin_open_ids` is authoritative; the runtime admin set is only a cache
-- runtime identity decisions use `open_id` only; `user_id` is retained only for
-  logs and `/whoami` diagnostics, and requires
-  `contact:user.employee_id:readonly` if you want it to be populated reliably
+- group backend state is shared by `chat_id`, not split by human member
+- `assistant` keeps separate context boundaries for the main chat flow and each
+  group thread, while still sharing one backend session
+- ACL answers whether a human member is eligible; whether a mention is still
+  required is decided by the group mode
+- other bots do not directly trigger `feishu-codex`; their messages enter
+  context only through history recovery
 
-#### Human-member access
+The formal behavior contract is now:
 
-- whether a human member is eligible to trigger the bot in a group is decided
-  by that group's ACL
-- ACL decides "who is eligible"; whether a mention is still required is decided
-  by the group mode
-- group ACL only manages human members, not other bots
-- supported ACL policies are:
-  - `admin-only`
-  - `allowlist`
-  - `all-members`
-
-#### Group modes
-
-- strict explicit-mention matching depends on `system.yaml.bot_open_id`
-- realtime discovery from `/whoareyou` and `/init` is only for diagnostics and bootstrap; it does not replace the runtime value read from `system.yaml.bot_open_id`
-- if `system.yaml.trigger_open_ids` is configured, mentions that hit those
-  `open_id`s are also treated as valid triggers
-- `trigger_open_ids` only extends which mentions count as a trigger; it does not
-  bypass ACL and it does not replace `bot_open_id`
-- p2p backend state stays user-isolated; group backend state is shared by
-  `chat_id`
-- `assistant`
-  - receives and caches group messages
-  - replies only when a valid trigger mention is present
-  - includes group context since the last trigger boundary
-- main-flow (`chat` container) history recovery is constrained by
-  `group_history_fetch_limit` and `group_history_fetch_lookback_seconds`
-- main-flow recovery keeps a small backward slack window around the boundary
-  timestamp, then dedupes with boundary `message_id`s so messages are not
-  missed at the edge of the time window
-- `group_history_fetch_limit` and `group_history_fetch_lookback_seconds` also
-  act as the global recovery switch; setting either to `0` disables both
-  main-flow and thread recovery
-- thread (`thread` container) history recovery does not currently promise a
-  strict `group_history_fetch_lookback_seconds` cutoff, because the public
-    Feishu API does not support `start_time` / `end_time` for thread containers
-  - thread recovery prefers `ByCreateTimeDesc` and stops as soon as it crosses
-    the stored boundary; it only falls back to ascending scan if descending
-    ordering is not usable in practice
-  - maintains separate context boundaries for the main chat flow and each group
-    thread
-  - still uses one shared group backend session, so the model may remember
-    conclusions established elsewhere in the same group
-- `mention-only`
-  - does not cache group context
-  - triggers only on valid trigger mentions
-- `all`
-  - human group messages can trigger directly
-  - highest spam risk
-
-#### Group-command triggering
-
-- p2p commands can be sent directly
-- all group `/` commands are admin-only
-- in group `assistant` and `mention-only`, admin commands themselves must also
-  explicitly mention a trigger target first
-- in group `all`, admins can send group commands directly
-- group commands do not enter the `assistant` context log and do not advance the
-  assistant boundary
-
-#### Assistant-mode context
-
-- `assistant` writes group messages into a local log
-- only effective human mentions can trigger a reply
-- because Feishu does not push other bots' messages to bots in real time,
-  `assistant` backfills a limited window of recent history on every effective
-  mention
-- history backfill and live group logs are merged into one context pipeline
-- the context boundary tracks both sequence and time so each new effective
-  mention can resume from the previous boundary
-- when the trigger happens inside a group thread, execution cards, ACL denials,
-  and long-text follow-ups should stay in that thread instead of jumping back to
-  the main flow
-
-#### ACL denial feedback
-
-- unauthorized members in `assistant` / `mention-only` receive a denial message
-  only when they explicitly mention the bot
-- unauthorized members in `all` are silently ignored for plain messages to
-  avoid noise
-- unauthorized members in `all` still receive a denial message when they
-  explicitly mention the bot or send a group command
-
-#### Other bots and history
-
-- other bots cannot directly trigger `feishu-codex`
-- if group history is visible to the bot, messages from other bots can still
-  enter the `assistant` context through the per-mention history backfill
-- if history backfill is disabled, other bots' messages do not automatically
-  enter the `assistant` context
+- `docs/contracts/group-chat-contract.md`
+- manual regression checklist:
+  `docs/verification/group-chat-manual-test-checklist.zh-CN.md`
 
 ## 7. Current Repository Structure
 
@@ -426,8 +341,13 @@ feishu-codex/
     system.yaml.example
     codex.yaml.example
   docs/
-    *.md
-    *.zh-CN.md
+    contracts/
+    architecture/
+    decisions/
+    verification/
+    archive/
+    doc-index.md
+    doc-index.zh-CN.md
   tests/
     test_codex_app_server.py
     test_codex_handler.py
@@ -442,7 +362,12 @@ This structure is already sufficient for the current architecture:
 - Codex integration boundaries stay in `bot/adapters/` and
   `bot/codex_protocol/`
 - local persisted state stays in `bot/stores/`
-- semantic, runtime, and design explanations stay in `docs/`
+- formal feature contracts stay in `docs/contracts/`
+- current architecture and implementation boundaries stay in
+  `docs/architecture/`
+- upstream-derived safety decisions stay in `docs/decisions/`
+- manual verification material stays in `docs/verification/`
+- completed rollout plans and historical material stay in `docs/archive/`
 
 ## 8. Evolution Boundaries
 

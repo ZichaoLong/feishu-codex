@@ -13,9 +13,9 @@ This document explains the implementation model behind:
 
 See also:
 
-- `docs/session-profile-semantics.md`
-- `docs/shared-backend-resume-safety.md`
-- `docs/feishu-codex-design.md`
+- `docs/contracts/session-profile-semantics.md`
+- `docs/decisions/shared-backend-resume-safety.md`
+- `docs/architecture/feishu-codex-design.md`
 
 ## 1. Upstream Baseline
 

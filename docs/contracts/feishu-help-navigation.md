@@ -156,6 +156,6 @@ If a slash command would be rejected in the current scope, the same operation tr
 
 Related contracts:
 
-- `docs/session-profile-semantics.md`
-- `docs/runtime-control-surface.md`
-- `docs/feishu-thread-lifecycle.md`
+- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/runtime-control-surface.md`
+- `docs/contracts/feishu-thread-lifecycle.md`

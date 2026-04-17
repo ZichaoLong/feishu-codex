@@ -1,6 +1,6 @@
 # CodexHandler Ownership Decomposition Plan
 
-Chinese version: `docs/codex-handler-decomposition-plan.zh-CN.md`
+Chinese version: `docs/archive/codex-handler-decomposition-plan.zh-CN.md`
 
 This document is an implementation plan, not a runtime contract.
 

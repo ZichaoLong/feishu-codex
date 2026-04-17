@@ -1,6 +1,6 @@
 # Codex 权限模型
 
-英文原文：`docs/codex-permissions-model.md`
+英文原文：`docs/contracts/codex-permissions-model.md`
 
 本文记录 `feishu-codex` 暴露出来的 `approval_policy`、`sandbox` 和 `permissions` 预设背后的 upstream 语义。
 

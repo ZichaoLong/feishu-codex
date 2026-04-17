@@ -2,12 +2,12 @@
 
 See also:
 
-- `docs/fcodex-shared-backend-runtime.md` for the current shared-backend and
+- `docs/architecture/fcodex-shared-backend-runtime.md` for the current shared-backend and
   wrapper runtime model
-- `docs/runtime-control-surface.md` for the shared state vocabulary used by
+- `docs/contracts/runtime-control-surface.md` for the shared state vocabulary used by
   `/status`, `/release-feishu-runtime`, and the local admin surface
-- `docs/session-profile-semantics.md` for exact command and wrapper semantics
-- `docs/feishu-codex-design.md` for architecture and repository boundaries
+- `docs/contracts/session-profile-semantics.md` for exact command and wrapper semantics
+- `docs/architecture/feishu-codex-design.md` for architecture and repository boundaries
 
 ## 1. Upstream Baseline
 
@@ -76,7 +76,7 @@ Properties:
   cross-process divergence
 
 How the current runtime and `fcodex` wrapper make that work is documented in
-`docs/fcodex-shared-backend-runtime.md`.
+`docs/architecture/fcodex-shared-backend-runtime.md`.
 
 ### 5.2 Isolated backend
 
@@ -210,9 +210,9 @@ Supported semantics today:
 
 ## 9. Related Documents
 
-- `docs/session-profile-semantics.md`: exact command semantics for `/session`,
+- `docs/contracts/session-profile-semantics.md`: exact command semantics for `/session`,
   `/resume`, `fcodex`, and profile handling
-- `docs/fcodex-shared-backend-runtime.md`: shared backend, dynamic port
+- `docs/architecture/fcodex-shared-backend-runtime.md`: shared backend, dynamic port
   discovery, cwd proxy, and wrapper runtime behavior
-- `docs/feishu-codex-design.md`: architecture, design constraints, and current
+- `docs/architecture/feishu-codex-design.md`: architecture, design constraints, and current
   repository structure

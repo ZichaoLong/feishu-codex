@@ -1,6 +1,6 @@
 # CodexHandler Ownership 拆分计划
 
-英文原文：`docs/codex-handler-decomposition-plan.md`
+英文原文：`docs/archive/codex-handler-decomposition-plan.md`
 
 本文是实施计划，不是运行时语义合同。
 

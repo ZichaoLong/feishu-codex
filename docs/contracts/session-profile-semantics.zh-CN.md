@@ -1,6 +1,6 @@
 # Session、Resume 与 Profile 语义
 
-英文原文：`docs/session-profile-semantics.md`
+英文原文：`docs/contracts/session-profile-semantics.md`
 
 本文定义下列三类命令面向用户的目标语义：
 
