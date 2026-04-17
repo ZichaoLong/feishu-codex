@@ -87,6 +87,14 @@ The current-thread page should cover:
 - `/rename <title>` for the currently bound thread, via a form
 - `/rm` for the currently bound thread
 
+That current-thread page is still an entry for the **current chat binding**,
+not a global thread-admin surface.
+
+- `/status` and `/release-feishu-runtime` remain chat-scoped even when they are
+  triggered from inside a group chat
+- thread-scoped management for an arbitrary thread belongs to local
+  `feishu-codexctl`
+
 The help surface does not need a global thread browser or a global archive form.
 
 The existing `/session` card remains the current-directory thread browser and archive/resume surface for listed threads.
@@ -124,6 +132,11 @@ Reason:
 - `grant` and `revoke` commonly require mentions
 - one action may target multiple users
 - slash syntax is clearer than forcing an incomplete form model
+
+Generic Feishu commands triggered in groups, such as `/status`,
+`/release-feishu-runtime`, and `/profile`, do not belong to the `group`
+branch. They still belong to the `session` or `settings` branches, while group
+execution continues to obey the group-command trigger rules.
 
 ## 8. Commands Intentionally Excluded From `/help` Navigation
 

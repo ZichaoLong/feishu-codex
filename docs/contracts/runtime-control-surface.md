@@ -201,6 +201,11 @@ The table below is authoritative for Feishu-facing state transitions.
 
 Feishu `/status` is chat-scoped.
 
+Even when it is triggered from inside a group chat, it still targets the
+**current group binding**, not an arbitrary thread. Whether it may be triggered
+in that group is governed by the group-command rules in
+`docs/contracts/group-chat-contract.md`.
+
 It answers, for the current chat binding:
 
 - `binding`
@@ -224,6 +229,11 @@ Feishu `/release-feishu-runtime`:
 - takes no arguments
 - targets the current chat’s bound thread
 - but semantically releases Feishu runtime residency for that thread across the whole running `feishu-codex` service
+
+Even when it is triggered from a group chat, this remains a chat-scoped entry
+for the **current group binding**, not a global arbitrary-thread admin command.
+Whether it may be triggered in that group is still governed by the
+group-command rules in `docs/contracts/group-chat-contract.md`.
 
 It is not a per-chat “soft local flag”.
 

@@ -203,6 +203,9 @@
 
 飞书 `/status` 是 chat-scoped 命令。
 
+即使它是在群里触发的，作用对象仍是**当前群 binding**，而不是任意 thread。
+它在群里能否被触发，受 `docs/contracts/group-chat-contract.zh-CN.md` 的群命令触发规则约束。
+
 它只回答：
 
 - 当前这个聊天绑定的 `binding`
@@ -225,6 +228,10 @@
 - 不带参数
 - 作用于“当前 chat 绑定的 thread”
 - 但它的实际生效范围是：这个 thread 在整个 `feishu-codex` 服务内的 Feishu runtime 持有
+
+即使它是在群里触发的，这也仍然是一个**当前群 binding** 的 chat-scoped 入口，
+而不是任意 thread 的全局管理命令。群里能否触发它，仍受
+`docs/contracts/group-chat-contract.zh-CN.md` 的群命令触发规则约束。
 
 也就是说，它不是“只把当前 chat 自己标成 released”。
 

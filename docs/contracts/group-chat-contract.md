@@ -97,6 +97,12 @@ Those remain owned by their dedicated documents.
 - in group `assistant` and `mention-only`, admin commands themselves must also
   explicitly mention a trigger target first
 - in group `all`, admins can send group commands directly
+- "group commands" here includes both group-specific commands such as
+  `/groupmode` and `/acl`, and generic Feishu commands triggered from a group
+  context such as `/status` and `/release-feishu-runtime`
+- this section only defines whether those commands may be triggered in a group;
+  the runtime/session semantics of each command still belong to their dedicated
+  contracts
 - group commands do not enter the `assistant` context log and do not advance
   the assistant boundary
 
