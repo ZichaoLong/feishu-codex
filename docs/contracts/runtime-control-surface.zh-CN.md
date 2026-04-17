@@ -317,6 +317,8 @@
 - `feishu-codexctl service status`
 - `feishu-codexctl binding list`
 - `feishu-codexctl binding status <binding_id>`
+- `feishu-codexctl binding clear <binding_id>`
+- `feishu-codexctl binding clear-all`
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
