@@ -160,7 +160,7 @@ class ExecutionRecoveryController:
         with self._lock:
             if not self._turn_execution.mark_runtime_degraded_locked(state):
                 return
-            thread_id = str(state["current_thread_id"] or "").strip()
+            thread_id = build_runtime_view(state).current_thread_id.strip()
         logger.warning(
             "执行通道暂时降级，保留当前执行锚点: chat=%s thread=%s reason=%s",
             chat_id,
@@ -185,13 +185,14 @@ class ExecutionRecoveryController:
                 state,
                 ExecutionStateChanged(mirror_watchdog_timer=None),
             )
-            if not state["running"] or not state["current_thread_id"]:
+            runtime = build_runtime_view(state)
+            if not runtime.running or not runtime.current_thread_id:
                 self._apply_runtime_state_message_locked(
                     state,
                     ExecutionStateChanged(bump_mirror_watchdog_generation=True),
                 )
                 return
-            generation = state["mirror_watchdog_generation"] + 1
+            generation = runtime.execution.mirror_watchdog_generation + 1
             timer = threading.Timer(
                 float(self._mirror_watchdog_seconds()),
                 self.submit_mirror_watchdog,
@@ -213,16 +214,18 @@ class ExecutionRecoveryController:
     def run_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
-            if state["mirror_watchdog_generation"] != generation:
+            runtime = build_runtime_view(state)
+            if runtime.execution.mirror_watchdog_generation != generation:
                 return
             self._apply_runtime_state_message_locked(
                 state,
                 ExecutionStateChanged(mirror_watchdog_timer=None),
             )
-            if not state["running"]:
+            runtime = build_runtime_view(state)
+            if not runtime.running:
                 return
-            thread_id = str(state["current_thread_id"] or "").strip()
-            turn_id = str(state["current_turn_id"] or "").strip()
+            thread_id = runtime.current_thread_id.strip()
+            turn_id = runtime.execution.current_turn_id.strip()
         if not thread_id:
             return
         finalized = self.reconcile_execution_snapshot(

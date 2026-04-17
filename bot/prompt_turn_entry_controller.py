@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping, Protocol, TypeAlias
 
 from bot.adapters.base import ThreadSnapshot, ThreadSummary
@@ -42,93 +43,98 @@ class _ThreadAccessPolicy(Protocol):
     def interaction_denied_text(self, lease: Any) -> str: ...
 
 
+@dataclass(frozen=True, slots=True)
+class PromptTurnEntryPorts:
+    resolve_runtime_binding: Callable[[str, str, str], Any]
+    get_runtime_state: Callable[[str, str, str], RuntimeState]
+    get_runtime_view: Callable[[str, str, str], Any]
+    bind_thread: Callable[..., None]
+    clear_thread_binding: Callable[..., None]
+    resume_snapshot_by_id: Callable[..., ThreadSnapshot]
+    create_thread: Callable[..., ThreadSnapshot]
+    effective_default_profile: Callable[[], str]
+    message_reply_in_thread: Callable[[str], bool]
+    group_actor_open_id: Callable[[str], str]
+    access_policy: _ThreadAccessPolicy
+    acquire_interaction_lease_for_binding: Callable[[ChatBindingKey, str], Any]
+    release_interaction_lease_for_binding: Callable[[ChatBindingKey, str], bool]
+    acquire_thread_write_lease_locked: Callable[[ChatBindingKey, str], Any]
+    sync_stored_binding_locked: Callable[[ChatBindingKey, RuntimeState], None]
+    clear_plan_state: Callable[[RuntimeState], None]
+    apply_runtime_state_message_locked: Callable[[RuntimeState, Any], None]
+    claim_reserved_execution_card: Callable[[str], str]
+    patch_message: Callable[[str, str], bool]
+    card_publisher_factory: Callable[[], Any]
+    send_execution_card: Callable[..., str | None]
+    flush_execution_card: Callable[..., None]
+    retire_execution_anchor: Callable[[str, str], None]
+    schedule_mirror_watchdog: Callable[[str, str], None]
+    reconcile_execution_snapshot: Callable[..., bool]
+    refresh_terminal_execution_card_from_state: Callable[[str, str], bool]
+    finalize_execution_card_from_state: Callable[[str, str], bool]
+    mark_runtime_degraded: Callable[..., None]
+    runtime_recovery_reason: Callable[[Exception], str]
+    is_turn_thread_not_found_error: Callable[[Exception], bool]
+    is_thread_not_found_error: Callable[[Exception], bool]
+    is_transport_disconnect: Callable[[Exception], bool]
+    is_request_timeout_error: Callable[[Exception], bool]
+    start_turn: Callable[..., dict[str, Any]]
+    interrupt_running_turn: Callable[..., None]
+    reply_text: Callable[..., None]
+    mirror_watchdog_seconds: Callable[[], float]
+    card_reply_limit: Callable[[], int]
+    card_log_limit: Callable[[], int]
+
+
 class PromptTurnEntryController:
     def __init__(
         self,
         *,
         lock,
         turn_execution: TurnExecutionCoordinator,
-        resolve_runtime_binding: Callable[[str, str, str], Any],
-        get_runtime_state: Callable[[str, str, str], RuntimeState],
-        get_runtime_view: Callable[[str, str, str], Any],
-        bind_thread: Callable[[str, str, ThreadSummary], None],
-        clear_thread_binding: Callable[[str, str], None],
-        resume_snapshot_by_id: Callable[..., ThreadSnapshot],
-        create_thread: Callable[..., ThreadSnapshot],
-        effective_default_profile: Callable[[], str],
-        message_reply_in_thread: Callable[[str], bool],
-        group_actor_open_id: Callable[[str], str],
-        access_policy: _ThreadAccessPolicy,
-        acquire_interaction_lease_for_binding: Callable[[ChatBindingKey, str], Any],
-        release_interaction_lease_for_binding: Callable[[ChatBindingKey, str], bool],
-        acquire_thread_write_lease_locked: Callable[[ChatBindingKey, str], Any],
-        sync_stored_binding_locked: Callable[[ChatBindingKey, RuntimeState], None],
-        clear_plan_state: Callable[[RuntimeState], None],
-        apply_runtime_state_message_locked: Callable[[RuntimeState, Any], None],
-        claim_reserved_execution_card: Callable[[str], str],
-        patch_message: Callable[[str, str], bool],
-        card_publisher_factory: Callable[[], Any],
-        send_execution_card: Callable[..., str | None],
-        flush_execution_card: Callable[..., None],
-        retire_execution_anchor: Callable[[str, str], None],
-        schedule_mirror_watchdog: Callable[[str, str], None],
-        reconcile_execution_snapshot: Callable[..., bool],
-        refresh_terminal_execution_card_from_state: Callable[[str, str], bool],
-        finalize_execution_card_from_state: Callable[[str, str], bool],
-        mark_runtime_degraded: Callable[..., None],
-        runtime_recovery_reason: Callable[[Exception], str],
-        is_turn_thread_not_found_error: Callable[[Exception], bool],
-        is_thread_not_found_error: Callable[[Exception], bool],
-        is_transport_disconnect: Callable[[Exception], bool],
-        is_request_timeout_error: Callable[[Exception], bool],
-        start_turn: Callable[..., dict[str, Any]],
-        interrupt_running_turn: Callable[..., None],
-        reply_text: Callable[..., None],
-        mirror_watchdog_seconds: Callable[[], float],
-        card_reply_limit: Callable[[], int],
-        card_log_limit: Callable[[], int],
+        ports: PromptTurnEntryPorts,
     ) -> None:
         self._lock = lock
         self._turn_execution = turn_execution
-        self._resolve_runtime_binding = resolve_runtime_binding
-        self._get_runtime_state = get_runtime_state
-        self._get_runtime_view = get_runtime_view
-        self._bind_thread = bind_thread
-        self._clear_thread_binding = clear_thread_binding
-        self._resume_snapshot_by_id = resume_snapshot_by_id
-        self._create_thread = create_thread
-        self._effective_default_profile = effective_default_profile
-        self._message_reply_in_thread = message_reply_in_thread
-        self._group_actor_open_id = group_actor_open_id
-        self._access_policy = access_policy
-        self._acquire_interaction_lease_for_binding = acquire_interaction_lease_for_binding
-        self._release_interaction_lease_for_binding = release_interaction_lease_for_binding
-        self._acquire_thread_write_lease_locked = acquire_thread_write_lease_locked
-        self._sync_stored_binding_locked = sync_stored_binding_locked
-        self._clear_plan_state = clear_plan_state
-        self._apply_runtime_state_message_locked = apply_runtime_state_message_locked
-        self._claim_reserved_execution_card = claim_reserved_execution_card
-        self._patch_message = patch_message
-        self._card_publisher_factory = card_publisher_factory
-        self._send_execution_card = send_execution_card
-        self._flush_execution_card = flush_execution_card
-        self._retire_execution_anchor = retire_execution_anchor
-        self._schedule_mirror_watchdog = schedule_mirror_watchdog
-        self._reconcile_execution_snapshot = reconcile_execution_snapshot
-        self._refresh_terminal_execution_card_from_state = refresh_terminal_execution_card_from_state
-        self._finalize_execution_card_from_state = finalize_execution_card_from_state
-        self._mark_runtime_degraded = mark_runtime_degraded
-        self._runtime_recovery_reason = runtime_recovery_reason
-        self._is_turn_thread_not_found_error = is_turn_thread_not_found_error
-        self._is_thread_not_found_error = is_thread_not_found_error
-        self._is_transport_disconnect = is_transport_disconnect
-        self._is_request_timeout_error = is_request_timeout_error
-        self._start_turn = start_turn
-        self._interrupt_running_turn = interrupt_running_turn
-        self._reply_text = reply_text
-        self._mirror_watchdog_seconds = mirror_watchdog_seconds
-        self._card_reply_limit = card_reply_limit
-        self._card_log_limit = card_log_limit
+        self._resolve_runtime_binding = ports.resolve_runtime_binding
+        self._get_runtime_state = ports.get_runtime_state
+        self._get_runtime_view = ports.get_runtime_view
+        self._bind_thread = ports.bind_thread
+        self._clear_thread_binding = ports.clear_thread_binding
+        self._resume_snapshot_by_id = ports.resume_snapshot_by_id
+        self._create_thread = ports.create_thread
+        self._effective_default_profile = ports.effective_default_profile
+        self._message_reply_in_thread = ports.message_reply_in_thread
+        self._group_actor_open_id = ports.group_actor_open_id
+        self._access_policy = ports.access_policy
+        self._acquire_interaction_lease_for_binding = ports.acquire_interaction_lease_for_binding
+        self._release_interaction_lease_for_binding = ports.release_interaction_lease_for_binding
+        self._acquire_thread_write_lease_locked = ports.acquire_thread_write_lease_locked
+        self._sync_stored_binding_locked = ports.sync_stored_binding_locked
+        self._clear_plan_state = ports.clear_plan_state
+        self._apply_runtime_state_message_locked = ports.apply_runtime_state_message_locked
+        self._claim_reserved_execution_card = ports.claim_reserved_execution_card
+        self._patch_message = ports.patch_message
+        self._card_publisher_factory = ports.card_publisher_factory
+        self._send_execution_card = ports.send_execution_card
+        self._flush_execution_card = ports.flush_execution_card
+        self._retire_execution_anchor = ports.retire_execution_anchor
+        self._schedule_mirror_watchdog = ports.schedule_mirror_watchdog
+        self._reconcile_execution_snapshot = ports.reconcile_execution_snapshot
+        self._refresh_terminal_execution_card_from_state = ports.refresh_terminal_execution_card_from_state
+        self._finalize_execution_card_from_state = ports.finalize_execution_card_from_state
+        self._mark_runtime_degraded = ports.mark_runtime_degraded
+        self._runtime_recovery_reason = ports.runtime_recovery_reason
+        self._is_turn_thread_not_found_error = ports.is_turn_thread_not_found_error
+        self._is_thread_not_found_error = ports.is_thread_not_found_error
+        self._is_transport_disconnect = ports.is_transport_disconnect
+        self._is_request_timeout_error = ports.is_request_timeout_error
+        self._start_turn = ports.start_turn
+        self._interrupt_running_turn = ports.interrupt_running_turn
+        self._reply_text = ports.reply_text
+        self._mirror_watchdog_seconds = ports.mirror_watchdog_seconds
+        self._card_reply_limit = ports.card_reply_limit
+        self._card_log_limit = ports.card_log_limit
 
     @staticmethod
     def extract_turn_id_from_start_response(response: Any) -> str:

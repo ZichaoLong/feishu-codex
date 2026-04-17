@@ -5,7 +5,7 @@ import unittest
 
 from bot.adapters.base import ThreadSnapshot, ThreadSummary
 from bot.binding_runtime_manager import BindingRuntimeManager, ResolvedRuntimeBinding
-from bot.prompt_turn_entry_controller import PromptTurnEntryController
+from bot.prompt_turn_entry_controller import PromptTurnEntryController, PromptTurnEntryPorts
 from bot.runtime_state import ThreadStateChanged
 from bot.runtime_view import build_runtime_view
 from bot.stores.chat_binding_store import ChatBindingStore
@@ -171,66 +171,68 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         controller = PromptTurnEntryController(
             lock=lock,
             turn_execution=turn_execution,
-            resolve_runtime_binding=_resolve_runtime_binding,
-            get_runtime_state=_get_runtime_state,
-            get_runtime_view=_get_runtime_view,
-            bind_thread=_bind_thread,
-            clear_thread_binding=_clear_thread_binding,
-            resume_snapshot_by_id=_resume_snapshot_by_id,
-            create_thread=_create_thread,
-            effective_default_profile=lambda: "",
-            message_reply_in_thread=lambda message_id: message_id.startswith("thread-"),
-            group_actor_open_id=lambda message_id: "ou_actor" if message_id else "",
-            access_policy=access_policy,
-            acquire_interaction_lease_for_binding=binding_runtime.acquire_interaction_lease_for_binding,
-            release_interaction_lease_for_binding=binding_runtime.release_interaction_lease_for_binding,
-            acquire_thread_write_lease_locked=binding_runtime.acquire_thread_write_lease_locked,
-            sync_stored_binding_locked=binding_runtime.sync_stored_binding_locked,
-            clear_plan_state=turn_execution.clear_plan_state_locked,
-            apply_runtime_state_message_locked=binding_runtime.apply_runtime_state_message_locked,
-            claim_reserved_execution_card=lambda message_id: reserved_cards.pop(message_id, ""),
-            patch_message=lambda message_id, content: True,
-            card_publisher_factory=lambda: fake_card_publisher,
-            send_execution_card=lambda chat_id, parent_message_id, *, reply_in_thread=False: (
-                sent_execution_cards.append((chat_id, parent_message_id, reply_in_thread)),
-                "card-1",
-            )[1],
-            flush_execution_card=lambda sender_id, chat_id, immediate=False: flushed.append(
-                (sender_id, chat_id, bool(immediate))
+            ports=PromptTurnEntryPorts(
+                resolve_runtime_binding=_resolve_runtime_binding,
+                get_runtime_state=_get_runtime_state,
+                get_runtime_view=_get_runtime_view,
+                bind_thread=_bind_thread,
+                clear_thread_binding=_clear_thread_binding,
+                resume_snapshot_by_id=_resume_snapshot_by_id,
+                create_thread=_create_thread,
+                effective_default_profile=lambda: "",
+                message_reply_in_thread=lambda message_id: message_id.startswith("thread-"),
+                group_actor_open_id=lambda message_id: "ou_actor" if message_id else "",
+                access_policy=access_policy,
+                acquire_interaction_lease_for_binding=binding_runtime.acquire_interaction_lease_for_binding,
+                release_interaction_lease_for_binding=binding_runtime.release_interaction_lease_for_binding,
+                acquire_thread_write_lease_locked=binding_runtime.acquire_thread_write_lease_locked,
+                sync_stored_binding_locked=binding_runtime.sync_stored_binding_locked,
+                clear_plan_state=turn_execution.clear_plan_state_locked,
+                apply_runtime_state_message_locked=binding_runtime.apply_runtime_state_message_locked,
+                claim_reserved_execution_card=lambda message_id: reserved_cards.pop(message_id, ""),
+                patch_message=lambda message_id, content: True,
+                card_publisher_factory=lambda: fake_card_publisher,
+                send_execution_card=lambda chat_id, parent_message_id, *, reply_in_thread=False: (
+                    sent_execution_cards.append((chat_id, parent_message_id, reply_in_thread)),
+                    "card-1",
+                )[1],
+                flush_execution_card=lambda sender_id, chat_id, immediate=False: flushed.append(
+                    (sender_id, chat_id, bool(immediate))
+                ),
+                retire_execution_anchor=lambda sender_id, chat_id: retired.append((sender_id, chat_id)),
+                schedule_mirror_watchdog=lambda sender_id, chat_id: scheduled_watchdogs.append((sender_id, chat_id)),
+                reconcile_execution_snapshot=lambda sender_id, chat_id, *, thread_id, turn_id="": (
+                    reconciled.append((sender_id, chat_id, thread_id, turn_id)),
+                    False,
+                )[1],
+                refresh_terminal_execution_card_from_state=lambda sender_id, chat_id: (
+                    refreshed.append((sender_id, chat_id)),
+                    True,
+                )[1],
+                finalize_execution_card_from_state=lambda sender_id, chat_id: (
+                    finalized.append((sender_id, chat_id)),
+                    True,
+                )[1],
+                mark_runtime_degraded=lambda sender_id, chat_id, *, reason: degraded.append((sender_id, chat_id, reason)),
+                runtime_recovery_reason=lambda exc: str(exc),
+                is_turn_thread_not_found_error=lambda exc: str(exc) == "thread not found",
+                is_thread_not_found_error=lambda exc: str(exc) == "thread missing",
+                is_transport_disconnect=lambda exc: str(exc) == "disconnect",
+                is_request_timeout_error=lambda exc: str(exc) == "timeout",
+                start_turn=_start_turn,
+                interrupt_running_turn=_interrupt_running_turn,
+                reply_text=lambda chat_id, text, **kwargs: replies.append(
+                    (
+                        chat_id,
+                        text,
+                        str(kwargs.get("message_id", "") or ""),
+                        bool(kwargs.get("reply_in_thread", False)),
+                    )
+                ),
+                mirror_watchdog_seconds=lambda: 8.0,
+                card_reply_limit=lambda: 12000,
+                card_log_limit=lambda: 8000,
             ),
-            retire_execution_anchor=lambda sender_id, chat_id: retired.append((sender_id, chat_id)),
-            schedule_mirror_watchdog=lambda sender_id, chat_id: scheduled_watchdogs.append((sender_id, chat_id)),
-            reconcile_execution_snapshot=lambda sender_id, chat_id, *, thread_id, turn_id="": (
-                reconciled.append((sender_id, chat_id, thread_id, turn_id)),
-                False,
-            )[1],
-            refresh_terminal_execution_card_from_state=lambda sender_id, chat_id: (
-                refreshed.append((sender_id, chat_id)),
-                True,
-            )[1],
-            finalize_execution_card_from_state=lambda sender_id, chat_id: (
-                finalized.append((sender_id, chat_id)),
-                True,
-            )[1],
-            mark_runtime_degraded=lambda sender_id, chat_id, *, reason: degraded.append((sender_id, chat_id, reason)),
-            runtime_recovery_reason=lambda exc: str(exc),
-            is_turn_thread_not_found_error=lambda exc: str(exc) == "thread not found",
-            is_thread_not_found_error=lambda exc: str(exc) == "thread missing",
-            is_transport_disconnect=lambda exc: str(exc) == "disconnect",
-            is_request_timeout_error=lambda exc: str(exc) == "timeout",
-            start_turn=_start_turn,
-            interrupt_running_turn=_interrupt_running_turn,
-            reply_text=lambda chat_id, text, **kwargs: replies.append(
-                (
-                    chat_id,
-                    text,
-                    str(kwargs.get("message_id", "") or ""),
-                    bool(kwargs.get("reply_in_thread", False)),
-                )
-            ),
-            mirror_watchdog_seconds=lambda: 8.0,
-            card_reply_limit=lambda: 12000,
-            card_log_limit=lambda: 8000,
         )
 
         return {

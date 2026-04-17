@@ -143,6 +143,17 @@ So the adapter boundary should describe which resume inputs are accepted by the
 request contract, rather than exposing an older abstract signature that is
 narrower than the real call surface.
 
+Some decomposition constraints should also remain explicit:
+
+- thread sharing, Feishu write-owner, and interaction-owner admission rules
+  should stay behind one policy boundary; that boundary is now
+  `ThreadAccessPolicy`, not scattered handler/prompt/group entry logic
+- `BindingRuntimeManager` should expose snapshot / inventory / iteration style
+  read APIs to the rest of the system, rather than leaking the whole mutable
+  runtime-state map
+- orchestration components such as `PromptTurnEntryController` should be wired
+  through explicit ports, rather than growing anonymous callback lists
+
 Thread-summary access should also keep two contracts separate:
 
 - authoritative read: direct backend read by `thread_id`, used by paths that are

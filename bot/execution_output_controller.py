@@ -109,11 +109,12 @@ class ExecutionOutputController:
 
     def schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
-        message_id = str(state["current_message_id"] or "").strip()
-        if not message_id:
-            return
-        now = time.monotonic()
         with self._lock:
+            runtime = build_runtime_view(state)
+            message_id = runtime.execution.current_message_id.strip()
+            if not message_id:
+                return
+            now = time.monotonic()
             last_patch = float(state["last_patch_at"] or 0.0)
             timer = state["patch_timer"]
             interval_seconds = int(self._stream_patch_interval_ms()) / 1000

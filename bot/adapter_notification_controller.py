@@ -7,6 +7,7 @@ from typing import Any, Callable, MutableMapping, TypeAlias
 from bot.constants import display_path
 from bot.execution_transcript import ExecutionTranscript
 from bot.runtime_state import ExecutionStateChanged, RuntimeStateMessage, ThreadStateChanged
+from bot.runtime_view import build_runtime_view
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,9 @@ class AdapterNotificationController:
         status_type = status.get("type")
         self._note_runtime_event(*binding)
         with self._lock:
-            current_turn_id = str(state["current_turn_id"] or "").strip()
-            current_message_id = str(state["current_message_id"] or "").strip()
+            runtime = build_runtime_view(state)
+            current_turn_id = runtime.execution.current_turn_id.strip()
+            current_message_id = runtime.execution.current_message_id.strip()
             if status_type == "active":
                 self._turn_execution.acknowledge_active_thread_locked(state)
         if status_type != "active" and (current_turn_id or current_message_id):
@@ -127,9 +129,10 @@ class AdapterNotificationController:
         self._note_runtime_event(*binding)
         state = self._get_runtime_state(*binding)
         with self._lock:
-            current_turn_id = str(state["current_turn_id"] or "").strip()
-            current_message_id = str(state["current_message_id"] or "").strip()
-            is_running = bool(state["running"])
+            runtime = build_runtime_view(state)
+            current_turn_id = runtime.execution.current_turn_id.strip()
+            current_message_id = runtime.execution.current_message_id.strip()
+            is_running = runtime.running
         if is_running or current_turn_id or current_message_id:
             self._finalize_execution_from_terminal_signal(
                 binding[0],
@@ -154,9 +157,10 @@ class AdapterNotificationController:
         for binding in bindings:
             state = self._get_runtime_state(*binding)
             with self._lock:
-                if str(state["current_thread_id"] or "").strip() != thread_id:
+                runtime = build_runtime_view(state)
+                if runtime.current_thread_id.strip() != thread_id:
                     continue
-                resolved_title = new_title or str(state["current_thread_title"] or "").strip()
+                resolved_title = new_title or runtime.current_thread_title.strip()
                 self._apply_persisted_runtime_state_message_locked(
                     binding,
                     state,
@@ -190,7 +194,8 @@ class AdapterNotificationController:
                 )
             card_id = self._send_execution_card(binding[1], "")
             with self._lock:
-                if str(state["current_turn_id"] or "").strip() == turn_id:
+                runtime = build_runtime_view(state)
+                if runtime.execution.current_turn_id.strip() == turn_id:
                     self._apply_runtime_state_message_locked(
                         state,
                         ExecutionStateChanged(
@@ -374,7 +379,7 @@ class AdapterNotificationController:
                 status=status,
                 error_message=str(error.get("message") or "执行失败").strip() if error else "",
             )
-            current_turn_id = str(state["current_turn_id"] or "").strip()
+            current_turn_id = build_runtime_view(state).execution.current_turn_id.strip()
         self._finalize_execution_from_terminal_signal(
             binding[0],
             binding[1],

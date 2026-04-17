@@ -289,16 +289,17 @@ class RuntimeAdminController:
             )
         )
 
+    def _release_binding_runtime_state_locked(self, state: RuntimeState) -> None:
+        self._cancel_patch_timer_locked(state)
+        self._cancel_mirror_watchdog_locked(state)
+
     def release_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
         normalized_thread_id = str(thread_id or "").strip()
         with self._lock:
             result = self._binding_runtime.release_feishu_runtime_by_thread_id_locked(
                 normalized_thread_id,
                 release_feishu_runtime_availability=self.release_feishu_runtime_availability_locked,
-                on_release_binding_state=lambda state: (
-                    self._cancel_patch_timer_locked(state),
-                    self._cancel_mirror_watchdog_locked(state),
-                ),
+                on_release_binding_state=self._release_binding_runtime_state_locked,
             )
         if result.unsubscribe_thread_id:
             self._unsubscribe_thread(result.unsubscribe_thread_id)

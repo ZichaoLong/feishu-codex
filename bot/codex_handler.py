@@ -55,7 +55,7 @@ from bot.execution_recovery_controller import ExecutionRecoveryController, Termi
 from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
 from bot.interaction_request_controller import InteractionRequestController
 from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSurfaceController
-from bot.prompt_turn_entry_controller import PromptTurnEntryController
+from bot.prompt_turn_entry_controller import PromptTurnEntryController, PromptTurnEntryPorts
 from bot.runtime_admin_controller import RuntimeAdminController
 from bot.runtime_card_publisher import (
     RuntimeCardPublisher,
@@ -400,66 +400,68 @@ class CodexHandler(BotHandler):
         self._prompt_turn_entry = PromptTurnEntryController(
             lock=self._lock,
             turn_execution=self._turn_execution,
-            resolve_runtime_binding=lambda sender_id, chat_id, message_id="": self._resolve_runtime_binding(
-                sender_id,
-                chat_id,
-                message_id,
+            ports=PromptTurnEntryPorts(
+                resolve_runtime_binding=lambda sender_id, chat_id, message_id="": self._resolve_runtime_binding(
+                    sender_id,
+                    chat_id,
+                    message_id,
+                ),
+                get_runtime_state=lambda sender_id, chat_id, message_id="": self._get_runtime_state(
+                    sender_id,
+                    chat_id,
+                    message_id,
+                ),
+                get_runtime_view=lambda sender_id, chat_id, message_id="": self._get_runtime_view(
+                    sender_id,
+                    chat_id,
+                    message_id,
+                ),
+                bind_thread=lambda sender_id, chat_id, thread, message_id="": self._bind_thread(
+                    sender_id,
+                    chat_id,
+                    thread,
+                    message_id=message_id,
+                ),
+                clear_thread_binding=lambda sender_id, chat_id, message_id="": self._clear_thread_binding(
+                    sender_id,
+                    chat_id,
+                    message_id=message_id,
+                ),
+                resume_snapshot_by_id=self._resume_snapshot_by_id,
+                create_thread=lambda **kwargs: self._adapter.create_thread(**kwargs),
+                effective_default_profile=self._effective_default_profile,
+                message_reply_in_thread=self._message_reply_in_thread,
+                group_actor_open_id=self._group_actor_open_id,
+                access_policy=self._thread_access_policy,
+                acquire_interaction_lease_for_binding=self._acquire_interaction_lease_for_binding,
+                release_interaction_lease_for_binding=self._release_interaction_lease_for_binding,
+                acquire_thread_write_lease_locked=self._acquire_thread_write_lease_locked,
+                sync_stored_binding_locked=self._sync_stored_binding_locked,
+                clear_plan_state=self._clear_plan_state,
+                apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
+                claim_reserved_execution_card=self._claim_reserved_execution_card,
+                patch_message=lambda message_id, content: self.bot.patch_message(message_id, content),
+                card_publisher_factory=self._runtime_card_publisher,
+                send_execution_card=self._send_execution_card,
+                flush_execution_card=self._flush_execution_card,
+                retire_execution_anchor=self._retire_execution_anchor,
+                schedule_mirror_watchdog=self._schedule_mirror_watchdog,
+                reconcile_execution_snapshot=self._reconcile_execution_snapshot,
+                refresh_terminal_execution_card_from_state=self._refresh_terminal_execution_card_from_state,
+                finalize_execution_card_from_state=self._finalize_execution_card_from_state,
+                mark_runtime_degraded=self._mark_runtime_degraded,
+                runtime_recovery_reason=self._runtime_recovery_reason,
+                is_turn_thread_not_found_error=self._is_turn_thread_not_found_error,
+                is_thread_not_found_error=self._is_thread_not_found_error,
+                is_transport_disconnect=self._is_transport_disconnect,
+                is_request_timeout_error=self._is_request_timeout_error,
+                start_turn=lambda **kwargs: self._adapter.start_turn(**kwargs),
+                interrupt_running_turn=self._interrupt_running_turn,
+                reply_text=self._reply_text,
+                mirror_watchdog_seconds=lambda: self._mirror_watchdog_seconds,
+                card_reply_limit=lambda: self._card_reply_limit,
+                card_log_limit=lambda: self._card_log_limit,
             ),
-            get_runtime_state=lambda sender_id, chat_id, message_id="": self._get_runtime_state(
-                sender_id,
-                chat_id,
-                message_id,
-            ),
-            get_runtime_view=lambda sender_id, chat_id, message_id="": self._get_runtime_view(
-                sender_id,
-                chat_id,
-                message_id,
-            ),
-            bind_thread=lambda sender_id, chat_id, thread, message_id="": self._bind_thread(
-                sender_id,
-                chat_id,
-                thread,
-                message_id=message_id,
-            ),
-            clear_thread_binding=lambda sender_id, chat_id, message_id="": self._clear_thread_binding(
-                sender_id,
-                chat_id,
-                message_id=message_id,
-            ),
-            resume_snapshot_by_id=self._resume_snapshot_by_id,
-            create_thread=lambda **kwargs: self._adapter.create_thread(**kwargs),
-            effective_default_profile=self._effective_default_profile,
-            message_reply_in_thread=self._message_reply_in_thread,
-            group_actor_open_id=self._group_actor_open_id,
-            access_policy=self._thread_access_policy,
-            acquire_interaction_lease_for_binding=self._acquire_interaction_lease_for_binding,
-            release_interaction_lease_for_binding=self._release_interaction_lease_for_binding,
-            acquire_thread_write_lease_locked=self._acquire_thread_write_lease_locked,
-            sync_stored_binding_locked=self._sync_stored_binding_locked,
-            clear_plan_state=self._clear_plan_state,
-            apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
-            claim_reserved_execution_card=self._claim_reserved_execution_card,
-            patch_message=lambda message_id, content: self.bot.patch_message(message_id, content),
-            card_publisher_factory=self._runtime_card_publisher,
-            send_execution_card=self._send_execution_card,
-            flush_execution_card=self._flush_execution_card,
-            retire_execution_anchor=self._retire_execution_anchor,
-            schedule_mirror_watchdog=self._schedule_mirror_watchdog,
-            reconcile_execution_snapshot=self._reconcile_execution_snapshot,
-            refresh_terminal_execution_card_from_state=self._refresh_terminal_execution_card_from_state,
-            finalize_execution_card_from_state=self._finalize_execution_card_from_state,
-            mark_runtime_degraded=self._mark_runtime_degraded,
-            runtime_recovery_reason=self._runtime_recovery_reason,
-            is_turn_thread_not_found_error=self._is_turn_thread_not_found_error,
-            is_thread_not_found_error=self._is_thread_not_found_error,
-            is_transport_disconnect=self._is_transport_disconnect,
-            is_request_timeout_error=self._is_request_timeout_error,
-            start_turn=lambda **kwargs: self._adapter.start_turn(**kwargs),
-            interrupt_running_turn=self._interrupt_running_turn,
-            reply_text=self._reply_text,
-            mirror_watchdog_seconds=lambda: self._mirror_watchdog_seconds,
-            card_reply_limit=lambda: self._card_reply_limit,
-            card_log_limit=lambda: self._card_log_limit,
         )
         self._inbound_surface = InboundSurfaceController(
             keyword=KEYWORD,
@@ -697,10 +699,7 @@ class CodexHandler(BotHandler):
     def _deactivate_binding_locked(self, key: ChatBindingKey) -> str:
         return self._binding_runtime.deactivate_binding_locked(
             key,
-            on_deactivate_state=lambda state: (
-                self._cancel_patch_timer_locked(state),
-                self._cancel_mirror_watchdog_locked(state),
-            ),
+            on_deactivate_state=self._deactivate_binding_state_locked,
         )
 
     def deactivate_sender(self, sender_id: str, chat_id: str = "", message_id: str = "") -> None:
@@ -747,12 +746,7 @@ class CodexHandler(BotHandler):
     def shutdown(self) -> None:
         """停止底层 app-server。"""
         with self._lock:
-            self._binding_runtime.visit_runtime_states_locked(
-                lambda state: (
-                    self._cancel_patch_timer_locked(state),
-                    self._cancel_mirror_watchdog_locked(state),
-                )
-            )
+            self._binding_runtime.visit_runtime_states_locked(self._cancel_runtime_timers_locked)
         try:
             self._service_control_plane.stop()
         except Exception:
@@ -948,6 +942,21 @@ class CodexHandler(BotHandler):
 
     def _cancel_mirror_watchdog_locked(self, state: _RuntimeState) -> None:
         self._execution_recovery.cancel_mirror_watchdog_locked(state)
+
+    def _cancel_runtime_timers_locked(self, state: _RuntimeState) -> None:
+        self._cancel_patch_timer_locked(state)
+        self._cancel_mirror_watchdog_locked(state)
+
+    def _deactivate_binding_state_locked(self, state: _RuntimeState) -> None:
+        self._cancel_runtime_timers_locked(state)
+
+    def _replace_bound_thread_state_locked(self, state: _RuntimeState) -> None:
+        self._cancel_runtime_timers_locked(state)
+        self._reset_execution_context_locked(state, clear_card_message=True)
+
+    def _clear_bound_thread_state_locked(self, state: _RuntimeState) -> None:
+        self._replace_bound_thread_state_locked(state)
+        self._clear_plan_state(state)
 
     @staticmethod
     def _has_active_execution_locked(state: _RuntimeState) -> bool:
@@ -1974,11 +1983,7 @@ class CodexHandler(BotHandler):
                 thread_id=thread.thread_id,
                 thread_title=thread.title,
                 working_dir=thread.cwd or state["working_dir"],
-                on_thread_replaced=lambda state: (
-                    self._cancel_patch_timer_locked(state),
-                    self._cancel_mirror_watchdog_locked(state),
-                    self._reset_execution_context_locked(state, clear_card_message=True),
-                ),
+                on_thread_replaced=self._replace_bound_thread_state_locked,
                 on_after_bind=self._clear_plan_state,
             )
         if unsubscribe_thread_id:
@@ -1993,12 +1998,7 @@ class CodexHandler(BotHandler):
             unsubscribe_thread_id = self._binding_runtime.clear_thread_binding_locked(
                 chat_binding_key,
                 state,
-                on_clear_state=lambda state: (
-                    self._cancel_patch_timer_locked(state),
-                    self._cancel_mirror_watchdog_locked(state),
-                    self._reset_execution_context_locked(state, clear_card_message=True),
-                    self._clear_plan_state(state),
-                ),
+                on_clear_state=self._clear_bound_thread_state_locked,
             )
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)

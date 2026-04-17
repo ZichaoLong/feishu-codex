@@ -128,6 +128,12 @@ shared backend 与 wrapper 的具体机制，见
 - binding 解析与 runtime state 的 hydrate/create 应走单一 resolver 入口，
   不应在多个调用点里继续手写“先挑 binding key，再决定是否建 state”的两段式流程
 - `ThreadLeaseRegistry` 这类对象当前应视为 runtime-owned 内部状态，而不是通用线程安全组件
+- 线程共享、Feishu 写入 owner、interaction owner 这组准入规则，应集中在单一 policy 边界；
+  目前对应为 `ThreadAccessPolicy`，而不是继续散落在 handler / prompt / group 入口里
+- `BindingRuntimeManager` 对其他组件应优先暴露 snapshot / inventory / iteration 这类显式读取接口，
+  而不是再把整份可变 runtime-state map 直接交给外层持有
+- 像 `PromptTurnEntryController` 这类编排组件，对外依赖面应通过显式 ports 装配，
+  不应继续扩大匿名 callback 列表
 - `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面
 
 当前这一层拆分已经把 help/settings/group/session/file 等领域边界从单体逻辑里抽出来，但这还不是最终的“真正解耦”。
