@@ -84,10 +84,11 @@ That leads to:
 The recommended rollout is:
 
 1. extract `BindingRuntimeManager`
-2. extract `TurnExecutionCoordinator`
-3. finish remaining contract and naming cleanup
+2. extract the execution-lifecycle components
+3. extract `RuntimeAdminController`
+4. finish remaining contract and naming cleanup
 
-These phases are intentionally ordered and should not be inverted.
+These four phases are intentionally ordered and should not be inverted.
 
 Current progress:
 
@@ -100,8 +101,17 @@ Current progress:
   - `InteractionRequestController` owns approval / ask-user request lifecycle
   - `AdapterNotificationController` owns adapter-notification interpretation
     and dispatch
+- Phase 3 is complete: `RuntimeAdminController`
+  - owns runtime-admin and control-plane status queries
+  - owns `/status` and `/release-feishu-runtime`
+  - owns binding clear / clear-all and thread status / bindings /
+    release-feishu-runtime
 - `CodexHandler` is not yet a pure orchestrator, but it no longer directly
-  owns those execution details
+  owns those implementation details
+- The main remaining handler ownership is now:
+  - inbound Feishu message / card-action / command glue
+  - action guards and permission gates
+  - top-level runtime entrypoints and cross-domain orchestration
 
 ## 7. Phase 1: BindingRuntimeManager
 
@@ -262,9 +272,69 @@ execution components, but `CodexHandler` still owns:
   - watchdog fallback
   - snapshot reconcile effects on anchor/transcript state
 
-## 9. Phase 3: Remaining Contract Cleanup
+## 9. Phase 3: RuntimeAdminController
 
-After the first two ownership extractions, clean up the remaining items that
+### 9.1 Goal
+
+Extract runtime-admin and control-plane ownership from `CodexHandler` so that
+status queries, admin commands, and service-control request handling stop
+living as scattered handler methods.
+
+### 9.2 Responsibilities
+
+This component owns:
+
+- binding inventory and binding-status snapshot reads
+- thread status / bindings snapshot reads
+- `/status` rendering
+- `/release-feishu-runtime` execution and result rendering
+- admin-side rejection checks and execution for binding clear / clear-all
+- `service/status`
+- control-plane `binding/*` and `thread/*` admin requests
+
+### 9.3 Boundary With Other Components
+
+`RuntimeAdminController` does not own the underlying binding/runtime state
+machine and does not own turn lifecycle.
+
+It should:
+
+- read binding/thread snapshots through `BindingRuntimeManager`
+- query pending-request blockers through `InteractionRequestController`
+- perform admin-surface side effects such as unsubscribe and timer cleanup at
+  an explicit boundary
+
+In short:
+
+- `BindingRuntimeManager` owns "how does runtime state move?"
+- `RuntimeAdminController` owns "which admin operations are allowed and how are
+  they presented externally?"
+
+### 9.4 Out Of Scope
+
+This phase should not own:
+
+- Feishu message-text parsing
+- card-action routing
+- turn start / cancel / finalize
+- adapter-notification interpretation
+- top-level runtime start/stop
+
+Those stay in a thinner orchestration entry layer.
+
+### 9.5 Exit Criteria
+
+- existing `/status`, `/release-feishu-runtime`, binding clear, thread
+  status/bindings, and service-control tests still pass
+- new controller-level tests cover:
+  - release-feishu-runtime blockers
+  - clear-all fail-closed behavior
+  - `service/status` aggregate view
+  - attached vs released binding rendering under `thread/bindings`
+
+## 10. Phase 4: Remaining Contract Cleanup
+
+After the first three ownership extractions, clean up the remaining items that
 fit better once boundaries are explicit:
 
 - `#2` single-source-of-truth contract for `admin_open_ids`
@@ -274,9 +344,9 @@ fit better once boundaries are explicit:
 This cleanup is intentionally later because doing it earlier would mostly add
 more helpers back into `CodexHandler`.
 
-## 10. Why Not Start Elsewhere
+## 11. Why Not Start Elsewhere
 
-### 10.1 Do Not Start With Lock Splitting
+### 11.1 Do Not Start With Lock Splitting
 
 Starting with locks risks getting:
 
@@ -285,17 +355,17 @@ Starting with locks risks getting:
 
 That is not the desired long-term architecture.
 
-### 10.2 Do Not Prioritize More Scattered Review Fixes
+### 11.2 Do Not Prioritize More Scattered Review Fixes
 
 Many local bugs and local contracts have already been tightened. More isolated
 fixes now have lower marginal value than reducing total reasoning cost.
 
-### 10.3 Do Not Start With File-Level Slicing
+### 11.3 Do Not Start With File-Level Slicing
 
 If the work only turns one big file into multiple files while leaving state
 ownership implicit, it is still navigation refactoring, not real decoupling.
 
-## 11. Rollout Constraints
+## 12. Rollout Constraints
 
 The first two phases should follow these constraints:
 
@@ -306,7 +376,7 @@ The first two phases should follow these constraints:
 - allow internal API renames; do not preserve intermediate compatibility layers
   just for their own sake
 
-## 12. Suggested Commit Shape
+## 13. Suggested Commit Shape
 
 Each phase should be split into commits roughly like:
 
@@ -319,15 +389,18 @@ Each phase should be split into commits roughly like:
 This keeps review clearer, rollback smaller, and boundary definition separate
 from behavior movement.
 
-## 13. Recommended Next Step
+## 14. Recommended Next Step
 
-The immediate next step should be Phase 1: `BindingRuntimeManager`.
+The immediate next step should not be another round of scattered fixes. It
+should be the remaining inbound-surface extraction from `CodexHandler`.
 
-The first patch set should focus only on:
+The next controller should own:
 
-- the manager doc entry point
-- the manager skeleton
-- migration of binding resolver / hydrate / runtime view / snapshot
+- Feishu message-command parsing
+- card-action routing
+- action guards and permission gates
+- orchestration from inbound UI events into runtime / execution / admin
+  components
 
-That creates a real binding/runtime ownership boundary before moving the
-attach/release/lease operations that depend on it.
+That would leave `CodexHandler` much closer to a true runtime orchestrator
+instead of mixing frontend-adapter surface code with domain orchestration.

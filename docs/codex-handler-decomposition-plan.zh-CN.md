@@ -73,13 +73,14 @@
 
 ## 6. 总体方案
 
-建议按三个阶段推进：
+建议按四个阶段推进：
 
 1. `BindingRuntimeManager` 拆分
-2. `TurnExecutionCoordinator` 拆分
-3. 剩余合同与命名收尾
+2. 执行生命周期组件拆分
+3. `RuntimeAdminController` 拆分
+4. 剩余合同与命名收尾
 
-这三个阶段之间是前后依赖关系，不建议调换顺序。
+这四个阶段之间是前后依赖关系，不建议调换顺序。
 
 当前进度：
 
@@ -90,7 +91,15 @@
   - `ExecutionRecoveryController` 负责 watchdog、快照对账、终态补账、降级判定
   - `InteractionRequestController` 负责审批 / ask-user request 生命周期
   - `AdapterNotificationController` 负责 adapter notification 的语义解释与事件分发
+- 第三阶段已完成：`RuntimeAdminController`
+  - 负责 runtime admin / control-plane 状态查询
+  - 负责 `/status` 与 `/release-feishu-runtime`
+  - 负责 binding clear / clear-all 与 thread status / bindings / release-feishu-runtime
 - `CodexHandler` 仍未完全收成编排器，但已不再直接拥有上述三类实现细节
+- 当前剩余的主要 handler ownership 是：
+  - 飞书入站消息 / 卡片动作 / 命令解析 glue
+  - action guard 与 permission gate
+  - 顶层 runtime entrypoint 与跨域编排
 
 ## 7. 第一阶段：BindingRuntimeManager
 
@@ -242,7 +251,61 @@
   - watchdog 兜底
   - snapshot reconcile 对 anchor/transcript 的影响
 
-## 9. 第三阶段：剩余合同与命名收尾
+## 9. 第三阶段：RuntimeAdminController
+
+### 9.1 目标
+
+把“runtime admin / control-plane 管理面 ownership”从 `CodexHandler` 中抽出，避免状态查询、管理命令和 service control request 继续散落在 handler 里。
+
+### 9.2 负责的状态与职责
+
+第三阶段组件负责：
+
+- binding inventory / status snapshot 读取
+- thread status / bindings snapshot 读取
+- `/status` 渲染
+- `/release-feishu-runtime` 执行与结果渲染
+- binding clear / clear-all 的管理面拒绝条件与执行
+- `service/status`
+- control-plane 的 `binding/*` 与 `thread/*` 管理请求
+
+### 9.3 与其他组件的边界
+
+`RuntimeAdminController` 不拥有 binding/runtime 的底层状态机，也不拥有 turn lifecycle。
+
+它应：
+
+- 通过 `BindingRuntimeManager` 读取 binding / thread snapshot
+- 通过 `InteractionRequestController` 查询 pending request 阻塞条件
+- 在显式边界内调用 unsubscribe / timer cleanup 这类管理面副作用
+
+也就是说：
+
+- `BindingRuntimeManager` 决定“状态如何迁移”
+- `RuntimeAdminController` 决定“哪些管理面动作允许发生，以及如何对外呈现”
+
+### 9.4 不负责的内容
+
+第三阶段不应负责：
+
+- 飞书消息文本解析
+- 卡片 action 路由
+- turn start / cancel / finalize
+- adapter notification 语义解释
+- 顶层 runtime 启停
+
+这些仍留在更薄的一层编排入口。
+
+### 9.5 验收标准
+
+- 现有 `/status`、`/release-feishu-runtime`、binding clear、thread status/bindings、service control 相关测试继续通过
+- 新增 controller 级测试，覆盖：
+  - release-feishu-runtime 的阻塞条件
+  - clear-all 的 fail-closed 行为
+  - `service/status` 聚合视图
+  - attached / released binding 在 thread/bindings 下的呈现
+
+## 10. 第四阶段：剩余合同与命名收尾
 
 前两阶段完成后，再处理剩余更适合落在清晰边界内的条目：
 
@@ -252,9 +315,9 @@
 
 这一步之所以后置，是因为它们在当前结构下继续修，只会继续把 helper 堆回 `CodexHandler`。
 
-## 10. 为什么不建议别的顺序
+## 11. 为什么不建议别的顺序
 
-### 10.1 不建议先拆锁
+### 11.1 不建议先拆锁
 
 先拆锁很容易得到：
 
@@ -263,17 +326,17 @@
 
 这不是我们要的长期架构。
 
-### 10.2 不建议先做更多散点 review 修补
+### 11.2 不建议先做更多散点 review 修补
 
 当前局部 bug 与局部合同已收口不少，继续做散点修补的边际收益会下降。
 
 更高价值的是先降低整体推理成本。
 
-### 10.3 不建议先做文件级切分
+### 11.3 不建议先做文件级切分
 
 如果只是把 handler 拆成更多文件，但状态 ownership 仍不清楚，那只是“把大文件导航变成多文件导航”，不是真正解耦。
 
-## 11. 执行约束
+## 12. 执行约束
 
 前两阶段建议遵守以下约束：
 
@@ -283,7 +346,7 @@
 - 不在同一批改动里同时处理无关合同条目
 - 允许重命名内部 API，但不保留为了兼容而存在的中间层
 
-## 12. 建议提交节奏
+## 13. 建议提交节奏
 
 建议每个阶段按类似节奏拆成多次提交：
 
@@ -299,14 +362,15 @@
 - 回滚粒度更小
 - 不会把“边界定义”和“行为改动”混成一个超大提交
 
-## 13. 当前推荐的下一步
+## 14. 当前推荐的下一步
 
-下一步应直接开始第一阶段：`BindingRuntimeManager` 拆分。
+下一步不应回到散点 review 修补，而应继续把 `CodexHandler` 剩余的“入站 surface ownership”抽出来。
 
-建议第一批只做：
+建议优先抽出一个更薄的 command / action surface controller，负责：
 
-- manager 文档落点
-- manager 最小骨架
-- binding resolver / hydrate / runtime view / snapshot 迁移
+- 飞书消息命令解析
+- 卡片 action 路由
+- action guard 与 permission gate
+- 将入站事件编排到 runtime / execution / admin 组件
 
-先把“binding/runtime ownership”这条线抽出来，再进入 attach/release/lease 操作的进一步迁移。
+这样 `CodexHandler` 就能更接近纯 runtime orchestrator，而不是同时承担前端适配层与领域编排层。
