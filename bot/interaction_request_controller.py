@@ -34,7 +34,6 @@ class InteractionRequestController:
         self,
         *,
         lock,
-        pending_requests: dict[str, PendingRequestState],
         get_runtime_state: Callable[[str, str], RuntimeState],
         interactive_binding_for_thread: Callable[[str, bool], tuple[ChatBindingKey | None, bool]],
         send_interactive_card: Callable[[str, dict[str, Any], str, bool], str | None],
@@ -43,7 +42,7 @@ class InteractionRequestController:
         patch_message: Callable[[str, str], bool],
     ) -> None:
         self._lock = lock
-        self._pending_requests = pending_requests
+        self._pending_requests: dict[str, PendingRequestState] = {}
         self._get_runtime_state = get_runtime_state
         self._interactive_binding_for_thread = interactive_binding_for_thread
         self._send_interactive_card = send_interactive_card
@@ -51,9 +50,32 @@ class InteractionRequestController:
         self._respond = respond
         self._patch_message = patch_message
 
-    @property
-    def pending_requests(self) -> dict[str, PendingRequestState]:
-        return self._pending_requests
+    def has_pending_request(self, request_key: str) -> bool:
+        normalized_request_key = str(request_key or "").strip()
+        if not normalized_request_key:
+            return False
+        with self._lock:
+            return normalized_request_key in self._pending_requests
+
+    def pending_request_snapshot(self, request_key: str) -> PendingRequestState | None:
+        with self._lock:
+            return self.pending_request_snapshot_locked(request_key)
+
+    def pending_request_snapshot_locked(self, request_key: str) -> PendingRequestState | None:
+        normalized_request_key = str(request_key or "").strip()
+        if not normalized_request_key:
+            return None
+        pending = self._pending_requests.get(normalized_request_key)
+        if pending is None:
+            return None
+        return dict(pending)
+
+    def store_pending_request(self, request_key: str, pending: PendingRequestState | dict[str, Any]) -> None:
+        normalized_request_key = str(request_key or "").strip()
+        if not normalized_request_key:
+            raise ValueError("request_key 不能为空")
+        with self._lock:
+            self._pending_requests[normalized_request_key] = dict(pending)
 
     @staticmethod
     def pending_request_status(pending: PendingRequestState | dict[str, Any]) -> str:

@@ -118,6 +118,10 @@ Current module split:
 - `bot/feishu_codexctl.py` and `bot/service_control_plane.py`: local service-admin
   CLI and the in-process control plane for the running service
 - `bot/binding_identity.py`: stable admin-facing binding identifiers
+- `bot/interaction_request_controller.py`: owns pending approval / user-input
+  request state and fail-closed handling for interactive requests
+- `bot/codex_session_ui_domain.py`: owns session-card UI flows, including
+  transient rename-form state
 - `bot/execution_transcript.py`: an internal transcript assembler for execution-card
   presentation; it builds reply/log fragments and does not own thread, owner,
   or binding-level state

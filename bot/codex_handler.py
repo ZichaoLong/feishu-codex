@@ -165,10 +165,6 @@ class _RuntimeState(TypedDict):
     plan_text: str
 
 
-class _PendingRenameFormState(TypedDict):
-    thread_id: str
-
-
 class _PendingRequestState(TypedDict):
     rpc_request_id: int | str
     method: str
@@ -211,8 +207,6 @@ class CodexHandler(BotHandler):
         self._lock = threading.RLock()
         self._thread_lease_registry = ThreadLeaseRegistry()
         self._interaction_lease_store = InteractionLeaseStore(self._data_dir)
-        self._pending_requests: dict[str, _PendingRequestState] = {}
-        self._pending_rename_forms: dict[str, _PendingRenameFormState] = {}
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
         self._service_instance_lease = ServiceInstanceLease(self._data_dir)
         self._service_control_plane = ServiceControlPlane(
@@ -289,7 +283,6 @@ class CodexHandler(BotHandler):
         )
         self._interaction_requests = InteractionRequestController(
             lock=self._lock,
-            pending_requests=self._pending_requests,
             get_runtime_state=lambda sender_id, chat_id: self._get_runtime_state(sender_id, chat_id),
             interactive_binding_for_thread=lambda thread_id, adopt_sole_subscriber: self._interactive_binding_for_thread(
                 thread_id,
@@ -484,7 +477,7 @@ class CodexHandler(BotHandler):
             is_group_admin_actor=self._is_group_admin_actor,
             is_group_turn_actor=self._is_group_turn_actor,
             is_group_request_actor_or_admin=self._is_group_request_actor_or_admin,
-            handle_rename_form_fallback=self._handle_rename_form_fallback,
+            handle_rename_form_fallback=self._session_ui_domain.handle_rename_form_fallback,
             handle_user_input_form_fallback=self._handle_user_input_form_fallback,
         )
         self._inbound_surface.install_routes(
@@ -659,39 +652,6 @@ class CodexHandler(BotHandler):
         payload["request_id"] = request_key
         payload["question_id"] = matched_question_id
         return self._handle_user_input_action(payload)
-
-    def _handle_rename_form_fallback(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-        action_value: dict,
-    ) -> P2CardActionTriggerResponse | None:
-        form_value = action_value.get("_form_value") or {}
-        if not message_id or not isinstance(form_value, dict) or "rename_title" not in form_value:
-            return None
-
-        with self._lock:
-            pending = self._pending_rename_forms.get(message_id)
-        if not pending:
-            return make_card_response(
-                toast="重命名表单已失效，请重新打开。",
-                toast_type="warning",
-            )
-        if self._is_group_chat(chat_id, message_id) and not self._is_group_admin_actor(
-            chat_id,
-            message_id=message_id,
-            operator_open_id=str(action_value.get("_operator_open_id", "")).strip(),
-        ):
-            return make_card_response(
-                toast="仅管理员可操作群共享会话或群设置。",
-                toast_type="warning",
-            )
-
-        payload = dict(action_value)
-        payload["action"] = "rename_thread"
-        payload["thread_id"] = pending["thread_id"]
-        return self._session_ui_domain.handle_rename_submit_action(sender_id, chat_id, message_id, payload)
 
     def is_sender_active(self, sender_id: str, chat_id: str = "", message_id: str = "") -> bool:
         return self._get_runtime_state(sender_id, chat_id, message_id)["active"]
@@ -1158,7 +1118,7 @@ class CodexHandler(BotHandler):
         request = pending
         if request is None:
             with self._lock:
-                request = self._pending_requests.get(request_key)
+                request = self._interaction_requests.pending_request_snapshot_locked(request_key)
         if not request:
             return False
         actor_open_id = self._group_actor_open_id(message_id, operator_open_id)

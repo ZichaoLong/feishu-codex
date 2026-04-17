@@ -62,7 +62,7 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         handler = self._make_handler()
 
         for spec in iter_shared_commands():
-            self.assertIn(spec.slash_name, handler._command_routes)
+            self.assertTrue(handler._inbound_surface.has_command_route(spec.slash_name))
 
     def test_help_and_session_cards_reuse_shared_command_specs(self) -> None:
         help_command = get_shared_command("help")

@@ -116,6 +116,10 @@ Current progress:
   - owns running-prompt rejection and watchdog-reconcile entry
   - owns released -> attached recovery flow
   - owns prompt start / cancel and lease-acquisition entry orchestration
+- transient UI/request state that used to hang off `CodexHandler` has now been
+  pushed down to its real owners:
+  - `InteractionRequestController` owns pending interactive-request state
+  - `CodexSessionUiDomain` owns transient rename-form state
 - Phase 6 is complete: remaining contract and naming cleanup
   - `admin_open_ids` is now tightened to `system.yaml` as the sole authority
   - authoritative read vs bounded-list best-effort lookup is now separated by
@@ -488,6 +492,8 @@ All six phases in this rollout should follow these constraints:
 - default to no user-visible behavior changes
 - extract the boundary before moving all call sites
 - add component-level tests in the same phase
+- any commit that removes or renames a component surface must migrate all test
+  call sites in the same commit; do not leave CI red across follow-up commits
 - avoid mixing unrelated contract cleanup into the same patch series
 - allow internal API renames; do not preserve intermediate compatibility layers
   just for their own sake
@@ -501,6 +507,8 @@ Each phase should be split into commits roughly like:
 3. handler switched to the new interface
 4. component-level regression tests
 5. removal of old direct access paths and stale helpers
+6. same-commit migration of every test that still referenced the removed
+   surface
 
 This keeps review clearer, rollback smaller, and boundary definition separate
 from behavior movement.

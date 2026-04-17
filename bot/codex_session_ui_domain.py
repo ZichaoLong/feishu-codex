@@ -34,11 +34,18 @@ class _SessionUiDomainOwner(Protocol):
     bot: Any
     _adapter: Any
     _lock: threading.RLock
-    _pending_rename_forms: dict[str, dict[str, str]]
     _session_recent_limit: int
     _thread_list_query_limit: int
 
     def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView: ...
+    def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool: ...
+    def _is_group_admin_actor(
+        self,
+        chat_id: str,
+        *,
+        message_id: str = "",
+        operator_open_id: str = "",
+    ) -> bool: ...
     def _rename_bound_thread_title(
         self,
         sender_id: str,
@@ -79,6 +86,27 @@ class CodexSessionUiDomain:
     def __init__(self, owner: _SessionUiDomainOwner) -> None:
         self._owner = owner
         self._expanded_session_cards: set[str] = set()
+        self._pending_rename_forms: dict[str, dict[str, str]] = {}
+
+    def pending_rename_form_snapshot(self, message_id: str) -> dict[str, str] | None:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return None
+        with self._owner._lock:
+            pending = self._pending_rename_forms.get(normalized_message_id)
+            if pending is None:
+                return None
+            return dict(pending)
+
+    def register_pending_rename_form(self, message_id: str, *, thread_id: str) -> None:
+        normalized_message_id = str(message_id or "").strip()
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_message_id:
+            raise ValueError("message_id 不能为空")
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空")
+        with self._owner._lock:
+            self._pending_rename_forms[normalized_message_id] = {"thread_id": normalized_thread_id}
 
     def handle_session_command(
         self,
@@ -293,9 +321,40 @@ class CodexSessionUiDomain:
             return make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
         if not session:
             return make_card_response(toast="未找到对应线程", toast_type="warning")
-        with self._owner._lock:
-            self._owner._pending_rename_forms[message_id] = {"thread_id": thread_id}
+        self.register_pending_rename_form(message_id, thread_id=thread_id)
         return make_card_response(card=build_rename_card(session))
+
+    def handle_rename_form_fallback(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse | None:
+        form_value = action_value.get("_form_value") or {}
+        if not message_id or not isinstance(form_value, dict) or "rename_title" not in form_value:
+            return None
+
+        pending = self.pending_rename_form_snapshot(message_id)
+        if not pending:
+            return make_card_response(
+                toast="重命名表单已失效，请重新打开。",
+                toast_type="warning",
+            )
+        if self._owner._is_group_chat(chat_id, message_id) and not self._owner._is_group_admin_actor(
+            chat_id,
+            message_id=message_id,
+            operator_open_id=str(action_value.get("_operator_open_id", "")).strip(),
+        ):
+            return make_card_response(
+                toast="仅管理员可操作群共享会话或群设置。",
+                toast_type="warning",
+            )
+
+        payload = dict(action_value)
+        payload["action"] = "rename_thread"
+        payload["thread_id"] = pending["thread_id"]
+        return self.handle_rename_submit_action(sender_id, chat_id, message_id, payload)
 
     def handle_rename_submit_action(
         self,
@@ -315,8 +374,7 @@ class CodexSessionUiDomain:
             logger.exception("卡片重命名失败")
             return make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
 
-        with self._owner._lock:
-            self._owner._pending_rename_forms.pop(message_id, None)
+        self._clear_pending_rename_form(message_id)
         self._owner._rename_bound_thread_title(
             sender_id,
             chat_id,
@@ -403,7 +461,7 @@ class CodexSessionUiDomain:
         if not message_id:
             return
         with self._owner._lock:
-            self._owner._pending_rename_forms.pop(message_id, None)
+            self._pending_rename_forms.pop(message_id, None)
 
     def _handle_sessions_refresh_action(
         self,

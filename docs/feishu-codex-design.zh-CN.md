@@ -101,6 +101,8 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
 - `bot/feishu_codexctl.py` 与 `bot/service_control_plane.py`：本地服务管理 CLI 与运行中服务控制面
 - `bot/binding_identity.py`：admin-facing binding 标识规范
+- `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
+- `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态
 - `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 reply/log 片段拼装，不承担 thread、owner 或 binding 级状态职责
 - `bot/stores/*.py`：本地默认 profile、shared backend 运行时发现状态、群聊状态
 

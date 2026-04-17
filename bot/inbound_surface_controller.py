@@ -78,6 +78,9 @@ class InboundSurfaceController:
         self._action_routes = dict(action_routes)
         self._prefixed_action_routes = list(prefixed_action_routes)
 
+    def has_command_route(self, command_name: str) -> bool:
+        return str(command_name or "").strip().lower() in self._command_routes
+
     def handle_message(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
         cleaned = (text or "").strip()
         self._activate_binding_if_needed(sender_id, chat_id, message_id)

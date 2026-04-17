@@ -94,10 +94,11 @@ class BindingRuntimeManagerTests(unittest.TestCase):
 
         manager.hydrate_stored_bindings()
 
-        state = manager.runtime_state_by_binding[binding]
-        self.assertEqual(state["current_thread_id"], "thread-1")
-        self.assertEqual(state["current_thread_title"], "Demo")
-        self.assertEqual(state["approval_policy"], "never")
+        state = manager.binding_runtime_snapshot_locked(binding)
+        assert state is not None
+        self.assertEqual(state.thread_id, "thread-1")
+        self.assertEqual(state.thread_title, "Demo")
+        self.assertEqual(state.feishu_runtime_state, "attached")
         self.assertEqual(manager.bound_bindings_for_thread_locked("thread-1"), [binding])
         self.assertEqual(manager.attached_bindings_for_thread_locked("thread-1"), [binding])
         self.assertEqual(manager._thread_lease_registry.lease_owner("thread-1"), binding)
@@ -202,9 +203,10 @@ class BindingRuntimeManagerTests(unittest.TestCase):
             acquire_interaction_owner=False,
         )
         with manager._lock:
+            state_b = manager.resolve_runtime_binding(*binding_b).state
             manager.apply_persisted_runtime_state_message_locked(
                 binding_b,
-                manager.runtime_state_by_binding[binding_b],
+                state_b,
                 ThreadStateChanged(current_thread_runtime_state="released"),
             )
             snapshot = manager.thread_binding_snapshot_locked(
@@ -233,7 +235,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
 
         store = ChatBindingStore(data_dir)
         self.assertEqual(unsubscribe_thread_id, "thread-1")
-        self.assertNotIn(binding, manager.runtime_state_by_binding)
+        self.assertNotIn(binding, manager.binding_keys_locked())
         self.assertEqual(manager.bound_bindings_for_thread_locked("thread-1"), [])
         self.assertEqual(manager.attached_bindings_for_thread_locked("thread-1"), [])
         self.assertIsNone(manager._thread_lease_registry.lease_owner("thread-1"))

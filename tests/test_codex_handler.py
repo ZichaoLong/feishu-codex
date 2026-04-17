@@ -415,6 +415,22 @@ class CodexHandlerTests(unittest.TestCase):
         with handler._lock:
             return handler._binding_runtime.binding_keys_locked()
 
+    @staticmethod
+    def _store_pending_request(handler: CodexHandler, request_key: str, pending: dict) -> None:
+        handler._interaction_requests.store_pending_request(request_key, pending)
+
+    @staticmethod
+    def _has_pending_request(handler: CodexHandler, request_key: str) -> bool:
+        return handler._interaction_requests.has_pending_request(request_key)
+
+    @staticmethod
+    def _pending_rename_form_snapshot(handler: CodexHandler, message_id: str) -> dict[str, str] | None:
+        return handler._session_ui_domain.pending_rename_form_snapshot(message_id)
+
+    @staticmethod
+    def _register_pending_rename_form(handler: CodexHandler, message_id: str, *, thread_id: str) -> None:
+        handler._session_ui_domain.register_pending_rename_form(message_id, thread_id=thread_id)
+
     def _make_handler(
         self,
         cfg: dict | None = None,
@@ -1499,7 +1515,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(bot.sent_messages, [])
         self.assertEqual(bot.reply_refs, [])
-        self.assertNotIn("req-1", handler._pending_requests)
+        self.assertFalse(self._has_pending_request(handler, "req-1"))
 
     def test_approval_request_reply_stays_in_topic_after_message_context_is_gone(self) -> None:
         handler, bot = self._make_handler()
@@ -1560,29 +1576,29 @@ class CodexHandlerTests(unittest.TestCase):
 
     def test_server_request_resolved_closes_approval_card_as_handled_elsewhere(self) -> None:
         handler, bot = self._make_handler()
-        handler._pending_requests["req-1"] = {
+        self._store_pending_request(handler, "req-1", {
             "message_id": "msg-approval",
             "title": "Codex 命令执行审批",
             "method": "item/commandExecution/requestApproval",
-        }
+        })
 
         handler._handle_server_request_resolved({"requestId": "req-1"})
 
-        self.assertNotIn("req-1", handler._pending_requests)
+        self.assertFalse(self._has_pending_request(handler, "req-1"))
         self.assertEqual(bot.patches[-1][0], "msg-approval")
         self.assertIn("在其他终端处理", bot.patches[-1][1])
 
     def test_server_request_resolved_closes_user_input_card_as_handled_elsewhere(self) -> None:
         handler, bot = self._make_handler()
-        handler._pending_requests["req-1"] = {
+        self._store_pending_request(handler, "req-1", {
             "message_id": "msg-input",
             "title": "Codex 用户输入",
             "method": "item/tool/requestUserInput",
-        }
+        })
 
         handler._handle_server_request_resolved({"requestId": "req-1"})
 
-        self.assertNotIn("req-1", handler._pending_requests)
+        self.assertFalse(self._has_pending_request(handler, "req-1"))
         self.assertEqual(bot.patches[-1][0], "msg-input")
         self.assertIn("该请求已在其他终端处理", bot.patches[-1][1])
 
@@ -2683,7 +2699,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        handler._pending_requests["req-1"] = {
+        self._store_pending_request(handler, "req-1", {
             "rpc_request_id": "rpc-1",
             "method": "item/commandExecution/requestApproval",
             "params": {},
@@ -2697,7 +2713,7 @@ class CodexHandlerTests(unittest.TestCase):
             "sender_id": "ou_user",
             "actor_open_id": "ou_user",
             "status": "pending",
-        }
+        })
 
         with self.assertRaisesRegex(ServiceControlError, "不能清除 binding"):
             control_request(data_dir, "binding/clear", {"binding_id": "p2p:ou_user:c1"})
@@ -4340,7 +4356,9 @@ class CodexHandlerTests(unittest.TestCase):
             {"action": "show_rename_form", "thread_id": "thread-1"},
         ))
 
-        self.assertEqual(handler._pending_rename_forms["msg-rename"]["thread_id"], "thread-1")
+        pending = self._pending_rename_form_snapshot(handler, "msg-rename")
+        assert pending is not None
+        self.assertEqual(pending["thread_id"], "thread-1")
         self.assertEqual(response["card"]["header"]["title"]["content"], "重命名线程")
 
     def test_form_value_only_callback_submits_rename(self) -> None:
@@ -4356,7 +4374,7 @@ class CodexHandlerTests(unittest.TestCase):
             source="vscode",
             status="notLoaded",
         )
-        handler._pending_rename_forms["msg-rename"] = {"thread_id": "thread-1"}
+        self._register_pending_rename_form(handler, "msg-rename", thread_id="thread-1")
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
         def fake_rename_thread(thread_id: str, name: str) -> None:
@@ -4373,7 +4391,7 @@ class CodexHandlerTests(unittest.TestCase):
         ))
 
         self.assertEqual(renamed, {"thread_id": "thread-1", "name": "new-title"})
-        self.assertNotIn("msg-rename", handler._pending_rename_forms)
+        self.assertIsNone(self._pending_rename_form_snapshot(handler, "msg-rename"))
         self.assertEqual(response["toast_type"], "success")
         self.assertEqual(response["toast"], "已重命名。")
 
@@ -4406,7 +4424,7 @@ class CodexHandlerTests(unittest.TestCase):
                 ))
 
         handler._adapter.respond = fake_respond
-        handler._pending_requests["req-1"] = {
+        self._store_pending_request(handler, "req-1", {
             "rpc_request_id": "rpc-1",
             "method": "item/commandExecution/requestApproval",
             "params": {},
@@ -4414,7 +4432,7 @@ class CodexHandlerTests(unittest.TestCase):
             "questions": [],
             "answers": {},
             "status": "pending",
-        }
+        })
 
         response = self._unpack_card_response(handler._handle_approval_card_action(
             {
@@ -4449,7 +4467,7 @@ class CodexHandlerTests(unittest.TestCase):
 
     def test_custom_answer_is_rejected_when_question_is_option_only(self) -> None:
         handler, _ = self._make_handler()
-        handler._pending_requests["req-1"] = {
+        self._store_pending_request(handler, "req-1", {
             "rpc_request_id": "rpc-1",
             "questions": [
                 {
@@ -4461,7 +4479,7 @@ class CodexHandlerTests(unittest.TestCase):
                 }
             ],
             "answers": {},
-        }
+        })
 
         response = self._unpack_card_response(handler._handle_user_input_action(
             {
@@ -4485,7 +4503,7 @@ class CodexHandlerTests(unittest.TestCase):
             responded["error"] = error
 
         handler._adapter.respond = fake_respond
-        handler._pending_requests["req-1"] = {
+        self._store_pending_request(handler, "req-1", {
             "rpc_request_id": "rpc-1",
             "method": "item/tool/requestUserInput",
             "message_id": "msg-1",
@@ -4499,7 +4517,7 @@ class CodexHandlerTests(unittest.TestCase):
                 }
             ],
             "answers": {},
-        }
+        })
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
@@ -4534,7 +4552,7 @@ class CodexHandlerTests(unittest.TestCase):
                 ))
 
         handler._adapter.respond = fake_respond
-        handler._pending_requests["req-1"] = {
+        self._store_pending_request(handler, "req-1", {
             "rpc_request_id": "rpc-1",
             "method": "item/tool/requestUserInput",
             "questions": [
@@ -4548,7 +4566,7 @@ class CodexHandlerTests(unittest.TestCase):
             ],
             "answers": {},
             "status": "pending",
-        }
+        })
 
         response = self._unpack_card_response(handler._handle_user_input_action(
             {

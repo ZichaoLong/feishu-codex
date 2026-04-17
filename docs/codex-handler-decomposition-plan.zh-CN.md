@@ -105,6 +105,9 @@
   - 负责 running prompt 拒绝与 watchdog 对账入口
   - 负责 released -> attached 恢复路径
   - 负责 prompt start / cancel 与 lease 抢占入口编排
+- 过去挂在 `CodexHandler` 上的瞬时 UI / request 状态也已下沉到真正 owner：
+  - `InteractionRequestController` 持有交互请求的 pending 状态
+  - `CodexSessionUiDomain` 持有重命名表单这类瞬时 UI 状态
 - 第六阶段已完成：剩余合同与命名收尾
   - `admin_open_ids` 已收紧为 `system.yaml` 单一事实源
   - authoritative read / bounded-list best-effort lookup 已用显式命名区分
@@ -441,6 +444,7 @@
 - 默认不改变用户可见行为
 - 每阶段都先抽边界，再迁移调用点
 - 每阶段都补对应组件级测试
+- 任何移除或重命名组件 surface 的提交，都必须在同一提交里迁完所有测试 call site；不允许靠后续提交补红
 - 不在同一批改动里同时处理无关合同条目
 - 允许重命名内部 API，但不保留为了兼容而存在的中间层
 
@@ -453,6 +457,7 @@
 3. handler 切换到新接口
 4. 补组件级回归测试
 5. 删除旧直连路径与遗留 helper
+6. 同提交迁完仍引用旧 surface 的全部测试
 
 这样做的好处是：
 
