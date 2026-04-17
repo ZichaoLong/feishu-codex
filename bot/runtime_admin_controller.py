@@ -23,7 +23,6 @@ class RuntimeAdminController:
         lock,
         binding_runtime: BindingRuntimeManager,
         interaction_requests,
-        runtime_state_by_binding: dict[ChatBindingKey, RuntimeState],
         clear_all_stored_bindings: Callable[[], None],
         deactivate_binding_locked: Callable[[ChatBindingKey], str],
         read_thread: Callable[[str], Any],
@@ -42,7 +41,6 @@ class RuntimeAdminController:
         self._lock = lock
         self._binding_runtime = binding_runtime
         self._interaction_requests = interaction_requests
-        self._runtime_state_by_binding = runtime_state_by_binding
         self._clear_all_stored_bindings = clear_all_stored_bindings
         self._deactivate_binding_locked = deactivate_binding_locked
         self._read_thread = read_thread
@@ -103,10 +101,10 @@ class RuntimeAdminController:
         if not attached_bindings:
             return False, "当前 thread 的 Feishu runtime 已经是 `released`。"
         for binding in attached_bindings:
-            state = self._runtime_state_by_binding.get(binding)
-            if state is None:
+            snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+            if snapshot is None:
                 continue
-            if self.binding_has_inflight_turn_locked(state):
+            if snapshot.has_inflight_turn:
                 return False, "当前有飞书侧 turn 正在运行，不能释放 runtime。"
         if self._interaction_requests.thread_has_pending_request_locked(normalized_thread_id):
             return False, "当前还有飞书侧审批或输入请求未处理，不能释放 runtime。"
@@ -116,10 +114,10 @@ class RuntimeAdminController:
         return self._interaction_requests.binding_has_pending_request_locked(binding)
 
     def binding_clear_availability_locked(self, binding: ChatBindingKey) -> tuple[bool, str]:
-        state = self._runtime_state_by_binding.get(binding)
-        if state is None:
+        snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+        if snapshot is None:
             return False, f"未找到绑定：{format_binding_id(binding)}"
-        if self.binding_has_inflight_turn_locked(state):
+        if snapshot.has_inflight_turn:
             return False, "当前有飞书侧 turn 正在运行，不能清除 binding。"
         if self.binding_has_pending_request_locked(binding):
             return False, "当前还有飞书侧审批或输入请求未处理，不能清除 binding。"
@@ -134,10 +132,10 @@ class RuntimeAdminController:
             allowed, reason = self.binding_clear_availability_locked(binding)
             if not allowed:
                 raise ValueError(reason)
-            state = self._runtime_state_by_binding.get(binding)
-            assert state is not None
-            thread_id = str(state["current_thread_id"] or "").strip()
-            thread_title = str(state["current_thread_title"] or "").strip()
+            snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+            assert snapshot is not None
+            thread_id = snapshot.thread_id
+            thread_title = snapshot.thread_title
             unsubscribe_thread_id = self._deactivate_binding_locked(binding)
         if unsubscribe_thread_id:
             self._unsubscribe_thread(unsubscribe_thread_id)
@@ -152,7 +150,7 @@ class RuntimeAdminController:
         unsubscribe_thread_ids: list[str] = []
         cleared_binding_ids: list[str] = []
         with self._lock:
-            bindings = sorted(self._runtime_state_by_binding)
+            bindings = list(self._binding_runtime.binding_keys_locked())
             if not bindings:
                 self._clear_all_stored_bindings()
                 return {

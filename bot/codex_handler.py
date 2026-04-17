@@ -89,6 +89,7 @@ from bot.stores.service_instance_lease import (
     ServiceInstanceLeaseError,
 )
 from bot.thread_lease_registry import ThreadLeaseRegistry
+from bot.thread_access_policy import ThreadAccessPolicy
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
 
@@ -316,7 +317,6 @@ class CodexHandler(BotHandler):
             ),
             patch_message=lambda message_id, content: self.bot.patch_message(message_id, content),
         )
-        self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = self._binding_runtime.runtime_state_by_binding
         self._adapter_notifications = AdapterNotificationController(
             lock=self._lock,
             turn_execution=self._turn_execution,
@@ -345,7 +345,6 @@ class CodexHandler(BotHandler):
             lock=self._lock,
             binding_runtime=self._binding_runtime,
             interaction_requests=self._interaction_requests,
-            runtime_state_by_binding=self._runtime_state_by_binding,
             clear_all_stored_bindings=self._chat_binding_store.clear_all,
             deactivate_binding_locked=self._deactivate_binding_locked,
             read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=False),
@@ -389,6 +388,15 @@ class CodexHandler(BotHandler):
         )
         self._session_ui_domain = CodexSessionUiDomain(self)
         self._file_message_domain = FileMessageDomain(self)
+        self._thread_access_policy = ThreadAccessPolicy(
+            lock=self._lock,
+            is_group_chat=self._is_group_chat,
+            group_mode_for_chat=lambda chat_id: self.bot.get_group_mode(chat_id),
+            thread_subscribers_locked=self._binding_runtime.thread_subscribers,
+            current_interaction_lease_locked=self._current_interaction_lease_locked,
+            feishu_interaction_holder=self._feishu_interaction_holder,
+            thread_write_owner_locked=self._binding_runtime.thread_write_owner,
+        )
         self._prompt_turn_entry = PromptTurnEntryController(
             lock=self._lock,
             turn_execution=self._turn_execution,
@@ -423,9 +431,7 @@ class CodexHandler(BotHandler):
             effective_default_profile=self._effective_default_profile,
             message_reply_in_thread=self._message_reply_in_thread,
             group_actor_open_id=self._group_actor_open_id,
-            prompt_write_denial_text=self._prompt_write_denial_text,
-            thread_sharing_policy_violation=self._thread_sharing_policy_violation,
-            interaction_denied_text=self._interaction_denied_text,
+            access_policy=self._thread_access_policy,
             acquire_interaction_lease_for_binding=self._acquire_interaction_lease_for_binding,
             release_interaction_lease_for_binding=self._release_interaction_lease_for_binding,
             acquire_thread_write_lease_locked=self._acquire_thread_write_lease_locked,
@@ -722,11 +728,7 @@ class CodexHandler(BotHandler):
             return
         unsubscribe_thread_ids: list[str] = []
         with self._lock:
-            binding_keys = [
-                binding
-                for binding in self._runtime_state_by_binding
-                if binding[1] == normalized_chat_id
-            ]
+            binding_keys = list(self._binding_runtime.binding_keys_for_chat_locked(normalized_chat_id))
             for binding in binding_keys:
                 unsubscribe_thread_id = self._deactivate_binding_locked(binding)
                 if unsubscribe_thread_id:
@@ -745,9 +747,12 @@ class CodexHandler(BotHandler):
     def shutdown(self) -> None:
         """停止底层 app-server。"""
         with self._lock:
-            for state in self._runtime_state_by_binding.values():
-                self._cancel_patch_timer_locked(state)
-                self._cancel_mirror_watchdog_locked(state)
+            self._binding_runtime.visit_runtime_states_locked(
+                lambda state: (
+                    self._cancel_patch_timer_locked(state),
+                    self._cancel_mirror_watchdog_locked(state),
+                )
+            )
         try:
             self._service_control_plane.stop()
         except Exception:
@@ -1039,95 +1044,14 @@ class CodexHandler(BotHandler):
     def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool:
         return self._resolve_chat_type(chat_id, message_id) == "group"
 
-    def _thread_sharing_policy_violation(
-        self,
-        chat_id: str,
-        thread_id: str,
-        *,
-        message_id: str = "",
-        current_chat_mode: str | None = None,
-    ) -> str:
-        normalized_thread_id = str(thread_id or "").strip()
-        normalized_chat_id = str(chat_id or "").strip()
-        if not normalized_thread_id or not normalized_chat_id:
-            return ""
-        current_mode = str(current_chat_mode or "").strip().lower()
-        if not current_mode and self._is_group_chat(normalized_chat_id, message_id):
-            current_mode = str(self.bot.get_group_mode(normalized_chat_id) or "").strip().lower()
-        with self._lock:
-            subscribers = self._thread_lease_registry.subscribers(normalized_thread_id)
-        other_chat_ids = sorted({binding[1] for binding in subscribers if binding[1] != normalized_chat_id})
-        if current_mode == "all" and other_chat_ids:
-            return (
-                "当前群聊处于 `all` 模式；该模式下线程不能与其他飞书会话共享。"
-                "请先切到 `assistant` 或 `mention-only`，或为本群新建线程。"
-            )
-        for binding in subscribers:
-            if binding[1] == normalized_chat_id:
-                continue
-            if binding[0] != GROUP_SHARED_BINDING_OWNER_ID:
-                continue
-            if str(self.bot.get_group_mode(binding[1]) or "").strip().lower() != "all":
-                continue
-            return (
-                "该线程当前已被处于 `all` 模式的其他群聊独占；"
-                "请先为本会话新建线程，或让对方切回 `assistant` / `mention-only`。"
-            )
-        return ""
-
     def _validate_group_mode_change(self, chat_id: str, mode: str, *, message_id: str = "") -> str:
-        normalized_mode = str(mode or "").strip().lower()
-        if normalized_mode != "all":
-            return ""
         runtime = self._get_runtime_view(GROUP_SHARED_BINDING_OWNER_ID, chat_id, message_id)
-        thread_id = runtime.current_thread_id.strip()
-        if not thread_id:
-            return ""
-        return self._thread_sharing_policy_violation(
+        return self._thread_access_policy.validate_group_mode_change(
             chat_id,
-            thread_id,
+            mode,
+            thread_id=runtime.current_thread_id.strip(),
             message_id=message_id,
-            current_chat_mode="all",
         )
-
-    @staticmethod
-    def _write_denied_text(owner_label: str) -> str:
-        return f"当前线程正由{owner_label}执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。"
-
-    @classmethod
-    def _interaction_denied_text(cls, lease: InteractionLease | None) -> str:
-        owner_label = "另一终端"
-        if lease is not None and lease.holder.kind == "feishu":
-            owner_label = "另一飞书会话"
-        return cls._write_denied_text(owner_label)
-
-    def _prompt_write_denial_text(
-        self,
-        binding: ChatBindingKey,
-        chat_id: str,
-        thread_id: str,
-        *,
-        message_id: str = "",
-        current_chat_mode: str | None = None,
-    ) -> str:
-        sharing_violation = self._thread_sharing_policy_violation(
-            chat_id,
-            thread_id,
-            message_id=message_id,
-            current_chat_mode=current_chat_mode,
-        )
-        if sharing_violation:
-            return sharing_violation
-        with self._lock:
-            interaction_lease = self._current_interaction_lease_locked(thread_id)
-            if interaction_lease is not None and not interaction_lease.holder.same_holder(
-                self._feishu_interaction_holder(binding)
-            ):
-                return self._interaction_denied_text(interaction_lease)
-            write_owner = self._thread_lease_registry.lease_owner(thread_id)
-            if write_owner is not None and write_owner != binding:
-                return self._write_denied_text("另一飞书会话")
-        return ""
 
     def _chat_binding_key(self, sender_id: str, chat_id: str, message_id: str = "") -> ChatBindingKey:
         with self._lock:
@@ -1608,17 +1532,11 @@ class CodexHandler(BotHandler):
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
             return
-        notifications: list[str] = []
         with self._lock:
-            for binding in self._thread_lease_registry.subscribers(normalized_thread_id):
-                if binding == owner_binding:
-                    continue
-                state = self._runtime_state_by_binding.get(binding)
-                if state is None or not state["active"]:
-                    continue
-                if str(state["current_thread_id"] or "").strip() != normalized_thread_id:
-                    continue
-                notifications.append(binding[1])
+            notifications = self._binding_runtime.active_chat_ids_for_thread_locked(
+                normalized_thread_id,
+                exclude_binding=owner_binding,
+            )
         if not notifications:
             return
         message = f"线程 `{normalized_thread_id[:8]}…` 的上一轮执行已结束；本会话现在可继续提问。"
@@ -1875,7 +1793,7 @@ class CodexHandler(BotHandler):
         refresh_session_message_id: str = "",
     ) -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
-        sharing_violation = self._thread_sharing_policy_violation(
+        sharing_violation = self._thread_access_policy.thread_sharing_policy_violation(
             chat_id,
             thread_id,
             message_id=message_id,

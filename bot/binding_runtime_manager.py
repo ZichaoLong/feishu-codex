@@ -48,6 +48,17 @@ class ReleaseFeishuRuntimeResult:
     unsubscribe_thread_id: str = ""
 
 
+@dataclass(frozen=True)
+class BindingRuntimeSnapshot:
+    binding: ChatBindingKey
+    active: bool
+    thread_id: str
+    thread_title: str
+    working_dir: str
+    feishu_runtime_state: str
+    has_inflight_turn: bool
+
+
 class BindingRuntimeManager:
     def __init__(
         self,
@@ -76,10 +87,6 @@ class BindingRuntimeManager:
         self._interaction_lease_store = interaction_lease_store
         self._is_group_chat = is_group_chat
         self._runtime_state_by_binding: dict[ChatBindingKey, MutableMapping[str, Any]] = {}
-
-    @property
-    def runtime_state_by_binding(self) -> dict[ChatBindingKey, MutableMapping[str, Any]]:
-        return self._runtime_state_by_binding
 
     @staticmethod
     def apply_runtime_state_message_locked(
@@ -421,6 +428,33 @@ class BindingRuntimeManager:
             return thread_id
         return ""
 
+    def visit_runtime_states_locked(self, visitor: Callable[[MutableMapping[str, Any]], None]) -> None:
+        for state in list(self._runtime_state_by_binding.values()):
+            visitor(state)
+
+    def binding_keys_locked(self) -> tuple[ChatBindingKey, ...]:
+        return tuple(sorted(self._runtime_state_by_binding))
+
+    def binding_keys_for_chat_locked(self, chat_id: str) -> tuple[ChatBindingKey, ...]:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return ()
+        return tuple(sorted(binding for binding in self._runtime_state_by_binding if binding[1] == normalized_chat_id))
+
+    def binding_runtime_snapshot_locked(self, binding: ChatBindingKey) -> BindingRuntimeSnapshot | None:
+        state = self._runtime_state_by_binding.get(binding)
+        if state is None:
+            return None
+        return BindingRuntimeSnapshot(
+            binding=binding,
+            active=bool(state["active"]),
+            thread_id=str(state["current_thread_id"] or "").strip(),
+            thread_title=str(state["current_thread_title"] or "").strip(),
+            working_dir=str(state["working_dir"] or "").strip(),
+            feishu_runtime_state=str(state["current_thread_runtime_state"] or "").strip(),
+            has_inflight_turn=self.binding_has_inflight_turn_locked(state),
+        )
+
     def bind_thread_locked(
         self,
         binding: ChatBindingKey,
@@ -503,6 +537,27 @@ class BindingRuntimeManager:
                 and str(state["current_thread_runtime_state"] or "").strip() == "attached"
             )
         )
+
+    def active_chat_ids_for_thread_locked(
+        self,
+        thread_id: str,
+        *,
+        exclude_binding: ChatBindingKey | None = None,
+    ) -> list[str]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return []
+        chat_ids: set[str] = set()
+        for binding in self.thread_subscribers(normalized_thread_id):
+            if exclude_binding is not None and binding == exclude_binding:
+                continue
+            state = self._runtime_state_by_binding.get(binding)
+            if state is None or not bool(state["active"]):
+                continue
+            if str(state["current_thread_id"] or "").strip() != normalized_thread_id:
+                continue
+            chat_ids.add(binding[1])
+        return sorted(chat_ids)
 
     def interaction_owner_snapshot_locked(
         self,

@@ -10,6 +10,7 @@ from bot.runtime_state import ThreadStateChanged
 from bot.runtime_view import build_runtime_view
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import InteractionLeaseStore
+from bot.thread_access_policy import ThreadAccessPolicy
 from bot.thread_lease_registry import ThreadLeaseRegistry
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
@@ -44,10 +45,9 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             is_group_chat=lambda chat_id, message_id: False,
         )
         turn_execution = TurnExecutionCoordinator()
-        runtime_state_by_binding = binding_runtime.runtime_state_by_binding
         binding = ("ou_user", "c1")
-        state = binding_runtime.build_default_runtime_state()
-        runtime_state_by_binding[binding] = state
+        with lock:
+            state = binding_runtime.get_or_create_runtime_state_locked(binding)
 
         replies: list[tuple[str, str, str, bool]] = []
         create_thread_calls: list[dict] = []
@@ -91,26 +91,35 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         }
         start_turn_behavior = {"value": {"turnId": "turn-1"}}
         interrupt_behavior = {"exc": None}
+        access_policy = ThreadAccessPolicy(
+            lock=lock,
+            is_group_chat=lambda chat_id, message_id: False,
+            group_mode_for_chat=lambda chat_id: "assistant",
+            thread_subscribers_locked=binding_runtime.thread_subscribers,
+            current_interaction_lease_locked=binding_runtime.current_interaction_lease_locked,
+            feishu_interaction_holder=binding_runtime.feishu_interaction_holder,
+            thread_write_owner_locked=binding_runtime.thread_write_owner,
+        )
 
         def _resolve_runtime_binding(sender_id: str, chat_id: str, message_id: str = "") -> ResolvedRuntimeBinding:
-            return ResolvedRuntimeBinding(binding=binding, state=runtime_state_by_binding[binding])
+            return ResolvedRuntimeBinding(binding=binding, state=state)
 
         def _get_runtime_state(sender_id: str, chat_id: str, message_id: str = ""):
-            return runtime_state_by_binding[binding]
+            return state
 
         def _get_runtime_view(sender_id: str, chat_id: str, message_id: str = ""):
             with lock:
-                return build_runtime_view(runtime_state_by_binding[binding])
+                return build_runtime_view(state)
 
         def _bind_thread(sender_id: str, chat_id: str, thread: ThreadSummary, *, message_id: str = "") -> None:
             del sender_id, chat_id, message_id
             with lock:
                 binding_runtime.bind_thread_locked(
                     binding,
-                    runtime_state_by_binding[binding],
+                    state,
                     thread_id=thread.thread_id,
                     thread_title=thread.title,
-                    working_dir=thread.cwd or runtime_state_by_binding[binding]["working_dir"],
+                    working_dir=thread.cwd or state["working_dir"],
                     on_after_bind=turn_execution.clear_plan_state_locked,
                 )
 
@@ -119,7 +128,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             with lock:
                 binding_runtime.clear_thread_binding_locked(
                     binding,
-                    runtime_state_by_binding[binding],
+                    state,
                     on_clear_state=lambda current_state: (
                         turn_execution.reset_execution_context_locked(current_state, clear_card_message=True),
                         turn_execution.clear_plan_state_locked(current_state),
@@ -172,9 +181,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             effective_default_profile=lambda: "",
             message_reply_in_thread=lambda message_id: message_id.startswith("thread-"),
             group_actor_open_id=lambda message_id: "ou_actor" if message_id else "",
-            prompt_write_denial_text=lambda binding_key, chat_id, thread_id, **kwargs: "",
-            thread_sharing_policy_violation=lambda chat_id, thread_id, **kwargs: "",
-            interaction_denied_text=lambda lease: f"interaction denied: {lease}",
+            access_policy=access_policy,
             acquire_interaction_lease_for_binding=binding_runtime.acquire_interaction_lease_for_binding,
             release_interaction_lease_for_binding=binding_runtime.release_interaction_lease_for_binding,
             acquire_thread_write_lease_locked=binding_runtime.acquire_thread_write_lease_locked,

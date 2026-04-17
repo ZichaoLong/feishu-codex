@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable, MutableMapping, TypeAlias
+from typing import Any, Callable, MutableMapping, Protocol, TypeAlias
 
 from bot.adapters.base import ThreadSnapshot, ThreadSummary
 from bot.cards import build_markdown_card
@@ -17,6 +17,29 @@ logger = logging.getLogger(__name__)
 
 ChatBindingKey: TypeAlias = tuple[str, str]
 RuntimeState: TypeAlias = MutableMapping[str, Any]
+
+
+class _ThreadAccessPolicy(Protocol):
+    def prompt_write_denial_text(
+        self,
+        binding: ChatBindingKey,
+        chat_id: str,
+        thread_id: str,
+        *,
+        message_id: str = "",
+        current_chat_mode: str | None = None,
+    ) -> str: ...
+
+    def thread_sharing_policy_violation(
+        self,
+        chat_id: str,
+        thread_id: str,
+        *,
+        message_id: str = "",
+        current_chat_mode: str | None = None,
+    ) -> str: ...
+
+    def interaction_denied_text(self, lease: Any) -> str: ...
 
 
 class PromptTurnEntryController:
@@ -35,9 +58,7 @@ class PromptTurnEntryController:
         effective_default_profile: Callable[[], str],
         message_reply_in_thread: Callable[[str], bool],
         group_actor_open_id: Callable[[str], str],
-        prompt_write_denial_text: Callable[..., str],
-        thread_sharing_policy_violation: Callable[..., str],
-        interaction_denied_text: Callable[[Any], str],
+        access_policy: _ThreadAccessPolicy,
         acquire_interaction_lease_for_binding: Callable[[ChatBindingKey, str], Any],
         release_interaction_lease_for_binding: Callable[[ChatBindingKey, str], bool],
         acquire_thread_write_lease_locked: Callable[[ChatBindingKey, str], Any],
@@ -79,9 +100,7 @@ class PromptTurnEntryController:
         self._effective_default_profile = effective_default_profile
         self._message_reply_in_thread = message_reply_in_thread
         self._group_actor_open_id = group_actor_open_id
-        self._prompt_write_denial_text = prompt_write_denial_text
-        self._thread_sharing_policy_violation = thread_sharing_policy_violation
-        self._interaction_denied_text = interaction_denied_text
+        self._access_policy = access_policy
         self._acquire_interaction_lease_for_binding = acquire_interaction_lease_for_binding
         self._release_interaction_lease_for_binding = release_interaction_lease_for_binding
         self._acquire_thread_write_lease_locked = acquire_thread_write_lease_locked
@@ -131,7 +150,7 @@ class PromptTurnEntryController:
         thread_id = runtime.current_thread_id.strip()
         if not thread_id:
             return True
-        denial_text = self._prompt_write_denial_text(
+        denial_text = self._access_policy.prompt_write_denial_text(
             resolved.binding,
             chat_id,
             thread_id,
@@ -249,7 +268,7 @@ class PromptTurnEntryController:
         released_thread_id = runtime.current_thread_id.strip()
         preattached_interaction_lease = None
         if released_thread_id and not runtime.binding.feishu_runtime_attached:
-            denial_text = self._prompt_write_denial_text(
+            denial_text = self._access_policy.prompt_write_denial_text(
                 chat_binding_key,
                 chat_id,
                 released_thread_id,
@@ -271,7 +290,7 @@ class PromptTurnEntryController:
             if not preattached_interaction_lease.granted:
                 self._reply_text(
                     chat_id,
-                    self._interaction_denied_text(preattached_interaction_lease.lease),
+                    self._access_policy.interaction_denied_text(preattached_interaction_lease.lease),
                     message_id=message_id,
                     reply_in_thread=self._message_reply_in_thread(message_id),
                 )
@@ -290,7 +309,7 @@ class PromptTurnEntryController:
             )
             return
 
-        sharing_violation = self._thread_sharing_policy_violation(
+        sharing_violation = self._access_policy.thread_sharing_policy_violation(
             chat_id,
             thread_id,
             message_id=message_id,
@@ -317,7 +336,7 @@ class PromptTurnEntryController:
         if not interaction_lease.granted:
             self._reply_text(
                 chat_id,
-                self._interaction_denied_text(interaction_lease.lease),
+                self._access_policy.interaction_denied_text(interaction_lease.lease),
                 message_id=message_id,
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )

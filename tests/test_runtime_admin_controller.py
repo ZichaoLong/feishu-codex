@@ -33,7 +33,6 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             interaction_lease_store=InteractionLeaseStore(data_dir),
             is_group_chat=lambda chat_id, message_id: False,
         )
-        runtime_state_by_binding = binding_runtime.runtime_state_by_binding
         unsubscribed: list[str] = []
         pending_by_thread: set[str] = set()
         pending_by_binding: set[tuple[str, str]] = set()
@@ -50,7 +49,6 @@ class RuntimeAdminControllerTests(unittest.TestCase):
                 thread_has_pending_request_locked=lambda thread_id: thread_id in pending_by_thread,
                 binding_has_pending_request_locked=lambda binding: binding in pending_by_binding,
             ),
-            runtime_state_by_binding=runtime_state_by_binding,
             clear_all_stored_bindings=chat_binding_store.clear_all,
             deactivate_binding_locked=lambda binding: binding_runtime.deactivate_binding_locked(binding),
             read_thread=_read_thread,
@@ -81,7 +79,6 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         return (
             lock,
             binding_runtime,
-            runtime_state_by_binding,
             controller,
             summaries,
             loaded_thread_ids,
@@ -90,10 +87,9 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             pending_by_binding,
         )
 
-    def _bind_thread(self, lock, binding_runtime, binding, runtime_state_by_binding, *, thread_id: str) -> None:
-        state = binding_runtime.build_default_runtime_state()
-        runtime_state_by_binding[binding] = state
+    def _bind_thread(self, lock, binding_runtime, binding, *, thread_id: str):
         with lock:
+            state = binding_runtime.get_or_create_runtime_state_locked(binding)
             binding_runtime.bind_thread_locked(
                 binding,
                 state,
@@ -101,12 +97,12 @@ class RuntimeAdminControllerTests(unittest.TestCase):
                 thread_title="demo",
                 working_dir="/tmp/project",
             )
+        return state
 
     def test_release_feishu_runtime_availability_locked_blocks_on_pending_request(self) -> None:
         (
             lock,
             binding_runtime,
-            runtime_state_by_binding,
             controller,
             summaries,
             *_,
@@ -114,7 +110,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             _pending_by_binding,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
-        self._bind_thread(lock, binding_runtime, binding, runtime_state_by_binding, thread_id="thread-1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
         summaries["thread-1"] = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -136,7 +132,6 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         (
             lock,
             binding_runtime,
-            runtime_state_by_binding,
             controller,
             summaries,
             _loaded_thread_ids,
@@ -144,7 +139,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             *_,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
-        self._bind_thread(lock, binding_runtime, binding, runtime_state_by_binding, thread_id="thread-1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
         summaries["thread-1"] = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -160,14 +155,16 @@ class RuntimeAdminControllerTests(unittest.TestCase):
 
         self.assertTrue(result["changed"])
         self.assertEqual(result["released_binding_ids"], ["p2p:ou_user:c1"])
-        self.assertEqual(runtime_state_by_binding[binding]["current_thread_runtime_state"], "released")
+        with lock:
+            snapshot = binding_runtime.binding_runtime_snapshot_locked(binding)
+        assert snapshot is not None
+        self.assertEqual(snapshot.feishu_runtime_state, "released")
         self.assertEqual(unsubscribed, ["thread-1"])
 
     def test_handle_service_control_request_service_status_aggregates_runtime_inventory(self) -> None:
         (
             lock,
             binding_runtime,
-            runtime_state_by_binding,
             controller,
             summaries,
             loaded_thread_ids,
@@ -175,8 +172,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             *_,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
-        self._bind_thread(lock, binding_runtime, binding, runtime_state_by_binding, thread_id="thread-1")
-        runtime_state_by_binding[binding]["running"] = True
+        state = self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        state["running"] = True
         summaries["thread-1"] = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -203,7 +200,6 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         (
             lock,
             binding_runtime,
-            runtime_state_by_binding,
             controller,
             summaries,
             _loaded_thread_ids,
@@ -212,7 +208,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             pending_by_binding,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
-        self._bind_thread(lock, binding_runtime, binding, runtime_state_by_binding, thread_id="thread-1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
         summaries["thread-1"] = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -235,7 +231,6 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         (
             lock,
             binding_runtime,
-            runtime_state_by_binding,
             controller,
             summaries,
             _loaded_thread_ids,
@@ -244,13 +239,13 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         ) = self._make_controller()
         binding_a = ("ou_user", "c1")
         binding_b = ("ou_user2", "c2")
-        self._bind_thread(lock, binding_runtime, binding_a, runtime_state_by_binding, thread_id="thread-1")
-        self._bind_thread(lock, binding_runtime, binding_b, runtime_state_by_binding, thread_id="thread-1")
+        self._bind_thread(lock, binding_runtime, binding_a, thread_id="thread-1")
+        state_b = self._bind_thread(lock, binding_runtime, binding_b, thread_id="thread-1")
         with lock:
             binding_runtime.unsubscribe_thread_locked(binding_b, "thread-1")
             binding_runtime.apply_persisted_runtime_state_message_locked(
                 binding_b,
-                runtime_state_by_binding[binding_b],
+                state_b,
                 ThreadStateChanged(current_thread_runtime_state="released"),
             )
         summaries["thread-1"] = ThreadSummary(

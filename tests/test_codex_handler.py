@@ -410,6 +410,11 @@ class CodexHandlerTests(unittest.TestCase):
             element for element in card["elements"] if isinstance(element, dict) and element.get("tag") == "action"
         ]
 
+    @staticmethod
+    def _binding_keys(handler: CodexHandler) -> tuple[tuple[str, str], ...]:
+        with handler._lock:
+            return handler._binding_runtime.binding_keys_locked()
+
     def _make_handler(
         self,
         cfg: dict | None = None,
@@ -934,7 +939,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler2._get_runtime_state("ou_user2", "chat-group", "m-status")
 
         self.assertEqual(state["current_thread_id"], "thread-group")
-        self.assertIn(("__group__", "chat-group"), handler2._runtime_state_by_binding)
+        self.assertIn(("__group__", "chat-group"), self._binding_keys(handler2))
 
         bot2.message_contexts["m-prompt"] = {"chat_type": "group", "sender_open_id": "ou_user2"}
         handler2.handle_message("ou_user2", "chat-group", "第二轮", message_id="m-prompt")
@@ -1396,7 +1401,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_chat_unavailable("chat-group", reason="disbanded")
 
-        self.assertNotIn(("__group__", "chat-group"), handler._runtime_state_by_binding)
+        self.assertNotIn(("__group__", "chat-group"), self._binding_keys(handler))
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
 
         handler2, _ = self._make_handler(data_dir=data_dir)
@@ -2061,8 +2066,8 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "chat-group", "/status", message_id="m-status")
 
-        self.assertIn(("__group__", "chat-group"), handler._runtime_state_by_binding)
-        self.assertNotIn(("ou_user", "chat-group"), handler._runtime_state_by_binding)
+        self.assertIn(("__group__", "chat-group"), self._binding_keys(handler))
+        self.assertNotIn(("ou_user", "chat-group"), self._binding_keys(handler))
         self.assertIs(handler._get_runtime_state("ou_user", "chat-group"), handler._get_runtime_state("ou_user2", "chat-group"))
 
     def test_group_settings_card_action_uses_shared_chat_binding_key(self) -> None:
@@ -2079,8 +2084,8 @@ class CodexHandlerTests(unittest.TestCase):
         )
 
         self.assertEqual(handler._get_runtime_state("ou_user", "chat-group", "m-group")["collaboration_mode"], "plan")
-        self.assertIn(("__group__", "chat-group"), handler._runtime_state_by_binding)
-        self.assertNotIn(("ou_user", "chat-group"), handler._runtime_state_by_binding)
+        self.assertIn(("__group__", "chat-group"), self._binding_keys(handler))
+        self.assertNotIn(("ou_user", "chat-group"), self._binding_keys(handler))
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("plan", response["toast"])
 
@@ -2615,7 +2620,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertTrue(result["cleared"])
         self.assertEqual(result["binding_id"], "p2p:ou_user:c1")
-        self.assertNotIn(("ou_user", "c1"), handler._runtime_state_by_binding)
+        self.assertNotIn(("ou_user", "c1"), self._binding_keys(handler))
         self.assertEqual(handler._thread_subscribers("thread-1"), ())
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
         self.assertIsNone(handler._chat_binding_store.load(("ou_user", "c1")))
@@ -2657,7 +2662,7 @@ class CodexHandlerTests(unittest.TestCase):
             result["cleared_binding_ids"],
             ["group:chat-group", "p2p:ou_user:c1"],
         )
-        self.assertEqual(handler._runtime_state_by_binding, {})
+        self.assertEqual(self._binding_keys(handler), ())
         self.assertEqual(sorted(handler._adapter.unsubscribe_thread_calls), ["thread-a", "thread-b"])
         self.assertEqual(handler._chat_binding_store.load_all(), {})
 
@@ -2697,7 +2702,7 @@ class CodexHandlerTests(unittest.TestCase):
         with self.assertRaisesRegex(ServiceControlError, "不能清除 binding"):
             control_request(data_dir, "binding/clear", {"binding_id": "p2p:ou_user:c1"})
 
-        self.assertIn(("ou_user", "c1"), handler._runtime_state_by_binding)
+        self.assertIn(("ou_user", "c1"), self._binding_keys(handler))
 
     def test_service_control_plane_release_runtime_name_target_resolves_explicit_exact_name(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
