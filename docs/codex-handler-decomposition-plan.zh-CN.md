@@ -89,6 +89,7 @@
   - `ExecutionOutputController` 负责执行卡片与 follow-up 发布
   - `ExecutionRecoveryController` 负责 watchdog、快照对账、终态补账、降级判定
   - `InteractionRequestController` 负责审批 / ask-user request 生命周期
+  - `AdapterNotificationController` 负责 adapter notification 的语义解释与事件分发
 - `CodexHandler` 仍未完全收成编排器，但已不再直接拥有上述三类实现细节
 
 ## 7. 第一阶段：BindingRuntimeManager
@@ -196,6 +197,10 @@
   - pending ask-user request
   - request fail-close / resolved 收口
   - request card send / patch 驱动
+- `AdapterNotificationController`
+  - adapter notification method -> handler 路由
+  - thread / turn / item 类通知的语义解释
+  - 将通知编排到 execution / output / recovery / request 组件
 
 ### 8.3 与 BindingRuntimeManager 的边界
 
@@ -224,8 +229,8 @@
 
 当前已完成到第 3 步和第 4 步中的大部分执行状态路径，但 `CodexHandler` 仍持有：
 
-- adapter notification 到具体 domain / controller 的分发编排
 - 非执行类 UI 与命令面 glue code
+- 顶层 runtime entrypoint 与 cross-domain orchestration
 
 ### 8.5 验收标准
 

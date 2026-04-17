@@ -21,6 +21,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummary
+from bot.adapter_notification_controller import AdapterNotificationController
 from bot.cards import (
     CommandResult,
     build_history_preview_card,
@@ -120,16 +121,6 @@ _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
         "sandbox": "danger-full-access",
     },
 }
-_WORK_ITEM_LABELS = {
-    "commandExecution": "命令执行",
-    "fileChange": "文件修改",
-    "imageGeneration": "图片生成",
-    "mcpToolCall": "MCP 工具调用",
-    "patchApply": "补丁应用",
-    "viewImageToolCall": "查看图片",
-    "webSearch": "网页搜索",
-}
-
 
 @dataclass(frozen=True)
 class _CommandRoute:
@@ -344,6 +335,30 @@ class CodexHandler(BotHandler):
                 error=error,
             ),
             patch_message=lambda message_id, content: self.bot.patch_message(message_id, content),
+        )
+        self._adapter_notifications = AdapterNotificationController(
+            lock=self._lock,
+            turn_execution=self._turn_execution,
+            execution_binding_for_thread=lambda thread_id, adopt_sole_subscriber: self._execution_binding_for_thread(
+                thread_id,
+                adopt_sole_subscriber=adopt_sole_subscriber,
+            ),
+            thread_subscribers=self._thread_subscribers,
+            thread_write_owner=self._thread_write_owner,
+            get_runtime_state=lambda sender_id, chat_id: self._get_runtime_state(sender_id, chat_id),
+            note_runtime_event=self._note_runtime_event,
+            apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
+            apply_persisted_runtime_state_message_locked=self._apply_persisted_runtime_state_message_locked,
+            cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
+            finalize_execution_from_terminal_signal=self._finalize_execution_from_terminal_signal,
+            patch_execution_card_message=self._patch_execution_card_message,
+            send_execution_card=self._send_execution_card,
+            schedule_mirror_watchdog=self._schedule_mirror_watchdog,
+            schedule_execution_card_update=self._schedule_execution_card_update,
+            flush_execution_card=self._flush_execution_card,
+            flush_plan_card=self._flush_plan_card,
+            interrupt_running_turn=self._interrupt_running_turn,
+            on_server_request_resolved=self._interaction_requests.handle_server_request_resolved,
         )
         self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = self._binding_runtime.runtime_state_by_binding
         self._hydrate_stored_bindings()
@@ -2898,42 +2913,7 @@ class CodexHandler(BotHandler):
         self._runtime_submit(self._handle_adapter_notification_impl, method, params)
 
     def _handle_adapter_notification_impl(self, method: str, params: dict[str, Any]) -> None:
-        if method == "thread/status/changed":
-            self._handle_thread_status_changed(params)
-            return
-        if method == "thread/closed":
-            self._handle_thread_closed(params)
-            return
-        if method == "thread/name/updated":
-            self._handle_thread_name_updated(params)
-            return
-        if method == "turn/started":
-            self._handle_turn_started(params)
-            return
-        if method == "turn/plan/updated":
-            self._handle_turn_plan_updated(params)
-            return
-        if method == "item/started":
-            self._handle_item_started(params)
-            return
-        if method == "item/agentMessage/delta":
-            self._handle_agent_message_delta(params)
-            return
-        if method == "item/commandExecution/outputDelta":
-            self._handle_command_delta(params)
-            return
-        if method == "item/fileChange/outputDelta":
-            self._handle_file_change_delta(params)
-            return
-        if method == "item/completed":
-            self._handle_item_completed(params)
-            return
-        if method == "turn/completed":
-            self._handle_turn_completed(params)
-            return
-        if method == "serverRequest/resolved":
-            self._handle_server_request_resolved(params)
-            return
+        self._adapter_notifications.handle_notification(method, params)
 
     def _handle_adapter_request(self, request_id: int | str, method: str, params: dict[str, Any]) -> None:
         self._runtime_submit(self._handle_adapter_request_impl, request_id, method, params)
@@ -2950,309 +2930,37 @@ class CodexHandler(BotHandler):
         self._interaction_requests.auto_reject_request(request_id, method, params)
 
     def _handle_thread_status_changed(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if not binding:
-            return
-        state = self._get_runtime_state(*binding)
-        status = params.get("status") or {}
-        status_type = status.get("type")
-        self._note_runtime_event(*binding)
-        with self._lock:
-            current_turn_id = state["current_turn_id"]
-            current_message_id = state["current_message_id"]
-            if status_type == "active":
-                self._turn_execution.acknowledge_active_thread_locked(state)
-        if status_type != "active" and (current_turn_id or current_message_id):
-            self._finalize_execution_from_terminal_signal(
-                binding[0],
-                binding[1],
-                thread_id=thread_id,
-                turn_id=current_turn_id,
-            )
-            return
-        if status_type == "active":
-            self._schedule_execution_card_update(*binding)
-            return
-        with self._lock:
-            self._turn_execution.settle_non_active_thread_locked(state)
-            self._cancel_mirror_watchdog_locked(state)
-        self._flush_execution_card(*binding, immediate=True)
+        self._adapter_notifications.handle_thread_status_changed(params)
 
     def _handle_thread_closed(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if not binding:
-            return
-        self._note_runtime_event(*binding)
-        state = self._get_runtime_state(*binding)
-        with self._lock:
-            current_turn_id = state["current_turn_id"]
-            current_message_id = state["current_message_id"]
-            is_running = state["running"]
-        if is_running or current_turn_id or current_message_id:
-            self._finalize_execution_from_terminal_signal(
-                binding[0],
-                binding[1],
-                thread_id=thread_id,
-                turn_id=current_turn_id,
-            )
-            return
-        with self._lock:
-            self._turn_execution.settle_thread_closed_locked(state)
-            self._cancel_mirror_watchdog_locked(state)
+        self._adapter_notifications.handle_thread_closed(params)
 
     def _handle_thread_name_updated(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        bindings = self._thread_subscribers(thread_id)
-        if not bindings:
-            return
-        new_title = str(params.get("threadName") or "").strip()
-        execution_binding = self._thread_write_owner(thread_id)
-        if execution_binding is not None:
-            self._note_runtime_event(*execution_binding)
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            with self._lock:
-                if state["current_thread_id"] != thread_id:
-                    continue
-                resolved_title = new_title or state["current_thread_title"]
-                self._apply_persisted_runtime_state_message_locked(
-                    binding,
-                    state,
-                    ThreadStateChanged(current_thread_title=resolved_title),
-                )
+        self._adapter_notifications.handle_thread_name_updated(params)
 
     def _handle_turn_started(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if not binding:
-            return
-        self._note_runtime_event(*binding)
-        state = self._get_runtime_state(*binding)
-        turn = params.get("turn") or {}
-        turn_id = turn.get("id", "")
-        with self._lock:
-            transition = self._turn_execution.prepare_turn_started_locked(
-                state,
-                turn_id=turn_id,
-                started_at=time.monotonic(),
-            )
-            self._clear_plan_state(state)
-        if not transition.reuse_existing_card:
-            if transition.previous_execution_card is not None:
-                self._patch_execution_card_message(
-                    transition.previous_execution_card.message_id,
-                    transcript=transition.previous_execution_card.transcript,
-                    running=False,
-                    elapsed=transition.previous_execution_card.elapsed,
-                    cancelled=transition.previous_execution_card.cancelled,
-                )
-            card_id = self._send_execution_card(binding[1], "")
-            with self._lock:
-                if state["current_turn_id"] == turn_id:
-                    self._apply_runtime_state_message_locked(
-                        state,
-                        ExecutionStateChanged(
-                            current_message_id=card_id or "",
-                            last_execution_message_id="",
-                        ),
-                    )
-        if transition.should_interrupt_started_turn:
-            try:
-                self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
-            except Exception:
-                logger.exception("turn 启动后自动取消失败")
-            else:
-                with self._lock:
-                    self._apply_runtime_state_message_locked(
-                        state,
-                        ExecutionStateChanged(pending_cancel=False),
-                    )
-        self._schedule_mirror_watchdog(*binding)
-        self._schedule_execution_card_update(*binding)
+        self._adapter_notifications.handle_turn_started(params)
 
     def _handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if not binding:
-            return
-        self._note_runtime_event(*binding)
-        state = self._get_runtime_state(*binding)
-        turn_id = params.get("turnId", "")
-        plan = params.get("plan") or []
-        explanation = params.get("explanation") or ""
-        with self._lock:
-            if not self._turn_execution.update_plan_outline_locked(
-                state,
-                turn_id=turn_id,
-                explanation=explanation,
-                plan=plan,
-            ):
-                return
-        self._flush_plan_card(*binding)
+        self._adapter_notifications.handle_turn_plan_updated(params)
 
     def _handle_item_started(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if binding:
-            self._note_runtime_event(*binding)
-        item = params.get("item") or {}
-        item_type = str(item.get("type", "") or "").strip()
-        if not binding:
-            return
-        state = self._get_runtime_state(*binding)
-        if item_type == "commandExecution":
-            command = item.get("command") or ""
-            cwd = item.get("cwd") or ""
-            with self._lock:
-                self._turn_execution.start_process_block_locked(
-                    state,
-                    text=f"\n$ ({display_path(cwd)}) {command}\n",
-                    marks_work=True,
-                )
-            self._schedule_execution_card_update(*binding)
-        elif item_type == "fileChange":
-            with self._lock:
-                self._turn_execution.start_process_block_locked(
-                    state,
-                    text="\n[准备应用文件修改]\n",
-                    marks_work=True,
-                )
-            self._schedule_execution_card_update(*binding)
-        elif item_type in _WORK_ITEM_LABELS:
-            with self._lock:
-                self._turn_execution.append_process_note_locked(
-                    state,
-                    text=f"\n[{_WORK_ITEM_LABELS[item_type]}]\n",
-                    marks_work=True,
-                )
-            self._schedule_execution_card_update(*binding)
+        self._adapter_notifications.handle_item_started(params)
 
     def _handle_agent_message_delta(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if not binding:
-            return
-        self._note_runtime_event(*binding)
-        state = self._get_runtime_state(*binding)
-        with self._lock:
-            self._turn_execution.append_assistant_delta_locked(
-                state,
-                delta=str(params.get("delta", "") or ""),
-            )
-        self._schedule_execution_card_update(*binding)
+        self._adapter_notifications.handle_agent_message_delta(params)
 
     def _handle_command_delta(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if binding:
-            self._note_runtime_event(*binding)
-        self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""))
+        self._adapter_notifications.handle_command_delta(params)
 
     def _handle_file_change_delta(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if binding:
-            self._note_runtime_event(*binding)
-        self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""))
+        self._adapter_notifications.handle_file_change_delta(params)
 
     def _handle_item_completed(self, params: dict[str, Any]) -> None:
-        item = params.get("item") or {}
-        item_type = str(item.get("type", "") or "").strip()
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if binding:
-            self._note_runtime_event(*binding)
-        if item_type == "commandExecution":
-            exit_code = item.get("exitCode")
-            status = item.get("status")
-            state = self._get_runtime_state(*binding) if binding else None
-            if state is not None:
-                with self._lock:
-                    self._turn_execution.finish_process_block_locked(
-                        state,
-                        suffix=f"\n[命令结束 status={status} exit={exit_code}]\n",
-                    )
-                self._schedule_execution_card_update(*binding)
-        elif item_type == "fileChange":
-            changes = item.get("changes") or []
-            state = self._get_runtime_state(*binding) if binding else None
-            if state is not None:
-                suffix = ""
-                if changes:
-                    summary = "\n".join(
-                        f"- {change.get('kind', 'update')}: {change.get('path', '')}"
-                        for change in changes[:20]
-                    )
-                    suffix = f"\n[文件变更]\n{summary}\n"
-                with self._lock:
-                    self._turn_execution.finish_process_block_locked(state, suffix=suffix)
-                self._schedule_execution_card_update(*binding)
-        elif item_type == "agentMessage" and item.get("text"):
-            binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-            if not binding:
-                return
-            state = self._get_runtime_state(*binding)
-            with self._lock:
-                self._turn_execution.reconcile_current_assistant_text_locked(
-                    state,
-                    text=str(item["text"] or ""),
-                )
-            self._schedule_execution_card_update(*binding)
-        elif item_type in _WORK_ITEM_LABELS:
-            state = self._get_runtime_state(*binding) if binding else None
-            if state is not None:
-                with self._lock:
-                    self._turn_execution.finish_process_block_locked(state)
-                self._schedule_execution_card_update(*binding)
-        elif item_type == "plan" and item.get("text"):
-            binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-            if not binding:
-                return
-            state = self._get_runtime_state(*binding)
-            turn_id = params.get("turnId", "")
-            with self._lock:
-                if not self._turn_execution.update_plan_text_locked(
-                    state,
-                    turn_id=turn_id,
-                    text=item["text"],
-                ):
-                    return
-            self._flush_plan_card(*binding)
+        self._adapter_notifications.handle_item_completed(params)
 
     def _handle_turn_completed(self, params: dict[str, Any]) -> None:
-        thread_id = params.get("threadId", "")
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if not binding:
-            return
-        self._note_runtime_event(*binding)
-        state = self._get_runtime_state(*binding)
-        turn = params.get("turn") or {}
-        error = turn.get("error") or {}
-        status = turn.get("status")
-        turn_id = str(turn.get("id", "") or "").strip()
-        with self._lock:
-            self._turn_execution.apply_turn_completed_locked(
-                state,
-                status=str(status or "").strip(),
-                error_message=str(error.get("message") or "执行失败").strip() if error else "",
-            )
-        self._finalize_execution_from_terminal_signal(
-            binding[0],
-            binding[1],
-            thread_id=thread_id,
-            turn_id=turn_id or state["current_turn_id"],
-        )
-
-    def _append_log_by_thread(self, thread_id: str, text: str) -> None:
-        binding = self._execution_binding_for_thread(thread_id, adopt_sole_subscriber=True)
-        if not binding:
-            return
-        state = self._get_runtime_state(*binding)
-        with self._lock:
-            self._turn_execution.append_process_delta_locked(state, text=text)
-        self._schedule_execution_card_update(*binding)
+        self._adapter_notifications.handle_turn_completed(params)
 
     def _send_execution_card(
         self,

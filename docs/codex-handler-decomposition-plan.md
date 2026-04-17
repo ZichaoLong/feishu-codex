@@ -98,6 +98,8 @@ Current progress:
   - `ExecutionRecoveryController` owns watchdog, snapshot reconcile, terminal
     backfill, and degraded-channel marking
   - `InteractionRequestController` owns approval / ask-user request lifecycle
+  - `AdapterNotificationController` owns adapter-notification interpretation
+    and dispatch
 - `CodexHandler` is not yet a pure orchestrator, but it no longer directly
   owns those execution details
 
@@ -211,6 +213,11 @@ Phase 2 is now realized as three cooperating components that together own:
   - pending ask-user requests
   - request fail-close / resolved cleanup
   - request-card delivery / patch driving
+- `AdapterNotificationController`
+  - adapter notification method -> handler routing
+  - semantic interpretation of thread / turn / item notifications
+  - dispatch from notifications into execution / output / recovery /
+    request components
 
 ### 8.3 Boundary With BindingRuntimeManager
 
@@ -241,8 +248,8 @@ Recommended order:
 Current status: most of steps 3 and 4 are now extracted into dedicated
 execution components, but `CodexHandler` still owns:
 
-- adapter-notification dispatch orchestration
 - non-execution command/UI glue
+- top-level runtime entrypoints and cross-domain orchestration
 
 ### 8.5 Exit Criteria
 
