@@ -57,17 +57,16 @@ from bot.codex_session_ui_domain import CodexSessionUiDomain
 from bot.codex_settings_domain import CodexSettingsDomain
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
 from bot.execution_transcript import ExecutionTranscript
+from bot.execution_output_controller import ExecutionOutputController
 from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
 from bot.runtime_card_publisher import (
     RuntimeCardPublisher,
     build_execution_card_model,
-    build_plan_card_model,
 )
 from bot.runtime_state import (
     UNSET,
     BindingActivated,
     ExecutionStateChanged,
-    PlanStateChanged,
     RuntimeSettingsChanged,
     RuntimeStateMessage,
     ThreadStateChanged,
@@ -303,6 +302,20 @@ class CodexHandler(BotHandler):
             is_group_chat=self._is_group_chat,
         )
         self._turn_execution = TurnExecutionCoordinator()
+        self._execution_output = ExecutionOutputController(
+            lock=self._lock,
+            runtime_submit=self._runtime_submit,
+            turn_execution=self._turn_execution,
+            get_runtime_state=lambda sender_id, chat_id: self._get_runtime_state(sender_id, chat_id),
+            get_runtime_view=lambda sender_id, chat_id: self._get_runtime_view(sender_id, chat_id),
+            apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
+            cancel_patch_timer_locked=self._cancel_patch_timer_locked,
+            card_publisher_factory=self._runtime_card_publisher,
+            reply_text=self._reply_text,
+            card_reply_limit=lambda: self._card_reply_limit,
+            card_log_limit=lambda: self._card_log_limit,
+            stream_patch_interval_ms=lambda: self._stream_patch_interval_ms,
+        )
         self._runtime_state_by_binding: dict[ChatBindingKey, _RuntimeState] = self._binding_runtime.runtime_state_by_binding
         self._hydrate_stored_bindings()
         if self._adapter_config.app_server_mode == "remote":
@@ -886,22 +899,7 @@ class CodexHandler(BotHandler):
             self._sync_stored_binding_locked(resolved.binding, state)
 
     def _refresh_terminal_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            runtime = build_runtime_view(state)
-            message_id = runtime.execution.effective_message_id.strip()
-            if not message_id:
-                return False
-            transcript = runtime.execution.transcript
-            elapsed = int(max(0.0, time.monotonic() - runtime.execution.started_at)) if runtime.execution.started_at else 0
-            cancelled = runtime.execution.cancelled
-        return self._patch_execution_card_message(
-            message_id,
-            transcript=transcript,
-            running=False,
-            elapsed=elapsed,
-            cancelled=cancelled,
-        )
+        return self._execution_output.refresh_terminal_execution_card_from_state(sender_id, chat_id)
 
     def _capture_terminal_reconcile_target(
         self,
@@ -3740,7 +3738,7 @@ class CodexHandler(BotHandler):
         *,
         reply_in_thread: bool = False,
     ) -> str | None:
-        return self._runtime_card_publisher().send_execution_card(
+        return self._execution_output.send_execution_card(
             chat_id,
             parent_message_id,
             reply_in_thread=reply_in_thread,
@@ -3755,134 +3753,28 @@ class CodexHandler(BotHandler):
         elapsed: int,
         cancelled: bool,
     ) -> bool:
-        model = build_execution_card_model(
-            transcript,
-            running=running,
-            elapsed=elapsed,
-            cancelled=cancelled,
-            log_limit=self._card_log_limit,
-            reply_limit=self._card_reply_limit,
-        )
-        return self._runtime_card_publisher().patch_execution_card(message_id, model)
-
-    def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        message_id = state["current_message_id"]
-        if not message_id:
-            return
-        now = time.monotonic()
-        with self._lock:
-            last_patch = state["last_patch_at"]
-            timer = state["patch_timer"]
-            if now - last_patch >= self._stream_patch_interval_ms / 1000:
-                self._apply_runtime_state_message_locked(
-                    state,
-                    ExecutionStateChanged(last_patch_at=now),
-                )
-                self._cancel_patch_timer_locked(state)
-                immediate = True
-            elif timer is None:
-                delay = self._stream_patch_interval_ms / 1000 - (now - last_patch)
-                timer = threading.Timer(delay, self._submit_flush_execution_card, args=(sender_id, chat_id))
-                timer.daemon = True
-                self._apply_runtime_state_message_locked(
-                    state,
-                    ExecutionStateChanged(patch_timer=timer),
-                )
-                timer.start()
-                immediate = False
-            else:
-                immediate = False
-        if immediate:
-            self._flush_execution_card(sender_id, chat_id)
-
-    def _submit_flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
-        self._runtime_submit(self._flush_execution_card, sender_id, chat_id, immediate=immediate)
-
-    def _flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            self._cancel_patch_timer_locked(state)
-            self._apply_runtime_state_message_locked(
-                state,
-                ExecutionStateChanged(last_patch_at=time.monotonic()),
-            )
-            runtime = build_runtime_view(state)
-            message_id = runtime.execution.current_message_id
-            if not message_id:
-                return
-            transcript = runtime.execution.transcript
-            reply_text = transcript.reply_text()
-            running = runtime.execution.running
-            cancelled = runtime.execution.cancelled
-            prompt_message_id = runtime.execution.current_prompt_message_id.strip()
-            prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
-            elapsed = (
-                int(max(0.0, time.monotonic() - runtime.execution.started_at))
-                if runtime.execution.started_at
-                else 0
-            )
-
-        ok = self._patch_execution_card_message(
+        return self._execution_output.patch_execution_card_message(
             message_id,
             transcript=transcript,
             running=running,
             elapsed=elapsed,
             cancelled=cancelled,
         )
-        if not ok and immediate and reply_text:
-            with self._lock:
-                followup = self._turn_execution.prepare_patch_failure_followup_locked(state)
-            if followup is not None:
-                self._reply_text(
-                    chat_id,
-                    followup.reply_text,
-                    message_id=followup.prompt_message_id,
-                    reply_in_thread=followup.prompt_reply_in_thread,
-                )
+
+    def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
+        self._execution_output.schedule_execution_card_update(sender_id, chat_id)
+
+    def _submit_flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
+        self._execution_output.submit_flush_execution_card(sender_id, chat_id, immediate=immediate)
+
+    def _flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
+        self._execution_output.flush_execution_card(sender_id, chat_id, immediate=immediate)
 
     def _send_followup_if_needed(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            followup = self._turn_execution.prepare_terminal_followup_locked(
-                state,
-                card_reply_limit=self._card_reply_limit,
-            )
-        if followup is None:
-            return
-        self._reply_text(
-            chat_id,
-            followup.reply_text,
-            message_id=followup.prompt_message_id,
-            reply_in_thread=followup.prompt_reply_in_thread,
-        )
+        self._execution_output.send_followup_if_needed(sender_id, chat_id)
 
     def _clear_plan_state(self, state: _RuntimeState) -> None:
         self._turn_execution.clear_plan_state_locked(state)
 
     def _flush_plan_card(self, sender_id: str, chat_id: str) -> None:
-        runtime = self._get_runtime_view(sender_id, chat_id)
-        model = build_plan_card_model(runtime.plan)
-        if model.is_empty:
-            return
-        result = self._runtime_card_publisher().publish_plan_card(
-            chat_id=chat_id,
-            parent_message_id=runtime.execution.current_message_id,
-            plan_message_id=runtime.plan.message_id,
-            model=model,
-            reply_in_thread=runtime.execution.current_prompt_reply_in_thread,
-        )
-        state = self._get_runtime_state(sender_id, chat_id)
-        if result.attempted_existing and not result.reused_existing:
-            with self._lock:
-                if state["plan_message_id"] == runtime.plan.message_id:
-                    self._apply_runtime_state_message_locked(
-                        state,
-                        PlanStateChanged(plan_message_id=""),
-                    )
-        if result.message_id and result.message_id != runtime.plan.message_id:
-            with self._lock:
-                self._apply_runtime_state_message_locked(
-                    state,
-                    PlanStateChanged(plan_message_id=result.message_id),
-                )
+        self._execution_output.flush_plan_card(sender_id, chat_id)
