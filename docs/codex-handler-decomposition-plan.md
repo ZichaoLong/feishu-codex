@@ -87,9 +87,10 @@ The recommended rollout is:
 2. extract the execution-lifecycle components
 3. extract `RuntimeAdminController`
 4. extract `InboundSurfaceController`
-5. finish remaining contract and naming cleanup
+5. extract `PromptTurnEntryController`
+6. finish remaining contract and naming cleanup
 
-These five phases are intentionally ordered and should not be inverted.
+These six phases are intentionally ordered and should not be inverted.
 
 Current progress:
 
@@ -384,9 +385,56 @@ In short:
   - group guard rejection
   - prefixed action-route dispatch
 
-## 11. Phase 5: Remaining Contract Cleanup
+## 11. Phase 5: PromptTurnEntryController
 
-After the first four ownership extractions, clean up the remaining items that
+### 11.1 Goal
+
+Extract live-turn entry ownership from `CodexHandler` so that prompt start /
+cancel / attach-resume / lease-acquisition flow stops living as one large
+handler control path.
+
+### 11.2 Responsibilities
+
+This component owns:
+
+- running-prompt rejection and watchdog-reconcile entry
+- released -> attached recovery flow
+- sharing-policy / write-lease / interaction-lease checks before prompt start
+- turn start / cancel entry orchestration
+- start-failure and thread-not-found retry entry handling
+
+### 11.3 Boundary With Other Components
+
+`PromptTurnEntryController` does not own the underlying binding/runtime state
+machine and does not directly own internal state of the
+execution/output/recovery/request components.
+
+It should:
+
+- query thread and lease capability through `BindingRuntimeManager`
+- drive explicit turn-state transitions through the execution-lifecycle
+  components
+- remain an entry-orchestration layer rather than becoming a new state store
+
+In short:
+
+- execution components own "how does turn state move?"
+- `PromptTurnEntryController` owns "when may a turn start, and how do entry
+  failures fail closed?"
+
+### 11.4 Exit Criteria
+
+- existing running-prompt, mid-turn write denial, released recovery,
+  start-turn retry, and cancel tests still pass
+- new controller-level tests cover:
+  - running-prompt rejection
+  - lease-denied rejection
+  - automatic recovery for released thread
+  - start-turn thread-not-found retry
+
+## 12. Phase 6: Remaining Contract Cleanup
+
+After the first five ownership extractions, clean up the remaining items that
 fit better once boundaries are explicit:
 
 - `#2` single-source-of-truth contract for `admin_open_ids`
@@ -396,9 +444,9 @@ fit better once boundaries are explicit:
 This cleanup is intentionally later because doing it earlier would mostly add
 more helpers back into `CodexHandler`.
 
-## 12. Why Not Start Elsewhere
+## 13. Why Not Start Elsewhere
 
-### 12.1 Do Not Start With Lock Splitting
+### 13.1 Do Not Start With Lock Splitting
 
 Starting with locks risks getting:
 
@@ -407,19 +455,19 @@ Starting with locks risks getting:
 
 That is not the desired long-term architecture.
 
-### 12.2 Do Not Prioritize More Scattered Review Fixes
+### 13.2 Do Not Prioritize More Scattered Review Fixes
 
 Many local bugs and local contracts have already been tightened. More isolated
 fixes now have lower marginal value than reducing total reasoning cost.
 
-### 12.3 Do Not Start With File-Level Slicing
+### 13.3 Do Not Start With File-Level Slicing
 
 If the work only turns one big file into multiple files while leaving state
 ownership implicit, it is still navigation refactoring, not real decoupling.
 
-## 13. Rollout Constraints
+## 14. Rollout Constraints
 
-The first four phases should follow these constraints:
+The first five phases should follow these constraints:
 
 - default to no user-visible behavior changes
 - extract the boundary before moving all call sites
@@ -428,7 +476,7 @@ The first four phases should follow these constraints:
 - allow internal API renames; do not preserve intermediate compatibility layers
   just for their own sake
 
-## 14. Suggested Commit Shape
+## 15. Suggested Commit Shape
 
 Each phase should be split into commits roughly like:
 
@@ -441,7 +489,7 @@ Each phase should be split into commits roughly like:
 This keeps review clearer, rollback smaller, and boundary definition separate
 from behavior movement.
 
-## 15. Recommended Next Step
+## 16. Recommended Next Step
 
 The immediate next step should not be another round of scattered fixes. It
 should be the remaining prompt-entry extraction from `CodexHandler`.

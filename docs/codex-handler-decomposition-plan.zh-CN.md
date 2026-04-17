@@ -73,15 +73,16 @@
 
 ## 6. 总体方案
 
-建议按五个阶段推进：
+建议按六个阶段推进：
 
 1. `BindingRuntimeManager` 拆分
 2. 执行生命周期组件拆分
 3. `RuntimeAdminController` 拆分
 4. `InboundSurfaceController` 拆分
-5. 剩余合同与命名收尾
+5. `PromptTurnEntryController` 拆分
+6. 剩余合同与命名收尾
 
-这五个阶段之间是前后依赖关系，不建议调换顺序。
+这六个阶段之间是前后依赖关系，不建议调换顺序。
 
 当前进度：
 
@@ -350,9 +351,49 @@
   - group guard 拒绝路径
   - prefixed action route 分发
 
-## 11. 第五阶段：剩余合同与命名收尾
+## 11. 第五阶段：PromptTurnEntryController
 
-前四阶段完成后，再处理剩余更适合落在清晰边界内的条目：
+### 11.1 目标
+
+把“live turn 入口 ownership”从 `CodexHandler` 中抽出，避免 prompt start / cancel / attach-resume / lease 抢占 这些最复杂的入口控制流继续混在 handler 里。
+
+### 11.2 负责的状态与职责
+
+第五阶段组件负责：
+
+- running prompt 的拒绝与 watchdog 对账入口
+- released -> attached 的恢复路径
+- prompt 发起前的 sharing policy / write lease / interaction lease 校验
+- turn start / cancel 的入口编排
+- start failure / thread not found retry 的入口收口
+
+### 11.3 与其他组件的边界
+
+`PromptTurnEntryController` 不拥有 binding/runtime 底层状态机，也不直接拥有 execution/output/recovery/request 组件内部状态。
+
+它应：
+
+- 通过 `BindingRuntimeManager` 获取线程与 lease 能力
+- 通过执行生命周期组件驱动 turn 的显式状态迁移
+- 作为“prompt/cancel 入口编排层”，而不是新的状态存储层
+
+也就是说：
+
+- execution 组件决定“turn 状态如何迁移”
+- `PromptTurnEntryController` 决定“何时允许进入 turn，以及入口失败如何 fail-closed”
+
+### 11.4 验收标准
+
+- 现有 running prompt、mid-turn 禁写、released 恢复、turn start retry、cancel 相关测试继续通过
+- 新增 controller 级测试，覆盖：
+  - running prompt 拒绝
+  - lease denied 拒绝
+  - released thread 自动恢复
+  - start_turn thread-not-found retry
+
+## 12. 第六阶段：剩余合同与命名收尾
+
+前五阶段完成后，再处理剩余更适合落在清晰边界内的条目：
 
 - `#2` `admin_open_ids` 单一事实源
 - `#9` authoritative read 与 bounded-list best-effort lookup 的命名与文档
@@ -360,9 +401,9 @@
 
 这一步之所以后置，是因为它们在当前结构下继续修，只会继续把 helper 堆回 `CodexHandler`。
 
-## 12. 为什么不建议别的顺序
+## 13. 为什么不建议别的顺序
 
-### 12.1 不建议先拆锁
+### 13.1 不建议先拆锁
 
 先拆锁很容易得到：
 
@@ -371,19 +412,19 @@
 
 这不是我们要的长期架构。
 
-### 12.2 不建议先做更多散点 review 修补
+### 13.2 不建议先做更多散点 review 修补
 
 当前局部 bug 与局部合同已收口不少，继续做散点修补的边际收益会下降。
 
 更高价值的是先降低整体推理成本。
 
-### 12.3 不建议先做文件级切分
+### 13.3 不建议先做文件级切分
 
 如果只是把 handler 拆成更多文件，但状态 ownership 仍不清楚，那只是“把大文件导航变成多文件导航”，不是真正解耦。
 
-## 13. 执行约束
+## 14. 执行约束
 
-前四阶段建议遵守以下约束：
+前五阶段建议遵守以下约束：
 
 - 默认不改变用户可见行为
 - 每阶段都先抽边界，再迁移调用点
@@ -391,7 +432,7 @@
 - 不在同一批改动里同时处理无关合同条目
 - 允许重命名内部 API，但不保留为了兼容而存在的中间层
 
-## 14. 建议提交节奏
+## 15. 建议提交节奏
 
 建议每个阶段按类似节奏拆成多次提交：
 
@@ -407,7 +448,7 @@
 - 回滚粒度更小
 - 不会把“边界定义”和“行为改动”混成一个超大提交
 
-## 15. 当前推荐的下一步
+## 16. 当前推荐的下一步
 
 下一步不应回到散点 review 修补，而应继续把 `CodexHandler` 剩余的“prompt entry ownership”抽出来。
 
