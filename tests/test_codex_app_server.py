@@ -745,6 +745,16 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("thread-2", stdout.getvalue())
         self.assertIn("provider1", stdout.getvalue())
 
+    def test_fcodex_slash_session_rejects_undocumented_scope_alias(self) -> None:
+        stderr = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.sys.stderr", stderr):
+                with patch("sys.argv", ["fcodex", "/session", "all"]):
+                    with self.assertRaises(SystemExit) as exc:
+                        fcodex_main()
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("用法：fcodex /session [cwd|global]", stderr.getvalue())
+
     def test_fcodex_slash_help_explains_upstream_picker_boundary(self) -> None:
         stdout = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):

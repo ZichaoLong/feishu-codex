@@ -459,9 +459,9 @@ def _handle_internal_command(
         scope = "cwd"
         if len(user_args) == 2:
             arg = user_args[1].strip().lower()
-            if arg in {"cwd", "current"}:
+            if arg == "cwd":
                 scope = "cwd"
-            elif arg in {"global", "all"}:
+            elif arg == "global":
                 scope = "global"
             else:
                 print(f"用法：{_SESSION_COMMAND.wrapper_usage}", file=sys.stderr)
