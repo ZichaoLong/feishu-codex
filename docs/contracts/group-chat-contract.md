@@ -125,15 +125,14 @@ Those remain owned by their dedicated documents.
 - `group_history_fetch_limit` and `group_history_fetch_lookback_seconds` also
   act as the global recovery switch; setting either to `0` disables both
   main-flow and thread recovery
-- thread (`thread` container) history recovery does not currently promise a
-  strict `group_history_fetch_lookback_seconds` cutoff, because the public
-  Feishu API does not support `start_time` / `end_time` for thread containers
+- thread (`thread` container) history recovery does not promise a strict
+  `group_history_fetch_lookback_seconds` cutoff, because the public Feishu API
+  does not support `start_time` / `end_time` for thread containers
 - thread recovery prefers `ByCreateTimeDesc` and stops as soon as it crosses
   the stored boundary; it only falls back to ascending scan if descending
   ordering is not usable in practice
-- when the missing history exceeds `group_history_fetch_limit`, the
-  implementation keeps the most recent missing messages rather than the oldest
-  slice
+- when the missing history exceeds `group_history_fetch_limit`, this contract
+  keeps the most recent missing messages rather than the oldest slice
 - the context boundary tracks:
   - local log sequence `seq`
   - boundary timestamp `created_at`
@@ -166,11 +165,11 @@ Those remain owned by their dedicated documents.
 - if history recovery is disabled, other bots' messages do not automatically
   enter the `assistant` context
 
-## 9. Current Limitations
+## 9. Explicit Limitations
 
-- thread history recovery cannot currently enforce the same strict time-window
-  cutoff as the main flow; that is a public Feishu API limitation, not an
-  intentional relaxation in this repo
+- thread history recovery cannot enforce the same strict time-window cutoff as
+  the main flow; that is a public Feishu API limitation, not an intentional
+  product-side relaxation in this repo
 - `all` mode is inherently easier to spam; that is product risk, not a runtime
   correctness bug
 - group commands and ordinary group messages share one backend session, but

@@ -101,7 +101,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 ### 6.3 未加载于当前 backend
 
-如果目标线程当前没有加载在本 backend 中，当前实现仍会直接调用 `thread/resume`。
+如果目标线程当前没有加载在本 backend 中，本仓库的安全取舍是直接调用 `thread/resume`。
 
 行为：
 
@@ -120,9 +120,9 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 飞书侧会在请求 `thread/resume` 前解析并显式传入 profile / model / model_provider
 - `fcodex` 则是在 wrapper 启动阶段注入默认 profile，再进入 upstream `codex resume`
 
-这个差异不应被理解为两端语义不一致；它们的目标合同是同一个：对 unloaded 线程，在没有显式 profile 时，都以本地默认 profile 恢复。
+这个差异不应被理解为两端语义不一致；它们的目标语义是同一个：对 unloaded 线程，在没有显式 profile 时，都以本地默认 profile 恢复。
 
-当前实现**不再**通过预览/确认卡片拦截这类 resume。
+本仓库的取舍是**不再**通过预览/确认卡片拦截这类 resume。
 因此，对“可能同时被另一个 isolated backend 写入”的线程，避免双 backend 写入的责任在操作侧，而不是由 UI 强制保护。
 
 ## 7. 来源展示与对称风险
@@ -144,7 +144,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 如果飞书把外部线程恢复进自己的 backend，可能产生分叉
 - 如果用户之后又用裸 `codex` 在另一个 backend 恢复飞书正在使用的线程，同样存在风险
 
-`feishu-codex` 不能消除这种风险。当前实现选择了更直接的 `/resume` 路径，因此安全边界依赖一条操作约束：需要多端继续同一 live thread 时，统一走 shared backend / `fcodex`，不要混用裸 `codex`。
+`feishu-codex` 不能消除这种风险。本仓库选择了更直接的 `/resume` 路径，因此安全边界依赖一条操作约束：需要多端继续同一 live thread 时，统一走 shared backend / `fcodex`，不要混用裸 `codex`。
 
 ## 8. 飞书多会话边界
 
@@ -156,20 +156,37 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 所以它们不会遭遇那种跨进程双 live thread 分叉问题。
 
-### 8.2 当前 UX 限制
+### 8.2 当前 UX / ownership 取舍
 
-当前实现对每个 `thread_id` 只维护一个主要的通知绑定。
-私聊场景下，这个绑定等价于 `(sender_id, chat_id)`；群聊场景下，则是群共享 state key 与 `chat_id`。
+当前模型已经不是“每个 `thread_id` 只维护一个主要通知绑定”的旧模型。
 
-这意味着：
+现在更准确的描述是：
 
-- 最后一个绑定到该线程的飞书会话，会收到流式更新和审批请求
-- 当前并不支持多会话镜像式 live view
+- 同一个 `thread_id` 可以同时存在多个 Feishu subscriber / binding
+- 这些 subscriber 共享同一个 backend thread，因此对 backend 安全
+- 但真正驱动执行与交互路由的仍是 owner / lease，而不是“最后一个绑定者”
 
-当前支持的语义是：
+具体来说：
 
-- 飞书内部共享线程状态，对 backend 安全
-- 每个线程只有一个会话拥有通知归属权
+- Feishu 内部写入准入由 `Feishu 写入 owner` 控制
+- 跨 Feishu / `fcodex` 的审批、补充输入、中断等交互准入由 `interaction owner` 控制
+- 当某线程当前没有显式 owner，但只有一个 Feishu subscriber 时，运行时可以按“唯一 subscriber”补位路由；一旦出现多个 subscriber，就必须依赖明确 owner，而不再靠“最后一个绑定”猜测
+
+这带来的用户侧结论是：
+
+- 非 owner 的 Feishu 会话仍可以保留 binding，并继续观察线程的共享事实状态
+- 非 owner 不能继续写入，也不能处理当前 turn 的审批 / 输入请求
+- 当前仍不承诺“多个飞书会话都看到完全镜像的可交互 live UI”；执行卡片、审批卡和 request 驱动事件仍按 owner 路径路由，而不是向所有 subscriber 广播
+
+因此，这一层的决策结论是：
+
+- 飞书内部允许多 subscriber，共享同一 backend thread
+- 可写性与可交互性由 owner lease 决定
+- “只有一个主要通知绑定”已经不是当前模型
+
+精确状态词汇与状态迁移，以
+`docs/contracts/runtime-control-surface.zh-CN.md`
+和 `docs/contracts/feishu-thread-lifecycle.zh-CN.md` 为准。
 
 ## 9. 相关文档
 

@@ -260,9 +260,9 @@ It does not:
 If the backend still reports `idle` or `active` afterward, some external subscriber
 is still attached.
 
-### 5.4 When it is rejected
+### 5.4 When it must be rejected
 
-Current implementation rejects release when:
+This command must reject release when:
 
 - a Feishu-side turn on that thread is still in flight
 - a Feishu-side approval or user-input request on that thread is still pending
@@ -320,9 +320,9 @@ it only unsubscribes its own connection, not the Feishu service connection.
 Therefore any action that truly changes whether Feishu is still attached to a
 thread must be executed by the running `feishu-codex` service itself.
 
-### 6.3 Current command set
+### 6.3 Current formal command set
 
-Current implementation provides:
+The current formal command set is:
 
 - `feishu-codexctl service status`
 - `feishu-codexctl binding list`
@@ -333,7 +333,7 @@ Current implementation provides:
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
 
-### 6.4 Target contract for binding persistence and reset
+### 6.4 Contract for binding persistence and reset
 
 `binding` is a local fact that should persist across Feishu service restarts.
 
@@ -348,13 +348,13 @@ especially for:
 - operational recovery
 - forcing Feishu back to a fresh "pick a thread again" state
 
-The target contract is:
+The formal contract is:
 
 - this is a `binding`-layer action, not a `thread runtime` action
 - it is not the same thing as `/release-feishu-runtime`
 - its formal surface belongs to `feishu-codexctl`
 
-So the target admin surface should converge on:
+So the formal admin surface is:
 
 - `feishu-codexctl binding clear <binding_id>`
 - `feishu-codexctl binding clear-all`

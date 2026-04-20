@@ -49,9 +49,9 @@ That model is substantially correct, but it needs a few precision notes.
 Upstream Codex models approval as a policy and a reviewer flow, not strictly as
 "a human must click approve".
 
-In this repo, the default reviewer is still the Feishu user, so describing
-`approval_policy` as the approval boundary is accurate for current product
-behavior.
+In this repo's current product contract, the default reviewer is still the
+Feishu user, so describing `approval_policy` as the approval boundary is
+accurate for current product behavior.
 
 Relevant upstream references:
 

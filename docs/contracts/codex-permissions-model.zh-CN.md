@@ -47,7 +47,7 @@
 
 upstream Codex 把 approval 建模为“策略 + reviewer 流程”，并不严格等同于“必须由一个人点击批准”。
 
-不过在本仓库当前实现里，默认 reviewer 仍然是飞书用户，因此把 `approval_policy` 解释为审批边界，对当前产品语义仍然是准确的。
+不过在本仓库当前产品合同里，默认 reviewer 仍然是飞书用户，因此把 `approval_policy` 解释为审批边界，对当前产品语义仍然是准确的。
 
 相关上游参考：
 

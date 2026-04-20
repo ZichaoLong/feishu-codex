@@ -118,6 +118,23 @@ Current module split:
 - `bot/feishu_codexctl.py` and `bot/service_control_plane.py`: local service-admin
   CLI and the in-process control plane for the running service
 - `bot/binding_identity.py`: stable admin-facing binding identifiers
+- `bot/binding_runtime_manager.py`: owner of `binding` / `subscribe` /
+  `attach` / `released` runtime state and local runtime snapshots
+- `bot/thread_access_policy.py`: policy boundary for thread sharing, Feishu
+  write-owner, and interaction-owner admission
+- `bot/turn_execution_coordinator.py`,
+  `bot/execution_output_controller.py`, and
+  `bot/execution_recovery_controller.py`: execution lifecycle state transitions,
+  execution-card publishing, and watchdog / reconcile / degraded-channel
+  handling
+- `bot/runtime_admin_controller.py`: `/status`,
+  `/release-feishu-runtime`, and control-plane status/admin management
+- `bot/inbound_surface_controller.py`: inbound command surface, card-action
+  routing, and help-card command reuse
+- `bot/prompt_turn_entry_controller.py`: prompt entry orchestration,
+  lease-acquisition, and released -> attached recovery flow
+- `bot/adapter_notification_controller.py`: adapter-notification routing,
+  interpretation, and downstream dispatch
 - `bot/interaction_request_controller.py`: owns pending approval / user-input
   request state and fail-closed handling for interactive requests
 - `bot/codex_session_ui_domain.py`: owns session-card UI flows, including
@@ -147,7 +164,8 @@ So the adapter boundary should describe which resume inputs are accepted by the
 request contract, rather than exposing an older abstract signature that is
 narrower than the real call surface.
 
-Some decomposition constraints should also remain explicit:
+This first ownership-tightening pass has already landed. The boundaries that
+still need to stay explicit as the code evolves are:
 
 - thread sharing, Feishu write-owner, and interaction-owner admission rules
   should stay behind one policy boundary; that boundary is now
@@ -179,28 +197,43 @@ Concurrency ownership should also remain explicit:
   long-term goal should be reducing the amount of state that must be shared at
   all, rather than first splitting that lock into smaller locks
 
-This first-layer split already moved help/settings/group/session/file concerns
-out of the old monolithic flow, but it is not yet the final form of "real
-decoupling".
+This split is no longer only a "move help/settings/group/session/file out of one
+large flow" exercise. The ownership-decomposition direction described in the
+historical plan has now largely landed:
 
-The next step should not be more file-level slicing of `CodexHandler`. It
-should be state-ownership decomposition:
+- `BindingRuntimeManager` now owns Feishu runtime management for `binding` /
+  `subscribe` / `attach` / `released`
+- `ThreadAccessPolicy` and the lease stores now own the admission rules for
+  Feishu write owner and interaction owner
+- `TurnExecutionCoordinator`, `ExecutionOutputController`,
+  `ExecutionRecoveryController`, `InteractionRequestController`, and
+  `AdapterNotificationController` now own the turn / execution / request-bridge
+  lifecycle slices
+- `RuntimeAdminController` now owns runtime-admin and control-plane management
+- `InboundSurfaceController` and `PromptTurnEntryController` now own the inbound
+  surface and prompt-entry orchestration layers
 
-- Feishu runtime management for `binding` / `subscribe` / `attach` /
-  `released`
-- owner/lease rules for Feishu write owner and interaction owner
-- turn / execution lifecycle, including execution anchor, watchdog, and
-  follow-up orchestration
-- service control-plane management
-- adapter notification / request bridge responsibilities
+So the earlier line "the next step should not be more file-level slicing of
+`CodexHandler`, but state-ownership decomposition" should now be read as an
+architectural direction that has already been executed, not as a still-pending
+roadmap item.
 
-If those state machines continue to live together in `CodexHandler`, the result
-is only lighter file navigation, not a clearer long-term architecture. The
-maintenance burden still comes from remembering implicit ordering constraints
-across unrelated runtime concerns.
+The main ownership that still remains at the top-level `CodexHandler` is now:
 
-For the recommended rollout order and phase boundaries of that ownership
-decomposition, see `docs/archive/codex-handler-decomposition-plan.md`.
+- runtime lifecycle bootstrap / shutdown and service-instance ownership
+- assembly of controllers / domains / adapter and cross-domain orchestration
+- a small set of helpers and fallback synchronization that still belongs in the
+  top-level orchestrator
+
+That means the next cleanup step is no longer "decompose the planned ownership
+slices once more". It is to keep shrinking the amount of shared state and
+cross-domain coordination that the top-level orchestrator must hold directly,
+and to avoid reintroducing new implicit ordering rules into `CodexHandler`.
+
+The rollout order and phase boundaries remain documented in
+`docs/archive/codex-handler-decomposition-plan.md`, but that document should now
+be treated as historical rollout material rather than a statement of unfinished
+current work.
 
 ## 6. Data and Behavioral Boundaries
 

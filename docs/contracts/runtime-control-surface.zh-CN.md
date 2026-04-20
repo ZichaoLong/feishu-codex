@@ -83,7 +83,7 @@
 
 ### 2.6 `交互 owner`
 
-这是跨前端共享的交互租约，当前实现会在 Feishu 与 `fcodex` 之间共享。
+这是跨前端共享的交互租约；在本仓库当前产品合同里，它会在 Feishu 与 `fcodex` 之间共享。
 
 它回答的问题是：
 
@@ -257,9 +257,9 @@
 
 如果 backend 在命令后仍 `idle` 或 `active`，说明还有外部订阅者没有释放。
 
-### 5.4 它何时会被拒绝
+### 5.4 它何时必须被拒绝
 
-当前实现会在以下场景拒绝释放：
+该命令在以下场景必须拒绝：
 
 - 该 thread 当前仍有飞书侧 turn 在执行
 - 该 thread 当前仍有飞书侧审批请求或用户输入请求未处理
@@ -319,9 +319,9 @@
 
 因此，任何要真正改变“Feishu 是否仍附着该 thread”的动作，都必须由运行中的 `feishu-codex` 服务代为执行。
 
-### 6.3 当前实现提供的第一批命令
+### 6.3 当前正式命令集
 
-当前实现提供：
+当前正式提供：
 
 - `feishu-codexctl service status`
 - `feishu-codexctl binding list`
@@ -332,7 +332,7 @@
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
 
-### 6.4 `binding` 持久化与重置的目标合同
+### 6.4 `binding` 持久化与重置合同
 
 `binding` 默认是跨重启保留的本地事实。
 
@@ -347,13 +347,13 @@
 - 状态救火
 - 让飞书侧整体回到“重新选择 thread”的初始状态
 
-这类动作的目标合同是：
+这类动作的正式合同是：
 
 - 它属于 `binding` 层，不属于 `thread runtime` 层
 - 它不等于 `/release-feishu-runtime`
 - 它的正式入口应属于本地管理面 `feishu-codexctl`
 
-因此，目标控制面应收敛到：
+因此，正式控制面收敛为：
 
 - `feishu-codexctl binding clear <binding_id>`
 - `feishu-codexctl binding clear-all`

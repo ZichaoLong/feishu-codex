@@ -119,8 +119,8 @@ first return to `not-loaded-in-current-backend`.
 
 ### 6.3 Not loaded in current backend
 
-If the target thread is not loaded in the current backend, the current
-implementation still calls `thread/resume` directly.
+If the target thread is not loaded in the current backend, this repository's
+safety decision is to call `thread/resume` directly.
 
 Behavior:
 
@@ -146,12 +146,12 @@ behavior through the same execution path.
   upstream `codex resume` path
 
 That difference should not be interpreted as a semantic mismatch. The intended
-contract is the same on both sides: for an unloaded thread, absent an explicit
-profile, resume uses the local default profile.
+semantics are the same on both sides: for an unloaded thread, absent an
+explicit profile, resume uses the local default profile.
 
-The current implementation no longer blocks this path with a preview/confirm
-card. Avoiding dual-backend writes for such threads is now an operational rule,
-not a UI-enforced guard.
+The repository decision is to no longer block this path with a preview/confirm
+card. Avoiding dual-backend writes for such threads is an operational rule, not
+a UI-enforced guard.
 
 ## 7. Provenance and Symmetric Risk
 
@@ -174,10 +174,10 @@ The risk is symmetric:
 - if a user later resumes a Feishu-active thread through bare `codex` on
   another backend, the same risk exists
 
-`feishu-codex` cannot eliminate that risk. The current implementation chooses a
-more direct `/resume` path, so the safety boundary relies on one operational
-rule: if multiple clients should continue the same live thread, keep them on the
-shared backend via `fcodex`, and do not mix in bare `codex`.
+`feishu-codex` cannot eliminate that risk. This repository chooses a more direct
+`/resume` path, so the safety boundary relies on one operational rule: if
+multiple clients should continue the same live thread, keep them on the shared
+backend via `fcodex`, and do not mix in bare `codex`.
 
 ## 8. Feishu Multi-Chat Boundary
 
@@ -191,22 +191,49 @@ process, so they do not create separate app-server processes per chat.
 Therefore, they do not suffer from the same cross-process dual-live-thread
 divergence that exists between Feishu and bare TUI.
 
-### 8.2 Current UX limitation
+### 8.2 Current UX / ownership decision
 
-Current implementation keeps one primary notification binding per `thread_id`.
-In p2p chats that binding is effectively `(sender_id, chat_id)`; in group chats
-it is the shared group-state key plus `chat_id`.
+The current model is no longer the older "one primary notification binding per
+`thread_id`" model.
 
-Implication:
+The more accurate description now is:
 
-- the last Feishu chat bound to a thread receives streaming updates and
-  approvals
-- this is not a mirrored multi-chat live view
+- one `thread_id` may have multiple Feishu subscribers / bindings at the same
+  time
+- those subscribers share one backend thread, so this remains backend-safe
+- execution-driving and interaction-driving routing still follows explicit
+  owner / lease state, not "who bound last"
 
-Supported semantics today:
+Concretely:
 
-- backend-safe shared thread state inside Feishu
-- single-chat notification ownership per thread
+- Feishu-internal write admission is controlled by the `Feishu write owner`
+- cross-frontend approvals, user-input requests, and interrupts are controlled
+  by the `interaction owner`
+- when a thread has no explicit owner but exactly one Feishu subscriber, the
+  runtime may fall back to that sole subscriber for routing; once multiple
+  subscribers exist, routing must depend on explicit owner state rather than
+  any "last binding wins" guess
+
+The user-visible consequence is:
+
+- non-owner Feishu chats may still keep their binding and observe shared thread
+  facts
+- non-owner chats may not write or handle the current turn's approvals / input
+  requests
+- the system still does not promise a fully mirrored interactive live UI across
+  multiple Feishu chats; execution cards, approval cards, and request-driving
+  events route by the effective owner path rather than broadcasting every
+  interactive surface to every subscriber
+
+So the decision at this layer is:
+
+- Feishu allows multiple subscribers on one backend thread
+- writability and interactivity are determined by owner leases
+- "one primary notification binding" is no longer the current model
+
+For the exact state vocabulary and state-transition contract, see
+`docs/contracts/runtime-control-surface.md` and
+`docs/contracts/feishu-thread-lifecycle.md`.
 
 ## 9. Related Documents
 

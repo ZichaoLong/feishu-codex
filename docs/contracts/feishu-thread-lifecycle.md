@@ -198,10 +198,10 @@ So the rule is:
 - same protocol contract
 - different front-end recovery strategy
 
-## 7. Implementation Contract
+## 7. Lifecycle Contract Fixed Here
 
-This document only fixes the implementation constraints that belong to the
-thread-lifecycle contract itself:
+This document only fixes the contract boundaries that belong to the
+thread-lifecycle layer itself:
 
 - one Feishu chat keeps one logical current thread binding
 - runtime loss does not clear binding automatically

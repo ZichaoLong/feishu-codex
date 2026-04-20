@@ -101,6 +101,13 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
 - `bot/feishu_codexctl.py` 与 `bot/service_control_plane.py`：本地服务管理 CLI 与运行中服务控制面
 - `bot/binding_identity.py`：admin-facing binding 标识规范
+- `bot/binding_runtime_manager.py`：binding / subscribe / attach / released 与本地 runtime snapshot 的 owner
+- `bot/thread_access_policy.py`：线程共享、Feishu 写入 owner、interaction owner 的准入 policy 边界
+- `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、watchdog / reconcile / degrade 处理
+- `bot/runtime_admin_controller.py`：`/status`、`/release-feishu-runtime` 与 control-plane 查询/管理
+- `bot/inbound_surface_controller.py`：入站命令面、卡片 action 路由、help 卡片命令复用
+- `bot/prompt_turn_entry_controller.py`：prompt 进入、lease 抢占、released -> attached 恢复编排
+- `bot/adapter_notification_controller.py`：adapter notification 的 method 路由、语义解释与下游分发
 - `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
 - `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态
 - `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 reply/log 片段拼装，不承担 thread、owner 或 binding 级状态职责
@@ -124,7 +131,7 @@ shared backend 与 wrapper 的具体机制，见
 - authoritative read：按 `thread_id` 直接向 backend 读取，供真正要落操作的路径使用
 - bounded-list best-effort lookup：只从当前全局列表视图里补充上下文或错误提示，不能反过来当作 thread 一定不存在的证明
 
-并发 ownership 也应继续收紧：
+并发 ownership 这一轮已经完成了主要收口；当前仍需继续保持清晰、并在后续增量功能中继续收紧的边界是：
 
 - `RuntimeLoop` 已是当前 handler 运行时状态变更的主要串行化原语
 - binding 解析与 runtime state 的 hydrate/create 应走单一 resolver 入口，
@@ -138,20 +145,30 @@ shared backend 与 wrapper 的具体机制，见
   不应继续扩大匿名 callback 列表
 - `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面
 
-当前这一层拆分已经把 help/settings/group/session/file 等领域边界从单体逻辑里抽出来，但这还不是最终的“真正解耦”。
+当前这一层拆分已经不只是“把 help/settings/group/session/file 等领域从单体逻辑里抽出去”。历史计划里提出的 ownership 拆分主线，目前已经大体落地：
 
-下一步的重点不应是继续把 `CodexHandler` 切成更多文件，而是继续拆状态 ownership：
+- `BindingRuntimeManager` 已持有 `binding` / `subscribe` / `attach` / `released` 这一组 Feishu runtime 管理
+- `ThreadAccessPolicy` 与 lease store 已持有 Feishu 写入 owner / interaction owner 的准入规则
+- `TurnExecutionCoordinator`、`ExecutionOutputController`、`ExecutionRecoveryController`、`InteractionRequestController`、`AdapterNotificationController` 已共同持有 turn / execution / request bridge 这一组生命周期状态机
+- `RuntimeAdminController` 已持有 runtime admin / control-plane 查询与管理面
+- `InboundSurfaceController` 与 `PromptTurnEntryController` 已把入站 surface 和 prompt 进入编排从总 handler 中拆开
 
-- `binding` / `subscribe` / `attach` / `released` 这一组 Feishu runtime 管理
-- Feishu 写入 owner 与 interaction owner 的 owner/lease 规则
-- turn / execution 生命周期，以及 execution anchor、watchdog、follow-up 发送编排
-- service control plane 管理
-- adapter notification / request bridge
+因此，这里原本那句“下一步重点不应是继续把 `CodexHandler` 切成更多文件，而是继续拆状态 ownership”，在当前仓库状态下应理解为一条**已经执行过的架构方向**，而不是仍未开始的 roadmap。
 
-如果这些状态机继续共居在 `CodexHandler`，那只是把导航从一个大文件变成多个文件，维护时仍要依赖调用顺序记忆隐式约束；这不是我们要的长期架构方向。
+当前仍然保留在 `CodexHandler` 顶层的 ownership，主要是：
 
-继续推进这条 ownership 拆分路线时，推荐的实施顺序与阶段边界见
-`docs/archive/codex-handler-decomposition-plan.zh-CN.md`。
+- runtime 顶层生命周期：bootstrap / shutdown / service-instance lease / adapter 生命周期
+- controller / domain / adapter 的装配，以及跨域 orchestration
+- 少量合理保留在总编排层的 helper 与兜底同步面
+
+所以，后续重点已经不是“继续把计划里的 ownership 再拆一次”，而是：
+
+- 继续缩小 `CodexHandler` 作为总编排层必须直接持有的共享状态面
+- 避免把新的跨域规则重新堆回顶层 handler
+- 让新增功能优先落到已有 owner 边界，而不是重新制造隐式调用顺序约束
+
+历史 rollout 顺序与阶段边界仍保存在
+`docs/archive/codex-handler-decomposition-plan.zh-CN.md`，但那份文档现在应被视为归档计划，而不是“当前还未完成的下一步说明”。
 
 ## 6. 数据与行为边界
 
