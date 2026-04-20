@@ -1,8 +1,12 @@
-# AGENTS.md
+# AGENTS.example.md
 
-This file only records the repo owner's design and development preferences.
+This file is an optional template for local agent-collaboration preferences.
 
-Do not treat this file as the source of truth for repository architecture, module boundaries, or feature semantics. Read the relevant documents under `docs/` on demand.
+It is not the source of truth for repository architecture, module boundaries,
+or feature semantics. Repository facts belong in `docs/`.
+
+If you want a private local preference file, copy this to `AGENTS.md` and edit
+it locally. `AGENTS.md` is intentionally gitignored in this repository.
 
 ## Core Preference
 
@@ -28,7 +32,8 @@ When making changes:
 - prefer simple control flow over clever layering
 - prefer fail-closed behavior over ambiguous best-effort behavior
 
-If a feature contract is unclear, surface the ambiguity and tighten the contract in code, naming, validation, or docs.
+If a feature contract is unclear, surface the ambiguity and tighten the
+contract in code, naming, validation, or docs.
 
 ## Compatibility
 
@@ -38,7 +43,8 @@ Unless the user explicitly asks otherwise:
 
 - internal APIs may be changed freely
 - stale branches and compatibility shims may be removed
-- behavior may be simplified if the result is cleaner and easier to reason about
+- behavior may be simplified if the result is cleaner and easier to reason
+  about
 
 ## Refactoring Bias
 
@@ -72,7 +78,9 @@ Prioritize, in order:
 
 Do not stop at “tests pass”.
 
-When practical, add or update tests that lock down the intended behavior of the change, especially for bugs, state transitions, ownership transfer, and other high-risk flows.
+When practical, add or update tests that lock down the intended behavior of the
+change, especially for bugs, state transitions, ownership transfer, and other
+high-risk flows.
 
 ## Docs Policy
 
@@ -80,6 +88,15 @@ Keep repository facts out of this file.
 
 - Architecture, boundaries, and runtime design belong in dedicated docs.
 - Feature contracts and behavior semantics belong in dedicated docs.
+- When adding or changing an important feature, command, concept, or
+  abstraction for a concrete scenario, prefer recording its design intent in
+  the relevant doc under `docs/`, not just its surface behavior.
+- Prefer documenting three points whenever practical:
+  - what problem or scenario it is meant to solve
+  - which layer of state or abstraction boundary it operates on
+  - why existing mechanisms were not sufficient
+- This is mainly to preserve the reason something exists, so later refactors
+  can still tell whether it should be kept, split, simplified, or removed.
 - Read those docs only when the task needs them.
 
 ## Reference Preference
@@ -87,11 +104,14 @@ Keep repository facts out of this file.
 When Feishu / Lark behavior matters:
 
 - prefer official documentation and public protocols as the reference
-- if direct access to the needed material is blocked, locate the relevant public URL first
-- if the content still cannot be retrieved, ask the developer to download it and pass it in
+- if direct access to the needed material is blocked, locate the relevant
+  public URL first
+- if the content still cannot be retrieved, ask the developer to download it
+  and pass it in
 
 When Codex app-server behavior or frontend / backend behavior matters:
 
 - treat upstream code and public documentation as the source of truth
-- inspect upstream code first when behavior is defined more clearly in implementation than in secondary descriptions
+- inspect upstream code first when behavior is defined more clearly in
+  implementation than in secondary descriptions
 - the upstream codebase is located at `~/llm/codex`

@@ -7,3 +7,4 @@ __pycache__/
 data/
 config/system.yaml
 config/codex.yaml
+AGENTS.md

@@ -3,9 +3,6 @@
 This directory is the source of truth for repository architecture, runtime
 boundaries, and feature contracts.
 
-`AGENTS.md` only records the repo owner's engineering preferences. It is not a
-substitute for the docs in this directory.
-
 ## Reading Rule
 
 When code and docs disagree, treat that as a contract gap. Tighten the code,
