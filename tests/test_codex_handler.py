@@ -4248,7 +4248,11 @@ class CodexHandlerTests(unittest.TestCase):
         action_elements = self._action_elements(response["card"])
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/status", "释放 runtime", "重命名"],
+            ["/status", "/preflight", "释放 runtime"],
+        )
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[1]["actions"]],
+            ["/rm", "重命名", "返回 Session"],
         )
 
     def test_help_show_page_action_can_open_session_resume_form(self) -> None:

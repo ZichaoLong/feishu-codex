@@ -5,6 +5,10 @@ import threading
 import unittest
 
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
+from bot.reason_codes import (
+    PROMPT_DENIED_BY_GROUP_ALL_MODE_SHARING,
+    PROMPT_DENIED_BY_INTERACTION_OWNER,
+)
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_feishu_interaction_holder
 from bot.thread_access_policy import ThreadAccessPolicy
 from bot.thread_lease_registry import ThreadLeaseRegistry
@@ -42,9 +46,11 @@ class ThreadAccessPolicyTests(unittest.TestCase):
             registry.subscribe(("ou_user2", "chat-other"), "thread-1")
 
         violation = policy.thread_sharing_policy_violation("chat-group", "thread-1", message_id="msg-1")
+        check = policy.thread_sharing_policy_violation_check("chat-group", "thread-1", message_id="msg-1")
 
         self.assertIn("`all` 模式", violation)
         self.assertIn("不能与其他飞书会话共享", violation)
+        self.assertEqual(check.reason_code, PROMPT_DENIED_BY_GROUP_ALL_MODE_SHARING)
 
     def test_thread_sharing_policy_violation_rejects_when_other_all_group_is_attached(self) -> None:
         lock, registry, _interaction_store, group_modes, policy = self._make_policy()
@@ -69,9 +75,11 @@ class ThreadAccessPolicyTests(unittest.TestCase):
         )
 
         denial = policy.prompt_write_denial_text(binding, "chat-p2p", "thread-1")
+        check = policy.prompt_write_denial_check(binding, "chat-p2p", "thread-1")
 
         self.assertIn("另一飞书会话", denial)
         self.assertIn("暂时不能写入", denial)
+        self.assertEqual(check.reason_code, PROMPT_DENIED_BY_INTERACTION_OWNER)
 
 
 if __name__ == "__main__":

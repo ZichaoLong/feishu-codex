@@ -3,9 +3,10 @@
 英文原文：`docs/contracts/runtime-control-surface.md`
 
 本文定义 Feishu 命令面、本地 `feishu-codexctl` 管理面，以及 shared backend
-之间共享的一组状态词汇与控制合同。它主要回答三件事：
+之间共享的一组状态词汇与控制合同。它主要回答四件事：
 
 - `/status` 到底在描述哪些状态
+- `/preflight` 可以 dry-run 什么，不可以改变什么
 - `/release-feishu-runtime` 具体释放什么，不释放什么
 - 为什么本地管理 CLI 必须通过正在运行的 `feishu-codex` 服务，而不能自己直连 app-server 做释放
 
@@ -22,7 +23,7 @@
 
 ## 2. 共享状态词汇
 
-这组词汇是 Feishu `/status` 和本地 `feishu-codexctl` 共同使用的事实词汇。
+这组词汇是 Feishu `/status`、`/preflight` 和本地 `feishu-codexctl` 共同使用的事实词汇。
 
 ### 2.1 `binding`
 
@@ -63,8 +64,14 @@
 若当前 status/admin surface 根本读不到 backend 信息，则回落为：
 
 - `unknown`
+- `missing`
+- `error`
 
-`unknown` 不是 backend 自身的线程状态词汇，只表示当前 surface 无法判定 backend 状态。
+这些回落值都不是 backend 自身的线程状态词汇：
+
+- `unknown`：当前 surface 无法判定 backend status 字段
+- `missing`：当前 surface 已确认该 thread 不存在
+- `error`：本次 backend 读取失败
 
 这是 app-server 的线程状态，不是飞书会话自己的 UI 状态。
 
@@ -222,8 +229,34 @@
 - 当前是否 `re-profile possible`
 - 当前是否允许执行 `/release-feishu-runtime`
 
+当 `/status` 或本地管理面需要解释某个 deny / blocked 结果时，可以同时暴露：
+
+- 稳定的 `reason_code`
+- 面向操作者的人类可读说明文本
+
+其中 code 是自动化和测试应依赖的稳定键；文本只负责给人看。
+
 它不会变成一个“全局线程管理器”。
 全局线程和绑定状态应交给本地 `feishu-codexctl`。
+
+### 4.1 `/preflight` 合同
+
+飞书 `/preflight` 也是 chat-scoped 命令，作用对象同样是当前 chat binding。
+
+它是只读 dry-run，只能回答“如果现在做下一步会怎样”，不得：
+
+- 启动 turn
+- 调用 `thread/resume`
+- 新建 subscriber
+- 改变 binding / runtime / owner 状态
+- 清理或写入本地 profile 状态
+
+它复用与普通 prompt 相同的 prompt preflight 检查，并复用
+`/release-feishu-runtime` 的 availability 检查；展示结果时可以暴露同一套
+`reason_code` 与人类可读说明。
+
+如果当前 binding 是 `bound + released`，`/preflight` 只能说明下一条普通消息是否会被接受。
+它本身不能把 `released` 改成 `attached`。
 
 ## 5. `/release-feishu-runtime` 精确合同
 

@@ -326,6 +326,14 @@ class CodexHandler(BotHandler):
             safe_read_runtime_config=self._safe_read_runtime_config,
             current_default_profile_resolution=self._current_default_profile_resolution,
             permissions_summary=_permissions_summary,
+            prompt_write_denial_check=lambda binding, chat_id, thread_id, message_id="": (
+                self._thread_access_policy.prompt_write_denial_check(
+                    binding,
+                    chat_id,
+                    thread_id,
+                    message_id=message_id,
+                )
+            ),
             resolve_thread_target_for_control_params=self._resolve_thread_target_for_control_params,
             cancel_patch_timer_locked=self._cancel_patch_timer_locked,
             cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
@@ -1316,6 +1324,14 @@ class CodexHandler(BotHandler):
                     sender_id, chat_id, message_id=message_id
                 ),
             ),
+            "/preflight": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_preflight_command(
+                    sender_id,
+                    chat_id,
+                    arg,
+                    message_id=message_id,
+                ),
+            ),
             "/release-feishu-runtime": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._handle_release_feishu_runtime_command(
                     sender_id,
@@ -1758,6 +1774,17 @@ class CodexHandler(BotHandler):
     def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
         binding = self._chat_binding_key(sender_id, chat_id, message_id)
         return self._runtime_admin.handle_status_command(binding)
+
+    def _handle_preflight_command(
+        self,
+        sender_id: str,
+        chat_id: str,
+        arg: str,
+        *,
+        message_id: str = "",
+    ) -> CommandResult:
+        binding = self._chat_binding_key(sender_id, chat_id, message_id)
+        return self._runtime_admin.handle_preflight_command(binding, arg)
 
     def _handle_release_feishu_runtime_command(
         self,

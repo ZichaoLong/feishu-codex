@@ -880,6 +880,35 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("thread-2", stdout.getvalue())
         self.assertIn("provider1", stdout.getvalue())
 
+    def test_fcodex_dry_run_session_remains_read_only(self) -> None:
+        thread = ThreadSummary(
+            thread_id="thread-3",
+            cwd="/tmp/project",
+            name="dry-run-demo",
+            preview="dry-run-demo",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+            model_provider="provider3",
+        )
+        stdout = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.list_current_dir_threads", return_value=[thread]):
+                with patch("bot.fcodex.CodexAppServerAdapter"):
+                    with patch("bot.fcodex.os.execvpe") as mock_exec:
+                        with patch("bot.fcodex.sys.stdout", stdout):
+                            with patch("sys.argv", ["fcodex", "--dry-run", "/session"]):
+                                with self.assertRaises(SystemExit) as exc:
+                                    fcodex_main()
+        self.assertEqual(exc.exception.code, 0)
+        mock_exec.assert_not_called()
+        self.assertIn("dry-run: fcodex /session", stdout.getvalue())
+        self.assertIn("read-only: yes", stdout.getvalue())
+        self.assertIn("thread admission: not consulted by fcodex wrapper discovery", stdout.getvalue())
+        self.assertIn("would start TUI: no", stdout.getvalue())
+        self.assertIn("thread-3", stdout.getvalue())
+
     def test_fcodex_slash_session_rejects_undocumented_scope_alias(self) -> None:
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
@@ -903,6 +932,7 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("fcodex /rm <thread_id|thread_name>", stdout.getvalue())
         self.assertIn("fcodex /session", stdout.getvalue())
         self.assertIn("fcodex /resume <thread_id|thread_name>", stdout.getvalue())
+        self.assertIn("fcodex --dry-run /resume <thread_id|thread_name>", stdout.getvalue())
         self.assertIn("进入 TUI 后，`/help`、`/resume` 等命令恢复 upstream 原样", stdout.getvalue())
         self.assertIn("`fcodex`、`fcodex <prompt>`、`fcodex resume <id>` 仍是 upstream Codex CLI", stdout.getvalue())
 
@@ -1064,6 +1094,43 @@ class FCodexTests(unittest.TestCase):
             mock_exec.call_args[0][1],
             ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
         )
+
+    def test_fcodex_dry_run_resume_reports_target_without_exec(self) -> None:
+        stdout = StringIO()
+        resolution = Mock()
+        resolution.effective_profile = "provider2"
+        resolution.stale_profile = "provider9"
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.resolve_resume_name_via_remote_backend") as mock_resolve:
+                mock_resolve.return_value = ThreadSummary(
+                    thread_id="019d2e94-a475-7bc1-b2f7-a3ce37628ede",
+                    cwd="/tmp/project",
+                    name="demo",
+                    preview="hello",
+                    created_at=0,
+                    updated_at=0,
+                    source="cli",
+                    status="idle",
+                )
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend", return_value=resolution):
+                    with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value="provider9"):
+                        with patch("bot.fcodex.ProfileStateStore.save_default_profile") as mock_save:
+                            with patch("bot.fcodex.ThreadRuntimeLeaseStore") as mock_lease_store:
+                                mock_lease_store.return_value.load.return_value = None
+                                with patch("bot.fcodex.os.execvpe") as mock_exec:
+                                    with patch("bot.fcodex.sys.stdout", stdout):
+                                        with patch("sys.argv", ["fcodex", "--dry-run", "/resume", "demo"]):
+                                            with self.assertRaises(SystemExit) as exc:
+                                                fcodex_main()
+        self.assertEqual(exc.exception.code, 0)
+        mock_exec.assert_not_called()
+        mock_save.assert_not_called()
+        self.assertEqual(mock_resolve.call_args.kwargs["target"], "demo")
+        self.assertIn("dry-run: fcodex /resume", stdout.getvalue())
+        self.assertIn("resolved thread: 019d2e94-a475-7bc1-b2f7-a3ce37628ede demo", stdout.getvalue())
+        self.assertIn("default profile: provider2", stdout.getvalue())
+        self.assertIn("stale profile: provider9", stdout.getvalue())
+        self.assertIn("thread runtime lease: no live owner recorded", stdout.getvalue())
 
     def test_fcodex_explicit_cd_is_forwarded_to_proxy(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):

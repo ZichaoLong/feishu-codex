@@ -166,6 +166,23 @@ wrapper 额外增加的行为：
 如果 live runtime 当前由另一实例持有，真正的附着仍要服从全局 `thread runtime lease`
 的自动转移 / 明确拒绝规则。
 
+### `fcodex --dry-run /session` 与 `fcodex --dry-run /resume`
+
+`--dry-run` 是 `fcodex` wrapper 的本地只读诊断前缀，不属于 TUI 内部命令。
+
+- `fcodex --dry-run /session [cwd|global]`
+  - 复用 `fcodex /session [cwd|global]` 的 discovery 规则
+  - 显式标注这是只读查询
+  - 不启动 TUI
+- `fcodex --dry-run /resume <thread_id|thread_name>`
+  - 复用 `fcodex /resume <thread_id|thread_name>` 的目标解析规则
+  - 输出将路由到的实例、解析出的 thread、默认 profile、thread runtime lease 检查
+  - 不启动 TUI，不调用 `thread/resume`
+  - 不清理 stale profile，也不写入任何本地状态
+
+它与普通 `fcodex /session` / `fcodex /resume` 一样，不读取命名实例的
+`thread admission` 过滤；这是本地操作者视角的预检。
+
 ### `fcodex /profile [name]`
 
 - 读取或修改与飞书共用的同一份本地默认 profile 状态

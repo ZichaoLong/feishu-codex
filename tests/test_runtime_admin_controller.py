@@ -6,6 +6,11 @@ import unittest
 
 from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummary
 from bot.binding_runtime_manager import BindingRuntimeManager
+from bot.reason_codes import (
+    PROMPT_DENIED_BY_INTERACTION_OWNER,
+    RELEASE_BLOCKED_BY_PENDING_REQUEST,
+    ReasonedCheck,
+)
 from bot.runtime_admin_controller import RuntimeAdminController
 from bot.runtime_state import ThreadStateChanged
 from bot.stores.chat_binding_store import ChatBindingStore
@@ -85,6 +90,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
                 stale_profile="",
             ),
             permissions_summary=lambda approval_policy, sandbox: f"{sandbox}/{approval_policy}",
+            prompt_write_denial_check=lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.allow(),
             resolve_thread_target_for_control_params=lambda params: ThreadSummary(
                 thread_id=str(params.get("thread_id", "") or "").strip(),
                 cwd="/tmp/project",
@@ -155,6 +161,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertIn("审批或输入请求未处理", reason)
+        check = controller.release_feishu_runtime_check_locked("thread-1")
+        self.assertEqual(check.reason_code, RELEASE_BLOCKED_BY_PENDING_REQUEST)
 
     def test_release_feishu_runtime_by_thread_id_marks_binding_released_and_unsubscribes(self) -> None:
         (
@@ -353,6 +361,84 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             {"thread_id": "thread-1", "thread_title": "demo", "imported": True},
         )
         self.assertEqual(admitted_thread_ids, {"thread-1"})
+
+    def test_binding_status_snapshot_includes_prompt_and_release_reason_codes(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _admitted_thread_ids,
+            pending_by_thread,
+            _pending_by_binding,
+        ) = self._make_controller()
+        controller._prompt_write_denial_check = lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.deny(
+            PROMPT_DENIED_BY_INTERACTION_OWNER,
+            "当前线程正由另一飞书会话执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
+        )
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        pending_by_thread.add("thread-1")
+
+        snapshot = controller.binding_status_snapshot(binding)
+
+        self.assertFalse(snapshot["next_prompt_allowed"])
+        self.assertEqual(snapshot["next_prompt_reason_code"], PROMPT_DENIED_BY_INTERACTION_OWNER)
+        self.assertFalse(snapshot["release_feishu_runtime_available"])
+        self.assertEqual(snapshot["release_feishu_runtime_reason_code"], RELEASE_BLOCKED_BY_PENDING_REQUEST)
+
+    def test_handle_preflight_command_renders_next_prompt_and_release_checks(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _admitted_thread_ids,
+            pending_by_thread,
+            _pending_by_binding,
+        ) = self._make_controller()
+        controller._prompt_write_denial_check = lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.deny(
+            PROMPT_DENIED_BY_INTERACTION_OWNER,
+            "当前线程正由另一飞书会话执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
+        )
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        pending_by_thread.add("thread-1")
+
+        result = controller.handle_preflight_command(binding, "")
+
+        card = result.card
+        assert card is not None
+        content = card["elements"][0]["content"]
+        self.assertIn("作用对象：当前 chat binding；这是 dry-run", content)
+        self.assertIn("下一条普通消息：`blocked` (`prompt_denied_by_interaction_owner`)", content)
+        self.assertIn("release-feishu-runtime：`blocked` (`release_blocked_by_pending_request`)", content)
 
     def test_handle_service_control_request_thread_revoke_removes_admission(self) -> None:
         (

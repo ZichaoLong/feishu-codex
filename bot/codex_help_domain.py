@@ -105,7 +105,7 @@ class CodexHelpDomain:
                     "- `/new`：立即新建线程\n"
                     f"- `{_SHARED_RESUME_COMMAND.feishu_usage}`：全局精确恢复线程，可填 `thread_id` 或 `thread_name`\n"
                     "- `/cd <path>`：切换目录并清空当前线程绑定\n"
-                    "- “当前线程”页：查看 `/status`、释放 runtime、重命名、归档当前绑定线程\n\n"
+                    "- “当前线程”页：查看 `/status`、`/preflight`、释放 runtime、重命名、归档当前绑定线程\n\n"
                     "**本地继续**\n"
                     "- 需要在本地继续同一 live thread 时，使用 `fcodex`\n"
                     f"- 本地 wrapper 命令请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`\n\n"
@@ -140,6 +140,7 @@ class CodexHelpDomain:
                 markdown=(
                     "这些操作都以**当前绑定线程**为目标。\n\n"
                     "- `/status`：查看当前 binding、feishu runtime、backend thread status、profile 相关信息\n"
+                    "- `/preflight`：dry-run 当前 chat 下一条普通消息与 release 操作，不启动 turn、不改 binding\n"
                     "- `/release-feishu-runtime`：释放 Feishu 对当前线程的 runtime 持有，但不解绑 thread\n"
                     "- `/rename <title>`：重命名当前线程\n"
                     f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
@@ -150,19 +151,25 @@ class CodexHelpDomain:
                         buttons=(
                             _HelpCommandButtonSpec(label="/status", command="/status", title="Codex 当前状态"),
                             _HelpCommandButtonSpec(
+                                label="/preflight",
+                                command="/preflight",
+                                title="Codex Preflight",
+                            ),
+                            _HelpCommandButtonSpec(
                                 label="释放 runtime",
                                 command="/release-feishu-runtime",
                                 title="Codex 释放 Feishu Runtime",
                             ),
-                            _HelpPageButtonSpec(label="重命名", page="session-rename-current-form"),
                         ),
                         layout="trisection",
                     ),
                     _HelpActionRowSpec(
                         buttons=(
                             _HelpCommandButtonSpec(label="/rm", command="/rm", title="Codex 归档线程"),
+                            _HelpPageButtonSpec(label="重命名", page="session-rename-current-form"),
                             _HelpPageButtonSpec(label="返回 Session", page="session"),
                         ),
+                        layout="trisection",
                     ),
                 ),
             ),

@@ -83,6 +83,7 @@ It must make the following capabilities reachable:
 The current-thread page should cover:
 
 - `/status`
+- `/preflight`
 - `/release-feishu-runtime`
 - `/rename <title>` for the currently bound thread, via a form
 - `/rm` for the currently bound thread
@@ -90,8 +91,8 @@ The current-thread page should cover:
 That current-thread page is still an entry for the **current chat binding**,
 not a global thread-admin surface.
 
-- `/status` and `/release-feishu-runtime` remain chat-scoped even when they are
-  triggered from inside a group chat
+- `/status`, `/preflight`, and `/release-feishu-runtime` remain chat-scoped
+  even when they are triggered from inside a group chat
 - thread-scoped management for an arbitrary thread belongs to local
   `feishu-codexctl`
 
@@ -133,7 +134,7 @@ Reason:
 - one action may target multiple users
 - slash syntax is clearer than forcing an incomplete form model
 
-Generic Feishu commands triggered in groups, such as `/status`,
+Generic Feishu commands triggered in groups, such as `/status`, `/preflight`,
 `/release-feishu-runtime`, and `/profile`, do not belong to the `group`
 branch. They still belong to the `session` or `settings` branches, while group
 execution continues to obey the group-command trigger rules.

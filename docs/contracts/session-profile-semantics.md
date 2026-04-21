@@ -186,6 +186,25 @@ instance's shared backend. If another instance currently owns the live runtime,
 actual attachment still follows the global `thread runtime lease` transfer /
 reject rules.
 
+### `fcodex --dry-run /session` and `fcodex --dry-run /resume`
+
+`--dry-run` is a local read-only diagnostic prefix owned by the `fcodex`
+wrapper. It is not a command inside the running TUI.
+
+- `fcodex --dry-run /session [cwd|global]`
+  - reuses `fcodex /session [cwd|global]` discovery rules
+  - explicitly marks the operation as read-only
+  - does not start the TUI
+- `fcodex --dry-run /resume <thread_id|thread_name>`
+  - reuses `fcodex /resume <thread_id|thread_name>` target resolution
+  - reports the selected instance, resolved thread, default profile, and thread
+    runtime lease check
+  - does not start the TUI and does not call `thread/resume`
+  - does not clear stale profiles or write any local state
+
+Like ordinary `fcodex /session` and `fcodex /resume`, it does not read
+named-instance `thread admission` filtering; it is an operator-local preflight.
+
 ### `fcodex /profile [name]`
 
 - Reads or changes the same local default-profile state used by Feishu

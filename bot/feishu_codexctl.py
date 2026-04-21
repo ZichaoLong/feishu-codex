@@ -125,10 +125,17 @@ def _print_binding_status(data_dir: pathlib.Path, binding_id: str) -> int:
     print(f"backend running turn: {'yes' if snapshot['backend_running_turn'] else 'no'}")
     print(f"feishu write owner: {snapshot['feishu_write_owner_binding_id'] or snapshot['feishu_write_owner_relation']}")
     print(f"interaction owner: {snapshot['interaction_owner']['label']}")
+    if snapshot["next_prompt_allowed"]:
+        print("next prompt: accepted")
+    else:
+        print(f"next prompt: blocked ({snapshot['next_prompt_reason_code']})")
+        print(f"next prompt reason: {snapshot['next_prompt_reason']}")
     print(f"re-profile possible: {'yes' if snapshot['reprofile_possible'] else 'no'}")
     if snapshot["thread_id"]:
         availability = "available" if snapshot["release_feishu_runtime_available"] else "blocked"
         print(f"release-feishu-runtime: {availability}")
+        if snapshot["release_feishu_runtime_reason_code"]:
+            print(f"release reason code: {snapshot['release_feishu_runtime_reason_code']}")
         if snapshot["release_feishu_runtime_reason"]:
             print(f"release reason: {snapshot['release_feishu_runtime_reason']}")
     print(f"approval_policy: {snapshot['approval_policy']}")
@@ -168,6 +175,8 @@ def _print_thread_status(data_dir: pathlib.Path, target_params: dict[str, str]) 
     print(f"re-profile possible: {'yes' if snapshot['reprofile_possible'] else 'no'}")
     availability = "available" if snapshot["release_feishu_runtime_available"] else "blocked"
     print(f"release-feishu-runtime: {availability}")
+    if snapshot["release_feishu_runtime_reason_code"]:
+        print(f"release reason code: {snapshot['release_feishu_runtime_reason_code']}")
     if snapshot["release_feishu_runtime_reason"]:
         print(f"release reason: {snapshot['release_feishu_runtime_reason']}")
     return 0
@@ -193,6 +202,8 @@ def _release_thread_runtime(data_dir: pathlib.Path, target_params: dict[str, str
     print(f"released bindings: {', '.join(result['released_binding_ids']) or '（无）'}")
     print(f"backend thread status: {result['backend_thread_status']}")
     print(f"re-profile possible: {'yes' if result['reprofile_possible'] else 'no'}")
+    if result.get("release_feishu_runtime_reason_code"):
+        print(f"release reason code: {result['release_feishu_runtime_reason_code']}")
     if result["already_released"]:
         print("note: Feishu runtime was already released.")
     elif result["backend_still_loaded"]:

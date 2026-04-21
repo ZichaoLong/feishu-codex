@@ -8,9 +8,10 @@ This document defines the shared state vocabulary and control contract across:
 - the local `feishu-codexctl` admin CLI
 - the shared app-server backend
 
-It answers three questions:
+It answers four questions:
 
 - what `/status` is actually describing
+- what `/preflight` may dry-run and must not mutate
 - what `/release-feishu-runtime` releases and does not release
 - why local runtime-release actions must go through the running `feishu-codex` service rather than directly calling app-server from a separate CLI connection
 
@@ -27,8 +28,8 @@ See also:
 
 ## 2. Shared State Vocabulary
 
-These terms are the shared factual vocabulary used by Feishu `/status` and the local
-`feishu-codexctl` admin surface.
+These terms are the shared factual vocabulary used by Feishu `/status`,
+`/preflight`, and the local `feishu-codexctl` admin surface.
 
 ### 2.1 `binding`
 
@@ -66,9 +67,14 @@ Fallback value in Feishu status/admin surfaces when the backend could not be
 read at all:
 
 - `unknown`
+- `missing`
+- `error`
 
-`unknown` is not a backend-native thread state. It only means the current
-surface could not determine the backend status.
+These fallback values are not backend-native thread states:
+
+- `unknown`: the current surface could not determine the backend status field
+- `missing`: the current surface confirmed the thread does not exist
+- `error`: one backend read attempt failed
 
 ### 2.4 `backend running turn`
 
@@ -225,8 +231,38 @@ It answers, for the current chat binding:
 - `re-profile possible`
 - whether `/release-feishu-runtime` is currently allowed
 
+When `/status` or local admin surfaces need to explain a deny / blocked result,
+they may expose both:
+
+- a stable `reason_code`
+- a human-facing explanation text
+
+The code is the automation-stable key; the text is for operators.
+
 It is not a global thread-management command.
 Global binding/thread inspection belongs to `feishu-codexctl`.
+
+### 4.1 `/preflight` Contract
+
+Feishu `/preflight` is also chat-scoped and targets the current chat binding.
+
+It is a read-only dry-run surface. It may explain what would happen next, but
+it must not:
+
+- start a turn
+- call `thread/resume`
+- add a subscriber
+- mutate binding / runtime / owner state
+- clear or write local profile state
+
+It reuses the same prompt preflight checks as ordinary prompts and the same
+availability checks as `/release-feishu-runtime`. When it renders a deny /
+blocked result, it may expose the same stable `reason_code` plus human-facing
+text.
+
+If the current binding is `bound + released`, `/preflight` may only report
+whether the next ordinary prompt would be accepted. It must not flip
+`released` back to `attached`.
 
 ## 5. Exact Contract of `/release-feishu-runtime`
 

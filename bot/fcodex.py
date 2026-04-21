@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from bot.adapters.base import ThreadSummary
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.config import load_config_file
-from bot.constants import DEFAULT_APP_SERVER_URL, FC_DATA_DIR, PROJECT_ROOT
+from bot.constants import DEFAULT_APP_SERVER_URL, FC_DATA_DIR, PROJECT_ROOT, display_path
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, resolve_instance_paths, validate_instance_name
 from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
 from bot.profile_resolution import resolve_local_default_profile_via_remote_backend
@@ -26,6 +26,7 @@ from bot.session_resolution import (
     looks_like_thread_id,
     resolve_resume_name_via_remote_backend,
 )
+from bot.service_control_plane import ServiceControlError, control_request
 from bot.shared_command_surface import (
     format_shared_wrapper_command_names,
     get_shared_command,
@@ -124,6 +125,20 @@ def _consume_instance_arg(user_args: list[str]) -> tuple[str, list[str]]:
     if first.startswith("--instance="):
         return validate_instance_name(first.split("=", 1)[1]), user_args[1:]
     return "", list(user_args)
+
+
+def _consume_dry_run_arg(user_args: list[str]) -> tuple[bool, list[str]]:
+    matches = [idx for idx, arg in enumerate(user_args) if arg == "--dry-run"]
+    if not matches:
+        return False, list(user_args)
+    if len(matches) > 1:
+        print("`--dry-run` 只能出现一次。", file=sys.stderr)
+        raise SystemExit(2)
+    if matches[0] != 0:
+        print("`--dry-run` 必须放在 fcodex 自命令之前。", file=sys.stderr)
+        print("示例：`fcodex --dry-run /resume <thread_id|thread_name>`", file=sys.stderr)
+        raise SystemExit(2)
+    return True, user_args[1:]
 
 
 def _running_instance_entries() -> list[InstanceRegistryEntry]:
@@ -418,6 +433,154 @@ def _resolve_thread_target_via_remote_backend(
     return thread, None
 
 
+def _parse_session_scope(user_args: list[str]) -> str | None:
+    scope = "cwd"
+    if len(user_args) == 2:
+        arg = user_args[1].strip().lower()
+        if arg == "cwd":
+            scope = "cwd"
+        elif arg == "global":
+            scope = "global"
+        else:
+            return None
+    elif len(user_args) > 2:
+        return None
+    return scope
+
+
+def _print_dry_run_target_header(command: str, target: _ResolvedInstanceTarget) -> None:
+    print(f"dry-run: fcodex {command}")
+    print(f"instance: {target.instance_name}")
+    print(f"data dir: {display_path(str(target.data_dir))}")
+    print(f"app server: {target.app_server_url}")
+    print("read-only: yes")
+
+
+def _resume_dry_run_lease_lines(thread_id: str, target: _ResolvedInstanceTarget) -> list[str]:
+    lease = ThreadRuntimeLeaseStore(global_data_dir()).load(thread_id)
+    if lease is None:
+        return ["thread runtime lease: no live owner recorded"]
+    if lease.owner_instance == target.instance_name:
+        return [
+            f"thread runtime lease: owned by target instance `{lease.owner_instance}`",
+            f"lease holders: {len(lease.holders)}",
+        ]
+    owner = _running_instance_by_name(lease.owner_instance)
+    if owner is None:
+        return [
+            f"thread runtime lease: stale owner `{lease.owner_instance}` is not currently registered",
+            "transfer check: real run may purge the stale lease before acquiring",
+        ]
+    if owner.service_token != lease.owner_service_token:
+        return [
+            f"thread runtime lease: stale owner token for `{lease.owner_instance}`",
+            "transfer check: real run may purge the stale lease before acquiring",
+        ]
+    try:
+        status = control_request(pathlib.Path(owner.data_dir), "thread/status", {"thread_id": thread_id})
+    except ServiceControlError as exc:
+        return [
+            f"thread runtime lease: blocked by owner instance `{lease.owner_instance}`",
+            f"transfer check: cannot query owner status ({exc})",
+        ]
+    if bool(status.get("release_feishu_runtime_available")):
+        return [
+            f"thread runtime lease: transferable from owner instance `{lease.owner_instance}`",
+            "transfer check: owner reports release-feishu-runtime available",
+        ]
+    reason_code = str(status.get("release_feishu_runtime_reason_code", "") or "").strip()
+    reason = str(status.get("release_feishu_runtime_reason", "") or "").strip()
+    suffix = f" ({reason_code})" if reason_code else ""
+    lines = [f"thread runtime lease: blocked by owner instance `{lease.owner_instance}`{suffix}"]
+    if reason:
+        lines.append(f"transfer reason: {reason}")
+    return lines
+
+
+def _handle_session_dry_run(cfg: dict, explicit_instance: str, user_args: list[str]) -> int:
+    scope = _parse_session_scope(user_args)
+    if scope is None:
+        print(f"用法：{_SESSION_COMMAND.wrapper_usage}", file=sys.stderr)
+        return 2
+    target = _resolve_instance_target(cfg=cfg, explicit_instance=explicit_instance)
+    session_command = "/session" if scope == "cwd" else "/session global"
+    _print_dry_run_target_header(session_command, target)
+    print(f"scope: {scope}")
+    if scope == "cwd":
+        print(f"working dir: {display_path(os.getcwd())}")
+    print("thread admission: not consulted by fcodex wrapper discovery")
+    print("would start TUI: no")
+    print("")
+    return _handle_local_list_command(cfg, target.app_server_url, scope)
+
+
+def _handle_resume_dry_run(cfg: dict, explicit_instance: str, user_args: list[str]) -> int:
+    if len(user_args) != 2:
+        print(f"用法：{_RESUME_COMMAND.wrapper_usage}", file=sys.stderr)
+        return 2
+    raw_target = user_args[1].strip()
+    if not raw_target:
+        print(f"用法：{_RESUME_COMMAND.wrapper_usage}", file=sys.stderr)
+        return 2
+    lookup_target = _resolve_instance_target(cfg=cfg, explicit_instance=explicit_instance)
+    thread, error = _resolve_thread_target_via_remote_backend(cfg, lookup_target.app_server_url, raw_target)
+    if thread is None:
+        print(f"dry-run resume failed: {error}", file=sys.stderr)
+        return 2
+    target = _resolve_instance_target(
+        cfg=cfg,
+        explicit_instance=explicit_instance,
+        thread_id=thread.thread_id,
+    )
+    profile_store = ProfileStateStore(target.data_dir)
+    profile_resolution = resolve_local_default_profile_via_remote_backend(
+        base_config=_remote_adapter_config(cfg, target.app_server_url),
+        app_server_url=target.app_server_url,
+        stored_profile=profile_store.load_default_profile(),
+    )
+
+    _print_dry_run_target_header("/resume", target)
+    if target.instance_name != lookup_target.instance_name:
+        print(
+            "routing note: target instance differs from lookup instance because the thread has a live runtime owner."
+        )
+        print(f"lookup instance: {lookup_target.instance_name}")
+    print(f"target: {raw_target}")
+    print(f"resolved thread: {thread.thread_id} {thread.title}".rstrip())
+    print(f"thread cwd: {display_path(thread.cwd)}")
+    print(f"backend thread status: {thread.status or 'unknown'}")
+    print(f"default profile: {profile_resolution.effective_profile or '（未设置）'}")
+    if profile_resolution.stale_profile:
+        print(
+            "stale profile: "
+            f"{profile_resolution.stale_profile} (real run will clear it; dry-run does not mutate local state)"
+        )
+    print("thread admission: not consulted by fcodex wrapper resume")
+    print(f"would pass to upstream: resume {thread.thread_id}")
+    print("would start TUI: no")
+    for line in _resume_dry_run_lease_lines(thread.thread_id, target):
+        print(line)
+    return 0
+
+
+def _handle_dry_run_command(cfg: dict, explicit_instance: str, user_args: list[str]) -> int:
+    if not user_args:
+        print(
+            "用法：`fcodex --dry-run /session [cwd|global]` 或 "
+            "`fcodex --dry-run /resume <thread_id|thread_name>`",
+            file=sys.stderr,
+        )
+        return 2
+    cmd = user_args[0]
+    if cmd == "/session":
+        return _handle_session_dry_run(cfg, explicit_instance, user_args)
+    if cmd == "/resume":
+        return _handle_resume_dry_run(cfg, explicit_instance, user_args)
+    print("`--dry-run` 目前只支持 fcodex wrapper 自命令 `/session` 与 `/resume`。", file=sys.stderr)
+    print("说明：裸 `fcodex resume <id>` 仍是 upstream Codex CLI 行为，不属于 wrapper dry-run surface。", file=sys.stderr)
+    return 2
+
+
 def _handle_rm_command(cfg: dict, app_server_url: str, user_args: list[str], data_dir: pathlib.Path) -> int:
     if len(user_args) != 2:
         print(f"用法：{_RM_COMMAND.wrapper_usage}", file=sys.stderr)
@@ -579,6 +742,10 @@ def _print_wrapper_usage() -> None:
     for usage in shared_wrapper_usage_lines():
         print(f"  {usage}", file=sys.stderr)
         print(f"  --instance <name> {usage[len('fcodex '):]}", file=sys.stderr)
+    print("  fcodex --dry-run /session [cwd|global]", file=sys.stderr)
+    print("  fcodex --dry-run /resume <thread_id|thread_name>", file=sys.stderr)
+    print("  --instance <name> --dry-run /session [cwd|global]", file=sys.stderr)
+    print("  --instance <name> --dry-run /resume <thread_id|thread_name>", file=sys.stderr)
     print("说明：以上 wrapper 自命令都必须单独使用。", file=sys.stderr)
 
 
@@ -611,17 +778,8 @@ def _handle_internal_command(
     if cmd == "/rm":
         return _handle_rm_command(cfg, app_server_url, user_args, data_dir)
     if cmd == "/session":
-        scope = "cwd"
-        if len(user_args) == 2:
-            arg = user_args[1].strip().lower()
-            if arg == "cwd":
-                scope = "cwd"
-            elif arg == "global":
-                scope = "global"
-            else:
-                print(f"用法：{_SESSION_COMMAND.wrapper_usage}", file=sys.stderr)
-                return 2
-        elif len(user_args) > 2:
+        scope = _parse_session_scope(user_args)
+        if scope is None:
             print(f"用法：{_SESSION_COMMAND.wrapper_usage}", file=sys.stderr)
             return 2
         return _handle_local_list_command(cfg, app_server_url, scope)
@@ -637,6 +795,10 @@ def _handle_internal_command(
         print("说明：多实例场景可在最前面加 `--instance <name>`；歧义时会要求显式指定。")
         print("说明：`fcodex`、`fcodex <prompt>`、`fcodex resume <id>` 仍是 upstream Codex CLI，只是默认连到 feishu-codex shared backend。")
         print("说明：`fcodex /session`、`fcodex /resume <name>` 复用与飞书一致的共享发现逻辑。")
+        print(
+            "说明：`fcodex --dry-run /session` 与 "
+            "`fcodex --dry-run /resume <thread_id|thread_name>` 只做只读预检，不启动 TUI。"
+        )
         print("说明：进入 TUI 后，`/help`、`/resume` 等命令恢复 upstream 原样，不等同于 wrapper 命令。")
         print("说明：`fcodex /profile` 只改 feishu-codex / 默认 fcodex 的本地默认 profile；`fcodex -p <profile>` 仍以显式参数为准。")
         return 0
@@ -649,9 +811,15 @@ def main() -> None:
     cfg = load_config_file("codex")
     codex_command = str(cfg.get("codex_command", "codex")).strip() or "codex"
     explicit_instance, user_args = _consume_instance_arg(sys.argv[1:])
+    dry_run, user_args = _consume_dry_run_arg(user_args)
     if explicit_instance and _has_explicit_remote(user_args):
         print("`--instance` 不能与显式 `--remote` 同时使用。", file=sys.stderr)
         raise SystemExit(2)
+    if dry_run:
+        if _has_explicit_remote(user_args):
+            print("`--dry-run` 不能与显式 `--remote` 同时使用。", file=sys.stderr)
+            raise SystemExit(2)
+        raise SystemExit(_handle_dry_run_command(cfg, explicit_instance, user_args))
 
     preprocessed_args = list(user_args)
     if not _has_explicit_remote(preprocessed_args):

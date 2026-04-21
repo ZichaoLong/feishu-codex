@@ -64,6 +64,11 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         for spec in iter_shared_commands():
             self.assertTrue(handler._inbound_surface.has_command_route(spec.slash_name))
 
+    def test_handler_exposes_preflight_command_route(self) -> None:
+        handler = self._make_handler()
+
+        self.assertTrue(handler._inbound_surface.has_command_route("/preflight"))
+
     def test_help_and_session_cards_reuse_shared_command_specs(self) -> None:
         help_command = get_shared_command("help")
         resume_command = get_shared_command("resume")
