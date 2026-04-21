@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, MutableMapping, TypeAlias
+from typing import Any, Callable, TypeAlias, TypedDict
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
@@ -24,7 +24,25 @@ logger = logging.getLogger(__name__)
 
 ChatBindingKey: TypeAlias = tuple[str, str]
 RuntimeState: TypeAlias = RuntimeStateDict
-PendingRequestState: TypeAlias = MutableMapping[str, Any]
+
+
+class PendingRequestStateDict(TypedDict, total=False):
+    rpc_request_id: int | str
+    method: str
+    params: dict[str, Any]
+    thread_id: str
+    turn_id: str
+    title: str
+    message_id: str
+    questions: list[dict[str, Any]]
+    answers: dict[str, str]
+    chat_id: str
+    sender_id: str
+    actor_open_id: str
+    status: str
+
+
+PendingRequestState: TypeAlias = PendingRequestStateDict
 
 PENDING_REQUEST_STATUS_PENDING = "pending"
 PENDING_REQUEST_STATUS_PROCESSING = "processing"

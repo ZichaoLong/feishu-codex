@@ -62,6 +62,14 @@ Typical values:
 - `active`
 - `systemError`
 
+Fallback value in Feishu status/admin surfaces when the backend could not be
+read at all:
+
+- `unknown`
+
+`unknown` is not a backend-native thread state. It only means the current
+surface could not determine the backend status.
+
 ### 2.4 `backend running turn`
 
 A derived judgment:

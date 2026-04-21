@@ -12,6 +12,7 @@ from bot.constants import display_path
 from bot.runtime_state import (
     BACKEND_THREAD_STATUS_ACTIVE,
     BACKEND_THREAD_STATUS_NOT_LOADED,
+    BACKEND_THREAD_STATUS_UNKNOWN,
     FEISHU_RUNTIME_ATTACHED,
     FEISHU_RUNTIME_RELEASED,
     LOADED_BACKEND_THREAD_STATUSES,
@@ -338,7 +339,7 @@ class RuntimeAdminController:
             "released_binding_ids": result.released_binding_ids,
             "changed": result.changed,
             "already_released": result.already_released,
-            "backend_thread_status": backend_thread_status or "unknown",
+            "backend_thread_status": backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN,
             "backend_still_loaded": backend_thread_status in LOADED_BACKEND_THREAD_STATUSES,
             "reprofile_possible": backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED,
         }
@@ -361,7 +362,7 @@ class RuntimeAdminController:
             "thread_id": snapshot["thread_id"],
             "thread_title": effective_summary.title if effective_summary is not None else "",
             "working_dir": effective_summary.cwd if effective_summary is not None else "",
-            "backend_thread_status": backend_thread_status or "unknown",
+            "backend_thread_status": backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN,
             "backend_running_turn": backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE,
             "bound_binding_ids": snapshot["bound_binding_ids"],
             "attached_binding_ids": snapshot["attached_binding_ids"],

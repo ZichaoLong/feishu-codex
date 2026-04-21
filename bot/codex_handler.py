@@ -12,7 +12,7 @@ import pathlib
 import threading
 import time
 from dataclasses import replace
-from typing import Any, Callable, TypedDict, TypeAlias
+from typing import Any, Callable, TypeAlias
 from uuid import UUID
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -47,7 +47,7 @@ from bot.instance_layout import DEFAULT_INSTANCE_NAME, current_instance_name, gl
 from bot.codex_config_reader import ResolvedProfileConfig, resolve_profile_from_codex_config
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
 from bot.codex_protocol.client import CodexRpcError
-from bot.codex_group_domain import CodexGroupDomain
+from bot.codex_group_domain import CodexGroupDomain, GroupDomainPorts
 from bot.codex_help_domain import CodexHelpDomain
 from bot.codex_session_ui_domain import CodexSessionUiDomain, SessionUiRuntimePorts
 from bot.codex_settings_domain import CodexSettingsDomain, SettingsDomainPorts
@@ -59,8 +59,9 @@ from bot.execution_recovery_controller import (
     SnapshotReplyProjection,
     TerminalReconcileTarget,
 )
-from bot.file_message_domain import FileMessageDomain, IncomingAttachmentMessage
+from bot.file_message_domain import FileMessageDomain, FileMessagePorts, IncomingAttachmentMessage
 from bot.interaction_request_controller import InteractionRequestController
+from bot.interaction_request_controller import PendingRequestStateDict
 from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSurfaceController
 from bot.prompt_turn_entry_controller import PromptTurnEntryController, PromptTurnEntryPorts
 from bot.runtime_admin_controller import RuntimeAdminController
@@ -138,22 +139,6 @@ _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
         "sandbox": "danger-full-access",
     },
 }
-
-class _PendingRequestState(TypedDict):
-    rpc_request_id: int | str
-    method: str
-    params: dict[str, Any]
-    thread_id: str
-    turn_id: str
-    title: str
-    message_id: str
-    questions: list[dict[str, Any]]
-    answers: dict[str, str]
-    chat_id: str
-    sender_id: str
-    actor_open_id: str
-    status: str
-
 
 def _permissions_preset_key(approval_policy: str, sandbox: str) -> str:
     for preset, config in _PERMISSIONS_PRESETS.items():
@@ -380,7 +365,30 @@ class CodexHandler(BotHandler):
             sandbox_policies=_SANDBOX_POLICIES,
             permissions_presets=_PERMISSIONS_PRESETS,
         )
-        self._group_domain = CodexGroupDomain(self)
+        self._group_domain = CodexGroupDomain(
+            ports=GroupDomainPorts(
+                get_sender_display_name=lambda **kwargs: self.bot.get_sender_display_name(**kwargs),
+                get_message_context=lambda message_id: self.bot.get_message_context(message_id),
+                get_group_mode=lambda chat_id: self.bot.get_group_mode(chat_id),
+                is_group_admin=lambda open_id: self.bot.is_group_admin(open_id=open_id),
+                get_group_acl_snapshot=lambda chat_id: self.bot.get_group_acl_snapshot(chat_id),
+                is_group_user_allowed=lambda chat_id, open_id: self.bot.is_group_user_allowed(
+                    chat_id,
+                    open_id=open_id,
+                ),
+                set_group_mode=lambda chat_id, mode: self.bot.set_group_mode(chat_id, mode),
+                set_group_access_policy=lambda chat_id, policy: self.bot.set_group_access_policy(chat_id, policy),
+                grant_group_members=lambda chat_id, open_ids: self.bot.grant_group_members(chat_id, open_ids),
+                revoke_group_members=lambda chat_id, open_ids: self.bot.revoke_group_members(chat_id, open_ids),
+                extract_non_bot_mentions=lambda message_id: self.bot.extract_non_bot_mentions(message_id),
+                is_group_chat=lambda chat_id, message_id="": self._is_group_chat(chat_id, message_id),
+                validate_group_mode_change=lambda chat_id, mode, message_id="": self._validate_group_mode_change(
+                    chat_id,
+                    mode,
+                    message_id=message_id,
+                ),
+            )
+        )
         self._help_domain = CodexHelpDomain(
             local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
         )
@@ -392,7 +400,17 @@ class CodexHandler(BotHandler):
             ),
         )
         self._file_message_domain = FileMessageDomain(
-            self,
+            ports=FileMessagePorts(
+                get_message_context=lambda message_id: self.bot.get_message_context(message_id),
+                download_message_resource=lambda message_id, resource_key, **kwargs: self.bot.download_message_resource(
+                    message_id,
+                    resource_key,
+                    **kwargs,
+                ),
+                reply_text=self._reply_text,
+                get_runtime_view=self._get_runtime_view,
+                message_reply_in_thread=self._message_reply_in_thread,
+            ),
             store=self._pending_attachment_store,
             ttl_seconds=self._attachment_ttl_seconds,
         )
@@ -1196,7 +1214,7 @@ class CodexHandler(BotHandler):
         chat_id: str,
         *,
         request_key: str,
-        pending: _PendingRequestState | None = None,
+        pending: PendingRequestStateDict | None = None,
         message_id: str = "",
         operator_open_id: str = "",
     ) -> bool:

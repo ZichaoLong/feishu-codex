@@ -15,11 +15,13 @@ import os
 import pathlib
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from bot.adapters.base import LocalImageTurnInputItem, TextTurnInputItem, TurnInputItem
 from bot.constants import display_path
+from bot.runtime_view import RuntimeView
 from bot.stores.pending_attachment_store import PendingAttachmentRecord, PendingAttachmentStore
 
 _ATTACHMENT_STAGE_DIRNAME = "_feishu_attachments"
@@ -54,21 +56,13 @@ class PreparedPromptInput:
     blocking_text: str = ""
 
 
-class _AttachmentIngressOwner(Protocol):
-    bot: Any
-
-    def _reply_text(
-        self,
-        chat_id: str,
-        text: str,
-        *,
-        message_id: str = "",
-        reply_in_thread: bool = False,
-    ) -> None: ...
-
-    def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> Any: ...
-
-    def _message_reply_in_thread(self, message_id: str) -> bool: ...
+@dataclass(frozen=True, slots=True)
+class FileMessagePorts:
+    get_message_context: Callable[[str], dict[str, Any]]
+    download_message_resource: Callable[..., Any]
+    reply_text: Callable[..., None]
+    get_runtime_view: Callable[[str, str, str], RuntimeView]
+    message_reply_in_thread: Callable[[str], bool]
 
 
 class FileMessageDomain:
@@ -76,12 +70,12 @@ class FileMessageDomain:
 
     def __init__(
         self,
-        owner: _AttachmentIngressOwner,
         *,
+        ports: FileMessagePorts,
         store: PendingAttachmentStore,
         ttl_seconds: float,
     ) -> None:
-        self._owner = owner
+        self._ports = ports
         self._store = store
         self._ttl_seconds = max(float(ttl_seconds), 1.0)
 
@@ -108,7 +102,7 @@ class FileMessageDomain:
             )
             return
 
-        runtime = self._owner._get_runtime_view(
+        runtime = self._ports.get_runtime_view(
             incoming.sender_id,
             incoming.chat_id,
             incoming.message_id,
@@ -128,7 +122,7 @@ class FileMessageDomain:
             return
 
         try:
-            downloaded = self._owner.bot.download_message_resource(
+            downloaded = self._ports.download_message_resource(
                 incoming.message_id,
                 incoming.resource_key,
                 resource_type=self._download_resource_type(attachment_type),
@@ -185,7 +179,7 @@ class FileMessageDomain:
         )
         saved_path = display_path(str(staged_path), str(working_dir))
         suffix = f"\n当前待消费附件：{pending_count} 个。" if pending_count > 1 else ""
-        self._owner._reply_text(
+        self._ports.reply_text(
             incoming.chat_id,
             (
                 f"{self._attachment_label(attachment_type)}已保存到本地：`{saved_path}`\n"
@@ -193,7 +187,7 @@ class FileMessageDomain:
                 f"{suffix}"
             ),
             message_id=incoming.message_id,
-            reply_in_thread=self._owner._message_reply_in_thread(incoming.message_id),
+            reply_in_thread=self._ports.message_reply_in_thread(incoming.message_id),
         )
 
     def prepare_prompt_input(
@@ -220,7 +214,7 @@ class FileMessageDomain:
                 )
             return PreparedPromptInput(input_items=(self._text_input_item(text),))
 
-        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
         working_dir = pathlib.Path(str(runtime.working_dir or "")).expanduser()
         blocking_text = self._validate_pending_attachments(
             attachments,
@@ -286,7 +280,7 @@ class FileMessageDomain:
         message_id: str,
         now: float,
     ) -> tuple[tuple[PendingAttachmentRecord, ...], tuple[PendingAttachmentRecord, ...]]:
-        context = self._owner.bot.get_message_context(message_id) if message_id else {}
+        context = self._ports.get_message_context(message_id) if message_id else {}
         thread_id = str(context.get("thread_id", "") or "").strip()
         return self._store.take(
             sender_id=sender_id,
@@ -343,11 +337,11 @@ class FileMessageDomain:
 
     def _reply_attachment_rejected(self, incoming: IncomingAttachmentMessage, reason: str) -> None:
         display_name = incoming.display_name or self._attachment_label(incoming.attachment_type)
-        self._owner._reply_text(
+        self._ports.reply_text(
             incoming.chat_id,
             f"无法接入附件：`{display_name}`\n{reason}",
             message_id=incoming.message_id,
-            reply_in_thread=self._owner._message_reply_in_thread(incoming.message_id),
+            reply_in_thread=self._ports.message_reply_in_thread(incoming.message_id),
         )
 
     def _stage_downloaded_attachment(

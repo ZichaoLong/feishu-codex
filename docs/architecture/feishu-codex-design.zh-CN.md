@@ -164,6 +164,8 @@ shared backend 与 wrapper 的具体机制，见
   不应继续扩大匿名 callback 列表
 - session UI 发起的 resume 流程，也应通过显式 runtime ports 穿过运行时边界，
   而不是在 domain 内直接触达 handler 私有的 loop helper
+- settings / group / file-message 这类 bot-facing domain，也应只依赖具名 ports 暴露的必要 bot/runtime 能力，
+  不应继续保留带隐式 `bot: Any` 的宽泛 owner protocol
 - settings domain 命令也应通过具名 settings ports 获取 bot 身份/消息上下文、runtime view/update 与 profile 状态，
   而不是依赖宽泛的 handler owner protocol
 - `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面

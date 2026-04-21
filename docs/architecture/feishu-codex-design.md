@@ -211,6 +211,9 @@ still need to stay explicit as the code evolves are:
 - session-UI initiated resume flow should also cross the runtime boundary
   through explicit runtime ports, rather than reaching into handler-private
   loop helpers from inside the domain object
+- bot-facing domains such as settings, group, and attachment ingress should
+  depend on named ports for the specific bot/runtime capabilities they need,
+  rather than retaining broad owner protocols with implicit `bot: Any`
 - settings-domain commands should depend on named settings ports for bot
   identity/context, runtime view/update, and profile state, rather than on a
   broad handler-owner protocol

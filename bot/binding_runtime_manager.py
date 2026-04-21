@@ -11,6 +11,7 @@ from bot.execution_transcript import ExecutionTranscript
 from bot.runtime_state import (
     BACKEND_THREAD_STATUS_ACTIVE,
     BACKEND_THREAD_STATUS_NOT_LOADED,
+    BACKEND_THREAD_STATUS_UNKNOWN,
     FEISHU_RUNTIME_ATTACHED,
     FEISHU_RUNTIME_NOT_APPLICABLE,
     FEISHU_RUNTIME_RELEASED,
@@ -718,7 +719,7 @@ class BindingRuntimeManager:
             "thread_title": thread_title,
             "working_dir": working_dir,
             "feishu_runtime_state": feishu_runtime_state,
-            "backend_thread_status": backend_thread_status or FEISHU_RUNTIME_NOT_APPLICABLE,
+            "backend_thread_status": backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN,
             "backend_running_turn": backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE,
             "feishu_write_owner_binding_id": feishu_write_owner_binding_id,
             "feishu_write_owner_relation": feishu_write_owner_relation,

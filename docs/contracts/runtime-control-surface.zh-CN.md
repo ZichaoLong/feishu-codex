@@ -60,6 +60,12 @@
 - `active`
 - `systemError`
 
+若当前 status/admin surface 根本读不到 backend 信息，则回落为：
+
+- `unknown`
+
+`unknown` 不是 backend 自身的线程状态词汇，只表示当前 surface 无法判定 backend 状态。
+
 这是 app-server 的线程状态，不是飞书会话自己的 UI 状态。
 
 ### 2.4 `backend running turn`
