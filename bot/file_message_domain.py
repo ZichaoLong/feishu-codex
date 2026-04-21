@@ -204,13 +204,11 @@ class FileMessageDomain:
         message_id: str,
         text: str,
     ) -> PreparedPromptInput:
-        context = self._owner.bot.get_message_context(message_id) if message_id else {}
-        thread_id = str(context.get("thread_id", "") or "").strip()
         now = time.time()
-        attachments, expired = self._store.take(
+        attachments, expired = self._take_pending_attachments_for_message(
             sender_id=sender_id,
             chat_id=chat_id,
-            thread_id=thread_id,
+            message_id=message_id,
             now=now,
         )
         self._delete_local_files(expired)
@@ -222,29 +220,47 @@ class FileMessageDomain:
                 )
             return PreparedPromptInput(input_items=(self._text_input_item(text),))
 
-        existing: list[PendingAttachmentRecord] = []
-        for record in attachments:
-            if pathlib.Path(record.local_path).exists():
-                existing.append(record)
-        if not existing:
+        runtime = self._owner._get_runtime_view(sender_id, chat_id, message_id)
+        working_dir = pathlib.Path(str(runtime.working_dir or "")).expanduser()
+        blocking_text = self._validate_pending_attachments(
+            attachments,
+            working_dir=working_dir,
+        )
+        if blocking_text:
             return PreparedPromptInput(
                 input_items=(),
-                blocking_text="附件暂存文件已不存在，请重新发送后再试。",
+                blocking_text=blocking_text,
             )
 
-        prompt_text = self._compose_prompt_text(text, tuple(existing))
+        prompt_text = self._compose_prompt_text(text, attachments)
         input_items: list[TurnInputItem] = [self._text_input_item(prompt_text)]
-        for record in existing:
+        for record in attachments:
             if record.attachment_type == "image":
                 input_items.append(self._local_image_input_item(record.local_path))
         return PreparedPromptInput(
             input_items=tuple(input_items),
-            consumed_attachments=tuple(existing),
+            consumed_attachments=attachments,
         )
 
     def restore_consumed_attachments(self, records: tuple[PendingAttachmentRecord, ...]) -> None:
         if records:
             self._store.add_many(records)
+
+    def invalidate_pending_attachments_for_scope(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> int:
+        attachments, expired = self._take_pending_attachments_for_message(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            now=time.time(),
+        )
+        self._delete_local_files(expired)
+        return len(attachments)
 
     def _cleanup_expired_attachments(self) -> None:
         expired = self._store.cleanup_expired(now=time.time())
@@ -261,6 +277,52 @@ class FileMessageDomain:
         lines.append("用户请求：")
         lines.append(text)
         return "\n".join(lines)
+
+    def _take_pending_attachments_for_message(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        now: float,
+    ) -> tuple[tuple[PendingAttachmentRecord, ...], tuple[PendingAttachmentRecord, ...]]:
+        context = self._owner.bot.get_message_context(message_id) if message_id else {}
+        thread_id = str(context.get("thread_id", "") or "").strip()
+        return self._store.take(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            now=now,
+        )
+
+    def _validate_pending_attachments(
+        self,
+        attachments: tuple[PendingAttachmentRecord, ...],
+        *,
+        working_dir: pathlib.Path,
+    ) -> str:
+        expected_stage_dir = (working_dir / _ATTACHMENT_STAGE_DIRNAME).resolve()
+        missing_local_file = False
+        workspace_mismatch = False
+        for record in attachments:
+            local_path = pathlib.Path(record.local_path)
+            if not local_path.exists():
+                missing_local_file = True
+                continue
+            try:
+                stage_dir = local_path.parent.resolve()
+            except OSError:
+                missing_local_file = True
+                continue
+            if stage_dir != expected_stage_dir:
+                workspace_mismatch = True
+        if missing_local_file and workspace_mismatch:
+            return "待消费附件已失效，请重新发送需要处理的全部附件后再试。"
+        if workspace_mismatch:
+            return "待消费附件属于其他工作目录，切换目录后已失效，请在当前目录重新发送需要处理的全部附件后再试。"
+        if missing_local_file:
+            return "附件暂存集合已不完整，请重新发送需要处理的全部附件后再试。"
+        return ""
 
     def _pending_count_for_key(
         self,

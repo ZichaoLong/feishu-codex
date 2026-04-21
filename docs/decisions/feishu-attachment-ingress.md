@@ -146,6 +146,10 @@ More precisely:
 All still-pending attachments under the same key should be consumed together in
 receive order.
 
+If any attachment in that pending set is missing locally or no longer belongs to
+the current working directory, the whole set must fail closed rather than
+partially continuing with only the surviving subset.
+
 ### 5.3 Group Isolation Rule
 
 In group chats:
@@ -238,6 +242,12 @@ Therefore:
 - under `danger-full-access`, they follow the broader host permission boundary
 
 This is not accidental. It is the tradeoff accepted to keep the UX simple.
+
+Corollary:
+
+- if the working directory changes before pending attachments are consumed, that
+  pending set must be invalidated instead of being rebound into the new
+  workspace
 
 ## 7. Codex Input Contract
 

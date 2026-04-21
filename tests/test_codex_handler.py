@@ -3208,6 +3208,66 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertTrue(input_items[1]["path"].endswith(".png"))
         self.assertIn(input_items[1]["path"], input_items[0]["text"])
 
+    def test_missing_staged_attachment_blocks_entire_attachment_batch(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        workspace = pathlib.Path(tempdir.name) / "workspace"
+        workspace.mkdir()
+        handler, bot = self._make_handler({"default_working_dir": str(workspace)})
+        bot.message_contexts["m-file-1"] = {"chat_type": "p2p", "message_type": "file"}
+        bot.message_contexts["m-file-2"] = {"chat_type": "p2p", "message_type": "file"}
+        bot.message_contexts["m-text"] = {"chat_type": "p2p", "message_type": "text"}
+        bot.downloaded_resources[("m-file-1", "file", "file-key-1")] = SimpleNamespace(
+            content=b"one",
+            file_name="one.txt",
+            content_type="text/plain",
+        )
+        bot.downloaded_resources[("m-file-2", "file", "file-key-2")] = SimpleNamespace(
+            content=b"two",
+            file_name="two.txt",
+            content_type="text/plain",
+        )
+
+        handler.handle_attachment_message("ou_user", "c1", "m-file-1", "file", "file-key-1", "one.txt")
+        handler.handle_attachment_message("ou_user", "c1", "m-file-2", "file", "file-key-2", "two.txt")
+
+        staged_files = sorted((workspace / "_feishu_attachments").iterdir())
+        staged_files[0].unlink()
+
+        handler.handle_message("ou_user", "c1", "请处理附件", message_id="m-text")
+
+        self.assertEqual(handler._adapter.start_turn_calls, [])
+        self.assertIn("重新发送需要处理的全部附件", bot.replies[-1][1])
+        self.assertEqual(handler._pending_attachment_store.list_all(), ())
+
+    def test_workspace_mismatch_blocks_attachment_batch(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        workspace = pathlib.Path(tempdir.name) / "workspace-1"
+        workspace_2 = pathlib.Path(tempdir.name) / "workspace-2"
+        workspace.mkdir()
+        workspace_2.mkdir()
+        handler, bot = self._make_handler({"default_working_dir": str(workspace)})
+        bot.message_contexts["m-file"] = {"chat_type": "p2p", "message_type": "file"}
+        bot.message_contexts["m-text"] = {"chat_type": "p2p", "message_type": "text"}
+        bot.downloaded_resources[("m-file", "file", "file-key")] = SimpleNamespace(
+            content=b"one",
+            file_name="one.txt",
+            content_type="text/plain",
+        )
+
+        handler.handle_attachment_message("ou_user", "c1", "m-file", "file", "file-key", "one.txt")
+
+        state = handler._get_runtime_state("ou_user", "c1")
+        with handler._lock:
+            state["working_dir"] = str(workspace_2)
+
+        handler.handle_message("ou_user", "c1", "请处理附件", message_id="m-text")
+
+        self.assertEqual(handler._adapter.start_turn_calls, [])
+        self.assertIn("属于其他工作目录", bot.replies[-1][1])
+        self.assertEqual(handler._pending_attachment_store.list_all(), ())
+
     def test_group_attachment_pending_is_isolated_by_sender(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -4477,6 +4537,36 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 目录已切换")
         self.assertIn("当前线程绑定已清空。", card["elements"][0]["content"])
+
+    def test_cd_command_invalidates_pending_attachments_in_current_scope(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        workspace = pathlib.Path(tempdir.name) / "workspace-1"
+        workspace_2 = pathlib.Path(tempdir.name) / "workspace-2"
+        workspace.mkdir()
+        workspace_2.mkdir()
+        handler, bot = self._make_handler({"default_working_dir": str(workspace)})
+        bot.message_contexts["m-file"] = {"chat_type": "p2p", "message_type": "file"}
+        bot.message_contexts["m-text"] = {"chat_type": "p2p", "message_type": "text"}
+        bot.downloaded_resources[("m-file", "file", "file-key")] = SimpleNamespace(
+            content=b"spec-content",
+            file_name="spec.pdf",
+            content_type="application/pdf",
+        )
+
+        handler.handle_attachment_message("ou_user", "c1", "m-file", "file", "file-key", "spec.pdf")
+        staged_file = next((workspace / "_feishu_attachments").iterdir())
+
+        handler.handle_message("ou_user", "c1", f"/cd {workspace_2}")
+
+        self.assertEqual(handler._pending_attachment_store.list_all(), ())
+        _, card = bot.cards[-1]
+        self.assertIn("已使 1 个待消费附件失效。", card["elements"][0]["content"])
+
+        handler.handle_message("ou_user", "c1", "请处理附件", message_id="m-text")
+
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["text"], "请处理附件")
+        self.assertNotIn(str(staged_file), handler._adapter.start_turn_calls[-1]["text"])
 
     def test_bind_thread_to_new_thread_clears_previous_execution_anchor(self) -> None:
         handler, _ = self._make_handler()

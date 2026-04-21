@@ -1736,6 +1736,15 @@ class CodexHandler(BotHandler):
                 template="orange",
             ))
 
+        current_dir = pathlib.Path(str(runtime.working_dir or "")).expanduser().resolve()
+        target_dir = pathlib.Path(target).resolve()
+        invalidated_attachment_count = 0
+        if target_dir != current_dir:
+            invalidated_attachment_count = self._file_message_domain.invalidate_pending_attachments_for_scope(
+                sender_id=sender_id,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
         self._clear_thread_binding(sender_id, chat_id, message_id=message_id)
         binding = self._chat_binding_key(sender_id, chat_id, message_id)
         with self._lock:
@@ -1744,13 +1753,16 @@ class CodexHandler(BotHandler):
                 state,
                 ThreadStateChanged(working_dir=target),
             )
+        message = (
+            f"目录：`{display_path(target)}`\n"
+            "当前线程绑定已清空。\n"
+        )
+        if invalidated_attachment_count > 0:
+            message += f"已使 {invalidated_attachment_count} 个待消费附件失效。\n"
+        message += "直接发送普通文本，会在新目录自动新建线程。"
         return CommandResult(card=build_markdown_card(
             "Codex 目录已切换",
-            (
-                f"目录：`{display_path(target)}`\n"
-                "当前线程绑定已清空。\n"
-                "直接发送普通文本，会在新目录自动新建线程。"
-            ),
+            message,
         ))
 
     def _handle_new_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
