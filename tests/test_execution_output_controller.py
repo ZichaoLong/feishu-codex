@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+import json
 
 from bot.binding_runtime_manager import BindingRuntimeManager
 from bot.execution_output_controller import ExecutionOutputController
@@ -55,7 +56,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         )
         return manager.build_default_runtime_state()
 
-    def _make_controller(self, state):
+    def _make_controller(self, state, *, card_reply_limit: int = 5):
         bot = _FakeBot()
         replies: list[tuple[str, str, str, bool]] = []
         lock = threading.RLock()
@@ -79,7 +80,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
             reply_text=lambda chat_id, text, *, message_id="", reply_in_thread=False: replies.append(
                 (chat_id, text, message_id, reply_in_thread)
             ),
-            card_reply_limit=lambda: 5,
+            card_reply_limit=lambda: card_reply_limit,
             card_log_limit=lambda: 100,
             stream_patch_interval_ms=lambda: 1,
         )
@@ -99,6 +100,27 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         controller.send_followup_if_needed("ou_user", "c1")
 
         self.assertEqual(replies, [("c1", "123456789", "msg-1", True)])
+        self.assertTrue(state["followup_sent"])
+
+    def test_send_followup_prefers_terminal_result_card_when_reply_fits_card_budget(self) -> None:
+        state = self._make_state()
+        controller, bot, replies = self._make_controller(state, card_reply_limit=200)
+        state["current_message_id"] = "card-1"
+        state["current_prompt_message_id"] = "msg-2"
+        state["current_prompt_reply_in_thread"] = True
+        state["execution_transcript"].set_reply_text("done")
+
+        controller.send_followup_if_needed("ou_user", "c1")
+
+        self.assertEqual(replies, [])
+        parent_id, msg_type, content, reply_in_thread = bot.reply_refs[-1]
+        self.assertEqual(parent_id, "msg-2")
+        self.assertEqual(msg_type, "interactive")
+        self.assertTrue(reply_in_thread)
+        card = json.loads(content)
+        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertIn("<final_reply_text>", card["elements"][-1]["content"])
+        self.assertIn("done", card["elements"][-1]["content"])
         self.assertTrue(state["followup_sent"])
 
     def test_schedule_execution_card_update_immediate_path_patches_card(self) -> None:

@@ -230,15 +230,11 @@ class TurnExecutionCoordinator:
     def prepare_terminal_followup_locked(
         self,
         state: RuntimeState,
-        *,
-        card_reply_limit: int,
     ) -> ExecutionFollowupMessage | None:
         if state["followup_sent"]:
             return None
         reply_text = state["execution_transcript"].reply_text()
-        current_message_id = str(state["current_message_id"] or "").strip()
-        need_followup = not current_message_id or len(reply_text) > card_reply_limit
-        if not reply_text or not need_followup:
+        if not reply_text:
             return None
         self.apply_runtime_state_message_locked(
             state,

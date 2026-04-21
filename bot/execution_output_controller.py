@@ -4,6 +4,7 @@ import threading
 import time
 from typing import Any, Callable, MutableMapping, Protocol, TypeAlias
 
+from bot.card_text_projection import can_render_terminal_result_card
 from bot.runtime_card_publisher import (
     RuntimeCardPublisher,
     build_execution_card_model,
@@ -183,12 +184,21 @@ class ExecutionOutputController:
     def send_followup_if_needed(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
-            followup = self._turn_execution.prepare_terminal_followup_locked(
-                state,
-                card_reply_limit=int(self._card_reply_limit()),
-            )
+            followup = self._turn_execution.prepare_terminal_followup_locked(state)
         if followup is None:
             return
+        if can_render_terminal_result_card(
+            followup.reply_text,
+            char_limit=int(self._card_reply_limit()),
+        ):
+            published = self._card_publisher_factory().publish_terminal_result_card(
+                chat_id=chat_id,
+                parent_message_id=followup.prompt_message_id,
+                final_reply_text=followup.reply_text,
+                reply_in_thread=followup.prompt_reply_in_thread,
+            )
+            if published:
+                return
         self._reply_text(
             chat_id,
             followup.reply_text,

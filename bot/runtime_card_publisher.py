@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import Protocol
 
-from bot.cards import build_execution_card, build_plan_card
+from bot.cards import build_execution_card, build_plan_card, build_terminal_result_card
 from bot.execution_transcript import ExecutionReplySegment, ExecutionTranscript
 from bot.runtime_view import PlanView
 
@@ -156,6 +156,25 @@ class RuntimeCardPublisher:
             normalized_message_id,
             json.dumps(render_execution_card(model), ensure_ascii=False),
         )
+
+    def publish_terminal_result_card(
+        self,
+        *,
+        chat_id: str,
+        parent_message_id: str,
+        final_reply_text: str,
+        reply_in_thread: bool = False,
+    ) -> str | None:
+        content = json.dumps(build_terminal_result_card(final_reply_text), ensure_ascii=False)
+        normalized_parent = str(parent_message_id or "").strip()
+        if normalized_parent:
+            return self._bot.reply_to_message(
+                normalized_parent,
+                "interactive",
+                content,
+                reply_in_thread=reply_in_thread,
+            )
+        return self._bot.send_message_get_id(chat_id, "interactive", content)
 
     def publish_plan_card(
         self,

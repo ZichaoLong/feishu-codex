@@ -199,7 +199,7 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         state["current_prompt_message_id"] = "msg-2"
         state["execution_transcript"].set_reply_text("abcdef")
         state["current_message_id"] = "card-1"
-        followup = coordinator.prepare_terminal_followup_locked(state, card_reply_limit=3)
+        followup = coordinator.prepare_terminal_followup_locked(state)
         assert followup is not None
         self.assertEqual(followup.reply_text, "abcdef")
         self.assertTrue(state["followup_sent"])

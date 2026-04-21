@@ -13,6 +13,11 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     CallBackToast,
 )
 
+from bot.card_text_projection import (
+    TERMINAL_RESULT_CARD_HINT,
+    TERMINAL_RESULT_CARD_TITLE,
+    render_final_reply_text_block,
+)
 from bot.constants import display_path, format_timestamp, shorten
 from bot.execution_transcript import ExecutionReplySegment
 from bot.feishu_bot import _MAX_CARD_TABLES, count_card_tables, limit_card_tables
@@ -64,6 +69,22 @@ def build_markdown_card(title: str, content: str, *, template: str = "blue") -> 
             "template": template,
         },
         "elements": [{"tag": "markdown", "content": content}],
+    }
+
+
+def build_terminal_result_card(final_reply_text: str) -> dict:
+    """构造终态结果卡。"""
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": TERMINAL_RESULT_CARD_TITLE},
+            "template": "green",
+        },
+        "elements": [
+            {"tag": "markdown", "content": TERMINAL_RESULT_CARD_HINT},
+            {"tag": "hr"},
+            {"tag": "markdown", "content": render_final_reply_text_block(final_reply_text)},
+        ],
     }
 
 

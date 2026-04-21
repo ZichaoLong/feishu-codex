@@ -127,6 +127,9 @@ Current module split:
 
 - `bot/codex_handler.py`: Feishu-facing command handling and session binding
 - `bot/cards.py`: user-facing card rendering
+- `bot/card_text_projection.py`: card text projection boundary; owns the
+  terminal `final_reply_text` carrier contract and inbound `interactive`
+  strong-contract / best-effort text extraction
 - `bot/adapters/codex_app_server.py`: Codex adapter boundary
 - `bot/codex_protocol/client.py`: websocket JSON-RPC client for `codex app-server`
 - `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and thin proxy

@@ -107,6 +107,7 @@ shared backend 与 wrapper 的具体机制，见
 
 - `bot/codex_handler.py`：飞书侧命令处理与线程绑定
 - `bot/cards.py`：用户可见卡片渲染
+- `bot/card_text_projection.py`：卡片文本投影边界；负责终态 `final_reply_text` 结果载体约定，以及入站 `interactive` 的强合同 / best-effort 文本提取
 - `bot/adapters/codex_app_server.py`：Codex adapter 边界
 - `bot/codex_protocol/client.py`：`codex app-server` 的 websocket JSON-RPC client
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理

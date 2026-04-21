@@ -171,11 +171,16 @@ time:
 - once an execution is finalized, that card stops being the active anchor
 - if terminal reconciliation still needs to fill in missing text later, it may
   only patch that finalized card by its old `card_message_id`
+- the authoritative terminal result should normally be sent through a separate
+  `terminal result card`; only when that carrier cannot represent the text
+  safely or within budget may the system fall back to plain text
+- that terminal-result delivery path does not reopen the execution anchor and
+  does not weaken the "at most one active execution card" rule
 - only a new local prompt or a new external turn may create the next execution
   card
-- the local reply-length budget for the execution card constrains the final
-  rendered text length; the truncation notice itself must count against that
-  budget rather than being appended outside it
+- the local reply-length budget for the execution card constrains only the
+  display-only reply projection; the truncation notice itself must count
+  against that budget rather than being appended outside it
 
 Therefore a soft `thread/read` failure must never clear the current anchor and
 then let later notifications create a second card for the same execution.

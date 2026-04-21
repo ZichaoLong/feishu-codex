@@ -11,6 +11,8 @@ from lark_oapi.api.im.v1 import (
     P2ImMessageReceiveV1,
 )
 
+from bot.cards import build_execution_card, build_terminal_result_card
+from bot.execution_transcript import ExecutionReplySegment
 from bot.feishu_bot import FeishuBot
 
 
@@ -235,6 +237,78 @@ def _attachment_message_event(
             }
         }
     )
+
+
+class FeishuBotCardProjectionTests(unittest.TestCase):
+    def _make_bot(self) -> _RecordingBot:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        return _RecordingBot(pathlib.Path(tempdir.name))
+
+    def test_p2p_terminal_result_card_projects_authoritative_text(self) -> None:
+        bot = self._make_bot()
+
+        bot._handle_raw_message(
+            _attachment_message_event(
+                message_id="card-1",
+                chat_id="ou-user",
+                chat_type="p2p",
+                msg_type="interactive",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                content=build_terminal_result_card("稳定终态"),
+            )
+        )
+
+        self.assertEqual(
+            bot.received_messages,
+            [("ou-user", "ou-user", "稳定终态", "card-1")],
+        )
+
+    def test_p2p_execution_card_projects_visible_text_best_effort(self) -> None:
+        bot = self._make_bot()
+
+        bot._handle_raw_message(
+            _attachment_message_event(
+                message_id="card-2",
+                chat_id="ou-user",
+                chat_type="p2p",
+                msg_type="interactive",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                content=build_execution_card(
+                    "命令输出",
+                    [ExecutionReplySegment("assistant", "阶段回复")],
+                    running=False,
+                ),
+            )
+        )
+
+        self.assertEqual(len(bot.received_messages), 1)
+        self.assertIn("命令输出", bot.received_messages[0][2])
+        self.assertIn("阶段回复", bot.received_messages[0][2])
+
+    def test_history_entry_projects_interactive_terminal_result_from_other_app_sender(self) -> None:
+        bot = self._make_bot()
+
+        entry = bot._history_entry_from_message(
+            SimpleNamespace(
+                message_id="hist-card",
+                msg_type="interactive",
+                body=SimpleNamespace(
+                    content=json.dumps(build_terminal_result_card("来自其他机器人的终态"), ensure_ascii=False)
+                ),
+                mentions=[],
+                sender=SimpleNamespace(sender_type="app", id="cli_other_bot"),
+                create_time=1712476800000,
+                thread_id="",
+            )
+        )
+
+        self.assertIsNotNone(entry)
+        assert entry is not None
+        self.assertEqual(entry["text"], "来自其他机器人的终态")
+        self.assertEqual(entry["sender_type"], "app")
 
 
 class FeishuBotGroupModeTests(unittest.TestCase):

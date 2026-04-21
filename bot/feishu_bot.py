@@ -42,6 +42,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     CallBackToast,
 )
 
+from bot.card_text_projection import project_interactive_card_text
 from bot.constants import FC_DATA_DIR
 from bot.feishu_types import (
     BotIdentitySnapshot,
@@ -625,25 +626,8 @@ class FeishuBot(ABC):
             return " ".join(parts)
 
         if msg_type == "interactive":
-            # 飞书卡片：GetMessage API 返回降级内容，提取 title 和 text 元素
-            title = content_dict.get("title", "")
-            texts: list[str] = []
-            for para in content_dict.get("elements", []):
-                if not isinstance(para, list):
-                    continue
-                for elem in para:
-                    if isinstance(elem, dict) and elem.get("tag") == "text":
-                        t = elem.get("text", "").strip()
-                        if t:
-                            texts.append(t)
-            body = " ".join(texts)
-            if title and body:
-                return f"[卡片: {title}] {body}"
-            if title:
-                return f"[卡片: {title}]"
-            if body:
-                return f"[卡片] {body}"
-            return ""
+            projection = project_interactive_card_text(content_dict)
+            return projection.text
 
         # sticker/image/video/audio 等无文本消息
         return ""
