@@ -5,8 +5,10 @@ Codex settings domain.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from secrets import compare_digest
-from typing import Any, Protocol
+from typing import Any
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
@@ -28,45 +30,59 @@ from bot.runtime_view import RuntimeView
 
 logger = logging.getLogger(__name__)
 
+_UNSET = object()
 
-class _SettingsDomainOwner(Protocol):
-    bot: Any
-    _profile_state: Any
-    _adapter_config: Any
 
-    def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView: ...
+@dataclass(frozen=True, slots=True)
+class SettingsDomainPorts:
+    get_message_context: Callable[[str], dict[str, Any]]
+    get_sender_display_name: Callable[..., str]
+    get_bot_identity_snapshot: Callable[[], dict[str, Any]]
+    add_admin_open_id: Callable[[str], None]
+    set_configured_bot_open_id: Callable[[str], None]
+    save_default_profile: Callable[[str], None]
+    adapter_model_provider: str
+    get_runtime_view: Callable[[str, str, str], RuntimeView]
+    update_runtime_settings: Callable[..., None]
+    safe_read_runtime_config: Callable[[], RuntimeConfigSummary | None]
+    current_default_profile_resolution: Callable[[RuntimeConfigSummary | None], DefaultProfileResolution]
+
+
+class CodexSettingsDomain:
+    def __init__(
+        self,
+        *,
+        ports: SettingsDomainPorts,
+        approval_policies: set[str],
+        sandbox_policies: set[str],
+        permissions_presets: dict[str, dict[str, str]],
+    ) -> None:
+        self._ports = ports
+        self._approval_policies = approval_policies
+        self._sandbox_policies = sandbox_policies
+        self._permissions_presets = permissions_presets
+
+    def _runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView:
+        return self._ports.get_runtime_view(sender_id, chat_id, message_id)
+
     def _update_runtime_settings(
         self,
         sender_id: str,
         chat_id: str,
         *,
         message_id: str = "",
-        approval_policy: Any = ...,
-        sandbox: Any = ...,
-        collaboration_mode: Any = ...,
-    ) -> None: ...
-
-    def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None: ...
-
-    def _current_default_profile_resolution(
-        self,
-        runtime_config: RuntimeConfigSummary | None,
-    ) -> DefaultProfileResolution: ...
-
-
-class CodexSettingsDomain:
-    def __init__(
-        self,
-        owner: _SettingsDomainOwner,
-        *,
-        approval_policies: set[str],
-        sandbox_policies: set[str],
-        permissions_presets: dict[str, dict[str, str]],
+        approval_policy: Any = _UNSET,
+        sandbox: Any = _UNSET,
+        collaboration_mode: Any = _UNSET,
     ) -> None:
-        self._owner = owner
-        self._approval_policies = approval_policies
-        self._sandbox_policies = sandbox_policies
-        self._permissions_presets = permissions_presets
+        changes: dict[str, Any] = {"message_id": message_id}
+        if approval_policy is not _UNSET:
+            changes["approval_policy"] = approval_policy
+        if sandbox is not _UNSET:
+            changes["sandbox"] = sandbox
+        if collaboration_mode is not _UNSET:
+            changes["collaboration_mode"] = collaboration_mode
+        self._ports.update_runtime_settings(sender_id, chat_id, **changes)
 
     def handle_init_command(
         self,
@@ -76,8 +92,9 @@ class CodexSettingsDomain:
         *,
         message_id: str = "",
     ) -> CommandResult:
-        owner = self._owner
-        context = owner.bot.get_message_context(message_id) if message_id else {}
+        del sender_id, chat_id
+        ports = self._ports
+        context = ports.get_message_context(message_id) if message_id else {}
         provided_token = str(arg or "").strip()
         if not provided_token:
             return CommandResult(text="用法：`/init <token>`\n`token` 默认保存在本机配置目录的 `init.token` 文件。")
@@ -89,7 +106,7 @@ class CodexSettingsDomain:
         sender_type = str(context.get("sender_type", "user") or "user").strip()
         if not sender_open_id:
             return CommandResult(text="初始化失败：当前消息上下文里没有发送者 `open_id`，暂时无法写入管理员配置。")
-        sender_name = owner.bot.get_sender_display_name(
+        sender_name = ports.get_sender_display_name(
             user_id=sender_user_id,
             open_id=sender_open_id,
             sender_type=sender_type,
@@ -103,7 +120,7 @@ class CodexSettingsDomain:
         admin_added = sender_open_id not in admin_open_ids
         admin_open_ids.add(sender_open_id)
         configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
-        identity = owner.bot.get_bot_identity_snapshot()
+        identity = ports.get_bot_identity_snapshot()
         discovered_bot_open_id = str(identity.get("discovered_open_id", "") or "").strip()
         bot_open_id_written = False
         if discovered_bot_open_id and discovered_bot_open_id != configured_bot_open_id:
@@ -121,9 +138,9 @@ class CodexSettingsDomain:
             logger.exception("保存初始化配置失败")
             return CommandResult(text=f"初始化失败：保存配置时出错：{exc}")
 
-        owner.bot.add_admin_open_id(sender_open_id)
+        ports.add_admin_open_id(sender_open_id)
         if configured_bot_open_id:
-            owner.bot.set_configured_bot_open_id(configured_bot_open_id)
+            ports.set_configured_bot_open_id(configured_bot_open_id)
 
         lines = [
             "初始化结果：",
@@ -149,12 +166,13 @@ class CodexSettingsDomain:
         return CommandResult(text="\n".join(lines))
 
     def handle_whoami_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
-        owner = self._owner
-        context = owner.bot.get_message_context(message_id) if message_id else {}
+        del sender_id, chat_id
+        ports = self._ports
+        context = ports.get_message_context(message_id) if message_id else {}
         sender_user_id = str(context.get("sender_user_id", "")).strip()
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         sender_type = str(context.get("sender_type", "user") or "user").strip()
-        name = owner.bot.get_sender_display_name(
+        name = ports.get_sender_display_name(
             user_id=sender_user_id,
             open_id=sender_open_id,
             sender_type=sender_type,
@@ -172,8 +190,8 @@ class CodexSettingsDomain:
         ))
 
     def handle_botinfo_command(self, chat_id: str, *, message_id: str = "") -> CommandResult:
-        owner = self._owner
-        identity = owner.bot.get_bot_identity_snapshot()
+        del chat_id, message_id
+        identity = self._ports.get_bot_identity_snapshot()
         configured_open_id = str(identity.get("configured_open_id", "") or "").strip()
         discovered_open_id = str(identity.get("discovered_open_id", "") or "").strip()
         trigger_open_ids = [
@@ -217,11 +235,11 @@ class CodexSettingsDomain:
         return CommandResult(text="\n".join(lines))
 
     def handle_profile_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        owner = self._owner
-        runtime_config = owner._safe_read_runtime_config()
+        ports = self._ports
+        runtime_config = ports.safe_read_runtime_config()
         if runtime_config is None:
             return CommandResult(text="读取 Codex 运行时配置失败，无法查看或切换 profile。")
-        profile_resolution = owner._current_default_profile_resolution(runtime_config)
+        profile_resolution = ports.current_default_profile_resolution(runtime_config)
         local_profile = profile_resolution.effective_profile
         profiles = {profile.name: profile for profile in runtime_config.profiles}
         profile_names = [profile.name for profile in runtime_config.profiles if profile.name]
@@ -273,10 +291,10 @@ class CodexSettingsDomain:
                 lines.append(
                     f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，现已自动清空并回退到 Codex 原生默认。"
                 )
-            if owner._adapter_config.model_provider:
+            if ports.adapter_model_provider:
                 lines.append(
                     "注意：当前 feishu-codex 配置写死了 "
-                    f"`model_provider: {owner._adapter_config.model_provider}`，新建线程时可能仍以它为准。"
+                    f"`model_provider: {ports.adapter_model_provider}`，新建线程时可能仍以它为准。"
                 )
             return build_profile_card(
                 content="\n".join(lines),
@@ -294,12 +312,12 @@ class CodexSettingsDomain:
             )
 
         try:
-            owner._profile_state.save_default_profile(target_profile)
+            ports.save_default_profile(target_profile)
         except Exception as exc:
             logger.exception("保存 feishu-codex 默认 profile 失败")
             return CommandResult(text=f"切换 profile 失败：{exc}")
 
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         lines = [f"已切换默认 profile：`{target_profile}`"]
         if runtime.running:
             lines.append("如果当前正在执行，新 profile 从下一轮生效。")
@@ -309,13 +327,12 @@ class CodexSettingsDomain:
         ))
 
     def handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        owner = self._owner
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in self._approval_policies:
                 return CommandResult(text="审批策略仅支持：`untrusted`、`on-failure`、`on-request`、`never`")
-            owner._update_runtime_settings(
+            self._update_runtime_settings(
                 sender_id,
                 chat_id,
                 message_id=message_id,
@@ -329,13 +346,12 @@ class CodexSettingsDomain:
         return CommandResult(card=build_approval_policy_card(runtime.approval_policy, running=runtime.running))
 
     def handle_sandbox_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        owner = self._owner
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in self._sandbox_policies:
                 return CommandResult(text="沙箱策略仅支持：`read-only`、`workspace-write`、`danger-full-access`")
-            owner._update_runtime_settings(
+            self._update_runtime_settings(
                 sender_id,
                 chat_id,
                 message_id=message_id,
@@ -349,14 +365,13 @@ class CodexSettingsDomain:
         return CommandResult(card=build_sandbox_policy_card(runtime.sandbox, running=runtime.running))
 
     def handle_permissions_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        owner = self._owner
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         if arg:
             preset = arg.strip().lower()
             config = self._permissions_presets.get(preset)
             if config is None:
                 return CommandResult(text="权限预设仅支持：`read-only`、`default`、`full-access`")
-            owner._update_runtime_settings(
+            self._update_runtime_settings(
                 sender_id,
                 chat_id,
                 message_id=message_id,
@@ -380,13 +395,12 @@ class CodexSettingsDomain:
         ))
 
     def handle_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        owner = self._owner
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         if arg:
             mode = arg.strip().lower()
             if mode not in {"default", "plan"}:
                 return CommandResult(text="协作模式仅支持：`default`、`plan`")
-            owner._update_runtime_settings(
+            self._update_runtime_settings(
                 sender_id,
                 chat_id,
                 message_id=message_id,
@@ -409,12 +423,11 @@ class CodexSettingsDomain:
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._approval_policies:
             return make_card_response(toast="非法审批策略", toast_type="warning")
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
-        owner._update_runtime_settings(
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        self._update_runtime_settings(
             sender_id,
             chat_id,
             message_id=message_id,
@@ -437,12 +450,11 @@ class CodexSettingsDomain:
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        owner = self._owner
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._sandbox_policies:
             return make_card_response(toast="非法沙箱策略", toast_type="warning")
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
-        owner._update_runtime_settings(
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        self._update_runtime_settings(
             sender_id,
             chat_id,
             message_id=message_id,
@@ -465,13 +477,12 @@ class CodexSettingsDomain:
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        owner = self._owner
         preset = str(action_value.get("preset", "")).strip().lower()
         config = self._permissions_presets.get(preset)
         if config is None:
             return make_card_response(toast="非法权限预设", toast_type="warning")
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
-        owner._update_runtime_settings(
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        self._update_runtime_settings(
             sender_id,
             chat_id,
             message_id=message_id,
@@ -499,12 +510,11 @@ class CodexSettingsDomain:
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        owner = self._owner
         mode = str(action_value.get("mode", "")).strip().lower()
         if mode not in {"default", "plan"}:
             return make_card_response(toast="非法协作模式", toast_type="warning")
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
-        owner._update_runtime_settings(
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        self._update_runtime_settings(
             sender_id,
             chat_id,
             message_id=message_id,
@@ -526,8 +536,7 @@ class CodexSettingsDomain:
         chat_id: str,
         message_id: str,
     ) -> P2CardActionTriggerResponse:
-        owner = self._owner
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         return make_card_response(
             card=build_permissions_preset_card(
                 runtime.approval_policy,
@@ -542,8 +551,7 @@ class CodexSettingsDomain:
         chat_id: str,
         message_id: str,
     ) -> P2CardActionTriggerResponse:
-        owner = self._owner
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         return make_card_response(
             card=build_collaboration_mode_card(
                 runtime.collaboration_mode,
@@ -558,7 +566,6 @@ class CodexSettingsDomain:
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        owner = self._owner
         target_profile = str(action_value.get("profile", "")).strip()
         if not target_profile:
             return make_card_response(toast="缺少 profile 名称", toast_type="warning")
@@ -566,7 +573,7 @@ class CodexSettingsDomain:
         if result.card is None:
             return make_card_response(toast=result.text or "切换 profile 失败", toast_type="warning")
         toast = f"已切换默认 profile：{target_profile}"
-        runtime = owner._get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
         if runtime.running:
             toast += "；下一轮生效"
         return make_card_response(

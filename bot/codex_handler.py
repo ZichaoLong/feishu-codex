@@ -49,8 +49,8 @@ from bot.stores.instance_registry_store import InstanceRegistryStore, build_inst
 from bot.codex_protocol.client import CodexRpcError
 from bot.codex_group_domain import CodexGroupDomain
 from bot.codex_help_domain import CodexHelpDomain
-from bot.codex_session_ui_domain import CodexSessionUiDomain
-from bot.codex_settings_domain import CodexSettingsDomain
+from bot.codex_session_ui_domain import CodexSessionUiDomain, SessionUiRuntimePorts
+from bot.codex_settings_domain import CodexSettingsDomain, SettingsDomainPorts
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
 from bot.execution_transcript import ExecutionTranscript
 from bot.execution_output_controller import ExecutionOutputController
@@ -68,10 +68,12 @@ from bot.runtime_card_publisher import (
     RuntimeCardPublisher,
 )
 from bot.runtime_state import (
+    FEISHU_RUNTIME_ATTACHED,
     UNSET,
     BindingActivated,
     ExecutionStateChanged,
     RuntimeSettingsChanged,
+    RuntimeStateDict,
     RuntimeStateMessage,
     ThreadStateChanged,
     apply_runtime_state_message,
@@ -136,48 +138,6 @@ _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
         "sandbox": "danger-full-access",
     },
 }
-
-class _PlanStepState(TypedDict):
-    step: str
-    status: str
-
-
-class _RuntimeState(TypedDict):
-    active: bool
-    working_dir: str
-    current_thread_id: str
-    current_thread_title: str
-    current_thread_runtime_state: str
-    current_turn_id: str
-    running: bool
-    cancelled: bool
-    pending_cancel: bool
-    current_message_id: str
-    last_execution_message_id: str
-    current_prompt_message_id: str
-    current_prompt_reply_in_thread: bool
-    current_actor_open_id: str
-    execution_transcript: ExecutionTranscript
-    runtime_channel_state: str
-    started_at: float
-    last_runtime_event_at: float
-    last_patch_at: float
-    patch_timer: threading.Timer | None
-    mirror_watchdog_timer: threading.Timer | None
-    mirror_watchdog_generation: int
-    followup_sent: bool
-    awaiting_local_turn_started: bool
-    approval_policy: str
-    sandbox: str
-    collaboration_mode: str
-    model: str
-    reasoning_effort: str
-    plan_message_id: str
-    plan_turn_id: str
-    plan_explanation: str
-    plan_steps: list[_PlanStepState]
-    plan_text: str
-
 
 class _PendingRequestState(TypedDict):
     rpc_request_id: int | str
@@ -403,7 +363,19 @@ class CodexHandler(BotHandler):
             app_server_runtime_store=self._app_server_runtime,
         )
         self._settings_domain = CodexSettingsDomain(
-            self,
+            ports=SettingsDomainPorts(
+                get_message_context=lambda message_id: self.bot.get_message_context(message_id),
+                get_sender_display_name=lambda **kwargs: self.bot.get_sender_display_name(**kwargs),
+                get_bot_identity_snapshot=lambda: self.bot.get_bot_identity_snapshot(),
+                add_admin_open_id=lambda open_id: self.bot.add_admin_open_id(open_id),
+                set_configured_bot_open_id=lambda open_id: self.bot.set_configured_bot_open_id(open_id),
+                save_default_profile=self._profile_state.save_default_profile,
+                adapter_model_provider=str(self._adapter_config.model_provider or "").strip(),
+                get_runtime_view=self._get_runtime_view,
+                update_runtime_settings=self._update_runtime_settings,
+                safe_read_runtime_config=self._safe_read_runtime_config,
+                current_default_profile_resolution=self._current_default_profile_resolution,
+            ),
             approval_policies=_APPROVAL_POLICIES,
             sandbox_policies=_SANDBOX_POLICIES,
             permissions_presets=_PERMISSIONS_PRESETS,
@@ -412,7 +384,13 @@ class CodexHandler(BotHandler):
         self._help_domain = CodexHelpDomain(
             local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
         )
-        self._session_ui_domain = CodexSessionUiDomain(self)
+        self._session_ui_domain = CodexSessionUiDomain(
+            self,
+            runtime_ports=SessionUiRuntimePorts(
+                submit_to_runtime=self._runtime_submit,
+                resume_thread_on_runtime=self._resume_thread_on_runtime,
+            ),
+        )
         self._file_message_domain = FileMessageDomain(
             self,
             store=self._pending_attachment_store,
@@ -641,7 +619,7 @@ class CodexHandler(BotHandler):
                 snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
                 if snapshot is None:
                     continue
-                if snapshot.feishu_runtime_state != "attached" or not snapshot.thread_id:
+                if snapshot.feishu_runtime_state != FEISHU_RUNTIME_ATTACHED or not snapshot.thread_id:
                     continue
                 attached_thread_ids.add(snapshot.thread_id)
         for thread_id in sorted(attached_thread_ids):
@@ -878,23 +856,8 @@ class CodexHandler(BotHandler):
             self._runtime_loop.stop()
             self._service_instance_lease.release()
 
-    def _build_default_runtime_state(self) -> _RuntimeState:
-        return self._binding_runtime.build_default_runtime_state()  # type: ignore[return-value]
-
-    def _build_default_stored_binding(self) -> dict[str, str]:
-        return self._binding_runtime.build_default_stored_binding()
-
     def _hydrate_stored_bindings(self) -> None:
         self._binding_runtime.hydrate_stored_bindings()
-
-    def _apply_stored_binding(self, state: _RuntimeState, stored_binding: dict[str, str]) -> None:
-        self._binding_runtime.apply_stored_binding(state, stored_binding)
-
-    def _subscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._binding_runtime.subscribe_thread_locked(binding, thread_id)
-
-    def _unsubscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._binding_runtime.unsubscribe_thread_locked(binding, thread_id)
 
     def _acquire_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str):
         return self._binding_runtime.acquire_thread_write_lease_locked(binding, thread_id)
@@ -976,14 +939,8 @@ class CodexHandler(BotHandler):
         with self._lock:
             return self._binding_runtime.thread_write_owner(thread_id)
 
-    def _stored_binding_from_runtime(self, binding: ChatBindingKey, state: _RuntimeState) -> dict[str, str]:
-        return self._binding_runtime.stored_binding_from_runtime(binding, state)
-
-    def _sync_stored_binding_locked(self, binding: ChatBindingKey, state: _RuntimeState) -> None:
+    def _sync_stored_binding_locked(self, binding: ChatBindingKey, state: RuntimeStateDict) -> None:
         self._binding_runtime.sync_stored_binding_locked(binding, state)
-
-    def _save_stored_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> None:
-        self._binding_runtime.save_stored_binding(sender_id, chat_id, message_id)
 
     def _get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView:
         return self._binding_runtime.get_runtime_view(sender_id, chat_id, message_id)
@@ -992,13 +949,13 @@ class CodexHandler(BotHandler):
         return RuntimeCardPublisher(self.bot)
 
     @staticmethod
-    def _apply_runtime_state_message_locked(state: _RuntimeState, message: RuntimeStateMessage) -> None:
+    def _apply_runtime_state_message_locked(state: RuntimeStateDict, message: RuntimeStateMessage) -> None:
         apply_runtime_state_message(state, message)
 
     def _apply_persisted_runtime_state_message_locked(
         self,
         binding: ChatBindingKey,
-        state: _RuntimeState,
+        state: RuntimeStateDict,
         message: RuntimeStateMessage,
     ) -> None:
         self._binding_runtime.apply_persisted_runtime_state_message_locked(binding, state, message)
@@ -1055,39 +1012,29 @@ class CodexHandler(BotHandler):
         if timer is not None:
             timer.cancel()
 
-    def _cancel_patch_timer_locked(self, state: _RuntimeState) -> None:
+    def _cancel_patch_timer_locked(self, state: RuntimeStateDict) -> None:
         self._cancel_timer(state["patch_timer"])
         self._apply_runtime_state_message_locked(state, ExecutionStateChanged(patch_timer=None))
 
-    def _cancel_mirror_watchdog_locked(self, state: _RuntimeState) -> None:
+    def _cancel_mirror_watchdog_locked(self, state: RuntimeStateDict) -> None:
         self._execution_recovery.cancel_mirror_watchdog_locked(state)
 
-    def _cancel_runtime_timers_locked(self, state: _RuntimeState) -> None:
+    def _cancel_runtime_timers_locked(self, state: RuntimeStateDict) -> None:
         self._cancel_patch_timer_locked(state)
         self._cancel_mirror_watchdog_locked(state)
 
-    def _deactivate_binding_state_locked(self, state: _RuntimeState) -> None:
+    def _deactivate_binding_state_locked(self, state: RuntimeStateDict) -> None:
         self._cancel_runtime_timers_locked(state)
 
-    def _replace_bound_thread_state_locked(self, state: _RuntimeState) -> None:
+    def _replace_bound_thread_state_locked(self, state: RuntimeStateDict) -> None:
         self._cancel_runtime_timers_locked(state)
         self._reset_execution_context_locked(state, clear_card_message=True)
 
-    def _clear_bound_thread_state_locked(self, state: _RuntimeState) -> None:
+    def _clear_bound_thread_state_locked(self, state: RuntimeStateDict) -> None:
         self._replace_bound_thread_state_locked(state)
         self._clear_plan_state(state)
 
-    @staticmethod
-    def _has_active_execution_locked(state: _RuntimeState) -> bool:
-        return TurnExecutionCoordinator.has_active_execution_locked(state)
-
-    def _clear_execution_anchor_locked(self, state: _RuntimeState, *, clear_card_message: bool) -> None:
-        self._turn_execution.clear_execution_anchor_locked(
-            state,
-            clear_card_message=clear_card_message,
-        )
-
-    def _reset_execution_context_locked(self, state: _RuntimeState, *, clear_card_message: bool) -> None:
+    def _reset_execution_context_locked(self, state: RuntimeStateDict, *, clear_card_message: bool) -> None:
         self._turn_execution.reset_execution_context_locked(
             state,
             clear_card_message=clear_card_message,
@@ -1135,9 +1082,6 @@ class CodexHandler(BotHandler):
     def _schedule_mirror_watchdog(self, sender_id: str, chat_id: str) -> None:
         self._execution_recovery.schedule_mirror_watchdog(sender_id, chat_id)
 
-    def _submit_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
-        self._execution_recovery.submit_mirror_watchdog(sender_id, chat_id, generation)
-
     def _run_mirror_watchdog(self, sender_id: str, chat_id: str, generation: int) -> None:
         self._execution_recovery.run_mirror_watchdog(sender_id, chat_id, generation)
 
@@ -1147,13 +1091,10 @@ class CodexHandler(BotHandler):
     def _fresh_chat_binding_key(self, sender_id: str, chat_id: str, message_id: str = "") -> ChatBindingKey:
         return self._binding_runtime.fresh_chat_binding_key(sender_id, chat_id, message_id)
 
-    def _get_or_create_runtime_state_locked(self, binding: ChatBindingKey) -> _RuntimeState:
-        return self._binding_runtime.get_or_create_runtime_state_locked(binding)  # type: ignore[return-value]
-
     def _resolve_runtime_binding(self, sender_id: str, chat_id: str, message_id: str = "") -> ResolvedRuntimeBinding:
         return self._binding_runtime.resolve_runtime_binding(sender_id, chat_id, message_id)
 
-    def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> _RuntimeState:
+    def _get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeStateDict:
         return self._binding_runtime.get_runtime_state(sender_id, chat_id, message_id)  # type: ignore[return-value]
 
     def _resolve_chat_type(self, chat_id: str, message_id: str = "") -> str:
@@ -1221,13 +1162,6 @@ class CodexHandler(BotHandler):
             return True
         actor_open_id = self._group_actor_open_id(message_id, operator_open_id)
         return self.bot.is_group_admin(open_id=actor_open_id)
-
-    def _ensure_group_command_admin(self, chat_id: str, message_id: str = "") -> bool:
-        denial_text = self._group_command_admin_denial_text(chat_id, message_id=message_id)
-        if not denial_text:
-            return True
-        self._reply_text(chat_id, denial_text, message_id=message_id)
-        return False
 
     def _group_command_admin_denial_text(self, chat_id: str, message_id: str = "") -> str:
         if not self._is_group_chat(chat_id, message_id):
@@ -1794,61 +1728,14 @@ class CodexHandler(BotHandler):
             template="green",
         ))
 
-    @staticmethod
-    def _binding_has_inflight_turn_locked(state: _RuntimeState) -> bool:
-        return RuntimeAdminController.binding_has_inflight_turn_locked(state)
-
     def _binding_inventory_locked(self) -> list[dict[str, Any]]:
         return self._runtime_admin.binding_inventory_locked()
-
-    def _bound_bindings_for_thread_locked(self, thread_id: str) -> list[ChatBindingKey]:
-        return self._runtime_admin.bound_bindings_for_thread_locked(thread_id)
-
-    def _attached_bindings_for_thread_locked(self, thread_id: str) -> list[ChatBindingKey]:
-        return self._runtime_admin.attached_bindings_for_thread_locked(thread_id)
-
-    def _read_thread_summary_for_status(self, thread_id: str) -> tuple[ThreadSummary | None, str]:
-        return self._runtime_admin.read_thread_summary_for_status(thread_id)
-
-    def _interaction_owner_snapshot_locked(
-        self,
-        thread_id: str,
-        *,
-        current_binding: ChatBindingKey | None = None,
-    ) -> dict[str, str]:
-        return self._runtime_admin.interaction_owner_snapshot_locked(
-            thread_id,
-            current_binding=current_binding,
-        )
-
-    def _release_feishu_runtime_availability_locked(self, thread_id: str) -> tuple[bool, str]:
-        return self._runtime_admin.release_feishu_runtime_availability_locked(thread_id)
-
-    def _binding_has_pending_request_locked(self, binding: ChatBindingKey) -> bool:
-        return self._runtime_admin.binding_has_pending_request_locked(binding)
-
-    def _binding_clear_availability_locked(self, binding: ChatBindingKey) -> tuple[bool, str]:
-        return self._runtime_admin.binding_clear_availability_locked(binding)
-
-    def _clear_binding_for_control(self, binding: ChatBindingKey) -> dict[str, Any]:
-        return self._runtime_admin.clear_binding_for_control(binding)
 
     def _clear_all_bindings_for_control(self) -> dict[str, Any]:
         return self._runtime_admin.clear_all_bindings_for_control()
 
     def _binding_status_snapshot(self, binding: ChatBindingKey) -> dict[str, Any]:
         return self._runtime_admin.binding_status_snapshot(binding)
-
-    def _render_binding_status_markdown(
-        self,
-        snapshot: dict[str, Any],
-        *,
-        include_profile_lines: bool,
-    ) -> tuple[str, str]:
-        return self._runtime_admin.render_binding_status_markdown(
-            snapshot,
-            include_profile_lines=include_profile_lines,
-        )
 
     def _handle_status_command(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
         binding = self._chat_binding_key(sender_id, chat_id, message_id)
@@ -1867,14 +1754,6 @@ class CodexHandler(BotHandler):
 
     def _release_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
         return self._runtime_admin.release_feishu_runtime_by_thread_id(thread_id)
-
-    def _thread_status_snapshot(
-        self,
-        thread_id: str,
-        *,
-        summary: ThreadSummary | None = None,
-    ) -> dict[str, Any]:
-        return self._runtime_admin.thread_status_snapshot(thread_id, summary=summary)
 
     def _handle_service_control_request(self, method: str, params: dict[str, Any]) -> Any:
         return self._runtime_call(self._handle_service_control_request_impl, method, params)
@@ -1905,39 +1784,13 @@ class CodexHandler(BotHandler):
     def _refresh_sessions_card_message(self, sender_id: str, chat_id: str, message_id: str) -> None:
         self._session_ui_domain.refresh_sessions_card_message(sender_id, chat_id, message_id)
 
-    @staticmethod
-    def _pending_request_status(pending: _PendingRequestState | dict[str, Any]) -> str:
-        return InteractionRequestController.pending_request_status(pending)
-
     def _handle_approval_card_action(self, action_value: dict) -> P2CardActionTriggerResponse:
         return self._interaction_requests.handle_approval_card_action(action_value)
 
     def _handle_user_input_action(self, action_value: dict) -> P2CardActionTriggerResponse:
         return self._interaction_requests.handle_user_input_action(action_value)
 
-    def _resume_thread_in_background(
-        self,
-        sender_id: str,
-        chat_id: str,
-        thread_id: str,
-        *,
-        original_arg: str | None = None,
-        summary: ThreadSummary | None = None,
-        message_id: str = "",
-        refresh_session_message_id: str = "",
-    ) -> None:
-        self._runtime_submit(
-            self._resume_thread_in_background_impl,
-            sender_id,
-            chat_id,
-            thread_id,
-            original_arg=original_arg,
-            summary=summary,
-            message_id=message_id,
-            refresh_session_message_id=refresh_session_message_id,
-        )
-
-    def _resume_thread_in_background_impl(
+    def _resume_thread_on_runtime(
         self,
         sender_id: str,
         chat_id: str,
@@ -2265,9 +2118,6 @@ class CodexHandler(BotHandler):
     def _handle_server_request_resolved(self, params: dict[str, Any]) -> None:
         self._interaction_requests.handle_server_request_resolved(params)
 
-    def _auto_reject_request(self, request_id: int | str, method: str, params: dict[str, Any]) -> None:
-        self._interaction_requests.auto_reject_request(request_id, method, params)
-
     def _handle_thread_status_changed(self, params: dict[str, Any]) -> None:
         self._adapter_notifications.handle_thread_status_changed(params)
 
@@ -2288,12 +2138,6 @@ class CodexHandler(BotHandler):
 
     def _handle_agent_message_delta(self, params: dict[str, Any]) -> None:
         self._adapter_notifications.handle_agent_message_delta(params)
-
-    def _handle_command_delta(self, params: dict[str, Any]) -> None:
-        self._adapter_notifications.handle_command_delta(params)
-
-    def _handle_file_change_delta(self, params: dict[str, Any]) -> None:
-        self._adapter_notifications.handle_file_change_delta(params)
 
     def _handle_item_completed(self, params: dict[str, Any]) -> None:
         self._adapter_notifications.handle_item_completed(params)
@@ -2334,9 +2178,6 @@ class CodexHandler(BotHandler):
     def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         self._execution_output.schedule_execution_card_update(sender_id, chat_id)
 
-    def _submit_flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
-        self._execution_output.submit_flush_execution_card(sender_id, chat_id, immediate=immediate)
-
     def _flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
         self._execution_output.flush_execution_card(sender_id, chat_id, immediate=immediate)
 
@@ -2355,7 +2196,7 @@ class CodexHandler(BotHandler):
             prompt_reply_in_thread=prompt_reply_in_thread,
         )
 
-    def _clear_plan_state(self, state: _RuntimeState) -> None:
+    def _clear_plan_state(self, state: RuntimeStateDict) -> None:
         self._turn_execution.clear_plan_state_locked(state)
 
     def _flush_plan_card(self, sender_id: str, chat_id: str) -> None:

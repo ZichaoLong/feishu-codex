@@ -4,20 +4,20 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, MutableMapping, Protocol, TypeAlias
+from typing import Any, Callable, Protocol, TypeAlias
 
 from bot.adapters.base import ThreadSnapshot, ThreadSummary, TurnInputItem
 from bot.cards import build_markdown_card
 from bot.execution_transcript import ExecutionTranscript
 from bot.runtime_card_publisher import build_execution_card_model
-from bot.runtime_state import ExecutionStateChanged
+from bot.runtime_state import BACKEND_THREAD_STATUS_IDLE, ExecutionStateChanged, RuntimeStateDict
 from bot.runtime_view import build_runtime_view
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
 logger = logging.getLogger(__name__)
 
 ChatBindingKey: TypeAlias = tuple[str, str]
-RuntimeState: TypeAlias = MutableMapping[str, Any]
+RuntimeState: TypeAlias = RuntimeStateDict
 
 
 class _ThreadAccessPolicy(Protocol):
@@ -211,7 +211,7 @@ class PromptTurnEntryController:
             created_at=0,
             updated_at=0,
             source="appServer",
-            status="idle",
+            status=BACKEND_THREAD_STATUS_IDLE,
         )
         snapshot = self._resume_snapshot_by_id(
             thread_id,

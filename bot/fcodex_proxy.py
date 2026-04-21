@@ -30,6 +30,7 @@ from bot.stores.interaction_lease_store import (
     InteractionLeaseStore,
     make_fcodex_interaction_holder,
 )
+from bot.runtime_state import BACKEND_THREAD_STATUS_IDLE, BACKEND_THREAD_STATUS_NOT_LOADED
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
 from bot.thread_runtime_coordination import acquire_thread_runtime_holder_or_raise
 
@@ -47,11 +48,11 @@ _OWNER_WRITE_METHODS = {
     "turn/interrupt",
 }
 _NON_ACTIVE_THREAD_STATUS_TYPES = {
-    "idle",
+    BACKEND_THREAD_STATUS_IDLE,
     "errored",
     "closed",
     "archived",
-    "notLoaded",
+    BACKEND_THREAD_STATUS_NOT_LOADED,
 }
 
 

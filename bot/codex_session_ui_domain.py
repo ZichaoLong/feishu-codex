@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -27,6 +28,30 @@ from bot.cards import (
 )
 from bot.runtime_view import RuntimeView
 logger = logging.getLogger(__name__)
+
+
+class _SubmitToRuntime(Protocol):
+    def __call__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None: ...
+
+
+class _ResumeThreadOnRuntime(Protocol):
+    def __call__(
+        self,
+        sender_id: str,
+        chat_id: str,
+        thread_id: str,
+        *,
+        original_arg: str | None = None,
+        summary: ThreadSummary | None = None,
+        message_id: str = "",
+        refresh_session_message_id: str = "",
+    ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SessionUiRuntimePorts:
+    submit_to_runtime: _SubmitToRuntime
+    resume_thread_on_runtime: _ResumeThreadOnRuntime
 
 
 class _SessionUiDomainOwner(Protocol):
@@ -58,7 +83,6 @@ class _SessionUiDomainOwner(Protocol):
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None: ...
 
     def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
-    def _runtime_submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None: ...
 
     def _resolve_resume_target(self, arg: str) -> ThreadSummary: ...
 
@@ -77,22 +101,10 @@ class _SessionUiDomainOwner(Protocol):
         original_arg: str,
     ) -> ThreadSummary: ...
 
-    def _resume_thread_in_background(
-        self,
-        sender_id: str,
-        chat_id: str,
-        thread_id: str,
-        *,
-        original_arg: str | None = None,
-        summary: ThreadSummary | None = None,
-        message_id: str = "",
-        refresh_session_message_id: str = "",
-    ) -> None: ...
-
-
 class CodexSessionUiDomain:
-    def __init__(self, owner: _SessionUiDomainOwner) -> None:
+    def __init__(self, owner: _SessionUiDomainOwner, *, runtime_ports: SessionUiRuntimePorts) -> None:
         self._owner = owner
+        self._runtime_ports = runtime_ports
         self._expanded_session_cards: set[str] = set()
         self._pending_rename_forms: dict[str, dict[str, str]] = {}
 
@@ -149,8 +161,8 @@ class CodexSessionUiDomain:
                 "Codex 正在恢复线程",
                 f"正在恢复：`{target}`\n完成后会自动回复结果。",
             ),
-            after_dispatch=lambda: self._owner._runtime_submit(
-                self._resume_target_in_runtime,
+            after_dispatch=lambda: self._runtime_ports.submit_to_runtime(
+                self._resume_target_on_runtime,
                 sender_id,
                 chat_id,
                 target,
@@ -271,8 +283,8 @@ class CodexSessionUiDomain:
         if not thread_id:
             return make_card_response(toast="缺少 thread_id", toast_type="warning")
         thread_title = str(action_value.get("thread_title", "") or action_value.get("title", "")).strip() or thread_id
-        self._owner._runtime_submit(
-            self._resume_target_in_runtime,
+        self._runtime_ports.submit_to_runtime(
+            self._resume_target_on_runtime,
             sender_id,
             chat_id,
             thread_id,
@@ -285,7 +297,7 @@ class CodexSessionUiDomain:
             toast_type="success",
         )
 
-    def _resume_target_in_runtime(
+    def _resume_target_on_runtime(
         self,
         sender_id: str,
         chat_id: str,
@@ -302,7 +314,7 @@ class CodexSessionUiDomain:
             if refresh_session_message_id:
                 self.refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
             return
-        self._owner._resume_thread_in_background(
+        self._runtime_ports.resume_thread_on_runtime(
             sender_id,
             chat_id,
             thread.thread_id,

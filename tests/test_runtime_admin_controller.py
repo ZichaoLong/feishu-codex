@@ -289,7 +289,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             binding_runtime.apply_persisted_runtime_state_message_locked(
                 binding_b,
                 state_b,
-                ThreadStateChanged(current_thread_runtime_state="released"),
+                ThreadStateChanged(feishu_runtime_state="released"),
             )
         summaries["thread-1"] = ThreadSummary(
             thread_id="thread-1",

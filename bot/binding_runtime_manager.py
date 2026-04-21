@@ -3,13 +3,19 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, MutableMapping, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 from bot.binding_identity import binding_kind, format_binding_id
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.execution_transcript import ExecutionTranscript
 from bot.runtime_state import (
+    BACKEND_THREAD_STATUS_ACTIVE,
+    BACKEND_THREAD_STATUS_NOT_LOADED,
+    FEISHU_RUNTIME_ATTACHED,
+    FEISHU_RUNTIME_NOT_APPLICABLE,
+    FEISHU_RUNTIME_RELEASED,
     RuntimeStateMessage,
+    RuntimeStateDict,
     StoredBindingHydrated,
     ThreadStateChanged,
     apply_runtime_state_message,
@@ -33,7 +39,7 @@ ChatBindingKey: TypeAlias = tuple[str, str]
 @dataclass(frozen=True)
 class ResolvedRuntimeBinding:
     binding: ChatBindingKey
-    state: MutableMapping[str, Any]
+    state: RuntimeStateDict
 
 
 @dataclass(frozen=True)
@@ -86,11 +92,11 @@ class BindingRuntimeManager:
         self._thread_lease_registry = thread_lease_registry
         self._interaction_lease_store = interaction_lease_store
         self._is_group_chat = is_group_chat
-        self._runtime_state_by_binding: dict[ChatBindingKey, MutableMapping[str, Any]] = {}
+        self._runtime_state_by_binding: dict[ChatBindingKey, RuntimeStateDict] = {}
 
     @staticmethod
     def apply_runtime_state_message_locked(
-        state: MutableMapping[str, Any],
+        state: RuntimeStateDict,
         message: RuntimeStateMessage,
     ) -> None:
         apply_runtime_state_message(state, message)
@@ -98,7 +104,7 @@ class BindingRuntimeManager:
     def apply_persisted_runtime_state_message_locked(
         self,
         binding: ChatBindingKey,
-        state: MutableMapping[str, Any],
+        state: RuntimeStateDict,
         message: RuntimeStateMessage,
     ) -> None:
         self.apply_runtime_state_message_locked(state, message)
@@ -109,21 +115,21 @@ class BindingRuntimeManager:
             "working_dir": self._default_working_dir,
             "current_thread_id": "",
             "current_thread_title": "",
-            "current_thread_runtime_state": "",
+            "feishu_runtime_state": "",
             "current_thread_write_owner_thread_id": "",
             "approval_policy": self._default_approval_policy,
             "sandbox": self._default_sandbox,
             "collaboration_mode": self._default_collaboration_mode,
         }
 
-    def build_default_runtime_state(self) -> MutableMapping[str, Any]:
+    def build_default_runtime_state(self) -> RuntimeStateDict:
         stored_binding = self.build_default_stored_binding()
         return {
             "active": False,
             "working_dir": stored_binding["working_dir"],
             "current_thread_id": stored_binding["current_thread_id"],
             "current_thread_title": stored_binding["current_thread_title"],
-            "current_thread_runtime_state": stored_binding["current_thread_runtime_state"],
+            "feishu_runtime_state": stored_binding["feishu_runtime_state"],
             "current_turn_id": "",
             "running": False,
             "cancelled": False,
@@ -158,14 +164,14 @@ class BindingRuntimeManager:
         }
 
     @staticmethod
-    def apply_stored_binding(state: MutableMapping[str, Any], stored_binding: dict[str, str]) -> None:
+    def apply_stored_binding(state: RuntimeStateDict, stored_binding: dict[str, str]) -> None:
         apply_runtime_state_message(
             state,
             StoredBindingHydrated(
                 working_dir=stored_binding["working_dir"],
                 current_thread_id=stored_binding["current_thread_id"],
                 current_thread_title=stored_binding["current_thread_title"],
-                current_thread_runtime_state=stored_binding["current_thread_runtime_state"],
+                feishu_runtime_state=stored_binding["feishu_runtime_state"],
                 approval_policy=stored_binding["approval_policy"],
                 sandbox=stored_binding["sandbox"],
                 collaboration_mode=stored_binding["collaboration_mode"],
@@ -281,7 +287,7 @@ class BindingRuntimeManager:
             return (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
         return (sender_id, chat_id)
 
-    def get_or_create_runtime_state_locked(self, binding: ChatBindingKey) -> MutableMapping[str, Any]:
+    def get_or_create_runtime_state_locked(self, binding: ChatBindingKey) -> RuntimeStateDict:
         state = self._runtime_state_by_binding.get(binding)
         if state is not None:
             return state
@@ -291,11 +297,11 @@ class BindingRuntimeManager:
         if stored_binding is not None:
             self.apply_stored_binding(state, stored_binding)
             current_thread_id = str(state["current_thread_id"] or "").strip()
-            if state["current_thread_runtime_state"] == "attached":
+            if state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED:
                 self.subscribe_thread_locked(binding, current_thread_id)
             owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
             if (
-                state["current_thread_runtime_state"] == "attached"
+                state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED
                 and owner_thread_id
                 and owner_thread_id == current_thread_id
             ):
@@ -322,7 +328,7 @@ class BindingRuntimeManager:
                 state=self.get_or_create_runtime_state_locked(binding),
             )
 
-    def get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> MutableMapping[str, Any]:
+    def get_runtime_state(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeStateDict:
         return self.resolve_runtime_binding(sender_id, chat_id, message_id).state
 
     def get_runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView:
@@ -330,15 +336,15 @@ class BindingRuntimeManager:
         with self._lock:
             return build_runtime_view(state)
 
-    def stored_binding_from_runtime(self, binding: ChatBindingKey, state: MutableMapping[str, Any]) -> dict[str, str]:
+    def stored_binding_from_runtime(self, binding: ChatBindingKey, state: RuntimeStateDict) -> dict[str, str]:
         current_thread_id = str(state["current_thread_id"]).strip()
-        current_thread_runtime_state = str(state["current_thread_runtime_state"]).strip()
+        feishu_runtime_state = str(state["feishu_runtime_state"]).strip()
         if not current_thread_id:
-            current_thread_runtime_state = ""
+            feishu_runtime_state = ""
         current_thread_write_owner_thread_id = ""
         if (
             current_thread_id
-            and current_thread_runtime_state == "attached"
+            and feishu_runtime_state == FEISHU_RUNTIME_ATTACHED
             and self._thread_lease_registry.lease_owner(current_thread_id) == binding
         ):
             current_thread_write_owner_thread_id = current_thread_id
@@ -346,14 +352,14 @@ class BindingRuntimeManager:
             "working_dir": str(state["working_dir"]).strip(),
             "current_thread_id": current_thread_id,
             "current_thread_title": str(state["current_thread_title"]).strip(),
-            "current_thread_runtime_state": current_thread_runtime_state,
+            "feishu_runtime_state": feishu_runtime_state,
             "current_thread_write_owner_thread_id": current_thread_write_owner_thread_id,
             "approval_policy": str(state["approval_policy"]).strip(),
             "sandbox": str(state["sandbox"]).strip(),
             "collaboration_mode": str(state["collaboration_mode"]).strip(),
         }
 
-    def sync_stored_binding_locked(self, binding: ChatBindingKey, state: MutableMapping[str, Any]) -> None:
+    def sync_stored_binding_locked(self, binding: ChatBindingKey, state: RuntimeStateDict) -> None:
         stored_binding = self.stored_binding_from_runtime(binding, state)
         if stored_binding == self.build_default_stored_binding():
             self._chat_binding_store.clear(binding)
@@ -379,11 +385,11 @@ class BindingRuntimeManager:
             for binding, stored_binding in sorted(stored_bindings.items()):
                 state = self._runtime_state_by_binding[binding]
                 current_thread_id = str(state["current_thread_id"] or "").strip()
-                if state["current_thread_runtime_state"] == "attached":
+                if state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED:
                     self.subscribe_thread_locked(binding, current_thread_id)
                 owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
                 if (
-                    state["current_thread_runtime_state"] == "attached"
+                    state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED
                     and owner_thread_id
                     and owner_thread_id == current_thread_id
                 ):
@@ -408,14 +414,14 @@ class BindingRuntimeManager:
                         self.sync_stored_binding_locked(binding, state)
 
     @staticmethod
-    def binding_has_inflight_turn_locked(state: MutableMapping[str, Any]) -> bool:
+    def binding_has_inflight_turn_locked(state: RuntimeStateDict) -> bool:
         return bool(state["running"] or state["awaiting_local_turn_started"] or state["current_turn_id"])
 
     def deactivate_binding_locked(
         self,
         binding: ChatBindingKey,
         *,
-        on_deactivate_state: Callable[[MutableMapping[str, Any]], None] | None = None,
+        on_deactivate_state: Callable[[RuntimeStateDict], None] | None = None,
     ) -> str:
         state = self._runtime_state_by_binding.pop(binding, None)
         self._chat_binding_store.clear(binding)
@@ -430,7 +436,7 @@ class BindingRuntimeManager:
             return thread_id
         return ""
 
-    def visit_runtime_states_locked(self, visitor: Callable[[MutableMapping[str, Any]], None]) -> None:
+    def visit_runtime_states_locked(self, visitor: Callable[[RuntimeStateDict], None]) -> None:
         for state in list(self._runtime_state_by_binding.values()):
             visitor(state)
 
@@ -453,20 +459,20 @@ class BindingRuntimeManager:
             thread_id=str(state["current_thread_id"] or "").strip(),
             thread_title=str(state["current_thread_title"] or "").strip(),
             working_dir=str(state["working_dir"] or "").strip(),
-            feishu_runtime_state=str(state["current_thread_runtime_state"] or "").strip(),
+            feishu_runtime_state=str(state["feishu_runtime_state"] or "").strip(),
             has_inflight_turn=self.binding_has_inflight_turn_locked(state),
         )
 
     def bind_thread_locked(
         self,
         binding: ChatBindingKey,
-        state: MutableMapping[str, Any],
+        state: RuntimeStateDict,
         *,
         thread_id: str,
         thread_title: str,
         working_dir: str,
-        on_thread_replaced: Callable[[MutableMapping[str, Any]], None] | None = None,
-        on_after_bind: Callable[[MutableMapping[str, Any]], None] | None = None,
+        on_thread_replaced: Callable[[RuntimeStateDict], None] | None = None,
+        on_after_bind: Callable[[RuntimeStateDict], None] | None = None,
     ) -> str:
         normalized_thread_id = str(thread_id or "").strip()
         unsubscribe_thread_id = ""
@@ -483,7 +489,7 @@ class BindingRuntimeManager:
             ThreadStateChanged(
                 current_thread_id=normalized_thread_id,
                 current_thread_title=str(thread_title or "").strip(),
-                current_thread_runtime_state="attached",
+                feishu_runtime_state=FEISHU_RUNTIME_ATTACHED,
                 working_dir=str(working_dir or state["working_dir"]).strip(),
             ),
         )
@@ -495,9 +501,9 @@ class BindingRuntimeManager:
     def clear_thread_binding_locked(
         self,
         binding: ChatBindingKey,
-        state: MutableMapping[str, Any],
+        state: RuntimeStateDict,
         *,
-        on_clear_state: Callable[[MutableMapping[str, Any]], None] | None = None,
+        on_clear_state: Callable[[RuntimeStateDict], None] | None = None,
     ) -> str:
         thread_id = str(state["current_thread_id"] or "").strip()
         self.release_interaction_lease_for_binding(binding, thread_id)
@@ -512,7 +518,7 @@ class BindingRuntimeManager:
             ThreadStateChanged(
                 current_thread_id="",
                 current_thread_title="",
-                current_thread_runtime_state="",
+                feishu_runtime_state="",
             ),
         )
         return unsubscribe_thread_id
@@ -536,7 +542,7 @@ class BindingRuntimeManager:
             for binding, state in self._runtime_state_by_binding.items()
             if (
                 str(state["current_thread_id"] or "").strip() == normalized_thread_id
-                and str(state["current_thread_runtime_state"] or "").strip() == "attached"
+                and str(state["feishu_runtime_state"] or "").strip() == FEISHU_RUNTIME_ATTACHED
             )
         )
 
@@ -605,27 +611,12 @@ class BindingRuntimeManager:
             "label": holder.holder_id,
         }
 
-    def release_feishu_runtime_availability_locked(self, thread_id: str) -> tuple[bool, str]:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return False, "当前没有绑定线程。"
-        attached_bindings = self.attached_bindings_for_thread_locked(normalized_thread_id)
-        if not attached_bindings:
-            return False, "当前 thread 的 Feishu runtime 已经是 `released`。"
-        for binding in attached_bindings:
-            state = self._runtime_state_by_binding.get(binding)
-            if state is None:
-                continue
-            if self.binding_has_inflight_turn_locked(state):
-                return False, "当前有飞书侧 turn 正在运行，不能释放 runtime。"
-        return True, ""
-
     def release_feishu_runtime_by_thread_id_locked(
         self,
         thread_id: str,
         *,
         release_feishu_runtime_availability: Callable[[str], tuple[bool, str]],
-        on_release_binding_state: Callable[[MutableMapping[str, Any]], None] | None = None,
+        on_release_binding_state: Callable[[RuntimeStateDict], None] | None = None,
     ) -> ReleaseFeishuRuntimeResult:
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
@@ -651,7 +642,7 @@ class BindingRuntimeManager:
             self.apply_persisted_runtime_state_message_locked(
                 binding,
                 state,
-                ThreadStateChanged(current_thread_runtime_state="released"),
+                ThreadStateChanged(feishu_runtime_state=FEISHU_RUNTIME_RELEASED),
             )
             released_binding_ids.append(format_binding_id(binding))
         unsubscribe_thread_id = ""
@@ -690,7 +681,9 @@ class BindingRuntimeManager:
             thread_id = str(state["current_thread_id"] or "").strip()
             thread_title = str(state["current_thread_title"] or "").strip()
             working_dir = str(state["working_dir"] or "").strip()
-            feishu_runtime_state = str(state["current_thread_runtime_state"] or "").strip() or "not-applicable"
+            feishu_runtime_state = (
+                str(state["feishu_runtime_state"] or "").strip() or FEISHU_RUNTIME_NOT_APPLICABLE
+            )
             running_turn = self.binding_has_inflight_turn_locked(state)
             current_turn_id = str(state["current_turn_id"] or "").strip()
             owner = self._thread_lease_registry.lease_owner(thread_id) if thread_id else None
@@ -725,8 +718,8 @@ class BindingRuntimeManager:
             "thread_title": thread_title,
             "working_dir": working_dir,
             "feishu_runtime_state": feishu_runtime_state,
-            "backend_thread_status": backend_thread_status or "not-applicable",
-            "backend_running_turn": backend_thread_status == "active",
+            "backend_thread_status": backend_thread_status or FEISHU_RUNTIME_NOT_APPLICABLE,
+            "backend_running_turn": backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE,
             "feishu_write_owner_binding_id": feishu_write_owner_binding_id,
             "feishu_write_owner_relation": feishu_write_owner_relation,
             "interaction_owner": interaction_owner,
@@ -735,7 +728,7 @@ class BindingRuntimeManager:
             "approval_policy": approval_policy,
             "sandbox": sandbox,
             "collaboration_mode": collaboration_mode,
-            "reprofile_possible": bool(thread_id and backend_thread_status == "notLoaded"),
+            "reprofile_possible": bool(thread_id and backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED),
             "release_feishu_runtime_available": bool(thread_id and release_available),
             "release_feishu_runtime_reason": release_reason,
         }
@@ -786,7 +779,7 @@ class BindingRuntimeManager:
                     "thread_title": str(state["current_thread_title"] or "").strip(),
                     "working_dir": str(state["working_dir"] or "").strip(),
                     "feishu_runtime_state": (
-                        str(state["current_thread_runtime_state"] or "").strip() or "not-applicable"
+                        str(state["feishu_runtime_state"] or "").strip() or FEISHU_RUNTIME_NOT_APPLICABLE
                     ),
                     "feishu_write_owner": bool(
                         thread_id and self.thread_write_owner(thread_id) == binding

@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, MutableMapping, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 from bot.constants import display_path
 from bot.execution_transcript import ExecutionTranscript
-from bot.runtime_state import ExecutionStateChanged, RuntimeStateMessage, ThreadStateChanged
+from bot.runtime_state import (
+    BACKEND_THREAD_STATUS_ACTIVE,
+    ExecutionStateChanged,
+    RuntimeStateDict,
+    RuntimeStateMessage,
+    ThreadStateChanged,
+)
 from bot.runtime_view import build_runtime_view
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
 logger = logging.getLogger(__name__)
 
 ChatBindingKey: TypeAlias = tuple[str, str]
-RuntimeState: TypeAlias = MutableMapping[str, Any]
+RuntimeState: TypeAlias = RuntimeStateDict
 
 WORK_ITEM_LABELS = {
     "commandExecution": "命令执行",
@@ -103,9 +109,9 @@ class AdapterNotificationController:
             runtime = build_runtime_view(state)
             current_turn_id = runtime.execution.current_turn_id.strip()
             current_message_id = runtime.execution.current_message_id.strip()
-            if status_type == "active":
+            if status_type == BACKEND_THREAD_STATUS_ACTIVE:
                 self._turn_execution.acknowledge_active_thread_locked(state)
-        if status_type != "active" and (current_turn_id or current_message_id):
+        if status_type != BACKEND_THREAD_STATUS_ACTIVE and (current_turn_id or current_message_id):
             self._finalize_execution_from_terminal_signal(
                 binding[0],
                 binding[1],
@@ -113,7 +119,7 @@ class AdapterNotificationController:
                 turn_id=current_turn_id,
             )
             return
-        if status_type == "active":
+        if status_type == BACKEND_THREAD_STATUS_ACTIVE:
             self._schedule_execution_card_update(*binding)
             return
         with self._lock:

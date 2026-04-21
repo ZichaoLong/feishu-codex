@@ -1438,7 +1438,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._bind_thread("ou_user", "chat-a", thread)
 
-        handler._resume_thread_in_background_impl("ou_user2", "chat-b", "thread-1", message_id="m-b")
+        handler._resume_thread_on_runtime("ou_user2", "chat-b", "thread-1", message_id="m-b")
 
         self.assertEqual(handler._get_runtime_state("ou_user2", "chat-b", "m-b")["current_thread_id"], "")
         self.assertIn("`all` 模式", bot.replies[-1][1])
@@ -2516,8 +2516,8 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
         self.assertEqual(handler._get_runtime_state("ou_user", "chat-a")["current_thread_id"], "thread-1")
         self.assertEqual(handler._get_runtime_state("ou_user2", "chat-b")["current_thread_id"], "thread-1")
-        self.assertEqual(handler._get_runtime_state("ou_user", "chat-a")["current_thread_runtime_state"], "released")
-        self.assertEqual(handler._get_runtime_state("ou_user2", "chat-b")["current_thread_runtime_state"], "released")
+        self.assertEqual(handler._get_runtime_state("ou_user", "chat-a")["feishu_runtime_state"], "released")
+        self.assertEqual(handler._get_runtime_state("ou_user2", "chat-b")["feishu_runtime_state"], "released")
         self.assertEqual(handler._thread_subscribers("thread-1"), ())
         _, card = bot.cards[-1]
         self.assertIn("backend thread status：`notLoaded`", card["elements"][0]["content"])
@@ -2560,13 +2560,13 @@ class CodexHandlerTests(unittest.TestCase):
         handler2, _ = self._make_handler(data_dir=data_dir)
         state2 = handler2._get_runtime_state("ou_user", "c1")
         self.assertEqual(state2["current_thread_id"], "thread-1")
-        self.assertEqual(state2["current_thread_runtime_state"], "released")
+        self.assertEqual(state2["feishu_runtime_state"], "released")
         self.assertEqual(handler2._thread_subscribers("thread-1"), ())
 
         handler2.handle_message("ou_user", "c1", "hello")
 
         self.assertEqual(handler2._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
-        self.assertEqual(handler2._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "attached")
+        self.assertEqual(handler2._get_runtime_state("ou_user", "c1")["feishu_runtime_state"], "attached")
 
     def test_denied_prompt_keeps_released_binding_released_when_all_mode_group_owns_thread(self) -> None:
         handler, bot = self._make_handler()
@@ -2593,7 +2593,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.resume_thread_calls, [])
         self.assertEqual(handler._adapter.start_turn_calls, [])
         self.assertEqual(
-            handler._get_runtime_state("ou_user", "chat-a")["current_thread_runtime_state"],
+            handler._get_runtime_state("ou_user", "chat-a")["feishu_runtime_state"],
             "released",
         )
         self.assertEqual(handler._thread_subscribers("thread-1"), (("__group__", "chat-b"),))
@@ -2627,7 +2627,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._adapter.resume_thread_calls, [])
         self.assertEqual(handler._adapter.start_turn_calls, [])
         self.assertEqual(handler._thread_subscribers("thread-1"), ())
-        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "released")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["feishu_runtime_state"], "released")
         self.assertEqual(InteractionLeaseStore(data_dir).load("thread-1").holder.kind, "fcodex")
         self.assertIn("当前线程正由另一终端执行", bot.replies[-1][1])
 
@@ -2674,7 +2674,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertTrue(result["changed"])
         self.assertEqual(result["backend_thread_status"], "notLoaded")
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
-        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "released")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["feishu_runtime_state"], "released")
 
     def test_service_control_plane_thread_name_target_resolves_explicit_exact_name(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -2876,7 +2876,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(result["backend_thread_status"], "notLoaded")
         self.assertEqual(result["released_binding_ids"], ["p2p:ou_user:c1"])
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
-        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_runtime_state"], "released")
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["feishu_runtime_state"], "released")
 
     def test_service_control_plane_thread_name_target_rejects_ambiguous_exact_name(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -3952,7 +3952,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
         self.assertEqual(response["toast"], "已重命名。")
 
-    def test_resume_thread_in_background_refreshes_sessions_card(self) -> None:
+    def test_resume_thread_on_runtime_submit_refreshes_sessions_card(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -3967,7 +3967,8 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        handler._resume_thread_in_background(
+        handler._runtime_submit(
+            handler._resume_thread_on_runtime,
             "ou_user",
             "c1",
             "thread-1",

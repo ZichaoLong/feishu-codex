@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, MutableMapping, TypeAlias
+from typing import Any, TypeAlias
 
 from bot.execution_transcript import ExecutionTranscript
 from bot.runtime_state import (
@@ -11,10 +11,11 @@ from bot.runtime_state import (
     ExecutionStateChanged,
     PlanStateChanged,
     RuntimeHeartbeat,
+    RuntimeStateDict,
     apply_runtime_state_message,
 )
 
-RuntimeState: TypeAlias = MutableMapping[str, Any]
+RuntimeState: TypeAlias = RuntimeStateDict
 
 
 @dataclass(frozen=True)

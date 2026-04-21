@@ -4,18 +4,24 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, MutableMapping, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 from bot.adapters.base import ThreadSnapshot
 from bot.binding_runtime_manager import ResolvedRuntimeBinding
 from bot.execution_transcript import ExecutionTranscript
-from bot.runtime_state import ExecutionStateChanged, RuntimeStateMessage, ThreadStateChanged
+from bot.runtime_state import (
+    BACKEND_THREAD_STATUS_ACTIVE,
+    ExecutionStateChanged,
+    RuntimeStateDict,
+    RuntimeStateMessage,
+    ThreadStateChanged,
+)
 from bot.runtime_view import build_runtime_view
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
 logger = logging.getLogger(__name__)
 
-RuntimeState: TypeAlias = MutableMapping[str, Any]
+RuntimeState: TypeAlias = RuntimeStateDict
 
 
 @dataclass(frozen=True)
@@ -513,7 +519,7 @@ class ExecutionRecoveryController:
         projection = self.snapshot_reply(snapshot, turn_id=turn_id)
         resolved = self._resolve_runtime_binding(sender_id, chat_id)
         state = resolved.state
-        should_finalize = snapshot.summary.status != "active"
+        should_finalize = snapshot.summary.status != BACKEND_THREAD_STATUS_ACTIVE
         with self._lock:
             self._apply_persisted_runtime_state_message_locked(
                 resolved.binding,

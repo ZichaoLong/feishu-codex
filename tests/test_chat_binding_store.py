@@ -22,7 +22,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/p2p",
                 "current_thread_id": "thread-p2p",
                 "current_thread_title": "p2p title",
-                "current_thread_runtime_state": "attached",
+                "feishu_runtime_state": "attached",
                 "current_thread_write_owner_thread_id": "thread-p2p",
                 "approval_policy": "on-request",
                 "sandbox": "workspace-write",
@@ -35,7 +35,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/group",
                 "current_thread_id": "thread-group",
                 "current_thread_title": "",
-                "current_thread_runtime_state": "released",
+                "feishu_runtime_state": "released",
                 "current_thread_write_owner_thread_id": "",
                 "approval_policy": "never",
                 "sandbox": "danger-full-access",
@@ -68,7 +68,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/p2p",
                 "current_thread_id": "thread-p2p",
                 "current_thread_title": "",
-                "current_thread_runtime_state": "attached",
+                "feishu_runtime_state": "attached",
                 "current_thread_write_owner_thread_id": "thread-p2p",
                 "approval_policy": "on-request",
                 "sandbox": "workspace-write",
@@ -81,7 +81,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/group",
                 "current_thread_id": "thread-group",
                 "current_thread_title": "group title",
-                "current_thread_runtime_state": "released",
+                "feishu_runtime_state": "released",
                 "current_thread_write_owner_thread_id": "",
                 "approval_policy": "never",
                 "sandbox": "danger-full-access",
@@ -106,7 +106,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                 "working_dir": "/tmp/p2p",
                 "current_thread_id": "thread-p2p",
                 "current_thread_title": "",
-                "current_thread_runtime_state": "attached",
+                "feishu_runtime_state": "attached",
                 "current_thread_write_owner_thread_id": "",
                 "approval_policy": "on-request",
                 "sandbox": "workspace-write",
@@ -135,6 +135,26 @@ class ChatBindingStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "schema_version"):
             store.load(("ou_user", "oc_p2p"))
 
+    def test_store_rejects_stale_schema_version(self) -> None:
+        _, store, state_path = self._make_store()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": CHAT_BINDING_STORE_SCHEMA_VERSION - 1,
+                    "p2p_bindings": {},
+                    "group_bindings": {},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            f"schema_version must be {CHAT_BINDING_STORE_SCHEMA_VERSION}",
+        ):
+            store.load(("ou_user", "oc_p2p"))
+
     def test_store_rejects_bound_thread_without_runtime_state(self) -> None:
         _, store, state_path = self._make_store()
         state_path.write_text(
@@ -147,7 +167,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                                 "working_dir": "/tmp/p2p",
                                 "current_thread_id": "thread-1",
                                 "current_thread_title": "",
-                                "current_thread_runtime_state": "",
+                                "feishu_runtime_state": "",
                                 "current_thread_write_owner_thread_id": "",
                                 "approval_policy": "on-request",
                                 "sandbox": "workspace-write",
@@ -162,7 +182,7 @@ class ChatBindingStoreTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with self.assertRaisesRegex(ValueError, "current_thread_runtime_state must be attached or released"):
+        with self.assertRaisesRegex(ValueError, "feishu_runtime_state must be attached or released"):
             store.load(("ou_user", "oc_p2p"))
 
     def test_store_rejects_released_binding_with_write_owner(self) -> None:
@@ -177,7 +197,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                                 "working_dir": "/tmp/p2p",
                                 "current_thread_id": "thread-1",
                                 "current_thread_title": "",
-                                "current_thread_runtime_state": "released",
+                                "feishu_runtime_state": "released",
                                 "current_thread_write_owner_thread_id": "thread-1",
                                 "approval_policy": "on-request",
                                 "sandbox": "workspace-write",
@@ -207,7 +227,7 @@ class ChatBindingStoreTests(unittest.TestCase):
                                 "working_dir": "/tmp/p2p",
                                 "current_thread_id": "",
                                 "current_thread_title": "",
-                                "current_thread_runtime_state": "released",
+                                "feishu_runtime_state": "released",
                                 "current_thread_write_owner_thread_id": "",
                                 "approval_policy": "on-request",
                                 "sandbox": "workspace-write",

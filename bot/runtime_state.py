@@ -1,16 +1,86 @@
 """
-Explicit command/event objects for Codex runtime state mutations.
+Canonical runtime-state schema, status vocabulary, and reducer messages.
 
-The handler still owns orchestration, but state writes now flow through a small
-reducer instead of being scattered as ad-hoc dict assignments.
+Top-level orchestration still lives in `CodexHandler`, but the authoritative
+shape of the mutable runtime-state dict and its mutation messages live here so
+controllers and stores do not redefine partial local variants.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
-from typing import Any, MutableMapping
+from typing import Any, TypedDict
+
+from bot.execution_transcript import ExecutionTranscript
+
+FEISHU_RUNTIME_ATTACHED = "attached"
+FEISHU_RUNTIME_RELEASED = "released"
+FEISHU_RUNTIME_NOT_APPLICABLE = "not-applicable"
+VALID_FEISHU_RUNTIME_STATES = frozenset(
+    {
+        FEISHU_RUNTIME_ATTACHED,
+        FEISHU_RUNTIME_RELEASED,
+    }
+)
+
+BACKEND_THREAD_STATUS_IDLE = "idle"
+BACKEND_THREAD_STATUS_ACTIVE = "active"
+BACKEND_THREAD_STATUS_NOT_LOADED = "notLoaded"
+BACKEND_THREAD_STATUS_SYSTEM_ERROR = "systemError"
+LOADED_BACKEND_THREAD_STATUSES = frozenset(
+    {
+        BACKEND_THREAD_STATUS_IDLE,
+        BACKEND_THREAD_STATUS_ACTIVE,
+        BACKEND_THREAD_STATUS_SYSTEM_ERROR,
+    }
+)
 
 UNSET = object()
+
+
+class PlanStepState(TypedDict):
+    step: str
+    status: str
+
+
+class RuntimeStateDict(TypedDict):
+    active: bool
+    working_dir: str
+    current_thread_id: str
+    current_thread_title: str
+    feishu_runtime_state: str
+    current_turn_id: str
+    running: bool
+    cancelled: bool
+    pending_cancel: bool
+    current_message_id: str
+    last_execution_message_id: str
+    current_prompt_message_id: str
+    current_prompt_reply_in_thread: bool
+    current_actor_open_id: str
+    execution_transcript: ExecutionTranscript
+    runtime_channel_state: str
+    started_at: float
+    last_runtime_event_at: float
+    last_patch_at: float
+    patch_timer: threading.Timer | None
+    mirror_watchdog_timer: threading.Timer | None
+    mirror_watchdog_generation: int
+    followup_sent: bool
+    followup_text: str
+    terminal_result_text: str
+    awaiting_local_turn_started: bool
+    approval_policy: str
+    sandbox: str
+    collaboration_mode: str
+    model: str
+    reasoning_effort: str
+    plan_message_id: str
+    plan_turn_id: str
+    plan_explanation: str
+    plan_steps: list[PlanStepState]
+    plan_text: str
 
 
 class RuntimeStateMessage:
@@ -35,7 +105,7 @@ class StoredBindingHydrated(RuntimeStateCommand):
     working_dir: str
     current_thread_id: str
     current_thread_title: str
-    current_thread_runtime_state: str
+    feishu_runtime_state: str
     approval_policy: str
     sandbox: str
     collaboration_mode: str
@@ -53,7 +123,7 @@ class ThreadStateChanged(RuntimeStateCommand):
     working_dir: Any = UNSET
     current_thread_id: Any = UNSET
     current_thread_title: Any = UNSET
-    current_thread_runtime_state: Any = UNSET
+    feishu_runtime_state: Any = UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +180,7 @@ class PlanStateChanged(RuntimeStateEvent):
     plan_text: Any = UNSET
 
 
-def apply_runtime_state_message(state: MutableMapping[str, Any], message: RuntimeStateMessage) -> None:
+def apply_runtime_state_message(state: RuntimeStateDict, message: RuntimeStateMessage) -> None:
     match message:
         case BindingActivated(active=active):
             state["active"] = active
@@ -118,7 +188,7 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
             working_dir=working_dir,
             current_thread_id=current_thread_id,
             current_thread_title=current_thread_title,
-            current_thread_runtime_state=current_thread_runtime_state,
+            feishu_runtime_state=feishu_runtime_state,
             approval_policy=approval_policy,
             sandbox=sandbox,
             collaboration_mode=collaboration_mode,
@@ -126,7 +196,7 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
             state["working_dir"] = working_dir
             state["current_thread_id"] = current_thread_id
             state["current_thread_title"] = current_thread_title
-            state["current_thread_runtime_state"] = current_thread_runtime_state
+            state["feishu_runtime_state"] = feishu_runtime_state
             state["approval_policy"] = approval_policy
             state["sandbox"] = sandbox
             state["collaboration_mode"] = collaboration_mode
@@ -145,7 +215,7 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
             working_dir=working_dir,
             current_thread_id=current_thread_id,
             current_thread_title=current_thread_title,
-            current_thread_runtime_state=current_thread_runtime_state,
+            feishu_runtime_state=feishu_runtime_state,
         ):
             if working_dir is not UNSET:
                 state["working_dir"] = working_dir
@@ -153,8 +223,8 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
                 state["current_thread_id"] = current_thread_id
             if current_thread_title is not UNSET:
                 state["current_thread_title"] = current_thread_title
-            if current_thread_runtime_state is not UNSET:
-                state["current_thread_runtime_state"] = current_thread_runtime_state
+            if feishu_runtime_state is not UNSET:
+                state["feishu_runtime_state"] = feishu_runtime_state
         case ExecutionAnchorCleared(clear_card_message=clear_card_message):
             if clear_card_message:
                 state["current_message_id"] = ""

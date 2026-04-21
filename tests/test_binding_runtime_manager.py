@@ -52,7 +52,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
             state["working_dir"] = working_dir
             state["current_thread_id"] = thread_id
             state["current_thread_title"] = thread_title
-            state["current_thread_runtime_state"] = "attached"
+            state["feishu_runtime_state"] = "attached"
             manager.subscribe_thread_locked(binding, thread_id)
             if acquire_write_owner:
                 manager.acquire_thread_write_lease_locked(binding, thread_id)
@@ -83,7 +83,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
                 "working_dir": "/tmp/project",
                 "current_thread_id": "thread-1",
                 "current_thread_title": "Demo",
-                "current_thread_runtime_state": "attached",
+                "feishu_runtime_state": "attached",
                 "current_thread_write_owner_thread_id": "thread-1",
                 "approval_policy": "never",
                 "sandbox": "danger-full-access",
@@ -114,7 +114,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         state["working_dir"] = "/tmp/project"
         state["current_thread_id"] = "thread-1"
         state["current_thread_title"] = "Local title"
-        state["current_thread_runtime_state"] = "attached"
+        state["feishu_runtime_state"] = "attached"
         state["current_turn_id"] = "turn-1"
         state["running"] = True
         manager.subscribe_thread_locked(binding, "thread-1")
@@ -207,7 +207,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
             manager.apply_persisted_runtime_state_message_locked(
                 binding_b,
                 state_b,
-                ThreadStateChanged(current_thread_runtime_state="released"),
+                ThreadStateChanged(feishu_runtime_state="released"),
             )
             snapshot = manager.thread_binding_snapshot_locked(
                 "thread-1",
@@ -271,7 +271,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(state["current_thread_id"], "thread-new")
         self.assertEqual(state["current_thread_title"], "New")
         self.assertEqual(state["working_dir"], "/tmp/project-new")
-        self.assertEqual(state["current_thread_runtime_state"], "attached")
+        self.assertEqual(state["feishu_runtime_state"], "attached")
         self.assertEqual(state["current_message_id"], "")
         self.assertEqual(state["current_turn_id"], "")
         self.assertEqual(manager.bound_bindings_for_thread_locked("thread-old"), [])
@@ -280,7 +280,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertIsNone(manager._thread_lease_registry.lease_owner("thread-old"))
         assert stored is not None
         self.assertEqual(stored["current_thread_id"], "thread-new")
-        self.assertEqual(stored["current_thread_runtime_state"], "attached")
+        self.assertEqual(stored["feishu_runtime_state"], "attached")
         self.assertEqual(stored["working_dir"], "/tmp/project-new")
 
     def test_clear_thread_binding_locked_clears_attachment_and_keeps_binding_defaults(self) -> None:
@@ -308,7 +308,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(unsubscribe_thread_id, "thread-1")
         self.assertEqual(state["current_thread_id"], "")
         self.assertEqual(state["current_thread_title"], "")
-        self.assertEqual(state["current_thread_runtime_state"], "")
+        self.assertEqual(state["feishu_runtime_state"], "")
         self.assertEqual(state["current_message_id"], "")
         self.assertEqual(state["last_execution_message_id"], "")
         self.assertEqual(manager.bound_bindings_for_thread_locked("thread-1"), [])
@@ -317,7 +317,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(manager.interaction_owner_snapshot_locked("thread-1")["kind"], "none")
         assert stored is not None
         self.assertEqual(stored["current_thread_id"], "")
-        self.assertEqual(stored["current_thread_runtime_state"], "")
+        self.assertEqual(stored["feishu_runtime_state"], "")
         self.assertEqual(stored["working_dir"], "/tmp/project")
 
     def test_release_feishu_runtime_by_thread_id_locked_marks_bindings_released(self) -> None:
@@ -355,8 +355,8 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(result.unsubscribe_thread_id, "thread-1")
         self.assertEqual(sorted(result.bound_binding_ids), ["p2p:ou-user-a:chat-a", "p2p:ou-user-b:chat-b"])
         self.assertEqual(sorted(result.released_binding_ids), ["p2p:ou-user-a:chat-a", "p2p:ou-user-b:chat-b"])
-        self.assertEqual(state_a["current_thread_runtime_state"], "released")
-        self.assertEqual(state_b["current_thread_runtime_state"], "released")
+        self.assertEqual(state_a["feishu_runtime_state"], "released")
+        self.assertEqual(state_b["feishu_runtime_state"], "released")
         self.assertEqual(state_a["current_message_id"], "")
         self.assertEqual(state_b["current_message_id"], "")
         self.assertEqual(manager.bound_bindings_for_thread_locked("thread-1"), [binding_a, binding_b])
@@ -365,7 +365,34 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(manager.interaction_owner_snapshot_locked("thread-1")["kind"], "none")
         assert stored_a is not None
         assert stored_b is not None
-        self.assertEqual(stored_a["current_thread_runtime_state"], "released")
-        self.assertEqual(stored_b["current_thread_runtime_state"], "released")
+        self.assertEqual(stored_a["feishu_runtime_state"], "released")
+        self.assertEqual(stored_b["feishu_runtime_state"], "released")
         self.assertEqual(stored_a["current_thread_write_owner_thread_id"], "")
         self.assertEqual(stored_b["current_thread_write_owner_thread_id"], "")
+
+    def test_release_feishu_runtime_by_thread_id_locked_respects_external_availability_gate(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        manager = self._make_manager(data_dir=data_dir)
+        binding = ("ou-user-a", "chat-a")
+        state = self._attach_binding(manager, binding)
+
+        with manager._lock:
+            with self.assertRaisesRegex(ValueError, "blocked by controller"):
+                manager.release_feishu_runtime_by_thread_id_locked(
+                    "thread-1",
+                    release_feishu_runtime_availability=lambda thread_id: (False, "blocked by controller"),
+                )
+
+        stored = ChatBindingStore(data_dir).load(binding)
+        self.assertEqual(state["feishu_runtime_state"], "attached")
+        self.assertEqual(manager.attached_bindings_for_thread_locked("thread-1"), [binding])
+        self.assertEqual(manager._thread_lease_registry.lease_owner("thread-1"), binding)
+        self.assertEqual(
+            manager.interaction_owner_snapshot_locked("thread-1", current_binding=binding)["relation"],
+            "current",
+        )
+        assert stored is not None
+        self.assertEqual(stored["feishu_runtime_state"], "attached")
+        self.assertEqual(stored["current_thread_write_owner_thread_id"], "thread-1")

@@ -21,8 +21,9 @@ from typing import Any
 
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.feishu_types import ChatBindingsFileData, StoredChatBinding
+from bot.runtime_state import FEISHU_RUNTIME_ATTACHED, VALID_FEISHU_RUNTIME_STATES
 
-CHAT_BINDING_STORE_SCHEMA_VERSION = 3
+CHAT_BINDING_STORE_SCHEMA_VERSION = 4
 
 
 class ChatBindingStore:
@@ -173,7 +174,7 @@ class ChatBindingStore:
             "working_dir": raw_state.get("working_dir", ""),
             "current_thread_id": raw_state.get("current_thread_id", ""),
             "current_thread_title": raw_state.get("current_thread_title", ""),
-            "current_thread_runtime_state": raw_state.get("current_thread_runtime_state", ""),
+            "feishu_runtime_state": raw_state.get("feishu_runtime_state", ""),
             "current_thread_write_owner_thread_id": raw_state.get("current_thread_write_owner_thread_id", ""),
             "approval_policy": raw_state.get("approval_policy", ""),
             "sandbox": raw_state.get("sandbox", ""),
@@ -185,16 +186,16 @@ class ChatBindingStore:
                 raise ValueError(f"invalid chat_bindings.json: {key} must be a string")
             normalized[key] = value.strip()
         current_thread_id = normalized["current_thread_id"]
-        runtime_state = normalized["current_thread_runtime_state"]
+        runtime_state = normalized["feishu_runtime_state"]
         if current_thread_id:
-            if runtime_state not in {"attached", "released"}:
+            if runtime_state not in VALID_FEISHU_RUNTIME_STATES:
                 raise ValueError(
-                    "invalid chat_bindings.json: current_thread_runtime_state must be attached or released"
+                    "invalid chat_bindings.json: feishu_runtime_state must be attached or released"
                 )
         else:
             if runtime_state:
                 raise ValueError(
-                    "invalid chat_bindings.json: current_thread_runtime_state must be empty when current_thread_id is empty"
+                    "invalid chat_bindings.json: feishu_runtime_state must be empty when current_thread_id is empty"
                 )
         if (
             normalized["current_thread_write_owner_thread_id"]
@@ -204,7 +205,7 @@ class ChatBindingStore:
                 "invalid chat_bindings.json: current_thread_write_owner_thread_id must match current_thread_id"
             )
         if (
-            normalized["current_thread_runtime_state"] != "attached"
+            normalized["feishu_runtime_state"] != FEISHU_RUNTIME_ATTACHED
             and normalized["current_thread_write_owner_thread_id"]
         ):
             raise ValueError(

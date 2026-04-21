@@ -17,6 +17,7 @@ def _build_state() -> dict[str, object]:
         "working_dir": "/tmp/project",
         "current_thread_id": "thread-1",
         "current_thread_title": "demo",
+        "feishu_runtime_state": "attached",
         "current_turn_id": "turn-1",
         "running": True,
         "cancelled": False,

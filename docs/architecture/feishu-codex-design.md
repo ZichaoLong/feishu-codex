@@ -161,6 +161,10 @@ Current module split:
   request state and fail-closed handling for interactive requests
 - `bot/codex_session_ui_domain.py`: owns session-card UI flows, including
   transient rename-form state and RuntimeLoop-submitted resume target resolution
+- `bot/codex_settings_domain.py`: owns user-facing settings and identity
+  commands such as `/profile`, `/approval`, `/sandbox`, `/permissions`,
+  `/mode`, `/whoami`, and `/init`; it crosses bot/runtime/profile boundaries
+  through explicit `SettingsDomainPorts` rather than retaining a handler owner
 - `bot/execution_transcript.py`: an internal transcript assembler for execution-card
   presentation; it builds display-only `reply_segments` / `process_log`
   fragments, and can support hiding the terminal final-answer segment from the
@@ -204,6 +208,12 @@ still need to stay explicit as the code evolves are:
   runtime-state map
 - orchestration components such as `PromptTurnEntryController` should be wired
   through explicit ports, rather than growing anonymous callback lists
+- session-UI initiated resume flow should also cross the runtime boundary
+  through explicit runtime ports, rather than reaching into handler-private
+  loop helpers from inside the domain object
+- settings-domain commands should depend on named settings ports for bot
+  identity/context, runtime view/update, and profile state, rather than on a
+  broad handler-owner protocol
 
 Thread-summary access should also keep two contracts separate:
 
@@ -317,9 +327,9 @@ So:
   directly deleting `chat_bindings.json`
 - the persisted binding schema should also fail closed rather than carrying
   legacy half-states forward
-- whenever `current_thread_id` is non-empty, `current_thread_runtime_state`
+- whenever `current_thread_id` is non-empty, `feishu_runtime_state`
   must be explicitly present
-- `current_thread_runtime_state` may only be `attached` or `released`
+- `feishu_runtime_state` may only be `attached` or `released`
 - a `released` binding must not carry a residual `write_owner`
 - violations should be treated as storage corruption and fail fast instead of
   being silently normalized during load
@@ -410,6 +420,10 @@ full-tree dump.
     `interaction_request_controller.py`, `adapter_notification_controller.py`,
     `runtime_admin_controller.py`, `runtime_card_publisher.py`,
     `prompt_turn_entry_controller.py`
+  - within that runtime slice, `runtime_state.py` is the code-level single
+    source of truth for the mutable runtime-state schema, reducer messages, and
+    canonical Feishu/backend runtime status vocabulary; other modules should
+    import those symbols rather than redefining partial local variants
   - shared UI / helper boundaries: `cards.py`, `card_text_projection.py`,
     `shared_command_surface.py`, `feishu_types.py`, `codex_config_reader.py`
   - wrapper and service-admin path: `fcodex.py`, `fcodex_proxy.py`,

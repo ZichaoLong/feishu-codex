@@ -2,18 +2,26 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Callable, MutableMapping, TypeAlias
+from typing import Any, Callable, TypeAlias
 
 from bot.adapters.base import RuntimeConfigSummary, ThreadSummary
 from bot.binding_identity import format_binding_id, parse_binding_id
 from bot.binding_runtime_manager import BindingRuntimeManager
 from bot.cards import CommandResult, build_markdown_card
 from bot.constants import display_path
+from bot.runtime_state import (
+    BACKEND_THREAD_STATUS_ACTIVE,
+    BACKEND_THREAD_STATUS_NOT_LOADED,
+    FEISHU_RUNTIME_ATTACHED,
+    FEISHU_RUNTIME_RELEASED,
+    LOADED_BACKEND_THREAD_STATUSES,
+    RuntimeStateDict,
+)
 
 logger = logging.getLogger(__name__)
 
 ChatBindingKey: TypeAlias = tuple[str, str]
-RuntimeState: TypeAlias = MutableMapping[str, Any]
+RuntimeState: TypeAlias = RuntimeStateDict
 
 
 class RuntimeAdminController:
@@ -331,8 +339,8 @@ class RuntimeAdminController:
             "changed": result.changed,
             "already_released": result.already_released,
             "backend_thread_status": backend_thread_status or "unknown",
-            "backend_still_loaded": backend_thread_status in {"idle", "active", "systemError"},
-            "reprofile_possible": backend_thread_status == "notLoaded",
+            "backend_still_loaded": backend_thread_status in LOADED_BACKEND_THREAD_STATUSES,
+            "reprofile_possible": backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED,
         }
 
     def thread_status_snapshot(
@@ -354,13 +362,13 @@ class RuntimeAdminController:
             "thread_title": effective_summary.title if effective_summary is not None else "",
             "working_dir": effective_summary.cwd if effective_summary is not None else "",
             "backend_thread_status": backend_thread_status or "unknown",
-            "backend_running_turn": backend_thread_status == "active",
+            "backend_running_turn": backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE,
             "bound_binding_ids": snapshot["bound_binding_ids"],
             "attached_binding_ids": snapshot["attached_binding_ids"],
             "released_binding_ids": snapshot["released_binding_ids"],
             "feishu_write_owner_binding_id": snapshot["feishu_write_owner_binding_id"],
             "interaction_owner": snapshot["interaction_owner"],
-            "reprofile_possible": backend_thread_status == "notLoaded",
+            "reprofile_possible": backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED,
             "release_feishu_runtime_available": snapshot["release_feishu_runtime_available"],
             "release_feishu_runtime_reason": snapshot["release_feishu_runtime_reason"],
         }
@@ -371,7 +379,9 @@ class RuntimeAdminController:
                 bindings = self.binding_inventory_locked()
             bound_thread_ids = {item["thread_id"] for item in bindings if item["thread_id"]}
             attached_thread_ids = {
-                item["thread_id"] for item in bindings if item["thread_id"] and item["feishu_runtime_state"] == "attached"
+                item["thread_id"]
+                for item in bindings
+                if item["thread_id"] and item["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED
             }
             try:
                 loaded_thread_ids = self._list_loaded_thread_ids()
@@ -386,7 +396,9 @@ class RuntimeAdminController:
                 "admitted_thread_count": len(self._admitted_thread_ids()),
                 "binding_count": len(bindings),
                 "bound_binding_count": sum(1 for item in bindings if item["binding_state"] == "bound"),
-                "attached_binding_count": sum(1 for item in bindings if item["feishu_runtime_state"] == "attached"),
+                "attached_binding_count": sum(
+                    1 for item in bindings if item["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED
+                ),
                 "thread_count": len(bound_thread_ids),
                 "attached_thread_count": len(attached_thread_ids),
                 "loaded_thread_count": len(loaded_thread_ids),
@@ -422,7 +434,9 @@ class RuntimeAdminController:
                         {
                             "binding_id": binding_id,
                             "feishu_runtime_state": (
-                                "attached" if binding_id in set(snapshot["attached_binding_ids"]) else "released"
+                                FEISHU_RUNTIME_ATTACHED
+                                if binding_id in set(snapshot["attached_binding_ids"])
+                                else FEISHU_RUNTIME_RELEASED
                             ),
                         }
                         for binding_id in snapshot["bound_binding_ids"]

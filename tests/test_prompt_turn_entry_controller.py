@@ -292,7 +292,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
                 env["binding_runtime"].apply_persisted_runtime_state_message_locked(
                     env["binding"],
                     env["state"],
-                    ThreadStateChanged(current_thread_runtime_state="released"),
+                    ThreadStateChanged(feishu_runtime_state="released"),
                 )
 
     def test_handle_prompt_replies_when_turn_is_already_running(self) -> None:
@@ -333,7 +333,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
 
         self.assertEqual([call["thread_id"] for call in env["resume_calls"]], ["thread-1"])
         self.assertEqual(env["start_turn_calls"][-1]["thread_id"], "thread-1")
-        self.assertEqual(env["state"]["current_thread_runtime_state"], "attached")
+        self.assertEqual(env["state"]["feishu_runtime_state"], "attached")
 
     def test_start_prompt_turn_retries_after_thread_not_found(self) -> None:
         env = self._make_controller()

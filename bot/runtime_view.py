@@ -8,9 +8,10 @@ mutable runtime-state dict owned by ``CodexHandler``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from bot.execution_transcript import ExecutionTranscript
+from bot.runtime_state import FEISHU_RUNTIME_ATTACHED, RuntimeStateDict
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +42,7 @@ class ThreadBindingView:
 
     @property
     def feishu_runtime_attached(self) -> bool:
-        return self.feishu_runtime_state == "attached" and self.has_thread
+        return self.feishu_runtime_state == FEISHU_RUNTIME_ATTACHED and self.has_thread
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,14 +124,14 @@ class RuntimeView:
         return self.settings.collaboration_mode
 
 
-def build_runtime_view(state: Mapping[str, Any]) -> RuntimeView:
+def build_runtime_view(state: RuntimeStateDict) -> RuntimeView:
     return RuntimeView(
         active=bool(state["active"]),
         binding=ThreadBindingView(
             working_dir=str(state["working_dir"] or ""),
             thread_id=str(state["current_thread_id"] or ""),
             title=str(state["current_thread_title"] or ""),
-            feishu_runtime_state=str(state.get("current_thread_runtime_state") or ""),
+            feishu_runtime_state=str(state.get("feishu_runtime_state") or ""),
         ),
         execution=ExecutionView(
             running=bool(state["running"]),

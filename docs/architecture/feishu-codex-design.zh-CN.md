@@ -124,6 +124,7 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/adapter_notification_controller.py`：adapter notification 的 method 路由、语义解释与下游分发
 - `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
 - `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态，以及通过 `RuntimeLoop` 串行化的 resume 目标解析
+- `bot/codex_settings_domain.py`：用户侧设置与身份命令，包括 `/profile`、`/approval`、`/sandbox`、`/permissions`、`/mode`、`/whoami` 与 `/init`；它通过显式 `SettingsDomainPorts` 穿过 bot/runtime/profile 边界，而不是继续持有宽泛的 handler owner
 - `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 display-only 的 `reply_segments` / `process_log` 片段拼装，并支持在权威终态结果已经单独送达后，把最后一段最终答案从 execution card 的 reply 面板里剔除；它不承担 thread、owner 或 binding 级状态职责
 - `bot/stores/thread_admission_store.py`：每实例 Feishu 可见线程的 admission
 - `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
@@ -161,6 +162,10 @@ shared backend 与 wrapper 的具体机制，见
   而不是再把整份可变 runtime-state map 直接交给外层持有
 - 像 `PromptTurnEntryController` 这类编排组件，对外依赖面应通过显式 ports 装配，
   不应继续扩大匿名 callback 列表
+- session UI 发起的 resume 流程，也应通过显式 runtime ports 穿过运行时边界，
+  而不是在 domain 内直接触达 handler 私有的 loop helper
+- settings domain 命令也应通过具名 settings ports 获取 bot 身份/消息上下文、runtime view/update 与 profile 状态，
+  而不是依赖宽泛的 handler owner protocol
 - `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面
 
 当前这一层拆分已经不只是“把 help/settings/group/session/file 等领域从单体逻辑里抽出去”。历史计划里提出的 ownership 拆分主线，目前已经大体落地：
@@ -235,8 +240,8 @@ shared backend 与 wrapper 的具体机制，见
 - 这类清理动作应归入 `feishu-codexctl` 的 binding 管理面
 - 它不应继续以“单独删除 `chat_bindings.json` 文件”的方式被定义为一个独立架构概念
 - 持久化 binding schema 也应 fail-closed：不再为旧半状态做隐式兼容
-- 只要 `current_thread_id` 非空，就必须显式写出 `current_thread_runtime_state`
-- `current_thread_runtime_state` 只能是 `attached` 或 `released`
+- 只要 `current_thread_id` 非空，就必须显式写出 `feishu_runtime_state`
+- `feishu_runtime_state` 只能是 `attached` 或 `released`
 - `released` 状态不得携带残留 `write_owner`
 - 这类约束若不满足，应直接视为存储损坏并报错，而不是在 load 时静默补成 `attached` 或静默清理
 
@@ -310,6 +315,9 @@ shared backend 与 wrapper 的具体机制，见
     `interaction_request_controller.py`、`adapter_notification_controller.py`、
     `runtime_admin_controller.py`、`runtime_card_publisher.py`、
     `prompt_turn_entry_controller.py`
+  - 在这组 runtime 模块里，`runtime_state.py` 是可变 runtime state
+    schema、reducer message 与 Feishu/backend 运行时状态词汇的代码级单一事实源；
+    其他模块应直接 import，而不是再各自定义局部 TypedDict 或半套字面量
   - 共享 UI / helper 边界：`cards.py`、`card_text_projection.py`、
     `shared_command_surface.py`、`feishu_types.py`、`codex_config_reader.py`
   - wrapper 与服务管理路径：`fcodex.py`、`fcodex_proxy.py`、

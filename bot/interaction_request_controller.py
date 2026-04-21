@@ -18,11 +18,12 @@ from bot.cards import (
     build_permissions_approval_card,
     make_card_response,
 )
+from bot.runtime_state import RuntimeStateDict
 
 logger = logging.getLogger(__name__)
 
 ChatBindingKey: TypeAlias = tuple[str, str]
-RuntimeState: TypeAlias = MutableMapping[str, Any]
+RuntimeState: TypeAlias = RuntimeStateDict
 PendingRequestState: TypeAlias = MutableMapping[str, Any]
 
 PENDING_REQUEST_STATUS_PENDING = "pending"

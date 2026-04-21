@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, MutableMapping, Protocol, TypeAlias
+from typing import Any, Callable, Protocol, TypeAlias
 
 from bot.card_text_projection import can_render_terminal_result_card
 from bot.runtime_card_publisher import (
@@ -10,11 +10,11 @@ from bot.runtime_card_publisher import (
     build_execution_card_model,
     build_plan_card_model,
 )
-from bot.runtime_state import ExecutionStateChanged, PlanStateChanged, RuntimeStateMessage
+from bot.runtime_state import ExecutionStateChanged, PlanStateChanged, RuntimeStateDict, RuntimeStateMessage
 from bot.runtime_view import RuntimeView, build_runtime_view
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
-RuntimeState: TypeAlias = MutableMapping[str, Any]
+RuntimeState: TypeAlias = RuntimeStateDict
 
 
 class _ReplyText(Protocol):
