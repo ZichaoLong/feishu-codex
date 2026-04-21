@@ -361,6 +361,7 @@
 3. 如果 `final_reply_text` 非空：
    - 优先发送 `terminal result card`
    - 让该卡片成为强合同载体
+   - 如果引用回复发送失败，再回退到直接发送一张终态结果卡
 4. 如果终态结果载体发送成功，且终态 snapshot 能明确定位最后一个文本型 `agentMessage`：
    - 回写旧 execution card
    - 只保留更早的 `reply_segments`

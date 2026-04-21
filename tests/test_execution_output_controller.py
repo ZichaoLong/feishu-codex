@@ -150,6 +150,29 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         self.assertEqual(bot.reply_refs[-1][0], "msg-3")
         self.assertEqual(bot.reply_refs[-1][1], "interactive")
 
+    def test_publish_terminal_result_falls_back_to_top_level_card_before_text(self) -> None:
+        state = self._make_state()
+        controller, bot, replies = self._make_controller(state)
+
+        def _reply_fail(parent_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> str | None:
+            bot.reply_refs.append((parent_id, msg_type, content, reply_in_thread))
+            return None
+
+        bot.reply_to_message = _reply_fail  # type: ignore[method-assign]
+
+        ok = controller.publish_terminal_result(
+            "c1",
+            final_reply_text="done",
+            prompt_message_id="msg-4",
+            prompt_reply_in_thread=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(replies, [])
+        self.assertEqual(bot.reply_refs[-1][0], "msg-4")
+        self.assertEqual(bot.sent_messages[-1][0], "c1")
+        self.assertEqual(bot.sent_messages[-1][1], "interactive")
+
     def test_schedule_execution_card_update_immediate_path_patches_card(self) -> None:
         state = self._make_state()
         controller, bot, _ = self._make_controller(state)

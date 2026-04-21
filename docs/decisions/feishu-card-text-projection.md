@@ -416,6 +416,8 @@ Recommended order:
 3. if `final_reply_text` is non-empty:
    - prefer sending a `terminal result card`
    - treat that card as the strong-contract carrier
+   - if reply-based delivery fails, fall back to sending one top-level
+     terminal-result card before dropping to plain text
 4. if terminal-result delivery succeeds and the terminal snapshot can identify
    the last textual `agentMessage`:
    - patch the old execution card

@@ -248,6 +248,10 @@ Corollary:
 - if the working directory changes before pending attachments are consumed, that
   pending set must be invalidated instead of being rebound into the new
   workspace
+- this invalidation only removes automatic-consumption eligibility; it does not
+  imply deletion of already-staged local files from the original workspace
+- staged files remain in that original workspace for manual inspection,
+  deliberate reuse, or explicit path-based prompts
 
 ## 7. Codex Input Contract
 

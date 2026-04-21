@@ -18,7 +18,7 @@ _SNAPSHOT_WORK_ITEM_TYPES = {
     "webSearch",
 }
 
-_CARD_REPLY_TRUNCATION_NOTICE = "\n\n**[回复过长，完整内容已另行发送为文本消息]**"
+_CARD_REPLY_TRUNCATION_NOTICE = "\n\n**[回复过长，执行卡仅显示部分内容]**"
 _CARD_REPLY_COMPACT_TRUNCATION_NOTICE = "[回复过长]"
 
 

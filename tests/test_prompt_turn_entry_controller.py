@@ -207,7 +207,10 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
                 flush_execution_card=lambda sender_id, chat_id, immediate=False: flushed.append(
                     (sender_id, chat_id, bool(immediate))
                 ),
-                retire_execution_anchor=lambda sender_id, chat_id: retired.append((sender_id, chat_id)),
+                retire_execution_anchor=lambda sender_id, chat_id: (
+                    turn_execution.retire_execution_locked(state),
+                    retired.append((sender_id, chat_id)),
+                ),
                 schedule_mirror_watchdog=lambda sender_id, chat_id: scheduled_watchdogs.append((sender_id, chat_id)),
                 reconcile_execution_snapshot=lambda sender_id, chat_id, *, thread_id, turn_id="": (
                     reconciled.append((sender_id, chat_id, thread_id, turn_id)),
@@ -344,6 +347,24 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         self.assertEqual([call["thread_id"] for call in env["start_turn_calls"]], ["thread-1", "thread-1"])
         self.assertEqual(env["state"]["current_turn_id"], "turn-1")
         self.assertEqual(env["scheduled_watchdogs"], [("ou_user", "c1")])
+
+    def test_start_prompt_turn_fails_closed_when_execution_card_cannot_be_sent(self) -> None:
+        env = self._make_controller()
+        controller = env["controller"]
+        controller._send_execution_card = lambda chat_id, parent_message_id, *, reply_in_thread=False: None
+
+        started = controller.start_prompt_turn("ou_user", "c1", "hello", message_id="msg-1")
+
+        self.assertFalse(started)
+        self.assertEqual(env["start_turn_calls"], [])
+        self.assertEqual(env["scheduled_watchdogs"], [])
+        self.assertEqual(env["retired"], [("ou_user", "c1")])
+        self.assertEqual(
+            env["replies"],
+            [("c1", "执行卡片发送失败，未启动 Codex；请稍后重试。", "msg-1", False)],
+        )
+        self.assertFalse(env["state"]["running"])
+        self.assertEqual(env["state"]["current_message_id"], "")
 
 
 if __name__ == "__main__":

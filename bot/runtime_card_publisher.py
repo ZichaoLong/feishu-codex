@@ -168,12 +168,14 @@ class RuntimeCardPublisher:
         content = json.dumps(build_terminal_result_card(final_reply_text), ensure_ascii=False)
         normalized_parent = str(parent_message_id or "").strip()
         if normalized_parent:
-            return self._bot.reply_to_message(
+            message_id = self._bot.reply_to_message(
                 normalized_parent,
                 "interactive",
                 content,
                 reply_in_thread=reply_in_thread,
             )
+            if message_id:
+                return message_id
         return self._bot.send_message_get_id(chat_id, "interactive", content)
 
     def publish_plan_card(

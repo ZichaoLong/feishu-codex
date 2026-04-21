@@ -407,6 +407,15 @@ class PromptTurnEntryController:
                 message_id,
                 reply_in_thread=prompt_reply_in_thread,
             ) or ""
+        if not card_id:
+            self._retire_execution_anchor(sender_id, chat_id)
+            self._reply_text(
+                chat_id,
+                "执行卡片发送失败，未启动 Codex；请稍后重试。",
+                message_id=message_id,
+                reply_in_thread=prompt_reply_in_thread,
+            )
+            return False
         with self._lock:
             self._apply_runtime_state_message_locked(
                 state,
