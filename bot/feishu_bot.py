@@ -11,7 +11,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from collections import OrderedDict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import lark_oapi as lark
@@ -51,6 +51,7 @@ from bot.feishu_types import (
     MentionPayload,
     MessageContextPayload,
 )
+from bot.forward_aggregator import ForwardAggregator, ForwardAggregatorPorts, PendingForward
 from bot.stores.group_chat_store import (
     GroupChatStore,
 )
@@ -63,13 +64,6 @@ _DEDUP_TTL = 300  # 5 分钟
 
 # 飞书卡片限制：单张卡片中 markdown 表格数量上限（实测约 5~10，取保守值）
 _MAX_CARD_TABLES = 5
-
-# 合并转发消息：子消息处理上限 & 递归深度上限
-_MERGE_FORWARD_MAX = 50
-_MERGE_FORWARD_MAX_DEPTH = 10
-
-# 转发消息聚合：等待留言的超时时间（秒）
-_FORWARD_AGGREGATE_TIMEOUT = 2.0
 
 # 消息上下文缓存
 _MESSAGE_CONTEXT_MAX_SIZE = 1000
@@ -138,19 +132,6 @@ def _store_fifo_ttl_entry(
     while len(entries) > max_size:
         entries.popitem(last=False)
 
-
-@dataclass
-class _PendingForward:
-    """暂存的合并转发消息，等待后续留言消息合并"""
-    forwarded_text: str
-    message_id: str
-    chat_type: str
-    sender_user_id: str
-    sender_open_id: str
-    sender_type: str
-    created_at: int
-    thread_id: str
-    timer: threading.Timer = field(repr=False)
 
 @dataclass
 class _MessageContext:
@@ -295,9 +276,25 @@ class FeishuBot(ABC):
             if isinstance(item, str) and str(item).strip()
         }
         self._bot_open_id_error_logged = False
-        # 转发消息聚合缓冲区：暂存 merge_forward，等待后续留言合并
-        self._pending_forwards: dict[tuple[str, str], _PendingForward] = {}
-        self._pending_forwards_lock = threading.Lock()
+        self._forward_aggregator = ForwardAggregator(
+            ports=ForwardAggregatorPorts(
+                get_group_mode=self.get_group_mode,
+                append_group_log_entry=self._append_group_log_entry,
+                handle_forwarded_text=lambda sender_id, chat_id, text, message_id: self.on_message(
+                    sender_id,
+                    chat_id,
+                    text,
+                    message_id=message_id,
+                ),
+                fetch_merge_forward_items=self._fetch_merge_forward_items,
+                batch_resolve_sender_names=self._batch_resolve_sender_names,
+                extract_text=self._extract_text,
+            ),
+            group_mode_all=self._GROUP_MODE_ALL,
+            group_mode_assistant=self._GROUP_MODE_ASSISTANT,
+        )
+        self._pending_forwards = self._forward_aggregator.pending_forwards
+        self._pending_forwards_lock = self._forward_aggregator.pending_forwards_lock
 
         self.client = lark.Client.builder() \
             .app_id(app_id) \
@@ -577,16 +574,7 @@ class FeishuBot(ABC):
             ]
             for message_id in stale_message_ids:
                 self._message_contexts.pop(message_id, None)
-        with self._pending_forwards_lock:
-            stale_forward_keys = [
-                key
-                for key, pending in self._pending_forwards.items()
-                if key[1] == normalized_chat_id
-            ]
-            for key in stale_forward_keys:
-                pending = self._pending_forwards.pop(key, None)
-                if pending is not None and pending.timer:
-                    pending.timer.cancel()
+        self._forward_aggregator.forget_chat(normalized_chat_id)
 
     @staticmethod
     def _extract_text(msg_type: str, content_dict: dict) -> str:
@@ -796,18 +784,13 @@ class FeishuBot(ABC):
 
     # ---- 转发消息聚合 ----
 
-    def _pop_pending_forward(self, sender_id: str, chat_id: str) -> Optional[_PendingForward]:
+    def _pop_pending_forward(self, sender_id: str, chat_id: str) -> Optional[PendingForward]:
         """取出并清除指定用户/会话的待合并转发消息，同时取消其超时定时器
 
         Returns:
             待合并的转发消息，若不存在则返回 None
         """
-        key = (sender_id, chat_id)
-        with self._pending_forwards_lock:
-            pending = self._pending_forwards.pop(key, None)
-            if pending and pending.timer:
-                pending.timer.cancel()
-        return pending
+        return self._forward_aggregator.pop_pending_forward(sender_id, chat_id)
 
     def _buffer_forward(
         self, sender_id: str, chat_id: str, forwarded_text: str,
@@ -823,29 +806,18 @@ class FeishuBot(ABC):
 
         若同一 (sender_id, chat_id) 已有暂存转发，先取消旧定时器再覆盖。
         """
-        key = (sender_id, chat_id)
-        timer = threading.Timer(
-            _FORWARD_AGGREGATE_TIMEOUT,
-            self._on_forward_timeout,
-            args=[sender_id, chat_id],
+        self._forward_aggregator.buffer_forward(
+            sender_id,
+            chat_id,
+            forwarded_text,
+            message_id,
+            chat_type,
+            sender_user_id=sender_user_id,
+            sender_open_id=sender_open_id,
+            sender_type=sender_type,
+            created_at=created_at,
+            thread_id=thread_id,
         )
-        with self._pending_forwards_lock:
-            old = self._pending_forwards.get(key)
-            if old and old.timer:
-                old.timer.cancel()
-            self._pending_forwards[key] = _PendingForward(
-                forwarded_text=forwarded_text,
-                message_id=message_id,
-                chat_type=chat_type,
-                sender_user_id=str(sender_user_id or "").strip(),
-                sender_open_id=str(sender_open_id or "").strip(),
-                sender_type=str(sender_type or "user").strip() or "user",
-                created_at=max(int(created_at or 0), 0),
-                thread_id=str(thread_id or "").strip(),
-                timer=timer,
-            )
-        timer.start()
-        logger.info("转发消息已暂存，等待留言合并: user=%s, chat=%s", sender_id, chat_id)
 
     def _on_forward_timeout(self, sender_id: str, chat_id: str) -> None:
         """超时未收到留言，单独处理暂存的转发消息
@@ -854,49 +826,7 @@ class FeishuBot(ABC):
         `mention_only` 模式群聊中，因无 @mention 上下文，静默丢弃。
         `assistant` 模式群聊中，直接写入群聊日志，供后续有效触发时读取。
         """
-        try:
-            pending = self._pop_pending_forward(sender_id, chat_id)
-            if not pending:
-                return
-            group_mode = self.get_group_mode(chat_id) if pending.chat_type == "group" else ""
-            if pending.chat_type == "group" and group_mode == self._GROUP_MODE_ASSISTANT:
-                self._append_group_log_entry(
-                    chat_id=chat_id,
-                    message_id=pending.message_id,
-                    created_at=pending.created_at or int(time.time() * 1000),
-                    sender_user_id=pending.sender_user_id,
-                    sender_open_id=pending.sender_open_id,
-                    sender_type=pending.sender_type,
-                    msg_type="merge_forward",
-                    thread_id=pending.thread_id,
-                    text=f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>",
-                )
-                logger.info(
-                    "转发消息聚合超时，已写入助理模式日志: user=%s, chat=%s",
-                    sender_id,
-                    chat_id,
-                )
-                return
-            # mention_only 群聊中无 @mention，丢弃
-            if (pending.chat_type == "group"
-                    and group_mode != self._GROUP_MODE_ALL):
-                logger.debug(
-                    "转发消息聚合超时，群聊无@唤醒，丢弃: user=%s, chat=%s",
-                    sender_id, chat_id,
-                )
-                return
-            # 私聊或 all 模式群聊：单独处理转发内容
-            text = (f"<forwarded_messages>\n{pending.forwarded_text}"
-                    f"\n</forwarded_messages>")
-            logger.info(
-                "转发消息聚合超时，单独处理: user=%s, chat=%s",
-                sender_id, chat_id,
-            )
-            self.on_message(
-                sender_id, chat_id, text, message_id=pending.message_id,
-            )
-        except Exception as e:
-            logger.error("转发消息超时处理异常: %s", e, exc_info=True)
+        self._forward_aggregator.on_forward_timeout(sender_id, chat_id)
 
     def _fetch_bot_open_id(self) -> Optional[str]:
         """调用飞书 API 获取机器人自身的 open_id，仅供 `/whoareyou` 之类的显式探测使用。"""
@@ -1454,6 +1384,21 @@ class FeishuBot(ABC):
                 return
         self.send_message(chat_id, "interactive", content)
 
+    @staticmethod
+    def _format_ts(ts_ms: int | str | None) -> str:
+        if not ts_ms:
+            return "未知时间"
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            dt = datetime.fromtimestamp(
+                int(ts_ms) / 1000,
+                tz=timezone(timedelta(hours=8)),
+            )
+            return dt.strftime("%m-%d %H:%M:%S")
+        except (ValueError, OSError):
+            return "未知时间"
+
     def _format_group_context_entries(self, entries: list[GroupMessageEntry]) -> str:
         parts: list[str] = []
         for item in entries:
@@ -1529,145 +1474,29 @@ class FeishuBot(ABC):
             "管理员可发送 `/acl` 查看或调整当前群的授权策略。"
         )
 
-    @staticmethod
-    def _format_ts(ts_ms: int | str | None) -> str:
-        """将毫秒时间戳转为可读时间字符串"""
-        if not ts_ms:
-            return "未知时间"
-        try:
-            from datetime import datetime, timezone, timedelta
-            dt = datetime.fromtimestamp(
-                int(ts_ms) / 1000,
-                tz=timezone(timedelta(hours=8)),
-            )
-            return dt.strftime("%m-%d %H:%M:%S")
-        except (ValueError, OSError):
-            return "未知时间"
-
-    def _fetch_merge_forward_text(self, merge_message_id: str) -> str:
-        """通过 GetMessage API 获取合并转发中的子消息，还原对话格式返回
-
-        飞书 API 将所有层级的子消息作为扁平列表一次性返回，
-        通过 upper_message_id 字段区分父子关系。
-        本方法只调用一次 API，用 upper_message_id 构建消息树后递归格式化。
-        顶层调用会在外部包裹 <forwarded_messages> 标签。
-
-        输出格式示例:
-            [03-17 09:15:55] 张三:
-                你好，这是第一条消息
-            [03-17 09:16:37] 李四: [forwarded messages]
-                [03-17 08:00:00] 王五:
-                    嵌套的消息
-        """
+    def _fetch_merge_forward_items(self, merge_message_id: str) -> list[Any]:
         try:
             request = GetMessageRequest.builder().message_id(merge_message_id).build()
             response = self.client.im.v1.message.get(request)
             if not response.success():
                 logger.warning(
                     "获取合并转发消息失败: message_id=%s, code=%s, msg=%s",
-                    merge_message_id, response.code, response.msg,
+                    merge_message_id,
+                    response.code,
+                    response.msg,
                 )
-                return ""
-            items = response.data.items or []
-        except Exception as e:
-            logger.warning("获取合并转发消息异常: message_id=%s, error=%s",
-                          merge_message_id, e)
-            return ""
+                return []
+            return list(response.data.items or [])
+        except Exception as exc:
+            logger.warning(
+                "获取合并转发消息异常: message_id=%s, error=%s",
+                merge_message_id,
+                exc,
+            )
+            return []
 
-        # 用 upper_message_id 构建父子关系树
-        children_map: dict[str, list] = {}
-        for item in items[:_MERGE_FORWARD_MAX]:
-            sub_id = getattr(item, "message_id", None)
-            if sub_id == merge_message_id:
-                continue  # 跳过合并转发消息本身
-            parent_id = getattr(item, "upper_message_id", None) or merge_message_id
-            children_map.setdefault(parent_id, []).append(item)
-
-        # 批量解析用户姓名（只对 sender_type=user 调 Contact API）
-        sender_open_ids: set[str] = set()
-        for item in items[:_MERGE_FORWARD_MAX]:
-            sender = getattr(item, "sender", None)
-            if sender and getattr(sender, "sender_type", "") == "user":
-                sid = getattr(sender, "id", None)
-                if sid:
-                    sender_open_ids.add(sid)
-        name_map = self._batch_resolve_sender_names(sender_open_ids)
-
-        return self._format_merge_tree(
-            merge_message_id, children_map, name_map, depth=0,
-        )
-
-    def _format_merge_tree(
-        self,
-        parent_id: str,
-        children_map: dict[str, list],
-        name_map: dict[str, str],
-        depth: int,
-    ) -> str:
-        """递归格式化消息树的某一层子消息"""
-        indent = "    " * depth
-        if depth >= _MERGE_FORWARD_MAX_DEPTH:
-            return f"{indent}[嵌套转发层数过深，已截断]"
-
-        children = children_map.get(parent_id, [])
-        parts: list[str] = []
-        for item in children:
-            try:
-                sub_id = getattr(item, "message_id", None)
-                sub_type = item.msg_type
-
-                # 提取发送者和时间
-                sender = getattr(item, "sender", None)
-                sender_id = getattr(sender, "id", "") if sender else ""
-                sender_type = getattr(sender, "sender_type", "") if sender else ""
-                sender_name = name_map.get(sender_id, sender_id[:8])
-                if sender_type == "app":
-                    sender_name = f"{sender_name}[机器人]"
-                ts_str = self._format_ts(getattr(item, "create_time", None))
-                header = f"{indent}[{ts_str}] {sender_name}:"
-                content_indent = indent + "    "
-
-                if sub_type == "merge_forward":
-                    # 嵌套合并转发：标记后递归格式化子节点
-                    parts.append(f"{header} [forwarded messages]")
-                    nested = self._format_merge_tree(
-                        sub_id, children_map, name_map, depth + 1,
-                    )
-                    if nested:
-                        parts.append(nested)
-                else:
-                    # 提取文本内容（text/post/interactive 等）
-                    try:
-                        sub_content = json.loads(item.body.content)
-                        text = self._extract_text(sub_type, sub_content)
-                    except (json.JSONDecodeError, AttributeError):
-                        text = ""
-
-                    if text:
-                        # 多行消息：每行缩进到发送者下方
-                        indented_lines = "\n".join(
-                            f"{content_indent}{line}"
-                            for line in text.splitlines()
-                        )
-                        parts.append(f"{header}\n{indented_lines}")
-                    elif sub_type in ("image", "audio", "video", "sticker",
-                                      "file", "media"):
-                        # 不支持下载的媒体类型：占位提示
-                        type_labels = {
-                            "image": "图片", "audio": "语音",
-                            "video": "视频", "sticker": "表情",
-                            "file": "文件", "media": "媒体",
-                        }
-                        label = type_labels.get(sub_type, sub_type)
-                        parts.append(f"{header} [{label}]")
-                    else:
-                        # 其他未知类型：占位提示
-                        parts.append(f"{header} [{sub_type} 消息]")
-            except Exception as e:
-                logger.warning("解析子消息异常: message_id=%s, error=%s",
-                              getattr(item, "message_id", "?"), e)
-                continue
-        return "\n".join(parts)
+    def _fetch_merge_forward_text(self, merge_message_id: str) -> str:
+        return self._forward_aggregator.fetch_merge_forward_text(merge_message_id)
 
     def _on_raw_message(self, data: P2ImMessageReceiveV1) -> None:
         """解析原始消息，根据消息类型分发到对应处理方法

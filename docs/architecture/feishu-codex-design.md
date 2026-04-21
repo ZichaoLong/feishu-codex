@@ -153,6 +153,9 @@ Current module split:
   `/release-feishu-runtime`, and control-plane status/admin management
 - `bot/inbound_surface_controller.py`: inbound command surface, card-action
   routing, and help-card command reuse
+- `bot/forward_aggregator.py`: merged-forward buffering, timeout dispatch, and
+  forwarded-message tree rendering; it owns this transport-local state machine
+  instead of leaving it scattered across `FeishuBot`
 - `bot/prompt_turn_entry_controller.py`: prompt entry orchestration,
   lease-acquisition, and released -> attached recovery flow
 - `bot/adapter_notification_controller.py`: adapter-notification routing,
