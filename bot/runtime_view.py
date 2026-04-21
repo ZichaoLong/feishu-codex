@@ -62,6 +62,7 @@ class ExecutionView:
     last_patch_at: float
     mirror_watchdog_generation: int
     followup_sent: bool
+    followup_text: str
     awaiting_local_turn_started: bool
 
     @property
@@ -147,6 +148,7 @@ def build_runtime_view(state: Mapping[str, Any]) -> RuntimeView:
             last_patch_at=float(state["last_patch_at"] or 0.0),
             mirror_watchdog_generation=int(state["mirror_watchdog_generation"] or 0),
             followup_sent=bool(state["followup_sent"]),
+            followup_text=str(state.get("followup_text") or ""),
             awaiting_local_turn_started=bool(state["awaiting_local_turn_started"]),
         ),
         settings=RuntimeSettingsView(

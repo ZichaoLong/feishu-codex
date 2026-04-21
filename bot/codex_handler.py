@@ -104,6 +104,7 @@ from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
 logger = logging.getLogger(__name__)
 
 _CARD_REPLY_LIMIT_DEFAULT = 12000
+_TERMINAL_RESULT_CARD_LIMIT_DEFAULT = 12000
 _CARD_LOG_LIMIT_DEFAULT = 8000
 _MIRROR_WATCHDOG_SECONDS_DEFAULT = 8.0
 _ATTACHMENT_TTL_SECONDS_DEFAULT = 1800.0
@@ -241,6 +242,9 @@ class CodexHandler(BotHandler):
         )
         self._show_history_preview_on_resume = bool(cfg.get("show_history_preview_on_resume", True))
         self._card_reply_limit = int(cfg.get("card_reply_limit", _CARD_REPLY_LIMIT_DEFAULT))
+        self._terminal_result_card_limit = int(
+            cfg.get("terminal_result_card_limit", _TERMINAL_RESULT_CARD_LIMIT_DEFAULT)
+        )
         self._card_log_limit = int(cfg.get("card_log_limit", _CARD_LOG_LIMIT_DEFAULT))
         self._mirror_watchdog_seconds = float(
             cfg.get("mirror_watchdog_seconds", _MIRROR_WATCHDOG_SECONDS_DEFAULT)
@@ -278,6 +282,7 @@ class CodexHandler(BotHandler):
             card_publisher_factory=self._runtime_card_publisher,
             reply_text=self._reply_text,
             card_reply_limit=lambda: self._card_reply_limit,
+            terminal_result_card_limit=lambda: self._terminal_result_card_limit,
             card_log_limit=lambda: self._card_log_limit,
             stream_patch_interval_ms=lambda: self._stream_patch_interval_ms,
         )
@@ -291,6 +296,7 @@ class CodexHandler(BotHandler):
             apply_persisted_runtime_state_message_locked=self._apply_persisted_runtime_state_message_locked,
             finalize_execution_card_from_state=self._finalize_execution_card_from_state,
             patch_execution_card_message=self._patch_execution_card_message,
+            publish_terminal_result=self._publish_terminal_result,
             read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=True),
             is_thread_not_found_error=self._is_thread_not_found_error,
             is_turn_thread_not_found_error=self._is_turn_thread_not_found_error,
@@ -1614,7 +1620,6 @@ class CodexHandler(BotHandler):
             self._retire_execution_anchor(sender_id, chat_id)
             return False
         self._flush_execution_card(sender_id, chat_id, immediate=True)
-        self._send_followup_if_needed(sender_id, chat_id)
         self._retire_execution_anchor(sender_id, chat_id)
         return True
 
@@ -2319,8 +2324,20 @@ class CodexHandler(BotHandler):
     def _flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
         self._execution_output.flush_execution_card(sender_id, chat_id, immediate=immediate)
 
-    def _send_followup_if_needed(self, sender_id: str, chat_id: str) -> None:
-        self._execution_output.send_followup_if_needed(sender_id, chat_id)
+    def _publish_terminal_result(
+        self,
+        chat_id: str,
+        *,
+        final_reply_text: str,
+        prompt_message_id: str = "",
+        prompt_reply_in_thread: bool = False,
+    ) -> bool:
+        return self._execution_output.publish_terminal_result(
+            chat_id,
+            final_reply_text=final_reply_text,
+            prompt_message_id=prompt_message_id,
+            prompt_reply_in_thread=prompt_reply_in_thread,
+        )
 
     def _clear_plan_state(self, state: _RuntimeState) -> None:
         self._turn_execution.clear_plan_state_locked(state)

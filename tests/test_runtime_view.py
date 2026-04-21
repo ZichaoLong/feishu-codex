@@ -30,6 +30,7 @@ def _build_state() -> dict[str, object]:
         "mirror_watchdog_timer": None,
         "mirror_watchdog_generation": 4,
         "followup_sent": False,
+        "followup_text": "",
         "awaiting_local_turn_started": True,
         "approval_policy": "on-request",
         "sandbox": "workspace-write",

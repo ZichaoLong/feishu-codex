@@ -95,5 +95,9 @@
 # 超出后卡片会截断，完整回复会额外以文本消息发送。
 # card_reply_limit: 12000
 
+# 终态结果卡正文预算；默认值：12000
+# 只影响 terminal result card / 文本兜底，不影响 execution card 的 reply 面板截断。
+# terminal_result_card_limit: 12000
+
 # 主卡片中执行日志区最大字符数；默认值：8000
 # card_log_limit: 8000

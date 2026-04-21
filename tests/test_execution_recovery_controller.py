@@ -48,6 +48,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         turn_execution = TurnExecutionCoordinator()
         patches: list[dict[str, object]] = []
         finalized: list[tuple[str, str]] = []
+        terminal_results: list[dict[str, object]] = []
         snapshots: list[ThreadSnapshot | Exception] = []
 
         def _read_thread(thread_id: str) -> ThreadSnapshot:
@@ -79,6 +80,15 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
                 }
             )
             or True,
+            publish_terminal_result=lambda chat_id, *, final_reply_text, prompt_message_id="", prompt_reply_in_thread=False: terminal_results.append(
+                {
+                    "chat_id": chat_id,
+                    "final_reply_text": final_reply_text,
+                    "prompt_message_id": prompt_message_id,
+                    "prompt_reply_in_thread": prompt_reply_in_thread,
+                }
+            )
+            or True,
             read_thread=_read_thread,
             is_thread_not_found_error=lambda exc: isinstance(exc, _ThreadNotFound),
             is_turn_thread_not_found_error=lambda exc: False,
@@ -88,11 +98,11 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
             runtime_recovery_reason=str,
             mirror_watchdog_seconds=lambda: 60.0,
         )
-        return controller, snapshots, patches, finalized
+        return controller, snapshots, patches, finalized, terminal_results
 
     def test_capture_terminal_reconcile_target_preserves_execution_anchor(self) -> None:
         state = self._make_state()
-        controller, _, _, _ = self._make_controller(state)
+        controller, _, _, _, _ = self._make_controller(state)
         state["current_message_id"] = "card-1"
         state["current_turn_id"] = "turn-1"
         state["current_prompt_message_id"] = "msg-1"
@@ -110,11 +120,13 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         self.assertEqual(
             target,
             TerminalReconcileTarget(
+                sender_id="ou_user",
                 chat_id="c1",
                 thread_id="thread-1",
                 turn_id="turn-1",
                 card_message_id="card-1",
                 prompt_message_id="msg-1",
+                prompt_reply_in_thread=False,
                 transcript=state["execution_transcript"],
                 cancelled=True,
                 elapsed=target.elapsed,
@@ -124,7 +136,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
 
     def test_reconcile_execution_snapshot_updates_runtime_state_from_active_snapshot(self) -> None:
         state = self._make_state()
-        controller, snapshots, _, finalized = self._make_controller(state)
+        controller, snapshots, _, finalized, terminal_results = self._make_controller(state)
         state["running"] = True
         state["current_thread_id"] = "thread-1"
         state["current_thread_title"] = "old"
@@ -166,10 +178,11 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         self.assertEqual(state["execution_transcript"].reply_text(), "snapshot reply")
         self.assertGreater(state["last_runtime_event_at"], 0.0)
         self.assertEqual(state["runtime_channel_state"], "live")
+        self.assertEqual(terminal_results, [])
 
     def test_reconcile_execution_snapshot_timeout_marks_runtime_degraded(self) -> None:
         state = self._make_state()
-        controller, snapshots, _, finalized = self._make_controller(state)
+        controller, snapshots, _, finalized, _ = self._make_controller(state)
         state["running"] = True
         state["current_thread_id"] = "thread-1"
         state["current_message_id"] = "card-1"
@@ -189,10 +202,12 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
 
     def test_reconcile_execution_snapshot_not_found_finalizes(self) -> None:
         state = self._make_state()
-        controller, snapshots, _, finalized = self._make_controller(state)
+        controller, snapshots, _, finalized, terminal_results = self._make_controller(state)
         state["running"] = True
         state["current_thread_id"] = "thread-1"
         state["current_message_id"] = "card-1"
+        state["current_prompt_message_id"] = "msg-1"
+        state["execution_transcript"].set_reply_text("fallback reply")
 
         snapshots.append(_ThreadNotFound("thread not found"))
 
@@ -205,10 +220,21 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
 
         self.assertTrue(finalized_now)
         self.assertEqual(finalized, [("ou_user", "c1")])
+        self.assertEqual(
+            terminal_results,
+            [
+                {
+                    "chat_id": "c1",
+                    "final_reply_text": "fallback reply",
+                    "prompt_message_id": "msg-1",
+                    "prompt_reply_in_thread": False,
+                }
+            ],
+        )
 
     def test_note_runtime_event_arms_watchdog_for_running_thread(self) -> None:
         state = self._make_state()
-        controller, _, _, _ = self._make_controller(state)
+        controller, _, _, _, _ = self._make_controller(state)
         state["running"] = True
         state["current_thread_id"] = "thread-1"
 
@@ -222,7 +248,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
 
     def test_run_terminal_execution_reconcile_only_patches_when_snapshot_reply_changes(self) -> None:
         state = self._make_state()
-        controller, snapshots, patches, _ = self._make_controller(state)
+        controller, snapshots, patches, _, terminal_results = self._make_controller(state)
         snapshots.append(
             ThreadSnapshot(
                 summary=ThreadSummary(
@@ -246,11 +272,13 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
 
         controller.run_terminal_execution_reconcile(
             TerminalReconcileTarget(
+                sender_id="ou_user",
                 chat_id="c1",
                 thread_id="thread-1",
                 turn_id="turn-1",
                 card_message_id="card-1",
                 prompt_message_id="msg-1",
+                prompt_reply_in_thread=True,
                 transcript=state["execution_transcript"],
                 cancelled=False,
                 elapsed=5,
@@ -266,6 +294,51 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
                     "running": False,
                     "elapsed": 5,
                     "cancelled": False,
+                }
+            ],
+        )
+        self.assertEqual(
+            terminal_results,
+            [
+                {
+                    "chat_id": "c1",
+                    "final_reply_text": "updated reply",
+                    "prompt_message_id": "msg-1",
+                    "prompt_reply_in_thread": True,
+                }
+            ],
+        )
+
+    def test_run_terminal_execution_reconcile_sends_fallback_transcript_when_snapshot_unavailable(self) -> None:
+        state = self._make_state()
+        controller, snapshots, patches, _, terminal_results = self._make_controller(state)
+        state["execution_transcript"].set_reply_text("fallback answer")
+        snapshots.append(_ThreadNotFound("thread not found"))
+
+        controller.run_terminal_execution_reconcile(
+            TerminalReconcileTarget(
+                sender_id="ou_user",
+                chat_id="c1",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                card_message_id="card-1",
+                prompt_message_id="msg-9",
+                prompt_reply_in_thread=False,
+                transcript=state["execution_transcript"],
+                cancelled=False,
+                elapsed=5,
+            )
+        )
+
+        self.assertEqual(patches, [])
+        self.assertEqual(
+            terminal_results,
+            [
+                {
+                    "chat_id": "c1",
+                    "final_reply_text": "fallback answer",
+                    "prompt_message_id": "msg-9",
+                    "prompt_reply_in_thread": False,
                 }
             ],
         )

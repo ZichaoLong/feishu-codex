@@ -69,7 +69,9 @@ def can_render_terminal_result_card(final_reply_text: str, *, char_limit: int) -
 
 def project_interactive_card_text(content_dict: dict[str, Any]) -> CardTextProjection:
     visible_text = _extract_visible_card_text(content_dict)
-    final_reply_text = _extract_authoritative_final_reply_text(visible_text)
+    final_reply_text = ""
+    if _matches_terminal_result_card_contract(content_dict):
+        final_reply_text = _extract_authoritative_final_reply_text(visible_text)
     if final_reply_text:
         return CardTextProjection(
             text=final_reply_text,
@@ -80,6 +82,28 @@ def project_interactive_card_text(content_dict: dict[str, Any]) -> CardTextProje
         text=visible_text,
         visible_text=visible_text,
     )
+
+
+def _matches_terminal_result_card_contract(content_dict: dict[str, Any]) -> bool:
+    header = content_dict.get("header") or {}
+    if not isinstance(header, dict):
+        return False
+    title = header.get("title") or {}
+    if not isinstance(title, dict):
+        return False
+    if str(title.get("content", "") or "").strip() != TERMINAL_RESULT_CARD_TITLE:
+        return False
+
+    elements = content_dict.get("elements") or []
+    if not isinstance(elements, list):
+        return False
+    has_contract_hint = any(
+        isinstance(element, dict)
+        and str(element.get("tag", "") or "").strip() == "markdown"
+        and str(element.get("content", "") or "").strip() == TERMINAL_RESULT_CARD_HINT
+        for element in elements
+    )
+    return has_contract_hint
 
 
 def _extract_authoritative_final_reply_text(visible_text: str) -> str:

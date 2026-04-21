@@ -89,6 +89,7 @@ class ExecutionStateChanged(RuntimeStateEvent):
     last_runtime_event_at: Any = UNSET
     last_patch_at: Any = UNSET
     followup_sent: Any = UNSET
+    followup_text: Any = UNSET
     patch_timer: Any = UNSET
     mirror_watchdog_timer: Any = UNSET
     mirror_watchdog_generation: Any = UNSET
@@ -202,6 +203,8 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
                 state["last_patch_at"] = change.last_patch_at
             if change.followup_sent is not UNSET:
                 state["followup_sent"] = change.followup_sent
+            if change.followup_text is not UNSET:
+                state["followup_text"] = change.followup_text
             if change.patch_timer is not UNSET:
                 state["patch_timer"] = change.patch_timer
             if change.mirror_watchdog_timer is not UNSET:

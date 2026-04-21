@@ -56,7 +56,13 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         )
         return manager.build_default_runtime_state()
 
-    def _make_controller(self, state, *, card_reply_limit: int = 5):
+    def _make_controller(
+        self,
+        state,
+        *,
+        card_reply_limit: int = 5,
+        terminal_result_card_limit: int = 200,
+    ):
         bot = _FakeBot()
         replies: list[tuple[str, str, str, bool]] = []
         lock = threading.RLock()
@@ -81,6 +87,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
                 (chat_id, text, message_id, reply_in_thread)
             ),
             card_reply_limit=lambda: card_reply_limit,
+            terminal_result_card_limit=lambda: terminal_result_card_limit,
             card_log_limit=lambda: 100,
             stream_patch_interval_ms=lambda: 1,
         )
@@ -97,21 +104,22 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         bot.patch_results["card-1"] = False
 
         controller.flush_execution_card("ou_user", "c1", immediate=True)
-        controller.send_followup_if_needed("ou_user", "c1")
 
         self.assertEqual(replies, [("c1", "123456789", "msg-1", True)])
         self.assertTrue(state["followup_sent"])
 
-    def test_send_followup_prefers_terminal_result_card_when_reply_fits_card_budget(self) -> None:
+    def test_publish_terminal_result_prefers_terminal_result_card_when_reply_fits_budget(self) -> None:
         state = self._make_state()
-        controller, bot, replies = self._make_controller(state, card_reply_limit=200)
-        state["current_message_id"] = "card-1"
-        state["current_prompt_message_id"] = "msg-2"
-        state["current_prompt_reply_in_thread"] = True
-        state["execution_transcript"].set_reply_text("done")
+        controller, bot, replies = self._make_controller(state)
 
-        controller.send_followup_if_needed("ou_user", "c1")
+        ok = controller.publish_terminal_result(
+            "c1",
+            final_reply_text="done",
+            prompt_message_id="msg-2",
+            prompt_reply_in_thread=True,
+        )
 
+        self.assertTrue(ok)
         self.assertEqual(replies, [])
         parent_id, msg_type, content, reply_in_thread = bot.reply_refs[-1]
         self.assertEqual(parent_id, "msg-2")
@@ -121,7 +129,26 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
         self.assertIn("<final_reply_text>", card["elements"][-1]["content"])
         self.assertIn("done", card["elements"][-1]["content"])
-        self.assertTrue(state["followup_sent"])
+
+    def test_publish_terminal_result_uses_independent_budget_from_execution_card_reply_limit(self) -> None:
+        state = self._make_state()
+        controller, bot, replies = self._make_controller(
+            state,
+            card_reply_limit=3,
+            terminal_result_card_limit=200,
+        )
+
+        ok = controller.publish_terminal_result(
+            "c1",
+            final_reply_text="long enough",
+            prompt_message_id="msg-3",
+            prompt_reply_in_thread=False,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(replies, [])
+        self.assertEqual(bot.reply_refs[-1][0], "msg-3")
+        self.assertEqual(bot.reply_refs[-1][1], "interactive")
 
     def test_schedule_execution_card_update_immediate_path_patches_card(self) -> None:
         state = self._make_state()

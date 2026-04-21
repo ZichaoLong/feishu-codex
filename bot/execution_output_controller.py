@@ -42,6 +42,7 @@ class ExecutionOutputController:
         card_publisher_factory: Callable[[], RuntimeCardPublisher],
         reply_text: _ReplyText,
         card_reply_limit: Callable[[], int],
+        terminal_result_card_limit: Callable[[], int],
         card_log_limit: Callable[[], int],
         stream_patch_interval_ms: Callable[[], int],
     ) -> None:
@@ -55,6 +56,7 @@ class ExecutionOutputController:
         self._card_publisher_factory = card_publisher_factory
         self._reply_text = reply_text
         self._card_reply_limit = card_reply_limit
+        self._terminal_result_card_limit = terminal_result_card_limit
         self._card_log_limit = card_log_limit
         self._stream_patch_interval_ms = stream_patch_interval_ms
 
@@ -181,30 +183,36 @@ class ExecutionOutputController:
                     reply_in_thread=followup.prompt_reply_in_thread,
                 )
 
-    def send_followup_if_needed(self, sender_id: str, chat_id: str) -> None:
-        state = self._get_runtime_state(sender_id, chat_id)
-        with self._lock:
-            followup = self._turn_execution.prepare_terminal_followup_locked(state)
-        if followup is None:
-            return
+    def publish_terminal_result(
+        self,
+        chat_id: str,
+        *,
+        final_reply_text: str,
+        prompt_message_id: str = "",
+        prompt_reply_in_thread: bool = False,
+    ) -> bool:
+        normalized = str(final_reply_text or "").strip()
+        if not normalized:
+            return False
         if can_render_terminal_result_card(
-            followup.reply_text,
-            char_limit=int(self._card_reply_limit()),
+            normalized,
+            char_limit=int(self._terminal_result_card_limit()),
         ):
             published = self._card_publisher_factory().publish_terminal_result_card(
                 chat_id=chat_id,
-                parent_message_id=followup.prompt_message_id,
-                final_reply_text=followup.reply_text,
-                reply_in_thread=followup.prompt_reply_in_thread,
+                parent_message_id=prompt_message_id,
+                final_reply_text=normalized,
+                reply_in_thread=prompt_reply_in_thread,
             )
             if published:
-                return
+                return True
         self._reply_text(
             chat_id,
-            followup.reply_text,
-            message_id=followup.prompt_message_id,
-            reply_in_thread=followup.prompt_reply_in_thread,
+            normalized,
+            message_id=prompt_message_id,
+            reply_in_thread=prompt_reply_in_thread,
         )
+        return True
 
     def flush_plan_card(self, sender_id: str, chat_id: str) -> None:
         runtime = self._get_runtime_view(sender_id, chat_id)

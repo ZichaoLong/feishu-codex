@@ -1286,7 +1286,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, [])
 
-    def test_group_followup_reply_stays_on_trigger_message(self) -> None:
+    def test_group_terminal_result_card_stays_on_trigger_message(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
         bot.message_contexts["m-thread"] = {
@@ -1294,16 +1294,45 @@ class CodexHandlerTests(unittest.TestCase):
             "sender_open_id": "ou_user",
             "thread_id": "om_thread",
         }
-        handler._card_reply_limit = 5
+        handler._terminal_result_card_limit = 200
 
         handler.handle_message("ou_user", "chat-group", "thread prompt", message_id="m-thread")
-        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "123456789"})
-        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"status": "completed"}})
+        target = handler._capture_terminal_reconcile_target(
+            "ou_user",
+            "chat-group",
+            thread_id="thread-created",
+            turn_id="turn-1",
+        )
+        assert target is not None
+        handler._finalize_execution_card_from_state("ou_user", "chat-group")
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="completed",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [{"type": "agentMessage", "text": "123456789"}],
+                }
+            ],
+        )
 
-        self.assertEqual(bot.reply_parents[-1], ("chat-group", "123456789", "m-thread"))
-        self.assertTrue(bot.reply_parent_calls[-1][3])
+        handler._run_terminal_execution_reconcile(target)
 
-    def test_group_followup_reply_stays_in_topic_after_message_context_is_gone(self) -> None:
+        self.assertEqual(bot.reply_refs[-1][0], "m-thread")
+        self.assertEqual(bot.reply_ref_calls[-1][3], True)
+        card = json.loads(bot.reply_refs[-1][2])
+        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertIn("123456789", card["elements"][-1]["content"])
+
+    def test_group_terminal_result_card_stays_in_topic_after_message_context_is_gone(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
         bot.message_contexts["m-thread"] = {
@@ -1311,15 +1340,41 @@ class CodexHandlerTests(unittest.TestCase):
             "sender_open_id": "ou_user",
             "thread_id": "om_thread",
         }
-        handler._card_reply_limit = 5
+        handler._terminal_result_card_limit = 200
 
         handler.handle_message("ou_user", "chat-group", "thread prompt", message_id="m-thread")
+        target = handler._capture_terminal_reconcile_target(
+            "ou_user",
+            "chat-group",
+            thread_id="thread-created",
+            turn_id="turn-1",
+        )
+        assert target is not None
         bot.message_contexts.pop("m-thread", None)
-        handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "123456789"})
-        handler._handle_turn_completed({"threadId": "thread-created", "turn": {"status": "completed"}})
+        handler._finalize_execution_card_from_state("ou_user", "chat-group")
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="completed",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [{"type": "agentMessage", "text": "123456789"}],
+                }
+            ],
+        )
 
-        self.assertEqual(bot.reply_parents[-1], ("chat-group", "123456789", "m-thread"))
-        self.assertTrue(bot.reply_parent_calls[-1][3])
+        handler._run_terminal_execution_reconcile(target)
+
+        self.assertEqual(bot.reply_refs[-1][0], "m-thread")
+        self.assertEqual(bot.reply_ref_calls[-1][3], True)
 
     def test_multiple_bindings_share_thread_but_only_owner_can_write_until_turn_finishes(self) -> None:
         handler, bot = self._make_handler()
@@ -1654,10 +1709,48 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("ou_user", "c1", "hello")
         bot.patch_results["plan-card-2"] = False
         handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "123456789"})
+        target = handler._capture_terminal_reconcile_target("ou_user", "c1", thread_id="thread-created", turn_id="turn-1")
+        assert target is not None
         handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
+        handler._adapter.thread_snapshots[("thread-created", True)] = RuntimeError("snapshot down")
+        handler._run_terminal_execution_reconcile(target)
 
         matching_replies = [item for item in bot.replies if item == ("c1", "123456789")]
         self.assertEqual(len(matching_replies), 1)
+
+    def test_terminal_reconcile_sends_authoritative_result_card_from_snapshot_without_live_reply_delta(self) -> None:
+        handler, bot = self._make_handler()
+        handler._terminal_result_card_limit = 200
+
+        handler.handle_message("ou_user", "c1", "hello")
+        target = handler._capture_terminal_reconcile_target("ou_user", "c1", thread_id="thread-created", turn_id="turn-1")
+        assert target is not None
+        handler._finalize_execution_card_from_state("ou_user", "c1")
+        handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-created",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="completed",
+            ),
+            turns=[
+                {
+                    "id": "turn-1",
+                    "items": [{"type": "agentMessage", "text": "snapshot final answer"}],
+                }
+            ],
+        )
+
+        handler._run_terminal_execution_reconcile(target)
+
+        self.assertEqual(bot.sent_messages[-1][1], "interactive")
+        card = json.loads(bot.sent_messages[-1][2])
+        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertIn("snapshot final answer", card["elements"][-1]["content"])
 
     def test_mode_command_without_arg_shows_mode_card(self) -> None:
         handler, bot = self._make_handler()

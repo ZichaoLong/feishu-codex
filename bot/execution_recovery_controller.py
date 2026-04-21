@@ -20,11 +20,13 @@ RuntimeState: TypeAlias = MutableMapping[str, Any]
 
 @dataclass(frozen=True)
 class TerminalReconcileTarget:
+    sender_id: str
     chat_id: str
     thread_id: str
     turn_id: str
     card_message_id: str
     prompt_message_id: str
+    prompt_reply_in_thread: bool
     transcript: ExecutionTranscript
     cancelled: bool
     elapsed: int
@@ -43,6 +45,7 @@ class ExecutionRecoveryController:
         apply_persisted_runtime_state_message_locked: Callable[[tuple[str, str], RuntimeState, RuntimeStateMessage], None],
         finalize_execution_card_from_state: Callable[[str, str], bool],
         patch_execution_card_message: Callable[..., bool],
+        publish_terminal_result: Callable[..., bool],
         read_thread: Callable[[str], ThreadSnapshot],
         is_thread_not_found_error: Callable[[Exception], bool],
         is_turn_thread_not_found_error: Callable[[Exception], bool],
@@ -60,6 +63,7 @@ class ExecutionRecoveryController:
         self._apply_persisted_runtime_state_message_locked = apply_persisted_runtime_state_message_locked
         self._finalize_execution_card_from_state = finalize_execution_card_from_state
         self._patch_execution_card_message = patch_execution_card_message
+        self._publish_terminal_result = publish_terminal_result
         self._read_thread = read_thread
         self._is_thread_not_found_error = is_thread_not_found_error
         self._is_turn_thread_not_found_error = is_turn_thread_not_found_error
@@ -101,11 +105,13 @@ class ExecutionRecoveryController:
             if not resolved_turn_id:
                 return None
             return TerminalReconcileTarget(
+                sender_id=sender_id,
                 chat_id=chat_id,
                 thread_id=str(thread_id or "").strip(),
                 turn_id=resolved_turn_id,
                 card_message_id=card_message_id,
                 prompt_message_id=runtime.execution.current_prompt_message_id.strip(),
+                prompt_reply_in_thread=runtime.execution.current_prompt_reply_in_thread,
                 transcript=runtime.execution.transcript,
                 cancelled=runtime.execution.cancelled,
                 elapsed=(
@@ -114,6 +120,30 @@ class ExecutionRecoveryController:
                     else 0
                 ),
             )
+
+    def _maybe_publish_terminal_result(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        final_reply_text: str,
+        prompt_message_id: str = "",
+        prompt_reply_in_thread: bool = False,
+    ) -> bool:
+        normalized = str(final_reply_text or "").strip()
+        if not normalized:
+            return False
+        state = self._get_runtime_state(sender_id, chat_id)
+        with self._lock:
+            runtime = build_runtime_view(state)
+            if runtime.execution.followup_sent and runtime.execution.followup_text == normalized:
+                return False
+        return self._publish_terminal_result(
+            chat_id,
+            final_reply_text=normalized,
+            prompt_message_id=prompt_message_id,
+            prompt_reply_in_thread=prompt_reply_in_thread,
+        )
 
     def schedule_terminal_execution_reconcile(self, target: TerminalReconcileTarget | None) -> None:
         if target is None or not target.thread_id or not target.card_message_id:
@@ -126,6 +156,7 @@ class ExecutionRecoveryController:
         worker.start()
 
     def run_terminal_execution_reconcile(self, target: TerminalReconcileTarget) -> None:
+        fallback_reply_text = target.transcript.reply_text()
         try:
             snapshot = self._read_thread(target.thread_id)
         except Exception as exc:
@@ -135,25 +166,46 @@ class ExecutionRecoveryController:
                 target.thread_id[:12],
                 self._runtime_recovery_reason(exc),
             )
+            if fallback_reply_text:
+                self._maybe_publish_terminal_result(
+                    sender_id=target.sender_id,
+                    chat_id=target.chat_id,
+                    final_reply_text=fallback_reply_text,
+                    prompt_message_id=target.prompt_message_id,
+                    prompt_reply_in_thread=target.prompt_reply_in_thread,
+                )
             return
 
         reply_text, reply_items = self.snapshot_reply(snapshot, turn_id=target.turn_id)
-        if not reply_text:
+        if reply_text:
+            transcript = target.transcript.clone()
+            if not transcript.rebuild_reply_from_snapshot_items(reply_items, fallback_text=reply_text):
+                transcript.set_reply_text(reply_text)
+            if transcript.reply_text() != target.transcript.reply_text():
+                self._patch_execution_card_message(
+                    target.card_message_id,
+                    transcript=transcript,
+                    running=False,
+                    elapsed=target.elapsed,
+                    cancelled=target.cancelled,
+                )
+            self._maybe_publish_terminal_result(
+                sender_id=target.sender_id,
+                chat_id=target.chat_id,
+                final_reply_text=reply_text,
+                prompt_message_id=target.prompt_message_id,
+                prompt_reply_in_thread=target.prompt_reply_in_thread,
+            )
             return
 
-        transcript = target.transcript.clone()
-        if not transcript.rebuild_reply_from_snapshot_items(reply_items, fallback_text=reply_text):
-            transcript.set_reply_text(reply_text)
-        if transcript.reply_text() == target.transcript.reply_text():
-            return
-
-        self._patch_execution_card_message(
-            target.card_message_id,
-            transcript=transcript,
-            running=False,
-            elapsed=target.elapsed,
-            cancelled=target.cancelled,
-        )
+        if fallback_reply_text:
+            self._maybe_publish_terminal_result(
+                sender_id=target.sender_id,
+                chat_id=target.chat_id,
+                final_reply_text=fallback_reply_text,
+                prompt_message_id=target.prompt_message_id,
+                prompt_reply_in_thread=target.prompt_reply_in_thread,
+            )
 
     def mark_runtime_degraded(self, sender_id: str, chat_id: str, *, reason: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -247,7 +299,22 @@ class ExecutionRecoveryController:
     ) -> bool:
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
-            return self._finalize_execution_card_from_state(sender_id, chat_id)
+            state = self._get_runtime_state(sender_id, chat_id)
+            with self._lock:
+                runtime = build_runtime_view(state)
+                fallback_reply_text = runtime.execution.transcript.reply_text()
+                prompt_message_id = runtime.execution.current_prompt_message_id.strip()
+                prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
+            finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
+            if finalized and fallback_reply_text:
+                self._maybe_publish_terminal_result(
+                    sender_id=sender_id,
+                    chat_id=chat_id,
+                    final_reply_text=fallback_reply_text,
+                    prompt_message_id=prompt_message_id,
+                    prompt_reply_in_thread=prompt_reply_in_thread,
+                )
+            return finalized
         try:
             snapshot = self._read_thread(normalized_thread_id)
         except Exception as exc:
@@ -258,7 +325,22 @@ class ExecutionRecoveryController:
                     normalized_thread_id[:12],
                     self._runtime_recovery_reason(exc),
                 )
-                return self._finalize_execution_card_from_state(sender_id, chat_id)
+                state = self._get_runtime_state(sender_id, chat_id)
+                with self._lock:
+                    runtime = build_runtime_view(state)
+                    fallback_reply_text = runtime.execution.transcript.reply_text()
+                    prompt_message_id = runtime.execution.current_prompt_message_id.strip()
+                    prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
+                finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
+                if finalized and fallback_reply_text:
+                    self._maybe_publish_terminal_result(
+                        sender_id=sender_id,
+                        chat_id=chat_id,
+                        final_reply_text=fallback_reply_text,
+                        prompt_message_id=prompt_message_id,
+                        prompt_reply_in_thread=prompt_reply_in_thread,
+                    )
+                return finalized
             if self._is_transport_disconnect(exc) or self._is_request_timeout_error(exc):
                 self.mark_runtime_degraded(
                     sender_id,
@@ -274,6 +356,7 @@ class ExecutionRecoveryController:
         state = resolved.state
         should_finalize = snapshot.summary.status != "active"
         with self._lock:
+            runtime_before_finalize = build_runtime_view(state)
             self._apply_persisted_runtime_state_message_locked(
                 resolved.binding,
                 state,
@@ -293,7 +376,19 @@ class ExecutionRecoveryController:
                     occurred_at=time.monotonic(),
                 )
                 return False
-        return self._finalize_execution_card_from_state(sender_id, chat_id)
+            final_reply_text = build_runtime_view(state).execution.transcript.reply_text()
+            prompt_message_id = runtime_before_finalize.execution.current_prompt_message_id.strip()
+            prompt_reply_in_thread = runtime_before_finalize.execution.current_prompt_reply_in_thread
+        finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
+        if finalized and final_reply_text:
+            self._maybe_publish_terminal_result(
+                sender_id=sender_id,
+                chat_id=chat_id,
+                final_reply_text=final_reply_text,
+                prompt_message_id=prompt_message_id,
+                prompt_reply_in_thread=prompt_reply_in_thread,
+            )
+        return finalized
 
     @staticmethod
     def snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> tuple[str, list[dict[str, Any]]]:

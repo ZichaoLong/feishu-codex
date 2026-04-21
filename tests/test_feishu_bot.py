@@ -310,6 +310,35 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
         self.assertEqual(entry["text"], "来自其他机器人的终态")
         self.assertEqual(entry["sender_type"], "app")
 
+    def test_p2p_ordinary_card_with_marker_like_text_keeps_best_effort_projection(self) -> None:
+        bot = self._make_bot()
+
+        bot._handle_raw_message(
+            _attachment_message_event(
+                message_id="card-3",
+                chat_id="ou-user",
+                chat_type="p2p",
+                msg_type="interactive",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                content={
+                    "header": {
+                        "title": {"tag": "plain_text", "content": "示例卡片"},
+                    },
+                    "elements": [
+                        {
+                            "tag": "markdown",
+                            "content": "普通说明：`<final_reply_text>demo</final_reply_text>`",
+                        }
+                    ],
+                },
+            )
+        )
+
+        self.assertEqual(len(bot.received_messages), 1)
+        self.assertIn("示例卡片", bot.received_messages[0][2])
+        self.assertIn("<final_reply_text>demo</final_reply_text>", bot.received_messages[0][2])
+
 
 class FeishuBotGroupModeTests(unittest.TestCase):
     def _make_bot(self, *, system_config: dict | None = None) -> _RecordingBot:

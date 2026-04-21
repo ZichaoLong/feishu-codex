@@ -179,7 +179,7 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
             ["assistant", "divider", "assistant"],
         )
 
-    def test_followup_preparation_is_idempotent_and_uses_prompt_anchor(self) -> None:
+    def test_patch_failure_followup_preparation_is_idempotent_and_uses_prompt_anchor(self) -> None:
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()
         state["current_prompt_message_id"] = "msg-1"
@@ -194,15 +194,6 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertTrue(followup.prompt_reply_in_thread)
         self.assertTrue(state["followup_sent"])
         self.assertIsNone(coordinator.prepare_patch_failure_followup_locked(state))
-
-        state = self._make_state()
-        state["current_prompt_message_id"] = "msg-2"
-        state["execution_transcript"].set_reply_text("abcdef")
-        state["current_message_id"] = "card-1"
-        followup = coordinator.prepare_terminal_followup_locked(state)
-        assert followup is not None
-        self.assertEqual(followup.reply_text, "abcdef")
-        self.assertTrue(state["followup_sent"])
 
     def test_plan_state_updates_are_scoped_to_current_turn(self) -> None:
         coordinator = TurnExecutionCoordinator()
