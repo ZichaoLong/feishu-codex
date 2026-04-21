@@ -97,7 +97,29 @@ class _RecordingBot(FeishuBot):
     def on_chat_unavailable(self, chat_id: str, *, reason: str = "") -> None:
         self.chat_unavailable_events.append((chat_id, reason))
 
-    def _fetch_group_history_entries(
+    def _collect_assistant_context_entries(
+        self,
+        *,
+        chat_id: str,
+        current_message_id: str,
+        current_create_time,
+        current_seq: int,
+        thread_id: str = "",
+    ) -> list[dict]:
+        original_fetch = self._history_recovery.fetch_group_history_entries
+        self._history_recovery.fetch_group_history_entries = self._recorded_group_history_entries
+        try:
+            return super()._collect_assistant_context_entries(
+                chat_id=chat_id,
+                current_message_id=current_message_id,
+                current_create_time=current_create_time,
+                current_seq=current_seq,
+                thread_id=thread_id,
+            )
+        finally:
+            self._history_recovery.fetch_group_history_entries = original_fetch
+
+    def _recorded_group_history_entries(
         self,
         *,
         chat_id: str,
@@ -1161,9 +1183,9 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             created_at=1712476800000,
             thread_id="th-1",
         )
-        with bot._pending_forwards_lock:
-            pending = bot._pending_forwards[("u-user", "chat-1")]
-            pending.timer.cancel()
+        pending = bot._forward_aggregator.peek_pending_forward("u-user", "chat-1")
+        assert pending is not None
+        pending.timer.cancel()
         bot._on_forward_timeout("u-user", "chat-1")
 
         main_entries = bot._group_store.read_messages_between("chat-1", scope="main")

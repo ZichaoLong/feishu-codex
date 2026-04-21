@@ -188,6 +188,10 @@ class RuntimeAdminController:
         return check.allowed, check.reason_text
 
     def binding_prompt_check(self, binding: ChatBindingKey) -> ReasonedCheck:
+        with self._lock:
+            return self.binding_prompt_check_locked(binding)
+
+    def binding_prompt_check_locked(self, binding: ChatBindingKey) -> ReasonedCheck:
         snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
         if snapshot is None:
             return ReasonedCheck.allow()
@@ -202,7 +206,7 @@ class RuntimeAdminController:
             binding,
             binding[1],
             snapshot.thread_id,
-            "",
+            message_id="",
         )
 
     def clear_binding_for_control(self, binding: ChatBindingKey) -> dict[str, Any]:
@@ -262,13 +266,21 @@ class RuntimeAdminController:
         }
 
     def binding_status_snapshot(self, binding: ChatBindingKey) -> dict[str, Any]:
-        snapshot = self._binding_runtime.binding_status_snapshot(
-            binding,
-            read_thread_summary_for_status=self.read_thread_summary_for_status,
-            release_feishu_runtime_availability=self.release_feishu_runtime_availability_locked,
+        with self._lock:
+            snapshot = self._binding_runtime.binding_status_state_snapshot_locked(binding)
+            release_check = self.release_feishu_runtime_check_locked(str(snapshot["thread_id"] or "").strip())
+            prompt_check = self.binding_prompt_check_locked(binding)
+        thread_id = str(snapshot["thread_id"] or "").strip()
+        summary, backend_thread_status = self.read_thread_summary_for_status(thread_id)
+        if summary is not None:
+            snapshot["thread_title"] = summary.title or str(snapshot["thread_title"] or "").strip()
+            snapshot["working_dir"] = summary.cwd or str(snapshot["working_dir"] or "").strip()
+        snapshot["backend_thread_status"] = backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN
+        snapshot["backend_running_turn"] = backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE
+        snapshot["reprofile_possible"] = bool(
+            thread_id and backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED
         )
-        release_check = self.release_feishu_runtime_check_locked(str(snapshot["thread_id"] or "").strip())
-        prompt_check = self.binding_prompt_check(binding)
+        snapshot["release_feishu_runtime_available"] = bool(thread_id and release_check.allowed)
         snapshot["release_feishu_runtime_reason_code"] = release_check.reason_code
         snapshot["release_feishu_runtime_reason"] = release_check.reason_text
         snapshot["next_prompt_allowed"] = prompt_check.allowed

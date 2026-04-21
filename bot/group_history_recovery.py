@@ -35,7 +35,6 @@ class GroupHistoryRecoveryPorts:
     get_last_boundary_seq: Callable[..., int]
     get_last_boundary_created_at: Callable[..., int]
     get_last_boundary_message_ids: Callable[..., list[str]]
-    fetch_group_history_entries: Callable[..., list[GroupMessageEntry]] | None = None
 
 
 class GroupHistoryRecovery:
@@ -361,8 +360,7 @@ class GroupHistoryRecovery:
             for item in local_entries
             if isinstance(item, dict) and str(item.get("message_id", "") or "").strip()
         }
-        history_fetcher = self._ports.fetch_group_history_entries or self.fetch_group_history_entries
-        history_entries = history_fetcher(
+        history_entries = self.fetch_group_history_entries(
             chat_id=chat_id,
             current_message_id=current_message_id,
             current_create_time=current_create_time,

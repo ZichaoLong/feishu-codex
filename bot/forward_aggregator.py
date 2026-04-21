@@ -73,13 +73,10 @@ class ForwardAggregator:
         self._pending_forwards: dict[tuple[str, str], PendingForward] = {}
         self._pending_forwards_lock = threading.Lock()
 
-    @property
-    def pending_forwards(self) -> dict[tuple[str, str], PendingForward]:
-        return self._pending_forwards
-
-    @property
-    def pending_forwards_lock(self) -> threading.Lock:
-        return self._pending_forwards_lock
+    def peek_pending_forward(self, sender_id: str, chat_id: str) -> PendingForward | None:
+        key = (sender_id, chat_id)
+        with self._pending_forwards_lock:
+            return self._pending_forwards.get(key)
 
     def forget_chat(self, chat_id: str) -> None:
         normalized_chat_id = str(chat_id or "").strip()

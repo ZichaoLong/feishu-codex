@@ -41,7 +41,6 @@ class GroupHistoryRecoveryTests(unittest.TestCase):
         boundary_message_ids: list[str] | None = None,
         app_id: str = "app-id",
         history_fetch_limit: int = 50,
-        history_fetcher=None,
     ):
         calls: list[dict] = []
         response_pages = responses or {"": ListedMessagesPage([])}
@@ -65,7 +64,6 @@ class GroupHistoryRecoveryTests(unittest.TestCase):
                 get_last_boundary_seq=lambda _chat_id, *, scope: boundary_seq,
                 get_last_boundary_created_at=lambda _chat_id, *, scope: boundary_created_at,
                 get_last_boundary_message_ids=lambda _chat_id, *, scope: list(boundary_message_ids or []),
-                fetch_group_history_entries=history_fetcher,
             ),
             app_id=app_id,
             history_fetch_limit=history_fetch_limit,
@@ -181,8 +179,8 @@ class GroupHistoryRecoveryTests(unittest.TestCase):
             boundary_seq=1,
             boundary_created_at=1000,
             boundary_message_ids=["m-boundary"],
-            history_fetcher=fetcher,
         )
+        recovery.fetch_group_history_entries = fetcher
 
         entries = recovery.collect_assistant_context_entries(
             chat_id="chat-1",

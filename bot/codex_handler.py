@@ -307,38 +307,6 @@ class CodexHandler(BotHandler):
             interrupt_running_turn=self._interrupt_running_turn,
             on_server_request_resolved=self._interaction_requests.handle_server_request_resolved,
         )
-        self._runtime_admin = RuntimeAdminController(
-            lock=self._lock,
-            binding_runtime=self._binding_runtime,
-            interaction_requests=self._interaction_requests,
-            clear_all_stored_bindings=self._chat_binding_store.clear_all,
-            deactivate_binding_locked=self._deactivate_binding_locked,
-            read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=False),
-            list_loaded_thread_ids=lambda: self._adapter.list_loaded_thread_ids(),
-            current_app_server_url=lambda: self._adapter.current_app_server_url(),
-            unsubscribe_thread=lambda thread_id: self._adapter.unsubscribe_thread(thread_id),
-            release_service_thread_runtime_lease=self._release_service_thread_runtime_lease,
-            service_control_socket_path=lambda: str(self._service_control_plane.socket_path),
-            instance_name=lambda: self._instance_name,
-            admitted_thread_ids=lambda: tuple(sorted(self._thread_admission_store.list_all())),
-            admit_thread=self._thread_admission_store.admit,
-            revoke_thread=self._thread_admission_store.revoke,
-            safe_read_runtime_config=self._safe_read_runtime_config,
-            current_default_profile_resolution=self._current_default_profile_resolution,
-            permissions_summary=_permissions_summary,
-            prompt_write_denial_check=lambda binding, chat_id, thread_id, message_id="": (
-                self._thread_access_policy.prompt_write_denial_check(
-                    binding,
-                    chat_id,
-                    thread_id,
-                    message_id=message_id,
-                )
-            ),
-            resolve_thread_target_for_control_params=self._resolve_thread_target_for_control_params,
-            cancel_patch_timer_locked=self._cancel_patch_timer_locked,
-            cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
-            is_thread_not_found_error=self._is_thread_not_found_error,
-        )
         self._hydrate_stored_bindings()
         if self._adapter_config.app_server_mode == "remote":
             self._adapter_config = replace(
@@ -430,6 +398,31 @@ class CodexHandler(BotHandler):
             current_interaction_lease_locked=self._current_interaction_lease_locked,
             feishu_interaction_holder=self._feishu_interaction_holder,
             thread_write_owner_locked=self._binding_runtime.thread_write_owner,
+        )
+        self._runtime_admin = RuntimeAdminController(
+            lock=self._lock,
+            binding_runtime=self._binding_runtime,
+            interaction_requests=self._interaction_requests,
+            clear_all_stored_bindings=self._chat_binding_store.clear_all,
+            deactivate_binding_locked=self._deactivate_binding_locked,
+            read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=False),
+            list_loaded_thread_ids=lambda: self._adapter.list_loaded_thread_ids(),
+            current_app_server_url=lambda: self._adapter.current_app_server_url(),
+            unsubscribe_thread=lambda thread_id: self._adapter.unsubscribe_thread(thread_id),
+            release_service_thread_runtime_lease=self._release_service_thread_runtime_lease,
+            service_control_socket_path=lambda: str(self._service_control_plane.socket_path),
+            instance_name=lambda: self._instance_name,
+            admitted_thread_ids=lambda: tuple(sorted(self._thread_admission_store.list_all())),
+            admit_thread=self._thread_admission_store.admit,
+            revoke_thread=self._thread_admission_store.revoke,
+            safe_read_runtime_config=self._safe_read_runtime_config,
+            current_default_profile_resolution=self._current_default_profile_resolution,
+            permissions_summary=_permissions_summary,
+            prompt_write_denial_check=self._thread_access_policy.prompt_write_denial_check,
+            resolve_thread_target_for_control_params=self._resolve_thread_target_for_control_params,
+            cancel_patch_timer_locked=self._cancel_patch_timer_locked,
+            cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
+            is_thread_not_found_error=self._is_thread_not_found_error,
         )
         self._prompt_turn_entry = PromptTurnEntryController(
             lock=self._lock,

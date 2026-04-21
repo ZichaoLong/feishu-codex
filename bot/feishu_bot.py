@@ -283,7 +283,6 @@ class FeishuBot(ABC):
                 get_last_boundary_seq=self._get_group_history_boundary_seq,
                 get_last_boundary_created_at=self._get_group_history_boundary_created_at,
                 get_last_boundary_message_ids=self._get_group_history_boundary_message_ids,
-                fetch_group_history_entries=self._fetch_group_history_entries,
             ),
             app_id=lambda: self.app_id,
             history_fetch_limit=self._group_history_fetch_limit,
@@ -314,8 +313,6 @@ class FeishuBot(ABC):
             group_mode_all=self._GROUP_MODE_ALL,
             group_mode_assistant=self._GROUP_MODE_ASSISTANT,
         )
-        self._pending_forwards = self._forward_aggregator.pending_forwards
-        self._pending_forwards_lock = self._forward_aggregator.pending_forwards_lock
 
         self.client = lark.Client.builder() \
             .app_id(app_id) \

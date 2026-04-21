@@ -676,30 +676,28 @@ class BindingRuntimeManager:
         release_feishu_runtime_availability: Callable[[str], tuple[bool, str]],
     ) -> dict[str, Any]:
         with self._lock:
-            state = self._runtime_state_by_binding.get(binding)
-            if state is None:
-                raise ValueError(f"未找到绑定：{format_binding_id(binding)}")
-            thread_id = str(state["current_thread_id"] or "").strip()
-            thread_title = str(state["current_thread_title"] or "").strip()
-            working_dir = str(state["working_dir"] or "").strip()
-            feishu_runtime_state = (
-                str(state["feishu_runtime_state"] or "").strip() or FEISHU_RUNTIME_NOT_APPLICABLE
-            )
-            running_turn = self.binding_has_inflight_turn_locked(state)
-            current_turn_id = str(state["current_turn_id"] or "").strip()
-            owner = self._thread_lease_registry.lease_owner(thread_id) if thread_id else None
-            interaction_owner = self.interaction_owner_snapshot_locked(
-                thread_id,
-                current_binding=binding,
-            )
-            approval_policy = str(state["approval_policy"] or "").strip()
-            sandbox = str(state["sandbox"] or "").strip()
-            collaboration_mode = str(state["collaboration_mode"] or "").strip()
+            snapshot = self.binding_status_state_snapshot_locked(binding)
+        thread_id = str(snapshot["thread_id"] or "").strip()
         release_available, release_reason = release_feishu_runtime_availability(thread_id)
         summary, backend_thread_status = read_thread_summary_for_status(thread_id)
         if summary is not None:
-            thread_title = summary.title or thread_title
-            working_dir = summary.cwd or working_dir
+            snapshot["thread_title"] = summary.title or str(snapshot["thread_title"] or "").strip()
+            snapshot["working_dir"] = summary.cwd or str(snapshot["working_dir"] or "").strip()
+        snapshot["backend_thread_status"] = backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN
+        snapshot["backend_running_turn"] = backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE
+        snapshot["reprofile_possible"] = bool(
+            thread_id and backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED
+        )
+        snapshot["release_feishu_runtime_available"] = bool(thread_id and release_available)
+        snapshot["release_feishu_runtime_reason"] = release_reason
+        return snapshot
+
+    def binding_status_state_snapshot_locked(self, binding: ChatBindingKey) -> dict[str, Any]:
+        state = self._runtime_state_by_binding.get(binding)
+        if state is None:
+            raise ValueError(f"未找到绑定：{format_binding_id(binding)}")
+        thread_id = str(state["current_thread_id"] or "").strip()
+        owner = self._thread_lease_registry.lease_owner(thread_id) if thread_id else None
         if owner is None:
             feishu_write_owner_relation = "none"
             feishu_write_owner_binding_id = ""
@@ -716,22 +714,22 @@ class BindingRuntimeManager:
             "chat_id": binding[1],
             "binding_state": "bound" if thread_id else "unbound",
             "thread_id": thread_id,
-            "thread_title": thread_title,
-            "working_dir": working_dir,
-            "feishu_runtime_state": feishu_runtime_state,
-            "backend_thread_status": backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN,
-            "backend_running_turn": backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE,
+            "thread_title": str(state["current_thread_title"] or "").strip(),
+            "working_dir": str(state["working_dir"] or "").strip(),
+            "feishu_runtime_state": (
+                str(state["feishu_runtime_state"] or "").strip() or FEISHU_RUNTIME_NOT_APPLICABLE
+            ),
             "feishu_write_owner_binding_id": feishu_write_owner_binding_id,
             "feishu_write_owner_relation": feishu_write_owner_relation,
-            "interaction_owner": interaction_owner,
-            "running_turn": running_turn,
-            "current_turn_id": current_turn_id,
-            "approval_policy": approval_policy,
-            "sandbox": sandbox,
-            "collaboration_mode": collaboration_mode,
-            "reprofile_possible": bool(thread_id and backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED),
-            "release_feishu_runtime_available": bool(thread_id and release_available),
-            "release_feishu_runtime_reason": release_reason,
+            "interaction_owner": self.interaction_owner_snapshot_locked(
+                thread_id,
+                current_binding=binding,
+            ),
+            "running_turn": self.binding_has_inflight_turn_locked(state),
+            "current_turn_id": str(state["current_turn_id"] or "").strip(),
+            "approval_policy": str(state["approval_policy"] or "").strip(),
+            "sandbox": str(state["sandbox"] or "").strip(),
+            "collaboration_mode": str(state["collaboration_mode"] or "").strip(),
         }
 
     def thread_binding_snapshot_locked(

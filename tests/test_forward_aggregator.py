@@ -58,7 +58,9 @@ class ForwardAggregatorTests(unittest.TestCase):
         self.assertTrue(timers[0].cancelled)
         self.assertTrue(timers[1].started)
         self.assertFalse(timers[1].cancelled)
-        self.assertEqual(aggregator.pending_forwards[("ou-1", "chat-1")].forwarded_text, "second")
+        pending = aggregator.peek_pending_forward("ou-1", "chat-1")
+        assert pending is not None
+        self.assertEqual(pending.forwarded_text, "second")
 
     def test_timeout_in_assistant_mode_appends_thread_scoped_log(self) -> None:
         aggregator, appended_logs, handled_messages, _fetched_items, _timers = self._make_aggregator()
