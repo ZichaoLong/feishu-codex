@@ -52,6 +52,8 @@
 ### 决策记录
 
 - [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md)
+- [`feishu-attachment-ingress.zh-CN.md`](./decisions/feishu-attachment-ingress.zh-CN.md)
+- [`feishu-card-text-projection.zh-CN.md`](./decisions/feishu-card-text-projection.zh-CN.md)
 
 ### 验证材料
 
@@ -75,6 +77,8 @@
 | approval、sandbox、writable roots、受保护路径的语义是什么？ | [`codex-permissions-model.zh-CN.md`](./contracts/codex-permissions-model.zh-CN.md) |
 | `fcodex` shared-backend 的运行时模型是什么？wrapper、本地代理、`--cd` 语义如何工作？ | [`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md) |
 | shared backend 复用与 `/resume` 有哪些安全规则？ | [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md) |
+| 飞书附件 / 文件消息应如何进入本地工作区？哪些类型支持下载、哪些行为不由本仓库负责？ | [`feishu-attachment-ingress.zh-CN.md`](./decisions/feishu-attachment-ingress.zh-CN.md) |
+| 飞书卡片消息的文本投影、终态 `final_reply_text`、以及普通卡片的 best-effort 文本提取边界是什么？ | [`feishu-card-text-projection.zh-CN.md`](./decisions/feishu-card-text-projection.zh-CN.md) |
 | 群聊相关功能需要做哪些手工回归检查？ | [`group-chat-manual-test-checklist.zh-CN.md`](./verification/group-chat-manual-test-checklist.zh-CN.md) |
 | `CodexHandler` ownership 拆分当时的 rollout 计划是什么？ | [`codex-handler-decomposition-plan.zh-CN.md`](./archive/codex-handler-decomposition-plan.zh-CN.md) |
 
@@ -100,6 +104,14 @@
   - [`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md)
   - [`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md)
   - [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md)
+- 改飞书附件、文件消息、本地暂存、图片输入升级相关逻辑时：
+  - [`feishu-attachment-ingress.zh-CN.md`](./decisions/feishu-attachment-ingress.zh-CN.md)
+  - [`codex-permissions-model.zh-CN.md`](./contracts/codex-permissions-model.zh-CN.md)
+  - [`group-chat-contract.zh-CN.md`](./contracts/group-chat-contract.zh-CN.md)
+- 改飞书卡片消息、终态结果 round-trip、普通卡片文本提取相关逻辑时：
+  - [`feishu-card-text-projection.zh-CN.md`](./decisions/feishu-card-text-projection.zh-CN.md)
+  - [`feishu-thread-lifecycle.zh-CN.md`](./contracts/feishu-thread-lifecycle.zh-CN.md)
+  - [`feishu-codex-design.zh-CN.md`](./architecture/feishu-codex-design.zh-CN.md)
 - 处理权限、执行审批、沙箱报错或产品文案时：
   - [`codex-permissions-model.zh-CN.md`](./contracts/codex-permissions-model.zh-CN.md)
 

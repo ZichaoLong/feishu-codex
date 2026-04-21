@@ -59,6 +59,8 @@ Status guidance:
 ### Decisions
 
 - [`shared-backend-resume-safety.md`](./decisions/shared-backend-resume-safety.md)
+- [`feishu-attachment-ingress.md`](./decisions/feishu-attachment-ingress.md)
+- [`feishu-card-text-projection.md`](./decisions/feishu-card-text-projection.md)
 
 ### Verification
 
@@ -82,6 +84,8 @@ Status guidance:
 | How do approval, sandbox, writable roots, and protected paths behave? | [`codex-permissions-model.md`](./contracts/codex-permissions-model.md) |
 | How does `fcodex` shared-backend mode work, including wrapper, proxy, and `--cd` semantics? | [`fcodex-shared-backend-runtime.md`](./architecture/fcodex-shared-backend-runtime.md) |
 | What safety rules apply to shared backend reuse and `/resume`? | [`shared-backend-resume-safety.md`](./decisions/shared-backend-resume-safety.md) |
+| What boundary should Feishu attachment / file-message support follow, including what gets downloaded and what remains outside this repository? | [`feishu-attachment-ingress.md`](./decisions/feishu-attachment-ingress.md) |
+| What is the boundary for Feishu card text projection, terminal `final_reply_text`, and best-effort extraction from ordinary cards? | [`feishu-card-text-projection.md`](./decisions/feishu-card-text-projection.md) |
 | What should be covered in manual group-chat regression testing? | [`group-chat-manual-test-checklist.zh-CN.md`](./verification/group-chat-manual-test-checklist.zh-CN.md) |
 | What historical rollout plan was used to decompose `CodexHandler` ownership? | [`codex-handler-decomposition-plan.md`](./archive/codex-handler-decomposition-plan.md) |
 
@@ -108,6 +112,16 @@ Status guidance:
   - [`runtime-control-surface.md`](./contracts/runtime-control-surface.md)
   - [`fcodex-shared-backend-runtime.md`](./architecture/fcodex-shared-backend-runtime.md)
   - [`shared-backend-resume-safety.md`](./decisions/shared-backend-resume-safety.md)
+- For Feishu attachment ingress, file messages, local staging, or image-input
+  upgrade work:
+  - [`feishu-attachment-ingress.md`](./decisions/feishu-attachment-ingress.md)
+  - [`codex-permissions-model.md`](./contracts/codex-permissions-model.md)
+  - [`group-chat-contract.md`](./contracts/group-chat-contract.md)
+- For Feishu card messages, terminal-result round-trip, or best-effort text
+  extraction from ordinary cards:
+  - [`feishu-card-text-projection.md`](./decisions/feishu-card-text-projection.md)
+  - [`feishu-thread-lifecycle.md`](./contracts/feishu-thread-lifecycle.md)
+  - [`feishu-codex-design.md`](./architecture/feishu-codex-design.md)
 - For permission or execution wording:
   - [`codex-permissions-model.md`](./contracts/codex-permissions-model.md)
 
