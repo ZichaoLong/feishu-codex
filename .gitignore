@@ -7,4 +7,7 @@ __pycache__/
 data/
 config/system.yaml
 config/codex.yaml
+# Local private agent preferences stay untracked; templates remain versioned.
 AGENTS.md
+AGENTS.zh-CN.md
+.backuptodo

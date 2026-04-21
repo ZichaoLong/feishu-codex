@@ -160,7 +160,7 @@ Current module split:
 - `bot/interaction_request_controller.py`: owns pending approval / user-input
   request state and fail-closed handling for interactive requests
 - `bot/codex_session_ui_domain.py`: owns session-card UI flows, including
-  transient rename-form state
+  transient rename-form state and RuntimeLoop-submitted resume target resolution
 - `bot/execution_transcript.py`: an internal transcript assembler for execution-card
   presentation; it builds display-only `reply_segments` / `process_log`
   fragments, and can support hiding the terminal final-answer segment from the
@@ -217,6 +217,9 @@ Concurrency ownership should also remain explicit:
 
 - `RuntimeLoop` is already the primary serialization mechanism for handler-side
   runtime state mutations
+- session-UI initiated resume resolution and resume handoff should also go
+  through `RuntimeLoop`, rather than opening ad-hoc background threads that
+  touch the shared adapter/runtime boundary from the side
 - binding resolution and runtime-state hydrate/create should go through a
   single resolver path, rather than open-coding "pick a binding key, then
   maybe create state" in multiple call sites
@@ -382,71 +385,62 @@ The formal behavior contract is now:
 
 ## 7. Current Repository Structure
 
-The current repository layout is:
+The repository is easier to understand by responsibility than by a frozen
+full-tree dump.
 
-```text
-feishu-codex/
-  bot/
-    __main__.py
-    standalone.py
-    feishu_bot.py
-    handler.py
-    cards.py
-    codex_handler.py
-    fcodex.py
-    fcodex_proxy.py
-    feishu_codexctl.py
-    service_control_plane.py
-    instance_layout.py
-    instance_resolution.py
-    thread_runtime_coordination.py
-    binding_identity.py
-    config.py
-    constants.py
-    profile_resolution.py
-    session_resolution.py
-    adapters/
-      base.py
-      codex_app_server.py
-    codex_protocol/
-      client.py
-    stores/
-      app_server_runtime_store.py
-      instance_registry_store.py
-      profile_state_store.py
-      thread_admission_store.py
-      thread_runtime_lease_store.py
-  config/
-    system.yaml.example
-    codex.yaml.example
-  docs/
-    contracts/
-    architecture/
-    decisions/
-    verification/
-    archive/
-    doc-index.md
-    doc-index.zh-CN.md
-  tests/
-    test_codex_app_server.py
-    test_codex_handler.py
-  install.sh
-  pyproject.toml
-  README.md
-```
+- repository root
+  - operator-facing material and packaging live in `README.md`, `install.sh`,
+    and `pyproject.toml`
+  - the tracked agent-preference template lives in `AGENTS.example.md`
+  - real local override files such as `AGENTS.md` and `AGENTS.zh-CN.md`
+    remain intentionally gitignored
+- `bot/`
+  - entrypoints and transport boundaries: `__main__.py`, `standalone.py`,
+    `handler.py`, `feishu_bot.py`
+  - top-level orchestration and user-facing domains:
+    `codex_handler.py`, `codex_group_domain.py`, `codex_help_domain.py`,
+    `codex_session_ui_domain.py`, `codex_settings_domain.py`,
+    `file_message_domain.py`, `inbound_surface_controller.py`
+  - runtime state, execution flow, and coordination:
+    `runtime_loop.py`, `runtime_state.py`, `runtime_view.py`,
+    `binding_runtime_manager.py`, `thread_access_policy.py`,
+    `thread_lease_registry.py`, `thread_runtime_coordination.py`,
+    `turn_execution_coordinator.py`, `execution_output_controller.py`,
+    `execution_recovery_controller.py`, `execution_transcript.py`,
+    `interaction_request_controller.py`, `adapter_notification_controller.py`,
+    `runtime_admin_controller.py`, `runtime_card_publisher.py`,
+    `prompt_turn_entry_controller.py`
+  - shared UI / helper boundaries: `cards.py`, `card_text_projection.py`,
+    `shared_command_surface.py`, `feishu_types.py`, `codex_config_reader.py`
+  - wrapper and service-admin path: `fcodex.py`, `fcodex_proxy.py`,
+    `feishu_codexctl.py`, `service_control_plane.py`, `instance_layout.py`,
+    `instance_resolution.py`, `profile_resolution.py`, `session_resolution.py`,
+    `binding_identity.py`
+  - Codex adapter / protocol boundary:
+    `adapters/base.py`, `adapters/codex_app_server.py`,
+    `codex_protocol/client.py`
+  - persisted local state: `stores/app_server_runtime_store.py`,
+    `stores/chat_binding_store.py`, `stores/group_chat_store.py`,
+    `stores/instance_registry_store.py`, `stores/interaction_lease_store.py`,
+    `stores/pending_attachment_store.py`, `stores/profile_state_store.py`,
+    `stores/service_instance_lease.py`, `stores/thread_admission_store.py`,
+    `stores/thread_runtime_lease_store.py`
+- `config/`
+  - example local config files: `system.yaml.example`, `codex.yaml.example`
+- `docs/`
+  - formal contracts: `docs/contracts/`
+  - current architecture/runtime shape: `docs/architecture/`
+  - design decisions and safety boundaries: `docs/decisions/`
+  - manual verification material: `docs/verification/`
+  - archived rollout/history material: `docs/archive/`
+  - local working notes that are not repository truth: `docs/_work/`
+- `tests/`
+  - unit coverage for adapter/wrapper behavior, handler/controller flows,
+    runtime state transitions, stores, cards, and Feishu transport helpers
 
-This structure is already sufficient for the current architecture:
-
-- Feishu transport and handler code stay in `bot/`
-- Codex integration boundaries stay in `bot/adapters/` and
-  `bot/codex_protocol/`
-- local persisted state stays in `bot/stores/`
-- formal feature contracts stay in `docs/contracts/`
-- current architecture and implementation boundaries stay in
-  `docs/architecture/`
-- upstream-derived safety decisions stay in `docs/decisions/`
-- manual verification material stays in `docs/verification/`
-- completed rollout plans and historical material stay in `docs/archive/`
+This grouped view should stay aligned with the ownership split in §5.3.
+When a new module materially changes ownership boundaries, update both sections
+in the same change.
 
 ## 8. Evolution Boundaries
 

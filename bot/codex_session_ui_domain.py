@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -57,6 +58,7 @@ class _SessionUiDomainOwner(Protocol):
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None: ...
 
     def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
+    def _runtime_submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None: ...
 
     def _resolve_resume_target(self, arg: str) -> ThreadSummary: ...
 
@@ -142,17 +144,18 @@ class CodexSessionUiDomain:
                 text="用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。"
             )
         target = arg.strip()
-        threading.Thread(
-            target=self._resume_target_in_background,
-            args=(sender_id, chat_id, target),
-            kwargs={"message_id": message_id},
-            daemon=True,
-        ).start()
         return CommandResult(
             card=build_markdown_card(
                 "Codex 正在恢复线程",
                 f"正在恢复：`{target}`\n完成后会自动回复结果。",
-            )
+            ),
+            after_dispatch=lambda: self._owner._runtime_submit(
+                self._resume_target_in_runtime,
+                sender_id,
+                chat_id,
+                target,
+                message_id=message_id,
+            ),
         )
 
     def handle_rename_command(
@@ -267,41 +270,37 @@ class CodexSessionUiDomain:
         thread_id = str(action_value.get("thread_id", "")).strip()
         if not thread_id:
             return make_card_response(toast="缺少 thread_id", toast_type="warning")
-        try:
-            thread = self._owner._read_thread_summary_authoritatively(thread_id, original_arg=thread_id)
-        except Exception as exc:
-            logger.exception("查询恢复目标失败")
-            return make_card_response(toast=f"查询线程失败：{exc}", toast_type="warning")
-        threading.Thread(
-            target=self._owner._resume_thread_in_background,
-            args=(sender_id, chat_id, thread_id),
-            kwargs={
-                "original_arg": thread_id,
-                "summary": thread,
-                "message_id": message_id,
-                "refresh_session_message_id": message_id,
-            },
-            daemon=True,
-        ).start()
+        thread_title = str(action_value.get("thread_title", "") or action_value.get("title", "")).strip() or thread_id
+        self._owner._runtime_submit(
+            self._resume_target_in_runtime,
+            sender_id,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+            refresh_session_message_id=message_id,
+        )
         return make_card_response(
-            card=build_sessions_pending_card(thread.thread_id, title=thread.title),
+            card=build_sessions_pending_card(thread_id, title=thread_title),
             toast="正在恢复线程…",
             toast_type="success",
         )
 
-    def _resume_target_in_background(
+    def _resume_target_in_runtime(
         self,
         sender_id: str,
         chat_id: str,
         target: str,
         *,
         message_id: str = "",
+        refresh_session_message_id: str = "",
     ) -> None:
         try:
             thread = self._owner._resolve_resume_target(target)
         except Exception as exc:
             logger.exception("解析恢复目标失败")
             self._owner._reply_text(chat_id, f"恢复线程失败：{exc}", message_id=message_id)
+            if refresh_session_message_id:
+                self.refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
             return
         self._owner._resume_thread_in_background(
             sender_id,
@@ -310,6 +309,7 @@ class CodexSessionUiDomain:
             original_arg=target,
             summary=thread,
             message_id=message_id,
+            refresh_session_message_id=refresh_session_message_id,
         )
 
     def handle_show_rename_action(

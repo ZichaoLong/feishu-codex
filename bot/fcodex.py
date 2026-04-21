@@ -13,6 +13,7 @@ import sys
 import threading
 from dataclasses import dataclass, replace
 
+from bot.adapters.base import ThreadSummary
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.config import load_config_file
 from bot.constants import DEFAULT_APP_SERVER_URL, FC_DATA_DIR, PROJECT_ROOT

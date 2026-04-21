@@ -186,6 +186,8 @@ class InboundSurfaceController:
             self._reply_card(chat_id, result.card, message_id=message_id)
         elif result.text:
             self._reply_text(chat_id, result.text, message_id=message_id)
+        if result.after_dispatch is not None:
+            result.after_dispatch()
 
     def handle_help_execute_command_action(
         self,
@@ -283,6 +285,8 @@ class InboundSurfaceController:
                 toast="命令已执行。",
                 toast_type="success",
             )
+        if result.after_dispatch is not None:
+            result.after_dispatch()
         if result.card is not None:
             return make_card_response(card=result.card)
         if result.text:

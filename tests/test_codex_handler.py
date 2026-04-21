@@ -3492,31 +3492,11 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        recorded_threads = []
+        handler.handle_message("ou_user", "c1", "/resume demo")
 
-        class _RecordedThread:
-            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
-                self._target = target
-                self._args = args
-                self._kwargs = kwargs or {}
-                self.daemon = daemon
-
-            def start(self):
-                recorded_threads.append(self)
-
-            def run(self):
-                if self._target is not None:
-                    self._target(*self._args, **self._kwargs)
-
-        with patch("bot.codex_session_ui_domain.threading.Thread", _RecordedThread):
-            handler.handle_message("ou_user", "c1", "/resume demo")
-
-        self.assertEqual(len(recorded_threads), 1)
-        self.assertEqual(handler._adapter.resume_thread_calls, [])
-        _, pending_card = bot.cards[-1]
+        _, pending_card = bot.cards[0]
         self.assertEqual(pending_card["header"]["title"]["content"], "Codex 正在恢复线程")
         self.assertIn("正在恢复：`demo`", pending_card["elements"][0]["content"])
-        recorded_threads[0].run()
         handler._runtime_call(lambda: None)
         self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
 
@@ -4034,19 +4014,6 @@ class CodexHandlerTests(unittest.TestCase):
                 status="idle",
             ),
         ]
-        scheduled: dict[str, object] = {}
-
-        class _CapturedThread:
-            def __init__(self, *, target, args=(), kwargs=None, daemon=None):
-                del daemon
-                scheduled["target"] = target
-                scheduled["args"] = args
-                scheduled["kwargs"] = kwargs or {}
-                scheduled["started"] = False
-
-            def start(self) -> None:
-                scheduled["started"] = True
-
         def _read_thread(thread_id: str, include_turns: bool = False) -> ThreadSnapshot:
             del include_turns
             thread = next(item for item in threads if item.thread_id == thread_id)
@@ -4063,24 +4030,17 @@ class CodexHandlerTests(unittest.TestCase):
             {"action": "show_more_sessions"},
         )
 
-        with patch("bot.codex_session_ui_domain.threading.Thread", _CapturedThread):
-            response = self._unpack_card_response(handler.handle_card_action(
-                "ou_user",
-                "c1",
-                "msg-session",
-                {"action": "resume_thread", "thread_id": "thread-1"},
-            ))
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "resume_thread", "thread_id": "thread-1", "thread_title": "one"},
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
         pending_content = response["card"]["elements"][0]["content"]
         self.assertIn("正在恢复线程", pending_content)
         self.assertEqual(response["toast"], "正在恢复线程…")
-        self.assertTrue(scheduled.get("started"))
-
-        target = scheduled["target"]
-        args = scheduled["args"]
-        kwargs = scheduled["kwargs"]
-        target(*args, **kwargs)
         handler._runtime_call(lambda: None)
 
         patched = json.loads(next(content for message_id, content in bot.patches if message_id == "msg-session"))
@@ -4422,39 +4382,20 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        recorded_threads = []
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-help",
+            {
+                "action": "help_submit_command",
+                "command": "/resume",
+                "field_name": "resume_target",
+                "title": "Codex 恢复线程",
+                "_form_value": {"resume_target": "demo"},
+            },
+        ))
 
-        class _RecordedThread:
-            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
-                self._target = target
-                self._args = args
-                self._kwargs = kwargs or {}
-                self.daemon = daemon
-
-            def start(self):
-                recorded_threads.append(self)
-
-            def run(self):
-                if self._target is not None:
-                    self._target(*self._args, **self._kwargs)
-
-        with patch("bot.codex_session_ui_domain.threading.Thread", _RecordedThread):
-            response = self._unpack_card_response(handler.handle_card_action(
-                "ou_user",
-                "c1",
-                "msg-help",
-                {
-                    "action": "help_submit_command",
-                    "command": "/resume",
-                    "field_name": "resume_target",
-                    "title": "Codex 恢复线程",
-                    "_form_value": {"resume_target": "demo"},
-                },
-            ))
-
-        self.assertEqual(len(recorded_threads), 1)
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 正在恢复线程")
-        recorded_threads[0].run()
         handler._runtime_call(lambda: None)
         self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
 
@@ -4688,28 +4629,9 @@ class CodexHandlerTests(unittest.TestCase):
             ],
         )
 
-        recorded_threads = []
+        handler.handle_message("ou_user", "c1", "/resume demo")
 
-        class _RecordedThread:
-            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
-                self._target = target
-                self._args = args
-                self._kwargs = kwargs or {}
-                self.daemon = daemon
-
-            def start(self):
-                recorded_threads.append(self)
-
-            def run(self):
-                if self._target is not None:
-                    self._target(*self._args, **self._kwargs)
-
-        with patch("bot.codex_session_ui_domain.threading.Thread", _RecordedThread):
-            handler.handle_message("ou_user", "c1", "/resume demo")
-
-        self.assertEqual(len(recorded_threads), 1)
-        self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 正在恢复线程")
-        recorded_threads[0].run()
+        self.assertEqual(bot.cards[0][1]["header"]["title"]["content"], "Codex 正在恢复线程")
         handler._runtime_call(lambda: None)
 
         _, card = bot.cards[-1]
@@ -4739,27 +4661,56 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        class _ImmediateThread:
-            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
-                self._target = target
-                self._args = args
-                self._kwargs = kwargs or {}
-                self.daemon = daemon
-
-            def start(self):
-                if self._target is not None:
-                    self._target(*self._args, **self._kwargs)
-
-        with patch("bot.codex_session_ui_domain.threading.Thread", _ImmediateThread):
-            response = self._unpack_card_response(handler.handle_card_action(
-                "ou_user",
-                "c1",
-                "msg-1",
-                {"action": "resume_thread", "thread_id": "thread-1"},
-            ))
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-1",
+            {"action": "resume_thread", "thread_id": "thread-1", "thread_title": "demo"},
+        ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
         self.assertIn("正在恢复线程", response["toast"])
+        handler._runtime_call(lambda: None)
+
+    def test_resume_card_action_failure_refreshes_sessions_card(self) -> None:
+        handler, bot = self._make_handler({"session_recent_limit": 1})
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="one",
+            preview="",
+            created_at=0,
+            updated_at=3,
+            source="cli",
+            status="idle",
+        )
+        handler._adapter.list_threads_all = lambda **kwargs: [thread]
+
+        handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "show_more_sessions"},
+        )
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "msg-session",
+            {"action": "resume_thread", "thread_id": "thread-missing", "thread_title": "missing"},
+        ))
+
+        self.assertEqual(response["toast"], "正在恢复线程…")
+        handler._runtime_call(lambda: None)
+
+        self.assertIn("恢复线程失败", bot.replies[-1][1])
+        patched = json.loads(next(content for message_id, content in bot.patches if message_id == "msg-session"))
+        content = "\n".join(
+            element.get("content", "")
+            for element in patched["elements"]
+            if isinstance(element, dict) and element.get("tag") == "markdown"
+        )
+        self.assertIn("thread-1", content)
 
     def test_show_rename_form_registers_pending_message(self) -> None:
         handler, _ = self._make_handler()

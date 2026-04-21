@@ -5,6 +5,7 @@ feishu-codex 飞书卡片构建。
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -48,6 +49,7 @@ class CommandResult:
 
     text: str = ""
     card: dict | None = None
+    after_dispatch: Callable[[], None] | None = None
 
 
 _HISTORY_TEXT_MAX = 300
@@ -1049,6 +1051,7 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
                     "value": {
                         "action": "resume_thread",
                         "thread_id": thread_id,
+                        "thread_title": title,
                     },
                 },
                 {

@@ -123,7 +123,7 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/prompt_turn_entry_controller.py`：prompt 进入、lease 抢占、released -> attached 恢复编排
 - `bot/adapter_notification_controller.py`：adapter notification 的 method 路由、语义解释与下游分发
 - `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
-- `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态
+- `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态，以及通过 `RuntimeLoop` 串行化的 resume 目标解析
 - `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 display-only 的 `reply_segments` / `process_log` 片段拼装，并支持在权威终态结果已经单独送达后，把最后一段最终答案从 execution card 的 reply 面板里剔除；它不承担 thread、owner 或 binding 级状态职责
 - `bot/stores/thread_admission_store.py`：每实例 Feishu 可见线程的 admission
 - `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
@@ -151,6 +151,7 @@ shared backend 与 wrapper 的具体机制，见
 并发 ownership 这一轮已经完成了主要收口；当前仍需继续保持清晰、并在后续增量功能中继续收紧的边界是：
 
 - `RuntimeLoop` 已是当前 handler 运行时状态变更的主要串行化原语
+- session UI 发起的 resume 目标解析与后续恢复切换，也应通过 `RuntimeLoop` 进入统一串行化边界，而不是额外起裸后台线程侧向触碰共享 adapter/runtime 边界
 - binding 解析与 runtime state 的 hydrate/create 应走单一 resolver 入口，
   不应在多个调用点里继续手写“先挑 binding key，再决定是否建 state”的两段式流程
 - `ThreadLeaseRegistry` 这类对象当前应视为 runtime-owned 内部状态，而不是通用线程安全组件
@@ -288,69 +289,57 @@ shared backend 与 wrapper 的具体机制，见
 
 ## 7. 当前仓库结构
 
-当前仓库布局是：
+与其维护一份容易过时的完整树状清单，更适合按职责理解当前仓库：
 
-```text
-feishu-codex/
-  bot/
-    __main__.py
-    standalone.py
-    feishu_bot.py
-    handler.py
-    cards.py
-    codex_handler.py
-    fcodex.py
-    fcodex_proxy.py
-    feishu_codexctl.py
-    service_control_plane.py
-    instance_layout.py
-    instance_resolution.py
-    thread_runtime_coordination.py
-    binding_identity.py
-    config.py
-    constants.py
-    profile_resolution.py
-    session_resolution.py
-    adapters/
-      base.py
-      codex_app_server.py
-    codex_protocol/
-      client.py
-    stores/
-      app_server_runtime_store.py
-      instance_registry_store.py
-      profile_state_store.py
-      thread_admission_store.py
-      thread_runtime_lease_store.py
-  config/
-    system.yaml.example
-    codex.yaml.example
-  docs/
-    contracts/
-    architecture/
-    decisions/
-    verification/
-    archive/
-    doc-index.md
-    doc-index.zh-CN.md
-  tests/
-    test_codex_app_server.py
-    test_codex_handler.py
-  install.sh
-  pyproject.toml
-  README.md
-```
+- 仓库根目录
+  - 面向操作者的说明与打包入口放在 `README.md`、`install.sh`、`pyproject.toml`
+  - 仓库内跟踪的 agent 偏好模板放在 `AGENTS.example.md`
+  - 真正的本地私有覆盖文件（如 `AGENTS.md`、`AGENTS.zh-CN.md`）仍应保持未跟踪，并有意加入 gitignore
+- `bot/`
+  - 入口与传输边界：`__main__.py`、`standalone.py`、`handler.py`、`feishu_bot.py`
+  - 顶层编排与用户侧 domain：
+    `codex_handler.py`、`codex_group_domain.py`、`codex_help_domain.py`、
+    `codex_session_ui_domain.py`、`codex_settings_domain.py`、
+    `file_message_domain.py`、`inbound_surface_controller.py`
+  - 运行时状态、执行流与协调：
+    `runtime_loop.py`、`runtime_state.py`、`runtime_view.py`、
+    `binding_runtime_manager.py`、`thread_access_policy.py`、
+    `thread_lease_registry.py`、`thread_runtime_coordination.py`、
+    `turn_execution_coordinator.py`、`execution_output_controller.py`、
+    `execution_recovery_controller.py`、`execution_transcript.py`、
+    `interaction_request_controller.py`、`adapter_notification_controller.py`、
+    `runtime_admin_controller.py`、`runtime_card_publisher.py`、
+    `prompt_turn_entry_controller.py`
+  - 共享 UI / helper 边界：`cards.py`、`card_text_projection.py`、
+    `shared_command_surface.py`、`feishu_types.py`、`codex_config_reader.py`
+  - wrapper 与服务管理路径：`fcodex.py`、`fcodex_proxy.py`、
+    `feishu_codexctl.py`、`service_control_plane.py`、`instance_layout.py`、
+    `instance_resolution.py`、`profile_resolution.py`、`session_resolution.py`、
+    `binding_identity.py`
+  - Codex adapter / protocol 边界：
+    `adapters/base.py`、`adapters/codex_app_server.py`、
+    `codex_protocol/client.py`
+  - 本地持久化状态：`stores/app_server_runtime_store.py`、
+    `stores/chat_binding_store.py`、`stores/group_chat_store.py`、
+    `stores/instance_registry_store.py`、`stores/interaction_lease_store.py`、
+    `stores/pending_attachment_store.py`、`stores/profile_state_store.py`、
+    `stores/service_instance_lease.py`、`stores/thread_admission_store.py`、
+    `stores/thread_runtime_lease_store.py`
+- `config/`
+  - 本地配置样例：`system.yaml.example`、`codex.yaml.example`
+- `docs/`
+  - 正式 contract：`docs/contracts/`
+  - 当前架构与运行时形状：`docs/architecture/`
+  - 设计决策与安全边界：`docs/decisions/`
+  - 手工验证材料：`docs/verification/`
+  - 历史 rollout / 归档材料：`docs/archive/`
+  - 不属于仓库事实源的本地工作材料：`docs/_work/`
+- `tests/`
+  - adapter/wrapper 行为、handler/controller 流程、runtime 状态迁移、
+    stores、cards 与 Feishu transport helper 的单元测试
 
-这套结构已经能支撑当前架构边界：
-
-- 飞书传输与 handler 逻辑留在 `bot/`
-- Codex 集成边界留在 `bot/adapters/` 与 `bot/codex_protocol/`
-- 本地持久化状态留在 `bot/stores/`
-- 正式功能合同留在 `docs/contracts/`
-- 当前架构与实现边界留在 `docs/architecture/`
-- 上游调查结论与安全决策留在 `docs/decisions/`
-- 手测清单留在 `docs/verification/`
-- 已完成 rollout 与历史计划留在 `docs/archive/`
+这份按职责分组的视图应与 §5.3 的 ownership 拆分保持同步。
+新增模块如果实质改变了 owner 边界，应在同一次变更里同时更新这两节。
 
 ## 8. 演进边界
 

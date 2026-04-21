@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from typing import get_type_hints
 from websockets.exceptions import ConnectionClosedOK
 from websockets.sync.client import connect
 from websockets.sync.server import serve
@@ -15,7 +16,12 @@ from pathlib import Path
 from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, ThreadSummary
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.codex_protocol.client import CodexRpcClient
-from bot.fcodex import _default_data_dir, _launch_local_cwd_proxy, main as fcodex_main
+from bot.fcodex import (
+    _default_data_dir,
+    _launch_local_cwd_proxy,
+    _resolve_thread_target_via_remote_backend,
+    main as fcodex_main,
+)
 from bot.fcodex_proxy import _ProxyInteractionGate, _relay_messages, _rewrite_thread_start_cwd, run_proxy
 from bot.profile_resolution import resolve_local_default_profile
 from bot.stores.instance_registry_store import InstanceRegistryEntry
@@ -1560,6 +1566,14 @@ class SessionResolutionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "匹配到多个同名线程"):
             resolve_resume_target_by_name(adapter, name="demo", limit=100)
+
+    def test_fcodex_remote_thread_target_type_hints_resolve(self) -> None:
+        hints = get_type_hints(_resolve_thread_target_via_remote_backend)
+
+        self.assertEqual(
+            hints["return"],
+            tuple[ThreadSummary | None, str | None],
+        )
 
 
 class ProfileResolutionTests(unittest.TestCase):

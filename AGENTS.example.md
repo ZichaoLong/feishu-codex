@@ -6,7 +6,9 @@ It is not the source of truth for repository architecture, module boundaries,
 or feature semantics. Repository facts belong in `docs/`.
 
 If you want a private local preference file, copy this to `AGENTS.md` and edit
-it locally. `AGENTS.md` is intentionally gitignored in this repository.
+it locally. If you prefer to keep a private Chinese-localized variant such as
+`AGENTS.zh-CN.md`, keep that local as well. Both local files are intentionally
+gitignored in this repository.
 
 ## Core Preference
 

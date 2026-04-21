@@ -30,7 +30,6 @@ from lark_oapi.api.im.v1 import (
     PatchMessageRequestBody,
     ReplyMessageRequest,
     ReplyMessageRequestBody,
-    UrgentAppMessageRequest,
 )
 from lark_oapi.api.application.v6.model.p2_application_bot_menu_v6 import (
     P2ApplicationBotMenuV6,
@@ -2101,33 +2100,6 @@ class FeishuBot(ABC):
                 response.code, response.msg,
                 getattr(response, 'raw', {}).get('ext', '') if isinstance(getattr(response, 'raw', None), dict) else '',
             )
-            return False
-        return True
-
-    def urgent_message(self, message_id: str, user_ids: list[str]) -> bool:
-        """对已有消息发送应用内加急通知
-
-        Args:
-            message_id: 要加急的消息 ID
-            user_ids: 接收加急通知的用户 user_id 列表。这里要求真实 user_id，不是 open_id。
-
-        Returns:
-            是否成功
-        """
-        request = UrgentAppMessageRequest.builder() \
-            .message_id(message_id) \
-            .user_id_type("user_id") \
-            .request_body(UrgentReceivers.builder()
-                .user_id_list(user_ids)
-                .build()) \
-            .build()
-        try:
-            response = self.client.im.v1.message.urgent_app(request)
-        except Exception as e:
-            logger.error("加急通知失败(SDK异常): %s", e)
-            return False
-        if not response.success():
-            logger.error("加急通知失败: code=%s, msg=%s", response.code, response.msg)
             return False
         return True
 
