@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Protocol
+from typing import Callable, Protocol
 from uuid import UUID
 
 from bot.adapters.base import ThreadSummary
@@ -61,13 +61,17 @@ def list_current_dir_threads(
     cwd: str,
     limit: int,
     sort_key: str = "updated_at",
+    predicate: Callable[[ThreadSummary], bool] | None = None,
 ) -> list[ThreadSummary]:
-    return adapter.list_threads_all(
+    threads = adapter.list_threads_all(
         cwd=cwd,
         limit=limit,
         sort_key=sort_key,
         model_providers=[],
     )
+    if predicate is None:
+        return threads
+    return [thread for thread in threads if predicate(thread)]
 
 
 def list_global_threads(
@@ -75,12 +79,16 @@ def list_global_threads(
     *,
     limit: int,
     sort_key: str = "updated_at",
+    predicate: Callable[[ThreadSummary], bool] | None = None,
 ) -> list[ThreadSummary]:
-    return adapter.list_threads_all(
+    threads = adapter.list_threads_all(
         limit=limit,
         sort_key=sort_key,
         model_providers=[],
     )
+    if predicate is None:
+        return threads
+    return [thread for thread in threads if predicate(thread)]
 
 
 def resolve_resume_target_by_name(
@@ -89,6 +97,7 @@ def resolve_resume_target_by_name(
     name: str,
     limit: int,
     sort_key: str = "updated_at",
+    predicate: Callable[[ThreadSummary], bool] | None = None,
 ) -> ThreadSummary:
     target = name.strip()
     if not target:
@@ -105,6 +114,8 @@ def resolve_resume_target_by_name(
             model_providers=[],
         )
         for thread in page:
+            if predicate is not None and not predicate(thread):
+                continue
             if thread.name != target:
                 continue
             exact_name.append(thread)

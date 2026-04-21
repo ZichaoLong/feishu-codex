@@ -17,9 +17,15 @@
 
 ## 2. 问题陈述
 
-只有当 `feishu-codex` 与 stock Codex TUI 通过同一个 app-server backend 写入同一个线程时，它们才是安全的。
+只有当两个前端通过同一个 app-server backend 写入同一个线程时，它们才是安全的。
 
 如果它们通过不同的 app-server 进程去恢复同一个持久化线程，就可能各自物化出自己的 live 内存线程，随后再追加彼此冲突的状态。
+
+多实例支持落地后，这条规则需要更明确地读成：
+
+- 多个实例可以共享 `CODEX_HOME` 和 persisted thread namespace
+- 但同一时刻，一个 thread 只能被**一个实例 backend** 持有 live runtime
+- 裸 `codex` 自己开的 isolated backend 仍然完全不在这条协调路径内
 
 本文定义当前的安全模型，用于说明：
 
@@ -51,9 +57,14 @@
 
 如果用户希望飞书和本地 TUI 安全地同时操作同一个 live thread，它们就必须连接到同一个 app-server backend。
 
+在当前仓库里，这条规则又拆成两层：
+
+- **实例内**：Feishu 与 `fcodex` 可以安全共享同一个实例 backend
+- **实例间**：通过机器级 `ThreadRuntimeLease` 保证同一 thread 不会被两个实例 backend 同时 live attach
+
 ## 5. Backend 安全边界
 
-### 5.1 Shared backend
+### 5.1 实例内 shared backend
 
 这是推荐的安全路径。
 
@@ -65,7 +76,22 @@
 
 shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`。
 
-### 5.2 Isolated backend
+### 5.2 另一个 `feishu-codex` 实例 backend
+
+这是多实例模式新增的一条边界。
+
+特性：
+
+- 多个实例共享 persisted thread namespace
+- 但每个实例有自己独立的 live backend
+- 同一 thread 的 live residency 由机器级 `ThreadRuntimeLease` 协调
+- 若 owner 实例当前 idle，且其 `release_feishu_runtime_available` 为真，则允许自动转移
+- 若 owner 实例当前仍在执行，或仍有待处理审批 / 输入，则必须明确拒绝
+
+因此，这不是“共享 backend”，也不是“可以并发双写的两个 backend”。
+它是一条**共享持久化 namespace、但 live runtime 严格单 owner** 的协调路径。
+
+### 5.3 裸 `codex` 的 isolated backend
 
 当用户脱离 shared backend 直接运行 stock TUI 时，就是这一路径。
 
@@ -73,7 +99,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 - `feishu-codex` 无法知道这个本地 TUI 是空闲、关闭，还是即将写入
 - `feishu-codex` 不能安全地假设自己对该线程拥有独占所有权
-- 如果要在本地继续同一个 live thread，应改用 `fcodex` 走 shared backend
+- 如果要在本地继续同一个 live thread，应改用 `fcodex` 走同一个实例的 shared backend
 - 如果仍用裸 `codex` 在另一个 backend 写同一线程，就超出了当前支持的安全路径
 
 ## 6. `/resume` 安全模型
@@ -107,8 +133,11 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 - 直接恢复目标线程
 - 将当前飞书会话绑定到该线程
-- 如果用户随后通过 `fcodex` 接入同一个 shared backend，则飞书与 `fcodex` 可以继续安全地共同读写这个 live thread
-- 如果这次恢复没有显式指定 profile，则飞书与 `fcodex` 的有效行为一致：都使用 `feishu-codex` 当前本地默认 profile
+- 如果用户随后通过 `fcodex` 接入同一个实例 shared backend，则飞书与 `fcodex` 可以继续安全地共同读写这个 live thread
+- 若当前 thread 已被另一实例 backend live attach，则真正的恢复仍要服从机器级 `ThreadRuntimeLease`：
+  - owner 可立即 release 时，允许自动转移
+  - owner 仍 busy / pending 时，必须明确拒绝
+- 如果这次恢复没有显式指定 profile，则飞书与 `fcodex` 的有效行为一致：都使用当前实例 / 所选实例的本地默认 profile
 
 这条路径的前提是：
 
@@ -120,10 +149,16 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 飞书侧会在请求 `thread/resume` 前解析并显式传入 profile / model / model_provider
 - `fcodex` 则是在 wrapper 启动阶段注入默认 profile，再进入 upstream `codex resume`
 
-这个差异不应被理解为两端语义不一致；它们的目标语义是同一个：对 unloaded 线程，在没有显式 profile 时，都以本地默认 profile 恢复。
+这个差异不应被理解为两端语义不一致；它们的目标语义是同一个：对 unloaded 线程，在没有显式 profile 时，都以当前实例 / 所选实例的本地默认 profile 恢复。
 
 本仓库的取舍是**不再**通过预览/确认卡片拦截这类 resume。
 因此，对“可能同时被另一个 isolated backend 写入”的线程，避免双 backend 写入的责任在操作侧，而不是由 UI 强制保护。
+
+对命名实例还要再补一条可见性边界：
+
+- 飞书 `/session`、飞书 `/resume` 受当前实例的 `admission + binding` 可见面约束
+- `fcodex /session`、`fcodex /resume <name>` 则是本地操作者视角，不读取该 admission 过滤
+- 但一旦真的要 live attach，所有路径仍统一服从 `ThreadRuntimeLease`
 
 ## 7. 来源展示与对称风险
 
@@ -152,7 +187,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 ### 8.1 安全性
 
-同一个 `feishu-codex` service 下的所有飞书会话本来就共享同一个 backend 进程，因此不会像飞书和裸 TUI 之间那样，为每个会话创建不同的 app-server 进程。
+同一个实例下的所有飞书会话本来就共享同一个 backend 进程，因此不会像飞书和裸 TUI 之间那样，为每个会话创建不同的 app-server 进程。
 
 所以它们不会遭遇那种跨进程双 live thread 分叉问题。
 
@@ -183,6 +218,20 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 飞书内部允许多 subscriber，共享同一 backend thread
 - 可写性与可交互性由 owner lease 决定
 - “只有一个主要通知绑定”已经不是当前模型
+
+### 8.3 跨实例边界
+
+多实例并不改变上面这套“实例内多 subscriber”结论，但还要再补两条边界：
+
+- 不同实例之间不共享 live backend
+- 同一 thread 若需要跨实例继续，必须先经过：
+  - admission（是否对目标实例 Feishu 可见）
+  - thread runtime lease（当前是否允许目标实例接管 live runtime）
+
+因此：
+
+- 多实例共享的是 persisted thread namespace
+- 不共享的是 live thread 内存态、binding、ACL、owner 和 control plane
 
 精确状态词汇与状态迁移，以
 `docs/contracts/runtime-control-surface.zh-CN.md`

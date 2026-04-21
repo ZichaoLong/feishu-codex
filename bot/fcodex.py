@@ -11,11 +11,13 @@ import shutil
 import subprocess
 import sys
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.config import load_config_file
 from bot.constants import DEFAULT_APP_SERVER_URL, FC_DATA_DIR, PROJECT_ROOT
+from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, resolve_instance_paths, validate_instance_name
+from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
 from bot.profile_resolution import resolve_local_default_profile_via_remote_backend
 from bot.session_resolution import (
     list_current_dir_threads,
@@ -31,7 +33,9 @@ from bot.shared_command_surface import (
     shared_wrapper_usage_lines,
 )
 from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
+from bot.stores.instance_registry_store import InstanceRegistryEntry
 from bot.stores.profile_state_store import ProfileStateStore
+from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseStore
 
 _WRAPPER_COMMANDS = shared_wrapper_commands()
 _HELP_COMMAND = get_shared_command("help")
@@ -62,6 +66,14 @@ _OPTIONS_WITH_VALUE = {
     "-s",
     "--sandbox",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedInstanceTarget:
+    instance_name: str
+    data_dir: pathlib.Path
+    app_server_url: str
+    service_token: str = ""
 
 
 def _has_option(user_args: list[str], names: tuple[str, ...]) -> bool:
@@ -97,6 +109,129 @@ def _default_data_dir() -> pathlib.Path:
     # install.sh 的标准安装目录。即使外层 wrapper 漏传 FC_DATA_DIR，
     # 也能继续与 feishu-codex 服务共用同一份本地状态。
     return pathlib.Path.home() / ".local" / "share" / "feishu-codex"
+
+
+def _consume_instance_arg(user_args: list[str]) -> tuple[str, list[str]]:
+    if not user_args:
+        return "", []
+    first = user_args[0]
+    if first == "--instance":
+        if len(user_args) < 2:
+            print("`--instance` 缺少实例名。", file=sys.stderr)
+            raise SystemExit(2)
+        return validate_instance_name(user_args[1]), user_args[2:]
+    if first.startswith("--instance="):
+        return validate_instance_name(first.split("=", 1)[1]), user_args[1:]
+    return "", list(user_args)
+
+
+def _running_instance_entries() -> list[InstanceRegistryEntry]:
+    return list_running_instances()
+
+
+def _running_instance_by_name(instance_name: str) -> InstanceRegistryEntry | None:
+    normalized = validate_instance_name(instance_name)
+    return next((item for item in _running_instance_entries() if item.instance_name == normalized), None)
+
+
+def _pick_lookup_instance_entry(explicit_instance: str) -> InstanceRegistryEntry | None:
+    if explicit_instance:
+        return _running_instance_by_name(explicit_instance)
+    unique = unique_running_instance()
+    if unique is not None:
+        return unique
+    default = default_running_instance()
+    if default is not None:
+        return default
+    running = _running_instance_entries()
+    if running:
+        return sorted(running, key=lambda item: item.instance_name)[0]
+    return None
+
+
+def _lease_owner_instance(thread_id: str) -> str:
+    lease = ThreadRuntimeLeaseStore(global_data_dir()).load(thread_id)
+    if lease is None:
+        return ""
+    return lease.owner_instance
+
+
+def _resolve_instance_target(
+    *,
+    cfg: dict,
+    explicit_instance: str,
+    thread_id: str = "",
+) -> _ResolvedInstanceTarget:
+    configured_url = str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL
+    if explicit_instance:
+        paths = resolve_instance_paths(explicit_instance)
+        running = _running_instance_by_name(explicit_instance)
+        if running is not None:
+            return _ResolvedInstanceTarget(
+                instance_name=running.instance_name,
+                data_dir=pathlib.Path(running.data_dir),
+                app_server_url=running.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=paths.data_dir),
+                service_token=running.service_token,
+            )
+        return _ResolvedInstanceTarget(
+            instance_name=paths.instance_name,
+            data_dir=paths.data_dir,
+            app_server_url=resolve_effective_app_server_url(configured_url, data_dir=paths.data_dir),
+        )
+
+    owner_instance = _lease_owner_instance(thread_id) if thread_id else ""
+    if owner_instance:
+        running = _running_instance_by_name(owner_instance)
+        if running is not None:
+            return _ResolvedInstanceTarget(
+                instance_name=running.instance_name,
+                data_dir=pathlib.Path(running.data_dir),
+                app_server_url=running.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(running.data_dir)),
+                service_token=running.service_token,
+            )
+
+    unique = unique_running_instance()
+    if unique is not None:
+        return _ResolvedInstanceTarget(
+            instance_name=unique.instance_name,
+            data_dir=pathlib.Path(unique.data_dir),
+            app_server_url=unique.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(unique.data_dir)),
+            service_token=unique.service_token,
+        )
+
+    default = default_running_instance()
+    if default is not None:
+        return _ResolvedInstanceTarget(
+            instance_name=default.instance_name,
+            data_dir=pathlib.Path(default.data_dir),
+            app_server_url=default.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(default.data_dir)),
+            service_token=default.service_token,
+        )
+
+    running = _running_instance_entries()
+    if len(running) > 1:
+        print("检测到多个运行中的实例，请显式传 `--instance <name>`。", file=sys.stderr)
+        raise SystemExit(2)
+
+    if not running:
+        current_instance = current_cli_instance_name()
+        paths = resolve_instance_paths(current_instance)
+        return _ResolvedInstanceTarget(
+            instance_name=paths.instance_name,
+            data_dir=paths.data_dir if paths.instance_name != DEFAULT_INSTANCE_NAME else _default_data_dir(),
+            app_server_url=resolve_effective_app_server_url(
+                configured_url,
+                data_dir=paths.data_dir if paths.instance_name != DEFAULT_INSTANCE_NAME else _default_data_dir(),
+            ),
+        )
+
+    only = running[0]
+    return _ResolvedInstanceTarget(
+        instance_name=only.instance_name,
+        data_dir=pathlib.Path(only.data_dir),
+        app_server_url=only.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(only.data_dir)),
+        service_token=only.service_token,
+    )
 
 
 def _inject_default_profile(user_args: list[str], profile: str) -> list[str]:
@@ -345,6 +480,15 @@ def _extract_option_value(user_args: list[str], names: tuple[str, ...]) -> str:
     return ""
 
 
+def _thread_target_hint(user_args: list[str]) -> str:
+    if len(user_args) >= 2 and user_args[0] == "resume":
+        return user_args[1].strip()
+    if len(user_args) >= 2 and user_args[0] == "/resume":
+        target = user_args[1].strip()
+        return target if looks_like_thread_id(target) else ""
+    return ""
+
+
 def _resolve_effective_cwd(user_args: list[str]) -> str:
     raw = _extract_option_value(user_args, ("-C", "--cd")).strip()
     if not raw:
@@ -379,6 +523,9 @@ def _launch_local_cwd_proxy(
     backend_url: str,
     effective_cwd: str,
     data_dir: pathlib.Path,
+    *,
+    instance_name: str = DEFAULT_INSTANCE_NAME,
+    service_token: str = "",
 ) -> tuple[str, subprocess.Popen[str]]:
     cmd = [
         sys.executable,
@@ -390,6 +537,12 @@ def _launch_local_cwd_proxy(
         effective_cwd,
         "--data-dir",
         str(data_dir),
+        "--instance",
+        instance_name,
+        "--global-data-dir",
+        str(global_data_dir()),
+        "--service-token",
+        service_token,
         "--parent-pid",
         str(os.getpid()),
     ]
@@ -424,6 +577,7 @@ def _print_wrapper_usage() -> None:
     print("用法：", file=sys.stderr)
     for usage in shared_wrapper_usage_lines():
         print(f"  {usage}", file=sys.stderr)
+        print(f"  --instance <name> {usage[len('fcodex '):]}", file=sys.stderr)
     print("说明：以上 wrapper 自命令都必须单独使用。", file=sys.stderr)
 
 
@@ -479,6 +633,7 @@ def _handle_internal_command(
         for line in shared_wrapper_help_lines():
             print(line)
         print("说明：以上 wrapper 自命令必须单独使用，不能与裸 codex 参数混用。")
+        print("说明：多实例场景可在最前面加 `--instance <name>`；歧义时会要求显式指定。")
         print("说明：`fcodex`、`fcodex <prompt>`、`fcodex resume <id>` 仍是 upstream Codex CLI，只是默认连到 feishu-codex shared backend。")
         print("说明：`fcodex /session`、`fcodex /resume <name>` 复用与飞书一致的共享发现逻辑。")
         print("说明：进入 TUI 后，`/help`、`/resume` 等命令恢复 upstream 原样，不等同于 wrapper 命令。")
@@ -492,17 +647,42 @@ def _handle_internal_command(
 def main() -> None:
     cfg = load_config_file("codex")
     codex_command = str(cfg.get("codex_command", "codex")).strip() or "codex"
-    data_dir = _default_data_dir()
-    app_server_url = resolve_effective_app_server_url(
-        str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL,
-        data_dir=data_dir,
-    )
-    user_args = sys.argv[1:]
-    handled = _handle_internal_command(cfg, app_server_url, user_args, data_dir=data_dir)
+    explicit_instance, user_args = _consume_instance_arg(sys.argv[1:])
+    if explicit_instance and _has_explicit_remote(user_args):
+        print("`--instance` 不能与显式 `--remote` 同时使用。", file=sys.stderr)
+        raise SystemExit(2)
+
+    preprocessed_args = list(user_args)
+    if not _has_explicit_remote(preprocessed_args):
+        if len(preprocessed_args) == 2 and preprocessed_args[0] == "/resume" and not looks_like_thread_id(preprocessed_args[1].strip()):
+            lookup_target = _resolve_instance_target(cfg=cfg, explicit_instance=explicit_instance)
+            preprocessed_args = _resolve_wrapper_resume_args(cfg, lookup_target.app_server_url, preprocessed_args) or preprocessed_args
+
+    if _has_explicit_remote(preprocessed_args):
+        data_dir = _default_data_dir()
+        app_server_url = str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL
+        resolved_target = _ResolvedInstanceTarget(
+            instance_name=current_cli_instance_name(),
+            data_dir=data_dir,
+            app_server_url=app_server_url,
+        )
+    else:
+        thread_target = _thread_target_hint(preprocessed_args)
+        resolved_target = _resolve_instance_target(
+            cfg=cfg,
+            explicit_instance=explicit_instance,
+            thread_id=thread_target,
+        )
+        data_dir = resolved_target.data_dir
+        app_server_url = resolved_target.app_server_url
+
+    handled = _handle_internal_command(cfg, app_server_url, preprocessed_args, data_dir=data_dir)
     if isinstance(handled, int):
         raise SystemExit(handled)
     if isinstance(handled, list):
         user_args = handled
+    else:
+        user_args = preprocessed_args
 
     profile_store = ProfileStateStore(data_dir)
     stored_profile = profile_store.load_default_profile()
@@ -526,14 +706,28 @@ def main() -> None:
             # Without this local proxy, the shared app-server falls back to its own
             # WorkingDirectory (`~/.local/share/feishu-codex`) and fresh `fcodex`
             # sessions don't inherit the caller's shell cwd.
-            proxy_url, proxy_process = _launch_local_cwd_proxy(app_server_url, effective_cwd, data_dir)
+            proxy_kwargs: dict[str, str] = {}
+            if resolved_target.instance_name != DEFAULT_INSTANCE_NAME or resolved_target.service_token:
+                proxy_kwargs = {
+                    "instance_name": resolved_target.instance_name,
+                    "service_token": resolved_target.service_token,
+                }
+            proxy_url, proxy_process = _launch_local_cwd_proxy(
+                app_server_url,
+                effective_cwd,
+                data_dir,
+                **proxy_kwargs,
+            )
         except Exception as exc:
             print(f"启动 fcodex 本地 cwd proxy 失败：{exc}", file=sys.stderr)
             raise SystemExit(2)
         argv.extend(["--remote", proxy_url])
     argv.extend(user_args)
     try:
-        os.execvpe(argv[0], argv, os.environ.copy())
+        env = os.environ.copy()
+        env["FC_DATA_DIR"] = str(data_dir)
+        env["FC_INSTANCE"] = resolved_target.instance_name
+        os.execvpe(argv[0], argv, env)
     except Exception:
         if proxy_process is not None and proxy_process.poll() is None:
             proxy_process.terminate()

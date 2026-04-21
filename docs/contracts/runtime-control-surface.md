@@ -111,7 +111,7 @@ may re-resolve profile / provider.
 Avoid the term “original thread profile” in this repo’s contract.
 The precise wording is:
 
-- resume with the current local default profile
+- resume with the current-instance / selected-instance local default profile
 - resume with an explicit profile
 - a live loaded runtime cannot be re-profiled via resume
 
@@ -324,6 +324,7 @@ thread must be executed by the running `feishu-codex` service itself.
 
 The current formal command set is:
 
+- `feishu-codexctl instance list`
 - `feishu-codexctl service status`
 - `feishu-codexctl binding list`
 - `feishu-codexctl binding status <binding_id>`
@@ -332,6 +333,9 @@ The current formal command set is:
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread admissions`
+- `feishu-codexctl thread import (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread revoke (--thread-id <id> | --thread-name <name>)`
 
 ### 6.4 Contract for binding persistence and reset
 
@@ -439,6 +443,62 @@ Therefore `feishu-codex run` and a systemd-managed service must not coexist on
 the same `FC_DATA_DIR`.
 If both point at the same directory, the later starter must exit instead of
 trying to replace the socket.
+
+### 6.8 Instance Scope, Admission, and Global Coordination
+
+In multi-instance mode, `feishu-codexctl` deliberately splits into two scopes:
+
+- `instance list`
+  - machine-scoped
+  - reads the global running-instance registry
+  - does not target one specific instance
+- all other subcommands
+  - instance-scoped
+  - operate on one running `feishu-codex` service
+  - may select it explicitly via `--instance <name>`; otherwise they resolve
+    by current / unique-running / default-running rules and must fail when the
+    target remains ambiguous
+
+The formal contract for instance visibility is:
+
+- the `default` instance preserves the original single-instance globally visible
+  Feishu surface
+- named instances are `admission-scoped` by default
+- `thread admissions`
+  - lists the thread set currently admitted into this instance
+- `thread import`
+  - only makes a persisted thread visible on this instance's Feishu surface
+  - does not bind the thread
+  - does not load the thread into this instance backend
+  - does not immediately acquire a live runtime lease
+- `thread revoke`
+  - only removes this instance's admission for the thread
+  - must reject while a binding still points at that thread
+
+There are also two machine-level coordination facts:
+
+- `InstanceRegistry`
+  - records which instances are currently running and how local CLIs can reach
+    their control socket / backend endpoints
+  - used by `fcodex` and `feishu-codexctl instance list`
+- `ThreadRuntimeLease`
+  - records which instance currently owns live backend runtime residency for a
+    thread
+  - allows multiple holders for the same thread only when they come from the
+    same instance
+  - rejects concurrent live attachment from different instances
+
+The formal contract for cross-instance live-runtime transfer is:
+
+- if the current owner instance can release Feishu runtime immediately,
+  automatic transfer is allowed
+- if the current owner instance is still executing, or still has pending
+  approval / input, the write attempt must reject clearly
+- no queueing, no implicit stealing, and no "last binder wins" guesswork
+
+This `ThreadRuntimeLease` is a machine-level live-runtime fact.
+It is not the same thing as Feishu chat binding, Feishu write owner, or
+interaction owner.
 
 ## 7. Shared Vocabulary, Not Forced Command Symmetry
 

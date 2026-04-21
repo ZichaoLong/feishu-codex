@@ -9,6 +9,8 @@ import sys
 from typing import Any
 
 from bot.constants import FC_DATA_DIR, display_path
+from bot.instance_layout import DEFAULT_INSTANCE_NAME, resolve_instance_paths, validate_instance_name
+from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
 from bot.service_control_plane import ServiceControlError, control_request, control_socket_path
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore
 
@@ -18,6 +20,27 @@ def _data_dir() -> pathlib.Path:
     if raw:
         return pathlib.Path(raw).expanduser()
     return FC_DATA_DIR
+
+
+def _resolve_target_data_dir(explicit_instance: str | None) -> pathlib.Path:
+    normalized_instance = str(explicit_instance or "").strip()
+    if normalized_instance:
+        return resolve_instance_paths(validate_instance_name(normalized_instance)).data_dir
+    env_instance = str(os.environ.get("FC_INSTANCE", "") or "").strip()
+    if env_instance:
+        return resolve_instance_paths(validate_instance_name(env_instance)).data_dir
+    running = unique_running_instance()
+    if running is not None:
+        return pathlib.Path(running.data_dir)
+    default_running = default_running_instance()
+    if default_running is not None:
+        return pathlib.Path(default_running.data_dir)
+    running_instances = list_running_instances()
+    if len(running_instances) > 1:
+        raise ValueError("检测到多个运行中的实例，请显式传 `--instance <name>`。")
+    if not running_instances:
+        return resolve_instance_paths(current_cli_instance_name()).data_dir
+    return pathlib.Path(running_instances[0].data_dir)
 
 
 def _request(data_dir: pathlib.Path, method: str, params: dict[str, Any] | None = None) -> Any:
@@ -46,10 +69,14 @@ def _print_service_status(data_dir: pathlib.Path) -> int:
             print(f"last known app server: {runtime.active_url}")
         print(f"reason: {exc}")
         return 3
+    if result.get("instance_name"):
+        print(f"instance: {result['instance_name']}")
     print("service: running")
     print(f"pid: {result['pid']}")
     print(f"control socket: {result['control_socket_path']}")
     print(f"app server: {result['app_server_url']}")
+    if "admitted_thread_count" in result:
+        print(f"admitted threads: {result['admitted_thread_count']}")
     print(f"bindings: total={result['binding_count']} bound={result['bound_binding_count']} attached={result['attached_binding_count']}")
     print(f"threads: bound={result['thread_count']} feishu-attached={result['attached_thread_count']} loaded={result['loaded_thread_count']}")
     print(f"running bindings: {', '.join(result['running_binding_ids']) or '（无）'}")
@@ -175,9 +202,54 @@ def _release_thread_runtime(data_dir: pathlib.Path, target_params: dict[str, str
     return 0
 
 
+def _list_running_instances() -> int:
+    instances = list_running_instances()
+    if not instances:
+        print("当前没有运行中的实例。")
+        return 0
+    print("INSTANCE\tPID\tCONTROL\tAPP_SERVER")
+    for item in instances:
+        control = display_path(item.control_socket_path)
+        app_server = item.app_server_url or "-"
+        print(f"{item.instance_name}\t{item.owner_pid}\t{control}\t{app_server}")
+    return 0
+
+
+def _list_thread_admissions(data_dir: pathlib.Path) -> int:
+    result = _request(data_dir, "thread/admissions")
+    print(f"instance: {result['instance_name']}")
+    thread_ids = result.get("thread_ids") or []
+    if not thread_ids:
+        print("admitted threads: （无）")
+        return 0
+    print("admitted threads:")
+    for thread_id in thread_ids:
+        print(f"- {thread_id}")
+    return 0
+
+
+def _import_thread(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
+    result = _request(data_dir, "thread/import", target_params)
+    print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
+    print("imported: yes" if result["imported"] else "imported: already-admitted")
+    return 0
+
+
+def _revoke_thread(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
+    result = _request(data_dir, "thread/revoke", target_params)
+    print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
+    print("revoked: yes" if result["revoked"] else "revoked: already-absent")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="feishu-codexctl")
+    parser.add_argument("--instance")
     subparsers = parser.add_subparsers(dest="resource", required=True)
+
+    instance = subparsers.add_parser("instance")
+    instance_sub = instance.add_subparsers(dest="action", required=True)
+    instance_sub.add_parser("list")
 
     service = subparsers.add_parser("service")
     service_sub = service.add_subparsers(dest="action", required=True)
@@ -206,14 +278,25 @@ def _build_parser() -> argparse.ArgumentParser:
     thread_release_target = thread_release.add_mutually_exclusive_group(required=True)
     thread_release_target.add_argument("--thread-id")
     thread_release_target.add_argument("--thread-name")
+    thread_admissions = thread_sub.add_parser("admissions")
+    thread_import = thread_sub.add_parser("import")
+    thread_import_target = thread_import.add_mutually_exclusive_group(required=True)
+    thread_import_target.add_argument("--thread-id")
+    thread_import_target.add_argument("--thread-name")
+    thread_revoke = thread_sub.add_parser("revoke")
+    thread_revoke_target = thread_revoke.add_mutually_exclusive_group(required=True)
+    thread_revoke_target.add_argument("--thread-id")
+    thread_revoke_target.add_argument("--thread-name")
     return parser
 
 
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
-    data_dir = _data_dir()
     try:
+        if args.resource == "instance" and args.action == "list":
+            raise SystemExit(_list_running_instances())
+        data_dir = _resolve_target_data_dir(args.instance)
         if args.resource == "service" and args.action == "status":
             raise SystemExit(_print_service_status(data_dir))
         if args.resource == "binding" and args.action == "list":
@@ -230,6 +313,12 @@ def main() -> None:
             raise SystemExit(_print_thread_bindings(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "release-feishu-runtime":
             raise SystemExit(_release_thread_runtime(data_dir, _thread_target_params(args)))
+        if args.resource == "thread" and args.action == "admissions":
+            raise SystemExit(_list_thread_admissions(data_dir))
+        if args.resource == "thread" and args.action == "import":
+            raise SystemExit(_import_thread(data_dir, _thread_target_params(args)))
+        if args.resource == "thread" and args.action == "revoke":
+            raise SystemExit(_revoke_thread(data_dir, _thread_target_params(args)))
     except ServiceControlError as exc:
         print(f"控制面请求失败：{exc}", file=sys.stderr)
         raise SystemExit(2)

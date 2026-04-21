@@ -72,3 +72,26 @@ class FeishuCodexCtlTests(unittest.TestCase):
         args = parser.parse_args(["thread", "release-feishu-runtime", "--thread-name", "demo"])
 
         self.assertEqual(_thread_target_params(args), {"thread_name": "demo"})
+
+    def test_parser_accepts_global_instance_selector(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["--instance", "corp-b", "service", "status"])
+
+        self.assertEqual(args.instance, "corp-b")
+        self.assertEqual(args.resource, "service")
+        self.assertEqual(args.action, "status")
+
+    def test_thread_import_accepts_explicit_thread_id(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["thread", "import", "--thread-id", "thread-1"])
+
+        self.assertEqual(_thread_target_params(args), {"thread_id": "thread-1"})
+
+    def test_thread_revoke_accepts_explicit_thread_name(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["thread", "revoke", "--thread-name", "demo"])
+
+        self.assertEqual(_thread_target_params(args), {"thread_name": "demo"})

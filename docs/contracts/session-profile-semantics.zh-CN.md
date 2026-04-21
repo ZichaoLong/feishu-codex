@@ -26,18 +26,23 @@
 ### `/session`
 
 - 作用范围：仅当前目录
+- 可见性范围：
+  - `default` 实例：等同当前 backend 中当前目录下的全局线程列表
+  - 命名实例：仅当前实例可见的线程；可见集合由 `admission + 当前实例现有 binding` 组成
 - Provider 行为：跨 provider 聚合
 - 目的：浏览与当前目录相关的线程
 - 排序：按最近更新时间排序
 
 ### `/resume <thread_id|thread_name>`
 
-- 作用范围：整个 backend 全局
+- 作用范围：
+  - `default` 实例：整个 backend 全局
+  - 命名实例：当前实例可见线程集合；即已导入（admitted）或当前实例已绑定的线程
 - Provider 行为：跨 provider
 - 匹配方式：
   - 精确线程 id，或
   - 精确线程名
-  - 精确名称匹配会复用与 session 发现面相同的跨 provider 全局过滤规则，但会继续扫描后续分页，直到能证明唯一命中或存在歧义
+  - 精确名称匹配会复用与 session 发现面相同的分页/精确匹配算法，但仍服从当前实例的可见性范围；它会继续扫描后续分页，直到能证明唯一命中或存在歧义
 - 错误行为：
   - 0 个匹配：报错
   - 多个精确同名匹配：报错
@@ -48,11 +53,12 @@
 
 ### `/profile [name]`
 
-- 读取或修改 `feishu-codex` 的本地默认 profile
+- 读取或修改**当前实例**的本地默认 profile
 - 影响范围：
-  - 飞书侧默认 profile
-  - 所有没有显式传入 `-p/--profile` 的新 `fcodex` 启动
+  - 当前实例飞书侧默认 profile
+  - 所有没有显式传入 `-p/--profile`，且路由到同一实例的新 `fcodex` 启动
 - 不影响：
+  - 其他实例的本地默认 profile
   - 原生 `codex` 的全局配置
   - 已经在运行中的 TUI 实例
 
@@ -75,7 +81,23 @@
 
 ## 3. `fcodex` Shell Wrapper 语义
 
-## 直接运行 `fcodex`
+### 实例路由
+
+`fcodex` 在多实例下总是先选定一个目标实例 backend，再进入 wrapper 或 upstream Codex 路径。
+
+默认路由规则是：
+
+- 若显式传了 `--instance <name>`，直接使用该实例
+- 否则，若目标 `thread_id` 当前已有全局 live runtime lease，则优先路由到该 owner 实例
+- 否则，若当前只有一个运行中的实例，使用它
+- 否则，若 `default` 实例正在运行，使用 `default`
+- 否则，若存在多个运行中实例且仍无法消歧，直接报错，要求显式 `--instance`
+- 若当前没有运行中的实例，则回退到当前 shell / 环境推导出的本地实例目录
+
+这里的“自动路由”只决定 `fcodex` 要连哪个实例 backend。
+它不会改变飞书侧 `binding`、`admission` 或 owner 合同。
+
+### 直接运行 `fcodex`
 
 下列入口仍然是 upstream Codex CLI 的入口：
 
@@ -85,8 +107,8 @@
 
 wrapper 额外增加的行为：
 
-- 默认连接到 `feishu-codex` 的 shared backend
-- 如果没有传 `-p/--profile`，会继承本地默认 profile
+- 默认连接到**所选实例**的 shared backend
+- 如果没有传 `-p/--profile`，会继承所选实例的本地默认 profile
 - 工作目录取显式的 `--cd` 值；如果没有，则取当前 shell cwd
 - 如果显式传了 `--cd` / `-C` 但缺少值，wrapper 应直接报错，而不是静默回退到当前 cwd
 
@@ -108,8 +130,15 @@ wrapper 额外增加的行为：
 
 它们必须以独立 wrapper 命令形式使用，不会与裸 `codex` 的 flags 或 subcommands 混用。
 
+需要额外记住一条多实例差异：
+
+- `fcodex` 复用与飞书相同的**分页 / 精确匹配算法**
+- 但它默认面向本地操作者视角，不读取命名实例的 `thread admission` 过滤
+- 因此，`fcodex /session`、`fcodex /resume <name>` 的可见面可以比飞书命名实例更宽
+
 ### `fcodex /session [cwd|global]`
 
+- 作用对象：所选实例 backend
 - `fcodex /session`
   - 仅当前目录
   - 跨 provider 聚合
@@ -117,22 +146,25 @@ wrapper 额外增加的行为：
   - backend 全局
   - 跨 provider 聚合
 
-这个命令使用的是与飞书相同的 shared discovery 逻辑，而不是 upstream TUI 自带的 picker。
+这个命令复用的是与飞书相同的 shared discovery 算法，而不是 upstream TUI 自带的 picker。
+但它不读取命名实例的 `thread admission` store；它是本地操作者视角的发现面。
 
 ### `fcodex /resume <thread_id|thread_name>`
 
 - `thread_id`
-  - 直接透传给 upstream `codex resume <id>`
+  - 在所选实例 backend 上透传给 upstream `codex resume <id>`
 - `thread_name`
   - 通过共享的 `feishu-codex` discovery 层解析
   - 精确名称匹配
-  - backend 全局
+  - 所选实例 backend 全局
   - 跨 provider
   - 过滤规则与 `fcodex /session global` 一致，但会继续扫描后续分页，直到能证明唯一命中或存在歧义
   - 0 个匹配：报错
   - 多个精确同名匹配：报错
 
-在拿到唯一匹配后，wrapper 会通过 shared backend 以 thread id 恢复该线程。
+在拿到唯一匹配后，wrapper 会通过所选实例的 shared backend 以 thread id 恢复该线程。
+如果 live runtime 当前由另一实例持有，真正的附着仍要服从全局 `thread runtime lease`
+的自动转移 / 明确拒绝规则。
 
 ### `fcodex /profile [name]`
 
@@ -175,17 +207,18 @@ wrapper 额外增加的行为：
 
 ## 5. Profile 契约
 
-`feishu-codex` 维护一份本地默认 profile 状态：
+`feishu-codex` 为**每个实例**维护一份本地默认 profile 状态：
 
-- 飞书 `/profile`
-- `fcodex /profile`
+- 该实例上的飞书 `/profile`
+- 路由到该实例的 `fcodex /profile`
 
 这份状态与裸 Codex 的全局配置相互独立。
 
 因此：
 
-- 修改飞书 `/profile` 会改变未来 wrapper 启动时使用的默认 profile
-- 修改 `fcodex /profile` 会改变飞书侧看到的默认 profile
+- 修改某实例的飞书 `/profile` 会改变未来路由到该实例的 wrapper 启动默认 profile
+- 修改某实例的 `fcodex /profile` 会改变该实例飞书侧看到的默认 profile
+- 一个实例的 `/profile` 不会改写其他实例的本地默认 profile
 - `fcodex -p <profile>` 只覆盖当前这次启动
 - 裸 `codex -p <profile>` 不在本契约内
 
@@ -195,10 +228,10 @@ wrapper 额外增加的行为：
   - 飞书 `/resume`
   - `fcodex resume <thread_id>`
   - `fcodex /resume <thread_id|thread_name>`
-  在没有显式指定 profile 时，最终都以 `feishu-codex` 当前本地默认 profile 为准。
+  在没有显式指定 profile 时，最终都以**当前实例 / 所选实例**的本地默认 profile 为准。
 - 上一条是行为合同，不要求实现路径相同：
-  - 飞书侧会在恢复请求前解析本地默认 profile，并显式携带解析出的 profile / model / model_provider
-  - `fcodex` wrapper 则会先注入默认 profile，再进入 upstream `codex resume` 路径
+  - 飞书侧会在恢复请求前解析当前实例本地默认 profile，并显式携带解析出的 profile / model / model_provider
+  - `fcodex` wrapper 则会先注入所选实例的默认 profile，再进入 upstream `codex resume` 路径
 - 因此，对 unloaded 线程，飞书与 `fcodex` 的 resume 行为应视为“行为一致、路径不同”，而不是两套互相矛盾的 profile 规则。
 - 当目标线程当前 `loaded-in-current-backend` 时，`resume` 复用的是现有 live runtime。
   - 这一分支上，不能通过 `resume` 改写该 live thread 的 profile 或 provider
@@ -210,7 +243,7 @@ wrapper 额外增加的行为：
   - 若 thread 仍 `loaded`，则只是复用现有 live runtime，不能借此切 provider
 - 因此，“线程原始 profile”不是本项目推荐使用的合同术语。
   更准确的说法是：
-  - “以当前本地默认 profile 恢复”
+  - “以当前实例 / 所选实例本地默认 profile 恢复”
   - “以显式 profile 恢复”
 
 ## 6. 安全规则
@@ -218,5 +251,6 @@ wrapper 额外增加的行为：
 所有地方统一使用一条规则：
 
 - 如果你希望本地 TUI 和飞书继续操作同一个 live thread，请使用 `fcodex`，不要直接用裸 `codex`
+- 在多实例场景，本地 TUI 应接到实际持有该 live thread 的同一实例 backend；`fcodex` 会尽量自动路由，歧义时应显式 `--instance`
 
 `fcodex` 是 shared-backend 路径。裸 `codex` 默认刻意不在“共享线程的安全契约”内，除非它被手工指向同一个 remote backend。

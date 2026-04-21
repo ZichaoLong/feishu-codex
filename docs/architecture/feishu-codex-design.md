@@ -45,6 +45,8 @@ bridge:
   separated
 - Preserve a low-friction path for users who need to continue the same live
   thread from Feishu and local TUI
+- Allow one local operator to run multiple Feishu instances on one machine
+  while still sharing one `CODEX_HOME`
 
 ## 3. Non-goals
 
@@ -60,10 +62,12 @@ bridge:
   scraping or reconstructed state
 - Single source of truth: thread id, cwd, title, preview, source, and runtime
   config come from Codex
-- Feishu-specific state stays local: local default profile and thread/UI
-  binding state remain in `feishu-codex`
+- Feishu-specific state stays local: per-instance local default profile and
+  thread/UI binding state remain in `feishu-codex`
 - Shared-backend behavior is explicit: continuing the same live thread with
-  Feishu should go through one backend
+  Feishu should go through the same instance backend
+- `CODEX_HOME` and Feishu runtime boundaries stay separate: the former is
+  shared, the latter is isolated per instance
 - Runtime assumptions are documented: wrapper and shared-backend behavior should
   live in docs, not only in code
 
@@ -93,15 +97,26 @@ bridge:
 
 Current runtime behavior:
 
-- the `feishu-codex` service uses a managed app-server path by default
-- it starts a local `codex app-server` subprocess and talks to it over websocket
-- the shared backend prefers `ws://127.0.0.1:8765`
-- if that default port is unavailable, the service falls back to a free local
-  port and publishes the active endpoint through local runtime state
-- `fcodex` and other remote-style flows discover that active endpoint and attach
-  to the same shared backend
+- all instances share one `CODEX_HOME`
+- each instance owns its own:
+  - `FC_CONFIG_DIR`
+  - `FC_DATA_DIR`
+  - service owner
+  - control plane
+  - managed `codex app-server` backend
+- in this repository, `shared backend` means an instance-local shared backend,
+  not one global backend for the whole machine
+- one instance backend prefers `ws://127.0.0.1:8765`
+- if that default port is unavailable, that instance service falls back to
+  another free local port and publishes the active endpoint through its own
+  local runtime state
+- `fcodex` first chooses the target instance, then discovers that instance's
+  active backend endpoint and attaches to that same instance backend
 - `fcodex` adds a thin local websocket proxy only when it needs shared-backend
   cwd correction for upstream remote-mode behavior
+- the machine also maintains two global coordination facts:
+  - the running-instance registry
+  - the thread live-runtime lease
 
 The exact wrapper/runtime mechanics are documented in
 `docs/architecture/fcodex-shared-backend-runtime.md`.
@@ -117,11 +132,15 @@ Current module split:
 - `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and thin proxy
 - `bot/feishu_codexctl.py` and `bot/service_control_plane.py`: local service-admin
   CLI and the in-process control plane for the running service
+- `bot/instance_layout.py` and `bot/instance_resolution.py`: multi-instance
+  filesystem layout and current/target instance resolution
 - `bot/binding_identity.py`: stable admin-facing binding identifiers
 - `bot/binding_runtime_manager.py`: owner of `binding` / `subscribe` /
   `attach` / `released` runtime state and local runtime snapshots
 - `bot/thread_access_policy.py`: policy boundary for thread sharing, Feishu
   write-owner, and interaction-owner admission
+- `bot/thread_runtime_coordination.py`: cross-instance live-runtime lease
+  acquisition, automatic transfer, and reject flow
 - `bot/turn_execution_coordinator.py`,
   `bot/execution_output_controller.py`, and
   `bot/execution_recovery_controller.py`: execution lifecycle state transitions,
@@ -142,8 +161,13 @@ Current module split:
 - `bot/execution_transcript.py`: an internal transcript assembler for execution-card
   presentation; it builds reply/log fragments and does not own thread, owner,
   or binding-level state
-- `bot/stores/*.py`: local default profile, runtime backend discovery state,
-  and group-chat state
+- `bot/stores/thread_admission_store.py`: per-instance Feishu visible-thread
+  admissions
+- `bot/stores/instance_registry_store.py`: machine-global running-instance registry
+- `bot/stores/thread_runtime_lease_store.py`: machine-global thread
+  live-runtime lease
+- `bot/stores/*.py`: per-instance local default profile, runtime backend
+  discovery state, and group-chat state
 
 One maintenance rule should also stay explicit for the Feishu transport layer:
 
@@ -253,11 +277,22 @@ Codex remains the authority for:
 
 `feishu-codex` keeps only data that is Feishu- or integration-specific:
 
-- local default profile used by Feishu and default `fcodex` launches
-- runtime shared-backend discovery state
+- per-instance local default profile used by Feishu and `fcodex` launches
+  routed to that same instance
+- per-instance runtime shared-backend discovery state
 - p2p thread bindings and group-shared thread bindings keyed by `chat_id`
 - group-chat mode, group ACL, group context logs, and boundary state
 - transient approval, rename, and card state
+- the per-instance thread-admission set
+
+There are also two machine-global coordination states:
+
+- the running-instance registry
+- the thread live-runtime lease
+
+They live under shared `FC_GLOBAL_DATA_DIR`.
+They are neither Feishu-chat state nor Codex-owned thread metadata; they exist
+only for local CLI discovery and multi-instance runtime coordination.
 
 Within that set, `binding` is intentionally a restart-persistent local bookmark:
 
@@ -357,6 +392,9 @@ feishu-codex/
     fcodex_proxy.py
     feishu_codexctl.py
     service_control_plane.py
+    instance_layout.py
+    instance_resolution.py
+    thread_runtime_coordination.py
     binding_identity.py
     config.py
     constants.py
@@ -369,7 +407,10 @@ feishu-codex/
       client.py
     stores/
       app_server_runtime_store.py
+      instance_registry_store.py
       profile_state_store.py
+      thread_admission_store.py
+      thread_runtime_lease_store.py
   config/
     system.yaml.example
     codex.yaml.example

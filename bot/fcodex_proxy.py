@@ -25,10 +25,13 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 from websockets.sync.server import serve
 
+from bot.stores.instance_registry_store import InstanceRegistryStore
 from bot.stores.interaction_lease_store import (
     InteractionLeaseStore,
     make_fcodex_interaction_holder,
 )
+from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
+from bot.thread_runtime_coordination import acquire_thread_runtime_holder_or_raise
 
 _CWD_PROXY_METHODS = {"thread/start"}
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 5.0
@@ -120,6 +123,16 @@ def _payload_thread_id(payload: dict[str, Any]) -> str:
     return str(params.get("threadId", "") or "").strip()
 
 
+def _response_thread_id(payload: dict[str, Any]) -> str:
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return ""
+    thread = result.get("thread")
+    if isinstance(thread, dict):
+        return str(thread.get("id", "") or "").strip()
+    return str(result.get("threadId", "") or "").strip()
+
+
 def _jsonrpc_id_key(value: Any) -> str:
     return str(value)
 
@@ -159,6 +172,9 @@ class _ProxyInteractionGate:
         *,
         cwd: str,
         data_dir: pathlib.Path,
+        global_data_dir: pathlib.Path | None = None,
+        instance_name: str = "",
+        service_token: str = "",
         holder_pid: int,
     ) -> None:
         self._cwd = cwd
@@ -166,10 +182,16 @@ class _ProxyInteractionGate:
             f"fcodex:{holder_pid}",
             owner_pid=holder_pid,
         )
+        self._instance_name = str(instance_name or "").strip().lower()
+        self._service_token = str(service_token or "").strip()
         self._lease_store = InteractionLeaseStore(data_dir)
+        normalized_global_data_dir = pathlib.Path(global_data_dir or ".")
+        self._runtime_lease_store = ThreadRuntimeLeaseStore(normalized_global_data_dir)
+        self._instance_registry = InstanceRegistryStore(normalized_global_data_dir)
         self._lock = threading.Lock()
         self._pending_server_request_thread_by_id: dict[str, str] = {}
         self._pending_client_request_by_id: dict[str, tuple[str, str, bool]] = {}
+        self._pending_thread_request_by_id: dict[str, tuple[str, str]] = {}
         self._owned_thread_ids: set[str] = set()
 
     def _remember_owned_thread(self, thread_id: str) -> None:
@@ -204,6 +226,39 @@ class _ProxyInteractionGate:
             self._pending_client_request_by_id.clear()
         for thread_id in owned_thread_ids:
             self._lease_store.release(thread_id, self._holder)
+            self._release_runtime_lease(thread_id)
+
+    def _runtime_holder(self) -> ThreadRuntimeLeaseHolder | None:
+        if not self._instance_name or not self._service_token:
+            return None
+        return ThreadRuntimeLeaseHolder(
+            holder_id=self._holder.holder_id,
+            holder_type="fcodex",
+            instance_name=self._instance_name,
+            owner_pid=self._holder.owner_pid,
+            owner_service_token=self._service_token,
+            control_socket_path="",
+            backend_url="",
+            updated_at=time.time(),
+        )
+
+    def _acquire_runtime_lease(self, thread_id: str) -> None:
+        holder = self._runtime_holder()
+        if holder is None:
+            return
+        acquire_thread_runtime_holder_or_raise(
+            thread_id=thread_id,
+            holder=holder,
+            lease_store=self._runtime_lease_store,
+            registry_store=self._instance_registry,
+        )
+        self._remember_owned_thread(thread_id)
+
+    def _release_runtime_lease(self, thread_id: str) -> None:
+        if not self._service_token:
+            return
+        self._runtime_lease_store.release(thread_id, self._holder.holder_id)
+        self._forget_owned_thread(thread_id)
 
     def handle_client_message(self, message: str | bytes, *, client_ws: Any, backend_ws: Any) -> None:
         rewritten = _rewrite_thread_start_cwd(message, self._cwd)
@@ -216,8 +271,22 @@ class _ProxyInteractionGate:
         method = payload.get("method")
         if isinstance(method, str):
             thread_id = _payload_thread_id(payload)
+            request_id = payload.get("id")
+            if method == "thread/resume" and thread_id:
+                try:
+                    self._acquire_runtime_lease(thread_id)
+                except Exception as exc:
+                    _send_local_error(client_ws, request_id, str(exc))
+                    return
+                with self._lock:
+                    self._pending_thread_request_by_id[_jsonrpc_id_key(request_id)] = (method, thread_id)
+            elif method == "thread/start":
+                with self._lock:
+                    self._pending_thread_request_by_id[_jsonrpc_id_key(request_id)] = (method, "")
+            elif method == "thread/unsubscribe" and thread_id:
+                with self._lock:
+                    self._pending_thread_request_by_id[_jsonrpc_id_key(request_id)] = (method, thread_id)
             if method in _OWNER_WRITE_METHODS and thread_id:
-                request_id = payload.get("id")
                 if method == "turn/start":
                     lease = self._lease_store.acquire(thread_id, self._holder)
                     if not lease.granted:
@@ -249,6 +318,19 @@ class _ProxyInteractionGate:
 
         response_id = payload.get("id")
         if response_id not in (None, ""):
+            request_key = _jsonrpc_id_key(response_id)
+            with self._lock:
+                thread_request = self._pending_thread_request_by_id.pop(request_key, None)
+            if thread_request is not None:
+                request_method, thread_id = thread_request
+                if request_method == "thread/resume" and "error" in payload:
+                    self._release_runtime_lease(thread_id)
+                elif request_method == "thread/start" and "error" not in payload:
+                    started_thread_id = _response_thread_id(payload)
+                    if started_thread_id:
+                        self._acquire_runtime_lease(started_thread_id)
+                elif request_method == "thread/unsubscribe" and "error" not in payload:
+                    self._release_runtime_lease(thread_id)
             request_key = _jsonrpc_id_key(response_id)
             with self._lock:
                 thread_id = self._pending_server_request_thread_by_id.pop(request_key, "")
@@ -289,6 +371,8 @@ class _ProxyInteractionGate:
             if thread_id:
                 if method in {"turn/completed", "thread/closed"}:
                     self._lease_store.release(thread_id, self._holder)
+                    if method == "thread/closed":
+                        self._release_runtime_lease(thread_id)
                     self._forget_owned_thread(thread_id)
                 elif method == "thread/status/changed" and _thread_became_non_active(payload):
                     self._lease_store.release(thread_id, self._holder)
@@ -349,6 +433,9 @@ def run_proxy(
     backend_url: str,
     cwd: str,
     data_dir: str | pathlib.Path | None = None,
+    global_data_dir: str | pathlib.Path | None = None,
+    instance_name: str = "",
+    service_token: str = "",
     listen_host: str = "127.0.0.1",
     listen_port: int = 0,
     idle_timeout_seconds: float = _DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -416,6 +503,9 @@ def run_proxy(
                 gate = _ProxyInteractionGate(
                     cwd=cwd,
                     data_dir=pathlib.Path(data_dir or os.environ.get("FC_DATA_DIR") or "."),
+                    global_data_dir=pathlib.Path(global_data_dir or "."),
+                    instance_name=instance_name or os.environ.get("FC_INSTANCE", ""),
+                    service_token=service_token,
                     holder_pid=holder_pid,
                 )
 
@@ -473,6 +563,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--backend-url", required=True)
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--data-dir", default="")
+    parser.add_argument("--global-data-dir", default="")
+    parser.add_argument("--instance", default="")
+    parser.add_argument("--service-token", default="")
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=0)
     parser.add_argument("--parent-pid", type=int, default=0)
@@ -481,6 +574,9 @@ def main(argv: list[str] | None = None) -> None:
         backend_url=args.backend_url,
         cwd=args.cwd,
         data_dir=args.data_dir or None,
+        global_data_dir=args.global_data_dir or None,
+        instance_name=args.instance,
+        service_token=args.service_token,
         listen_host=args.listen_host,
         listen_port=args.listen_port,
         parent_pid=args.parent_pid or None,

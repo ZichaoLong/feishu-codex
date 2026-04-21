@@ -111,7 +111,7 @@
 不要再用“线程原始 profile”作为合同术语。
 更准确的说法是：
 
-- 当前本地默认 profile 恢复
+- 当前实例 / 所选实例本地默认 profile 恢复
 - 显式 profile 恢复
 - 当前 live runtime 无法借 `resume` 改 provider
 
@@ -323,6 +323,7 @@
 
 当前正式提供：
 
+- `feishu-codexctl instance list`
 - `feishu-codexctl service status`
 - `feishu-codexctl binding list`
 - `feishu-codexctl binding status <binding_id>`
@@ -331,6 +332,9 @@
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread admissions`
+- `feishu-codexctl thread import (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread revoke (--thread-id <id> | --thread-name <name>)`
 
 ### 6.4 `binding` 持久化与重置合同
 
@@ -427,6 +431,53 @@
 因此，`python -m bot` 直接运行和 systemd 管理的 service，不允许在同一个
 `FC_DATA_DIR` 上并存。
 如果二者指向同一目录，后启动的一方必须直接退出，而不是尝试抢 socket。
+
+### 6.8 实例作用域、admission 与全局协调
+
+多实例下，`feishu-codexctl` 的作用域需要明确拆成两层：
+
+- `instance list`
+  - 机器级
+  - 读取全局运行中实例注册表
+  - 不针对某一个目标实例
+- 其他子命令
+  - 实例级
+  - 作用于某一个运行中的 `feishu-codex` service
+  - 可通过 `--instance <name>` 显式选择；未显式指定时，按 current / unique-running / default-running 规则解析；若仍有歧义，则必须报错
+
+与实例可见范围相关的正式合同是：
+
+- `default` 实例保留原单实例的全局 Feishu 可见行为
+- 命名实例默认是 `admission-scoped`
+- `thread admissions`
+  - 列出当前实例已 admitted 的 thread 集合
+- `thread import`
+  - 只把 persisted thread 纳入当前实例的 Feishu 可见面
+  - 不等于 bind thread
+  - 不等于把 thread load 进当前实例 backend
+  - 不等于立刻获取 live runtime lease
+- `thread revoke`
+  - 只移除当前实例对该 thread 的 admission
+  - 若当前仍有 binding 指向该 thread，必须拒绝
+
+机器级还有两份共享协调事实：
+
+- `InstanceRegistry`
+  - 记录当前有哪些运行中的实例，以及它们的 control socket / backend 入口
+  - 供 `fcodex` 与 `feishu-codexctl instance list` 做实例发现
+- `ThreadRuntimeLease`
+  - 记录某个 thread 当前由哪个实例持有 live backend runtime
+  - 允许同一实例为同一 thread 持有多个 holder
+  - 不允许不同实例同时 live attach 同一 thread
+
+跨实例 live runtime 流转的正式合同是：
+
+- 若当前 owner 实例可以立即 release Feishu runtime，则允许自动流转
+- 若当前 owner 实例仍在执行，或仍有待处理审批 / 输入，则必须明确拒绝
+- 不排队，不隐式强抢，不靠“最后一个 binding”猜测 owner
+
+这里的 `ThreadRuntimeLease` 是机器级 live runtime 事实。
+它不是飞书 chat binding，也不是 Feishu 写入 owner / interaction owner 的替代物。
 
 ## 7. 共享词汇，而不是强求命令同名
 

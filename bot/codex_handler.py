@@ -7,6 +7,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import pathlib
 import threading
 import time
@@ -42,7 +43,9 @@ from bot.constants import (
     resolve_working_dir,
 )
 from bot.handler import BotHandler
+from bot.instance_layout import DEFAULT_INSTANCE_NAME, current_instance_name, global_data_dir
 from bot.codex_config_reader import ResolvedProfileConfig, resolve_profile_from_codex_config
+from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
 from bot.codex_protocol.client import CodexRpcError
 from bot.codex_group_domain import CodexGroupDomain
 from bot.codex_help_domain import CodexHelpDomain
@@ -72,10 +75,12 @@ from bot.runtime_state import (
 from bot.runtime_view import RuntimeView
 from bot.service_control_plane import ServiceControlPlane
 from bot.session_resolution import (
+    list_current_dir_threads,
     list_global_threads,
     looks_like_thread_id,
     resolve_resume_target_by_name,
 )
+from bot.stores.thread_admission_store import ThreadAdmissionStore
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import (
@@ -88,7 +93,9 @@ from bot.stores.service_instance_lease import (
     ServiceInstanceLease,
     ServiceInstanceLeaseError,
 )
+from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
 from bot.thread_lease_registry import ThreadLeaseRegistry
+from bot.thread_runtime_coordination import acquire_thread_runtime_holder_or_raise
 from bot.thread_access_policy import ThreadAccessPolicy
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
@@ -204,11 +211,16 @@ class CodexHandler(BotHandler):
 
         self._data_dir = data_dir or FC_DATA_DIR
         self._config_dir = config_dir
+        self._instance_name = current_instance_name(config_dir=self._config_dir, data_dir=self._data_dir)
+        self._global_data_dir = global_data_dir()
         self._lock = threading.RLock()
         self._thread_lease_registry = ThreadLeaseRegistry()
         self._interaction_lease_store = InteractionLeaseStore(self._data_dir)
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
         self._service_instance_lease = ServiceInstanceLease(self._data_dir)
+        self._instance_registry = InstanceRegistryStore(self._global_data_dir)
+        self._thread_admission_store = ThreadAdmissionStore(self._data_dir)
+        self._thread_runtime_lease_store = ThreadRuntimeLeaseStore(self._global_data_dir)
         self._service_control_plane = ServiceControlPlane(
             data_dir=self._data_dir,
             dispatch=self._handle_service_control_request,
@@ -344,7 +356,12 @@ class CodexHandler(BotHandler):
             list_loaded_thread_ids=lambda: self._adapter.list_loaded_thread_ids(),
             current_app_server_url=lambda: self._adapter.current_app_server_url(),
             unsubscribe_thread=lambda thread_id: self._adapter.unsubscribe_thread(thread_id),
+            release_service_thread_runtime_lease=self._release_service_thread_runtime_lease,
             service_control_socket_path=lambda: str(self._service_control_plane.socket_path),
+            instance_name=lambda: self._instance_name,
+            admitted_thread_ids=lambda: tuple(sorted(self._thread_admission_store.list_all())),
+            admit_thread=self._thread_admission_store.admit,
+            revoke_thread=self._thread_admission_store.revoke,
             safe_read_runtime_config=self._safe_read_runtime_config,
             current_default_profile_resolution=self._current_default_profile_resolution,
             permissions_summary=_permissions_summary,
@@ -522,11 +539,17 @@ class CodexHandler(BotHandler):
             self._runtime_loop.start()
             self._adapter.start()
             self._service_control_plane.start()
+            self._register_instance_runtime()
+            self._restore_service_thread_runtime_leases()
         except ServiceInstanceLeaseError:
             logger.exception("启动 feishu-codex service 失败：当前 FC_DATA_DIR 已被其他实例占用")
             raise
         except Exception:
             logger.exception("启动 Codex app-server 失败")
+            try:
+                self._unregister_instance_runtime()
+            except Exception:
+                logger.exception("回滚实例注册失败")
             try:
                 self._service_control_plane.stop()
             except Exception:
@@ -541,6 +564,101 @@ class CodexHandler(BotHandler):
                 logger.exception("回滚 handler runtime loop 失败")
             self._service_instance_lease.release()
             raise
+
+    def _register_instance_runtime(self) -> None:
+        entry = build_instance_registry_entry(
+            instance_name=self._instance_name,
+            service_token=self._service_instance_lease.owner_token,
+            control_socket_path=str(self._service_control_plane.socket_path),
+            app_server_url=self._adapter.current_app_server_url(),
+            config_dir=self._config_dir or pathlib.Path(""),
+            data_dir=self._data_dir,
+        )
+        self._instance_registry.register(entry)
+
+    def _unregister_instance_runtime(self) -> None:
+        self._instance_registry.unregister(
+            self._instance_name,
+            service_token=self._service_instance_lease.owner_token,
+        )
+
+    def _service_thread_runtime_holder(self) -> ThreadRuntimeLeaseHolder:
+        return ThreadRuntimeLeaseHolder(
+            holder_id=f"service:{self._service_instance_lease.owner_token}",
+            holder_type="service",
+            instance_name=self._instance_name,
+            owner_pid=os.getpid(),
+            owner_service_token=self._service_instance_lease.owner_token,
+            control_socket_path=str(self._service_control_plane.socket_path),
+            backend_url=self._adapter.current_app_server_url(),
+            updated_at=time.time(),
+        )
+
+    def _ensure_service_thread_runtime_lease(self, thread_id: str) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        acquire_thread_runtime_holder_or_raise(
+            thread_id=normalized_thread_id,
+            holder=self._service_thread_runtime_holder(),
+            lease_store=self._thread_runtime_lease_store,
+            registry_store=self._instance_registry,
+        )
+
+    def _release_service_thread_runtime_lease(self, thread_id: str) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        self._thread_runtime_lease_store.release(
+            normalized_thread_id,
+            f"service:{self._service_instance_lease.owner_token}",
+        )
+
+    def _restore_service_thread_runtime_leases(self) -> None:
+        attached_thread_ids: set[str] = set()
+        with self._lock:
+            for binding in self._binding_runtime.binding_keys_locked():
+                snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+                if snapshot is None:
+                    continue
+                if snapshot.feishu_runtime_state != "attached" or not snapshot.thread_id:
+                    continue
+                attached_thread_ids.add(snapshot.thread_id)
+        for thread_id in sorted(attached_thread_ids):
+            try:
+                self._ensure_service_thread_runtime_lease(thread_id)
+            except Exception:
+                logger.exception("恢复 service thread runtime lease 失败: thread=%s", thread_id[:12])
+                try:
+                    self._runtime_admin.release_feishu_runtime_by_thread_id(thread_id)
+                except Exception:
+                    logger.exception("将冲突线程 fail-closed 为 released 失败: thread=%s", thread_id[:12])
+
+    def _visible_thread_ids_for_instance(self) -> set[str]:
+        if self._instance_name == DEFAULT_INSTANCE_NAME:
+            return {thread.thread_id for thread in self._list_global_threads() if thread.thread_id}
+        visible = set(self._thread_admission_store.list_all())
+        with self._lock:
+            for binding in self._binding_runtime.binding_keys_locked():
+                snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+                if snapshot is not None and snapshot.thread_id:
+                    visible.add(snapshot.thread_id)
+        return visible
+
+    def _is_thread_visible_in_instance(self, thread_id: str) -> bool:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return False
+        if self._instance_name == DEFAULT_INSTANCE_NAME:
+            return True
+        if self._thread_admission_store.contains(normalized_thread_id):
+            return True
+        with self._lock:
+            for binding in self._binding_runtime.binding_keys_locked():
+                snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+                if snapshot is not None and snapshot.thread_id == normalized_thread_id:
+                    return True
+        return False
 
     def handle_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
         self._runtime_call(self._handle_message_impl, sender_id, chat_id, text, message_id=message_id)
@@ -669,6 +787,7 @@ class CodexHandler(BotHandler):
             unsubscribe_thread_id = self._deactivate_binding_locked(key)
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+            self._release_service_thread_runtime_lease(unsubscribe_thread_id)
 
     def preflight_group_prompt(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
         return self._runtime_call(
@@ -694,6 +813,7 @@ class CodexHandler(BotHandler):
                     unsubscribe_thread_ids.append(unsubscribe_thread_id)
         for unsubscribe_thread_id in sorted(set(unsubscribe_thread_ids)):
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+            self._release_service_thread_runtime_lease(unsubscribe_thread_id)
         pending_fail_closed = self._interaction_requests.fail_close_chat_requests(normalized_chat_id)
         logger.info(
             "chat unavailable cleanup finished: chat=%s reason=%s bindings=%s pending=%s",
@@ -707,6 +827,10 @@ class CodexHandler(BotHandler):
         """停止底层 app-server。"""
         with self._lock:
             self._binding_runtime.visit_runtime_states_locked(self._cancel_runtime_timers_locked)
+        try:
+            self._unregister_instance_runtime()
+        except Exception:
+            logger.exception("注销实例注册失败")
         try:
             self._service_control_plane.stop()
         except Exception:
@@ -1822,11 +1946,22 @@ class CodexHandler(BotHandler):
     def _resolve_resume_target(self, arg: str) -> ThreadSummary:
         target = arg.strip()
         if looks_like_thread_id(target):
+            if not self._is_thread_visible_in_instance(target):
+                raise ValueError("该线程当前未导入到本实例，也不属于本实例现有 binding。")
             return self._read_thread_summary_authoritatively(target, original_arg=target)
+        if self._instance_name == DEFAULT_INSTANCE_NAME:
+            thread = resolve_resume_target_by_name(
+                self._adapter,
+                name=target,
+                limit=self._thread_list_query_limit,
+            )
+            return self._read_thread_summary_authoritatively(thread.thread_id, original_arg=target)
+        visible_ids = self._visible_thread_ids_for_instance()
         thread = resolve_resume_target_by_name(
             self._adapter,
             name=target,
             limit=self._thread_list_query_limit,
+            predicate=lambda item: item.thread_id in visible_ids,
         )
         return self._read_thread_summary_authoritatively(thread.thread_id, original_arg=target)
 
@@ -1889,6 +2024,7 @@ class CodexHandler(BotHandler):
         thread = summary or self._lookup_thread_summary_in_bounded_list(thread_id)
         profile = self._effective_default_profile()
         resolved = resolve_profile_from_codex_config(profile) if profile else _EMPTY_RESOLVED_PROFILE
+        self._ensure_service_thread_runtime_lease(thread_id)
         try:
             return self._adapter.resume_thread(
                 thread_id,
@@ -1897,6 +2033,7 @@ class CodexHandler(BotHandler):
                 model_provider=resolved.model_provider or None,
             )
         except Exception as exc:
+            self._release_service_thread_runtime_lease(thread_id)
             if self._is_thread_not_found_error(exc):
                 raise ValueError(f"未找到匹配的线程：`{original_arg}`") from exc
             if thread and thread.source == "cli" and self._is_transport_disconnect(exc):
@@ -1932,22 +2069,31 @@ class CodexHandler(BotHandler):
         *,
         message_id: str = "",
     ) -> None:
-        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
-        state = resolved.state
-        chat_binding_key = resolved.binding
-        unsubscribe_thread_id: str = ""
-        with self._lock:
-            unsubscribe_thread_id = self._binding_runtime.bind_thread_locked(
-                chat_binding_key,
-                state,
-                thread_id=thread.thread_id,
-                thread_title=thread.title,
-                working_dir=thread.cwd or state["working_dir"],
-                on_thread_replaced=self._replace_bound_thread_state_locked,
-                on_after_bind=self._clear_plan_state,
-            )
-        if unsubscribe_thread_id:
-            self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+        thread_was_visible = self._is_thread_visible_in_instance(thread.thread_id)
+        self._ensure_service_thread_runtime_lease(thread.thread_id)
+        self._thread_admission_store.admit(thread.thread_id)
+        try:
+            resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
+            state = resolved.state
+            chat_binding_key = resolved.binding
+            unsubscribe_thread_id: str = ""
+            with self._lock:
+                unsubscribe_thread_id = self._binding_runtime.bind_thread_locked(
+                    chat_binding_key,
+                    state,
+                    thread_id=thread.thread_id,
+                    thread_title=thread.title,
+                    working_dir=thread.cwd or state["working_dir"],
+                    on_thread_replaced=self._replace_bound_thread_state_locked,
+                    on_after_bind=self._clear_plan_state,
+                )
+            if unsubscribe_thread_id:
+                self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+                self._release_service_thread_runtime_lease(unsubscribe_thread_id)
+        except Exception:
+            if not thread_was_visible:
+                self._release_service_thread_runtime_lease(thread.thread_id)
+            raise
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
         resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
@@ -1962,11 +2108,34 @@ class CodexHandler(BotHandler):
             )
         if unsubscribe_thread_id:
             self._adapter.unsubscribe_thread(unsubscribe_thread_id)
+            self._release_service_thread_runtime_lease(unsubscribe_thread_id)
 
     def _list_global_threads(self) -> list[ThreadSummary]:
         return list_global_threads(
             self._adapter,
             limit=self._thread_list_query_limit,
+        )
+
+    def _list_visible_current_dir_threads(
+        self,
+        sender_id: str,
+        chat_id: str,
+        *,
+        message_id: str = "",
+    ) -> list[ThreadSummary]:
+        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
+        if self._instance_name == DEFAULT_INSTANCE_NAME:
+            return list_current_dir_threads(
+                self._adapter,
+                cwd=runtime.working_dir,
+                limit=self._thread_list_query_limit,
+            )
+        visible_ids = self._visible_thread_ids_for_instance()
+        return list_current_dir_threads(
+            self._adapter,
+            cwd=runtime.working_dir,
+            limit=self._thread_list_query_limit,
+            predicate=lambda thread: thread.thread_id in visible_ids,
         )
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None:

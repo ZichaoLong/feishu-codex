@@ -76,6 +76,7 @@ Status guidance:
 | What is the Feishu-side thread lifecycle, and what states must stay distinct? | [`feishu-thread-lifecycle.md`](./contracts/feishu-thread-lifecycle.md) |
 | What shared state vocabulary and admin-surface contract apply to `/status`, `/release-feishu-runtime`, and `feishu-codexctl`? | [`runtime-control-surface.md`](./contracts/runtime-control-surface.md) |
 | What do `/session`, `/resume`, `/profile`, and `/rm` mean across Feishu, `fcodex`, and the TUI? | [`session-profile-semantics.md`](./contracts/session-profile-semantics.md) |
+| How do multi-instance `default` / named-instance behavior, admission, `fcodex --instance`, and the global runtime lease work? | [`session-profile-semantics.md`](./contracts/session-profile-semantics.md), [`runtime-control-surface.md`](./contracts/runtime-control-surface.md), [`fcodex-shared-backend-runtime.md`](./architecture/fcodex-shared-backend-runtime.md) |
 | What information architecture and semantic rules does the Feishu `/help` navigation surface follow? | [`feishu-help-navigation.md`](./contracts/feishu-help-navigation.md) |
 | What is the formal behavior contract for group chat modes, ACL, history recovery, and group-command triggering? | [`group-chat-contract.md`](./contracts/group-chat-contract.md) |
 | How do approval, sandbox, writable roots, and protected paths behave? | [`codex-permissions-model.md`](./contracts/codex-permissions-model.md) |
@@ -99,6 +100,12 @@ Status guidance:
   - [`feishu-help-navigation.md`](./contracts/feishu-help-navigation.md)
   - [`group-chat-manual-test-checklist.zh-CN.md`](./verification/group-chat-manual-test-checklist.zh-CN.md)
 - For wrapper or backend work:
+  - [`fcodex-shared-backend-runtime.md`](./architecture/fcodex-shared-backend-runtime.md)
+  - [`shared-backend-resume-safety.md`](./decisions/shared-backend-resume-safety.md)
+- For multi-instance behavior, instance admission, `feishu-codexctl --instance`,
+  or cross-instance runtime lease work:
+  - [`session-profile-semantics.md`](./contracts/session-profile-semantics.md)
+  - [`runtime-control-surface.md`](./contracts/runtime-control-surface.md)
   - [`fcodex-shared-backend-runtime.md`](./architecture/fcodex-shared-backend-runtime.md)
   - [`shared-backend-resume-safety.md`](./decisions/shared-backend-resume-safety.md)
 - For permission or execution wording:

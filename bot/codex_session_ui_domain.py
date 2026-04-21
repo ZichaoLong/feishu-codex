@@ -25,8 +25,6 @@ from bot.cards import (
     make_card_response,
 )
 from bot.runtime_view import RuntimeView
-from bot.session_resolution import list_current_dir_threads
-
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +59,14 @@ class _SessionUiDomainOwner(Protocol):
     def _reply_text(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
 
     def _resolve_resume_target(self, arg: str) -> ThreadSummary: ...
+
+    def _list_visible_current_dir_threads(
+        self,
+        sender_id: str,
+        chat_id: str,
+        *,
+        message_id: str = "",
+    ) -> list[ThreadSummary]: ...
 
     def _read_thread_summary_authoritatively(
         self,
@@ -567,8 +573,8 @@ class CodexSessionUiDomain:
         return next((item for item in rows if item["thread_id"] == thread_id), None)
 
     def _list_current_dir_threads(self, sender_id: str, chat_id: str, *, message_id: str = "") -> list[ThreadSummary]:
-        return list_current_dir_threads(
-            self._owner._adapter,
-            cwd=self._owner._get_runtime_view(sender_id, chat_id, message_id).working_dir,
-            limit=self._owner._thread_list_query_limit,
+        return self._owner._list_visible_current_dir_threads(
+            sender_id,
+            chat_id,
+            message_id=message_id,
         )

@@ -37,6 +37,7 @@
 - 尽量减少对私有磁盘格式或 shell hook 行为的依赖
 - 让飞书层、本地 wrapper 层、Codex 协议层保持清晰分离
 - 为“飞书与本地继续同一个 live thread”保留一条低认知负担的 shared-backend 路径
+- 允许同一台机器上的同一位本地操作者同时运行多个 Feishu 实例，同时继续共享一套 `CODEX_HOME`
 
 ## 3. 非目标
 
@@ -50,8 +51,9 @@
 
 - 原生协议优先：优先使用 `codex app-server` 行为和 API，而不是本地抓取或重建状态
 - 单一事实来源：thread id、cwd、title、preview、source、runtime config 来自 Codex
-- 飞书本地状态留在本地：本地默认 profile、线程/UI 绑定状态由 `feishu-codex` 管理
-- shared-backend 路径显式存在：如果要和飞书继续同一个 live thread，应明确走同一个 backend
+- 飞书本地状态留在本地：每实例本地默认 profile、线程/UI 绑定状态由 `feishu-codex` 管理
+- shared-backend 路径显式存在：如果要和飞书继续同一个 live thread，应明确走同一个**实例 backend**
+- `CODEX_HOME` 与 Feishu 运行时边界分离：前者共享，后者按实例隔离
 - 运行时假设要文档化：wrapper 与 shared-backend 行为不能只隐含在代码里
 
 ## 5. 当前架构
@@ -80,12 +82,21 @@
 
 当前运行时行为：
 
-- `feishu-codex` service 默认走 managed app-server 路径
-- service 会启动本地 `codex app-server` 子进程，并通过 websocket 与之通信
-- shared backend 默认优先 `ws://127.0.0.1:8765`
-- 如果默认端口不可用，service 会自动切到空闲本地端口，并把当前实际地址写入本地运行时状态
-- `fcodex` 与其它 remote-style 路径会发现这个实际地址，并附着到同一个 shared backend
+- 所有实例共享同一个 `CODEX_HOME`
+- 每个实例各自持有：
+  - `FC_CONFIG_DIR`
+  - `FC_DATA_DIR`
+  - service owner
+  - control plane
+  - managed `codex app-server` backend
+- `shared backend` 在当前仓库里表示“实例内共享 backend”，不是“全系统只存在一个 backend”
+- 某实例的 backend 默认优先 `ws://127.0.0.1:8765`
+- 如果默认端口不可用，该实例 service 会自动切到空闲本地端口，并把当前实际地址写入该实例自己的运行时状态
+- `fcodex` 会先选择目标实例，再发现该实例的实际 backend 地址，并附着到同一个实例 backend
 - 当 upstream remote 模式需要 cwd 修正时，`fcodex` 会额外加一个很薄的本地 websocket 代理
+- 机器级还维护两份全局协调状态：
+  - 运行中实例注册表
+  - thread live runtime lease
 
 shared backend 与 wrapper 的具体机制，见
 `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`。
@@ -100,9 +111,11 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/codex_protocol/client.py`：`codex app-server` 的 websocket JSON-RPC client
 - `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
 - `bot/feishu_codexctl.py` 与 `bot/service_control_plane.py`：本地服务管理 CLI 与运行中服务控制面
+- `bot/instance_layout.py` 与 `bot/instance_resolution.py`：多实例目录布局、当前/目标实例解析
 - `bot/binding_identity.py`：admin-facing binding 标识规范
 - `bot/binding_runtime_manager.py`：binding / subscribe / attach / released 与本地 runtime snapshot 的 owner
 - `bot/thread_access_policy.py`：线程共享、Feishu 写入 owner、interaction owner 的准入 policy 边界
+- `bot/thread_runtime_coordination.py`：跨实例 live runtime lease 获取、自动转移与拒绝
 - `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、watchdog / reconcile / degrade 处理
 - `bot/runtime_admin_controller.py`：`/status`、`/release-feishu-runtime` 与 control-plane 查询/管理
 - `bot/inbound_surface_controller.py`：入站命令面、卡片 action 路由、help 卡片命令复用
@@ -111,7 +124,10 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
 - `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态
 - `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 reply/log 片段拼装，不承担 thread、owner 或 binding 级状态职责
-- `bot/stores/*.py`：本地默认 profile、shared backend 运行时发现状态、群聊状态
+- `bot/stores/thread_admission_store.py`：每实例 Feishu 可见线程的 admission
+- `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
+- `bot/stores/thread_runtime_lease_store.py`：机器级 thread live runtime lease
+- `bot/stores/*.py`：每实例本地默认 profile、shared backend 运行时发现状态、群聊状态
 
 对飞书传输层还应补一条维护性约束：
 
@@ -188,11 +204,21 @@ shared backend 与 wrapper 的具体机制，见
 
 `feishu-codex` 只保存飞书或集成侧专属的数据：
 
-- 飞书与默认 `fcodex` 启动共用的本地默认 profile
-- shared backend 的运行时地址发现状态
+- 每实例飞书与该实例 `fcodex` 启动共用的本地默认 profile
+- 每实例 shared backend 的运行时地址发现状态
 - 私聊当前绑定到哪个 thread，以及群聊按 `chat_id` 共享绑定到哪个 thread
 - 群聊工作态、群 ACL、群上下文日志与上下文边界状态
 - 审批、重命名、卡片等临时 UI 状态
+- 每实例 thread admission 集合
+
+另外还有两份机器级共享协调状态：
+
+- 运行中实例注册表
+- thread live runtime lease
+
+它们都位于共享的 `FC_GLOBAL_DATA_DIR` 下。
+这两份状态不属于任何单个 Feishu chat，也不属于 Codex 线程元数据；
+它们只用于本地 CLI 和多实例运行时协调。
 
 其中，`binding` 默认是跨重启保留的本地 bookmark：
 
@@ -276,6 +302,9 @@ feishu-codex/
     fcodex_proxy.py
     feishu_codexctl.py
     service_control_plane.py
+    instance_layout.py
+    instance_resolution.py
+    thread_runtime_coordination.py
     binding_identity.py
     config.py
     constants.py
@@ -288,7 +317,10 @@ feishu-codex/
       client.py
     stores/
       app_server_runtime_store.py
+      instance_registry_store.py
       profile_state_store.py
+      thread_admission_store.py
+      thread_runtime_lease_store.py
   config/
     system.yaml.example
     codex.yaml.example

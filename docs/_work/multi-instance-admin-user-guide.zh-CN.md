@@ -1,6 +1,6 @@
 # 多实例模式下的管理员与用户使用方式（草案）
 
-> 状态：待审视草案
+> 状态：已按本文方向完成第一轮实现，本文继续作为管理员/用户工作流说明草案
 >
 > 说明：本文描述的是目标使用方式，不表示当前代码已全部支持。待设计确认并实现后，再把稳定部分下沉到正式合同与 README。
 
@@ -77,6 +77,7 @@ feishu-codex --instance corp-b log
 - `corp-a` 与 `corp-b` 是两条独立的 Feishu service
 - 它们各自拥有自己的 backend
 - 停掉某个实例，只影响该实例
+- `default` 实例仍沿用原单实例行为；命名实例才默认收紧到显式 admission
 
 ### 3.3 管理实例内运行态
 
@@ -95,7 +96,44 @@ feishu-codexctl --instance corp-a thread status --thread-id <id>
 - `feishu-codexctl` 的对象是“某个运行中的 Feishu service”
 - 它不是一个脱离实例的全局线程神控台
 
-### 3.4 跨企业复用 thread 的原则
+### 3.4 让某个实例“可见/可用”某个共享 thread
+
+这里要先明确一个最重要的点：
+
+- 共享 `CODEX_HOME` 不等于所有实例会自动暴露所有 thread
+
+建议的目标工作流是：
+
+1. thread 先存在于共享 `CODEX_HOME` 中
+2. 管理员显式把它导入到某个实例
+3. 只有被导入的实例，才会在 Feishu 侧把这个 thread 视为可见/可恢复目标
+
+建议的本地管理命令形态：
+
+```bash
+feishu-codexctl --instance corp-b thread import --thread-id <thread_id>
+feishu-codexctl --instance corp-b thread revoke --thread-id <thread_id>
+```
+
+这里的语义是：
+
+- `import`
+  - 让某个共享 thread 进入该实例的 admitted 范围
+  - 不等于立即获取写入租约
+  - 不等于立即把该 thread load 进该实例 backend
+- `revoke`
+  - 让该 thread 不再对这个实例的 Feishu 命令面默认可见
+  - 若当前仍有 binding / running turn，则应阻塞或要求先清理
+
+这一步是“管理员显式决策跨企业共享”的核心动作。
+
+补充当前实现取舍：
+
+- `default` 实例继续把共享 `CODEX_HOME` 里的 persisted thread 视为默认可见
+- 只有命名实例才需要管理员显式 `import`
+- 这意味着“原单实例路径基本不变；新增企业实例按 admission 收紧”
+
+### 3.5 跨企业复用 thread 的原则
 
 管理员可以决定不同企业实例是否使用同一个 persisted thread。
 
@@ -114,7 +152,72 @@ feishu-codexctl --instance corp-a thread status --thread-id <id>
 - **看见同一个 thread，可以接受**
 - **同时把它变成两个 live backend runtime，不可以接受**
 
-### 3.5 管理员对普通用户的预期说明
+### 3.6 写入租约如何流转
+
+建议采用下面这条尽量顺手、但仍保持 fail-closed 的工作流：
+
+#### 情况 A：thread 当前没有任何实例持有 live runtime
+
+- thread 只要已经被导入到实例 B
+- 实例 B 上的下一条 prompt 就可以正常获取 runtime lease
+- 然后由实例 B 的 backend `resume/attach` 并启动 turn
+
+这时对用户的体验基本就是：
+
+- “直接发消息就能接上”
+
+#### 情况 B：thread 当前由实例 A 持有 live runtime，但已经 idle
+
+- thread 已被实例 B 导入
+- 实例 B 上来了新的 prompt
+- 系统发现：
+  - A 当前是 owner instance
+  - 但 A 没有 running turn
+  - 也没有 pending approval / pending input
+- 这时可执行**自动流转**：
+  - B 请求 A 释放 runtime
+  - A 成功释放后
+  - B 获取 runtime lease
+  - B 在自己的 backend 上恢复并启动 turn
+
+这时对用户的体验仍然可以接近：
+
+- “如果另一边已经闲了，我直接发消息就能接管”
+
+#### 情况 C：thread 当前由实例 A 持有 live runtime，且仍在执行或等待交互
+
+- 实例 B 上的 prompt 必须 pure reject
+- 不排队
+- 不偷偷强抢
+- 不自动猜测“也许可以接管”
+
+给用户/管理员的提示应尽量明确：
+
+- 当前 owner 是哪个实例
+- 是“正在执行”还是“正在等待审批/输入”
+- 现在不能写，稍后再试
+
+#### 初始版本的建议取舍
+
+为控制复杂度，初始版本建议：
+
+- 先支持：
+  - `import`
+  - `revoke`
+  - idle 时自动流转
+  - active/pending 时 pure reject
+- 暂不急着支持：
+  - 管理员强制 takeover
+  - 跨实例排队
+  - 非 owner 实例的 live 跟随/镜像 UI
+
+这样管理员和普通用户的心智都比较简单：
+
+- thread 要先被管理员导入到实例
+- 闲着时可以自然流转
+- 忙着时就明确拒绝
+
+### 3.7 管理员对普通用户的预期说明
 
 管理员可以对普通用户给出简单说明：
 
@@ -128,6 +231,7 @@ feishu-codexctl --instance corp-a thread status --thread-id <id>
 普通用户的目标心智应尽量简单：
 
 - 我只和当前企业里的这个 bot 交互
+- 我只能接触当前实例已经导入/开放给本实例的 thread
 - 这个 bot 是否能写当前 thread，取决于当前 chat 的 ACL / mode / owner 状态
 - 如果系统提示当前 thread 正忙、被占用、或本实例当前不能写，就不要反复并发触发
 
@@ -165,6 +269,11 @@ fcodex /resume <thread_name>
 fcodex --instance corp-a
 fcodex --instance corp-b resume <thread_id>
 ```
+
+这里补一条边界：
+
+- `fcodex` 仍可保留比 Feishu 实例更强的全局发现能力
+- 但它在真正连 backend 写入时，仍要服从实例路由和全局 runtime lease
 
 ### 5.3 自动路由的用户心智
 

@@ -18,8 +18,10 @@ from bot.codex_protocol.client import CodexRpcClient
 from bot.fcodex import _default_data_dir, _launch_local_cwd_proxy, main as fcodex_main
 from bot.fcodex_proxy import _ProxyInteractionGate, _relay_messages, _rewrite_thread_start_cwd, run_proxy
 from bot.profile_resolution import resolve_local_default_profile
+from bot.stores.instance_registry_store import InstanceRegistryEntry
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
+from bot.stores.thread_runtime_lease_store import ThreadRuntimeLease
 from bot.session_resolution import (
     format_thread_match,
     looks_like_thread_id,
@@ -675,6 +677,112 @@ class FCodexTests(unittest.TestCase):
             mock_exec.call_args[0][1],
             ["codex", "--cd", os.getcwd(), "--remote", "ws://127.0.0.1:9900", "resume"],
         )
+
+    def test_fcodex_rejects_instance_with_explicit_remote(self) -> None:
+        stderr = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.sys.stderr", stderr):
+                with patch("sys.argv", ["fcodex", "--instance", "corp-b", "--remote", "ws://127.0.0.1:9900"]):
+                    with self.assertRaises(SystemExit) as exc:
+                        fcodex_main()
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("不能与显式 `--remote` 同时使用", stderr.getvalue())
+
+    def test_fcodex_routes_resume_to_owner_instance(self) -> None:
+        corp_a = InstanceRegistryEntry(
+            instance_name="corp-a",
+            owner_pid=111,
+            service_token="token-a",
+            control_socket_path="/tmp/corp-a.sock",
+            app_server_url="ws://127.0.0.1:9101",
+            config_dir="/tmp/config-a",
+            data_dir="/tmp/data-a",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        corp_b = InstanceRegistryEntry(
+            instance_name="corp-b",
+            owner_pid=222,
+            service_token="token-b",
+            control_socket_path="/tmp/corp-b.sock",
+            app_server_url="ws://127.0.0.1:9102",
+            config_dir="/tmp/config-b",
+            data_dir="/tmp/data-b",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        lease = ThreadRuntimeLease(
+            thread_id="thread-1",
+            owner_instance="corp-b",
+            owner_service_token="token-b",
+            control_socket_path="/tmp/corp-b.sock",
+            backend_url="ws://127.0.0.1:9102",
+            attached_at=1.0,
+            holders=(),
+        )
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.unique_running_instance", return_value=None):
+                with patch("bot.fcodex.default_running_instance", return_value=None):
+                    with patch("bot.fcodex.list_running_instances", return_value=[corp_a, corp_b]):
+                        with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=lease):
+                            with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                                    mock_resolve.return_value.effective_profile = ""
+                                    mock_resolve.return_value.stale_profile = ""
+                                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9200", Mock())) as mock_proxy:
+                                        with patch("bot.fcodex.os.execvpe") as mock_exec:
+                                            with patch("sys.argv", ["fcodex", "resume", "thread-1"]):
+                                                fcodex_main()
+
+        mock_proxy.assert_called_once_with(
+            "ws://127.0.0.1:9102",
+            os.getcwd(),
+            Path("/tmp/data-b"),
+            instance_name="corp-b",
+            service_token="token-b",
+        )
+        self.assertEqual(
+            mock_exec.call_args[0][1],
+            ["codex", "--remote", "ws://127.0.0.1:9200", "--cd", os.getcwd(), "resume", "thread-1"],
+        )
+
+    def test_fcodex_requires_explicit_instance_when_multiple_instances_are_running(self) -> None:
+        corp_a = InstanceRegistryEntry(
+            instance_name="corp-a",
+            owner_pid=111,
+            service_token="token-a",
+            control_socket_path="/tmp/corp-a.sock",
+            app_server_url="ws://127.0.0.1:9101",
+            config_dir="/tmp/config-a",
+            data_dir="/tmp/data-a",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        corp_b = InstanceRegistryEntry(
+            instance_name="corp-b",
+            owner_pid=222,
+            service_token="token-b",
+            control_socket_path="/tmp/corp-b.sock",
+            app_server_url="ws://127.0.0.1:9102",
+            config_dir="/tmp/config-b",
+            data_dir="/tmp/data-b",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        stderr = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.unique_running_instance", return_value=None):
+                with patch("bot.fcodex.default_running_instance", return_value=None):
+                    with patch("bot.fcodex.list_running_instances", return_value=[corp_a, corp_b]):
+                        with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=None):
+                            with patch("bot.fcodex.sys.stderr", stderr):
+                                with patch("sys.argv", ["fcodex", "resume", "thread-1"]):
+                                    with self.assertRaises(SystemExit) as exc:
+                                        fcodex_main()
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("请显式传 `--instance <name>`", stderr.getvalue())
 
     def test_fcodex_clears_stale_local_default_profile(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):

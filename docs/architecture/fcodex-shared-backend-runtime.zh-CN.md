@@ -28,18 +28,29 @@
 在稳定状态下，本地 / 共享路径如下：
 
 ```text
-Feishu client
-  -> feishu-codex service
-     -> shared codex app-server
-        （默认优先 ws://127.0.0.1:8765；冲突时自动切到空闲本地端口）
+shared CODEX_HOME
+machine-global coordination (`FC_GLOBAL_DATA_DIR`)
+  - instance registry
+  - thread runtime lease
+
+instance A / default
+  Feishu client
+    -> feishu-codex service
+       -> instance-local shared codex app-server
+          （默认优先 ws://127.0.0.1:8765；冲突时自动切到空闲本地端口）
 
 fcodex shell wrapper
+  -> select target instance backend
   -> local thin proxy
-     -> shared codex app-server
+     -> selected instance-local shared codex app-server
         -> upstream Codex TUI
 ```
 
-关键点在于：飞书和 `fcodex` 预期应连接到同一个 live app-server backend。
+关键点在于：
+
+- `shared backend` 现在指的是**实例内共享 backend**
+- 多个实例共享的是 `CODEX_HOME`，不是同一个 live app-server backend
+- 飞书和 `fcodex` 如果要安全继续同一个 live thread，预期应连接到同一个**实例 backend**
 
 ## 3. 为什么需要 `fcodex`
 
@@ -47,26 +58,40 @@ fcodex shell wrapper
 
 `fcodex` 存在的目的，是提供：
 
-- 与飞书共享的单一 backend
-- 由 `feishu-codex` 持有的本地默认 profile
+- 与所选飞书实例共享的单一 backend
+- 由所选实例 `feishu-codex` 持有的本地默认 profile
 - `/session`、`/resume <name>` 这类 wrapper 命令
 - 一个用于修正 remote 模式工作目录行为的兼容层
 
 ## 4. 安装后的 Wrapper 环境
 
-安装后的 `fcodex` wrapper 在启动 Python 入口前，会做三件重要的事：
+多实例下，要区分三层本地路径：
+
+1. 共享的 `CODEX_HOME`
+2. 每实例独立的 `FC_CONFIG_DIR` / `FC_DATA_DIR`
+3. 机器级共享协调目录 `FC_GLOBAL_DATA_DIR`
+
+其中：
+
+- `default` 实例保持与原单实例安装路径兼容
+- 命名实例落在 `instances/<name>` 子目录下
+- `FC_GLOBAL_DATA_DIR` 默认落在数据根目录下的 `_global/`
+
+安装后的 `fcodex` wrapper 会先做基础环境准备，再把控制权交给 Python wrapper。
+这一层会：
 
 1. 如果存在，则加载 `~/.config/environment.d/90-codex.conf`
-2. 设置 `FC_CONFIG_DIR`
-3. 设置 `FC_DATA_DIR`
+2. 准备默认实例的 `FC_CONFIG_DIR` / `FC_DATA_DIR` 根信息
+3. 再由 Python wrapper 解析 `--instance`、实例注册表、runtime lease，为本次启动选出目标实例
 
-这意味着 service 进程与本地 wrapper 可以共享：
+因此，“wrapper 与 service 共享的本地状态”应理解为：
 
-- 同一份配置目录
-- 同一份本地 profile 状态文件
-- 同一份辅助本地状态
+- **同一实例**共享自己的配置目录、profile-state、runtime backend 发现状态
+- **所有实例**共享 `CODEX_HOME`
+- **所有实例**共享机器级实例注册表与 thread runtime lease
 
-这里的“辅助本地状态”也包括 shared app-server 的运行时地址发现信息：当默认 `ws://127.0.0.1:8765` 被占用、服务自动切到其它空闲端口时，`fcodex` 会据此找到当前实际 backend 地址。
+当默认 `ws://127.0.0.1:8765` 被占用、某实例服务自动切到其它空闲端口时，
+`fcodex` 会通过该实例的数据目录里记录的运行时发现状态找到当前实际 backend 地址。
 
 ## 5. `--cd` 的真实工作方式
 
@@ -133,7 +158,8 @@ fcodex shell wrapper
 - `fcodex resume <thread_id>`
 - `fcodex /resume <name>` 在 wrapper 侧解析完成之后
 
-像 `fcodex /session` 这样的 wrapper 命令虽然不会启动 TUI，但它们查询的仍然是同一个 backend 和同一份线程元数据。
+这里的“shared backend”都指所选实例 backend。
+像 `fcodex /session` 这样的 wrapper 命令虽然不会启动 TUI，但它们查询的仍然是所选实例 backend 和同一份 persisted 线程元数据。
 
 ## 9. 显式 `--remote` 是特例
 
@@ -151,7 +177,7 @@ fcodex shell wrapper
 
 相较于裸 Codex TUI，`fcodex` 增加了这些语义：
 
-- 默认与飞书共享 backend
+- 默认与所选飞书实例共享 backend
 - 当缺少 `-p/--profile` 时注入本地默认 profile
 - wrapper 命令：
   - `/help`
@@ -189,7 +215,7 @@ wrapper 可能需要跟着调整。相关上游实现与变更历史，应以 [`
 
 ### Shared backend 可用性是前提
 
-如果 shared app-server 没有运行，或者不可达，`fcodex` 就无法完成它的职责。这时启动会快速失败，而不是悄悄退回一个隔离的本地 backend。
+如果所选实例的 shared app-server 没有运行，或者不可达，`fcodex` 就无法完成它的职责。这时启动会快速失败，而不是悄悄退回一个隔离的本地 backend。
 
 ## 12. 开发者入口
 

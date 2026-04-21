@@ -31,19 +31,31 @@ See also:
 At steady state, the local/shared path looks like this:
 
 ```text
-Feishu client
-  -> feishu-codex service
-     -> shared codex app-server
-        (prefers ws://127.0.0.1:8765; auto-falls back to a free local port)
+shared CODEX_HOME
+machine-global coordination (`FC_GLOBAL_DATA_DIR`)
+  - instance registry
+  - thread runtime lease
+
+instance A / default
+  Feishu client
+    -> feishu-codex service
+       -> instance-local shared codex app-server
+          (prefers ws://127.0.0.1:8765; auto-falls back to a free local port)
 
 fcodex shell wrapper
+  -> select target instance backend
   -> local thin proxy
-     -> shared codex app-server
+     -> selected instance-local shared codex app-server
         -> upstream Codex TUI
 ```
 
-The important point is that Feishu and `fcodex` are meant to talk to the same
-live app-server backend.
+The important points are:
+
+- `shared backend` now means an instance-local shared backend
+- multiple instances share `CODEX_HOME`, not one universal live app-server
+  backend
+- if Feishu and `fcodex` should safely continue the same live thread, they are
+  expected to talk to the same instance backend
 
 ## 3. Why `fcodex` Exists
 
@@ -53,30 +65,45 @@ operate on the same live thread.
 
 `fcodex` exists to provide:
 
-- one shared backend with Feishu
-- a local default profile owned by `feishu-codex`
+- one shared backend with the selected Feishu instance
+- a local default profile owned by the selected `feishu-codex` instance
 - wrapper commands such as `/session` and `/resume <name>`
 - a compatibility patch for remote-mode working-directory behavior
 
 ## 4. Installed Wrapper Environment
 
-The installed `fcodex` wrapper does three important things before it launches
-the Python entrypoint:
+In multi-instance mode, distinguish three local path layers:
+
+1. shared `CODEX_HOME`
+2. per-instance `FC_CONFIG_DIR` / `FC_DATA_DIR`
+3. machine-global coordination under `FC_GLOBAL_DATA_DIR`
+
+Specifically:
+
+- the `default` instance remains path-compatible with the original
+  single-instance layout
+- named instances live under `instances/<name>` subdirectories
+- `FC_GLOBAL_DATA_DIR` defaults to `_global/` under the data root
+
+The installed `fcodex` wrapper first prepares the base environment, then hands
+off to the Python wrapper for actual instance selection. That layer:
 
 1. loads `~/.config/environment.d/90-codex.conf` when present
-2. sets `FC_CONFIG_DIR`
-3. sets `FC_DATA_DIR`
+2. prepares default-instance `FC_CONFIG_DIR` / `FC_DATA_DIR` root information
+3. resolves `--instance`, the instance registry, and the runtime lease to pick
+   the target instance for this launch
 
-That means the service process and the local wrapper can share:
+So "wrapper and service share local state" should now be read as:
 
-- the same configuration directory
-- the same local profile-state file
-- the same auxiliary local state
+- the wrapper and service of the same instance share that instance's config,
+  profile-state, and runtime backend-discovery state
+- all instances share `CODEX_HOME`
+- all instances share the machine-level instance registry and thread runtime
+  lease
 
-That auxiliary local state also includes runtime shared-backend discovery. When
-the default `ws://127.0.0.1:8765` endpoint is unavailable and the service falls
-back to another free local port, `fcodex` uses that state to find the active
-backend.
+When the default `ws://127.0.0.1:8765` endpoint is unavailable and one instance
+service falls back to another free port, `fcodex` uses that instance's local
+runtime-discovery state to find the active backend.
 
 ## 5. How `--cd` Actually Works
 
@@ -151,8 +178,9 @@ By default:
 - `fcodex resume <thread_id>`
 - `fcodex /resume <name>` after wrapper-side resolution
 
+Here "shared backend" always means the selected instance backend.
 Wrapper commands such as `fcodex /session` do not start a TUI, but they still
-query the same backend and the same thread metadata.
+query that selected backend and the same persisted thread metadata.
 
 ## 9. Explicit `--remote` Is a Special Case
 
@@ -171,7 +199,7 @@ This is intentional. Explicit `--remote` means "use the target I asked for."
 
 Compared with bare Codex TUI, `fcodex` adds these semantics:
 
-- shared backend with Feishu by default
+- shared backend with the selected Feishu instance by default
 - local default-profile injection when `-p/--profile` is absent
 - wrapper commands:
   - `/help`
@@ -214,9 +242,9 @@ Inside the TUI, `/resume` picker behavior remains upstream and may differ from:
 
 ### Shared backend availability matters
 
-If the shared app-server is not running or not reachable, `fcodex` cannot do its
-job. In that case, startup fails fast rather than silently falling back to an
-isolated local backend.
+If the selected instance's shared app-server is not running or not reachable,
+`fcodex` cannot do its job. In that case, startup fails fast rather than
+silently falling back to an isolated local backend.
 
 ## 12. Developer Pointers
 

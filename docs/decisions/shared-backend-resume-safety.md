@@ -19,12 +19,20 @@ See also:
 
 ## 2. Problem Statement
 
-`feishu-codex` and stock Codex TUI are safe only when they write the same thread
-through the same app-server backend.
+Two frontends are safe only when they write the same thread through the same
+app-server backend.
 
 If they resume the same persisted thread through different app-server processes,
 they can each materialize their own live in-memory thread and append
 conflicting state later.
+
+After multi-instance support, this rule must be read more explicitly:
+
+- multiple instances may share `CODEX_HOME` and the persisted thread namespace
+- but at any moment, one thread may have live runtime residency in only one
+  instance backend
+- bare `codex` running its own isolated backend is still fully outside that
+  coordination path
 
 This document defines the current safety model for:
 
@@ -62,9 +70,15 @@ Use one rule everywhere:
 If the user wants Feishu and local TUI to operate on the same live thread
 safely, both must connect to the same app-server backend.
 
+In this repository, that now splits into two layers:
+
+- **within one instance**: Feishu and `fcodex` may safely share that instance backend
+- **across instances**: a machine-level `ThreadRuntimeLease` prevents one
+  thread from being live-attached by two instance backends at the same time
+
 ## 5. Backend Safety Boundary
 
-### 5.1 Shared backend
+### 5.1 Shared backend within one instance
 
 This is the recommended safe path.
 
@@ -78,7 +92,26 @@ Properties:
 How the current runtime and `fcodex` wrapper make that work is documented in
 `docs/architecture/fcodex-shared-backend-runtime.md`.
 
-### 5.2 Isolated backend
+### 5.2 Another `feishu-codex` instance backend
+
+This is the new boundary introduced by multi-instance support.
+
+Properties:
+
+- multiple instances share the persisted thread namespace
+- each instance has its own live backend
+- live residency of one thread is coordinated by the machine-level
+  `ThreadRuntimeLease`
+- if the owner instance is idle and reports `release_feishu_runtime_available`,
+  automatic transfer is allowed
+- if the owner instance is still executing or still has pending approval /
+  input, the write attempt must reject clearly
+
+So this is neither "one shared backend" nor "two backends that may dual-write".
+It is a coordinated path with a shared persisted namespace but strictly
+single-owner live runtime.
+
+### 5.3 Bare `codex` isolated backend
 
 This is what happens when the user runs stock TUI outside the shared backend.
 
@@ -87,8 +120,8 @@ Properties:
 - `feishu-codex` cannot know whether that local TUI is idle, closed, or about
   to write
 - `feishu-codex` cannot safely assume exclusive ownership of such a thread
-- local continuation of the same live thread should use `fcodex` and the shared
-  backend instead
+- local continuation of the same live thread should use `fcodex` and the same
+  instance shared backend instead
 - continuing to write the same thread through bare `codex` on another backend
   is outside the supported safe path
 
@@ -126,11 +159,15 @@ Behavior:
 
 - resume the target thread immediately
 - bind the current Feishu chat to that thread
-- if the user later attaches through `fcodex` on the same shared backend,
+- if the user later attaches through `fcodex` on the same instance shared backend,
   Feishu and `fcodex` can continue operating on the same live thread safely
+- if another instance backend currently holds live residency for that thread,
+  actual resume still has to obey the machine-level `ThreadRuntimeLease`:
+  - automatic transfer is allowed only when the owner can release immediately
+  - busy / pending owner state must reject clearly
 - if this resume does not specify an explicit profile, Feishu and `fcodex`
-  have the same effective behavior: they both use the current `feishu-codex`
-  local default profile
+  have the same effective behavior: they both use the current-instance /
+  selected-instance local default profile
 
 This path assumes:
 
@@ -147,11 +184,21 @@ behavior through the same execution path.
 
 That difference should not be interpreted as a semantic mismatch. The intended
 semantics are the same on both sides: for an unloaded thread, absent an
-explicit profile, resume uses the local default profile.
+explicit profile, resume uses the current-instance / selected-instance local
+default profile.
 
 The repository decision is to no longer block this path with a preview/confirm
 card. Avoiding dual-backend writes for such threads is an operational rule, not
 a UI-enforced guard.
+
+Named instances add one more visibility boundary:
+
+- Feishu `/session` and Feishu `/resume` obey the current instance's
+  `admission + binding` visible surface
+- `fcodex /session` and `fcodex /resume <name>` are operator-local and do not
+  read that admission filter
+- once a path actually wants live runtime residency, all of them still obey
+  the same `ThreadRuntimeLease`
 
 ## 7. Provenance and Symmetric Risk
 
@@ -185,7 +232,7 @@ Safety and UX are different concerns.
 
 ### 8.1 Safety
 
-All Feishu chats in one `feishu-codex` service already share one backend
+All Feishu chats in one instance already share one backend
 process, so they do not create separate app-server processes per chat.
 
 Therefore, they do not suffer from the same cross-process dual-live-thread
@@ -230,6 +277,22 @@ So the decision at this layer is:
 - Feishu allows multiple subscribers on one backend thread
 - writability and interactivity are determined by owner leases
 - "one primary notification binding" is no longer the current model
+
+### 8.3 Cross-instance boundary
+
+Multi-instance support does not change the "multiple subscribers within one
+instance" conclusion above, but it adds two more boundaries:
+
+- different instances do not share one live backend
+- if the same thread should continue on another instance, it must first pass:
+  - admission (is the thread visible to the target instance's Feishu surface?)
+  - thread runtime lease (may the target instance take live runtime now?)
+
+So:
+
+- instances share the persisted thread namespace
+- they do not share live thread memory state, bindings, ACL, owners, or
+  control planes
 
 For the exact state vocabulary and state-transition contract, see
 `docs/contracts/runtime-control-surface.md` and
