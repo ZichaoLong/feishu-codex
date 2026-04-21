@@ -143,6 +143,7 @@ class BindingRuntimeManager:
             "mirror_watchdog_generation": 0,
             "followup_sent": False,
             "followup_text": "",
+            "terminal_result_text": "",
             "awaiting_local_turn_started": False,
             "approval_policy": stored_binding["approval_policy"],
             "sandbox": stored_binding["sandbox"],

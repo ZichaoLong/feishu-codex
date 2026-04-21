@@ -147,8 +147,8 @@ Current module split:
 - `bot/turn_execution_coordinator.py`,
   `bot/execution_output_controller.py`, and
   `bot/execution_recovery_controller.py`: execution lifecycle state transitions,
-  execution-card publishing, and watchdog / reconcile / degraded-channel
-  handling
+  execution-card publishing, terminal-result delivery, and watchdog /
+  reconcile / degraded-channel handling
 - `bot/runtime_admin_controller.py`: `/status`,
   `/release-feishu-runtime`, and control-plane status/admin management
 - `bot/inbound_surface_controller.py`: inbound command surface, card-action
@@ -162,8 +162,10 @@ Current module split:
 - `bot/codex_session_ui_domain.py`: owns session-card UI flows, including
   transient rename-form state
 - `bot/execution_transcript.py`: an internal transcript assembler for execution-card
-  presentation; it builds reply/log fragments and does not own thread, owner,
-  or binding-level state
+  presentation; it builds display-only `reply_segments` / `process_log`
+  fragments, and can support hiding the terminal final-answer segment from the
+  execution card once that answer has been delivered through a separate
+  authoritative carrier; it does not own thread, owner, or binding-level state
 - `bot/stores/thread_admission_store.py`: per-instance Feishu visible-thread
   admissions
 - `bot/stores/instance_registry_store.py`: machine-global running-instance registry

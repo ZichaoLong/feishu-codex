@@ -136,6 +136,7 @@ flowchart TD
 - 运行中的执行卡片，优先相信 live notification
 - 收到终态通知时，先按当前 transcript 立即收口执行卡片
 - `thread/read` 只用于后台补齐最终回复、补收口、确认 thread 是否已经不再 active
+- 如果 `thread/read` 给出了可判定的终态最后一个文本型 `agentMessage`，且终态结果载体已经成功发出，则允许后台再 patch 一次旧 execution card，把这最后一段从 reply 面板里移除
 - 一次 `thread/read` timeout 或 transport error，只能把运行通道标记为临时降级，不能清空当前执行锚点
 
 但终态通知可能因为断连、接管、时序问题而漏掉。因此飞书侧仍需要在这些场景主动做 `thread/read` 对账：
@@ -153,6 +154,8 @@ flowchart TD
 - 当执行结束后，这张卡片会被收口并退出“当前执行锚点”
 - 如果终态后还需要补最终文本，只允许后台按旧 `card_message_id` 回写这张已结束的旧卡片
 - 终态权威结果应优先通过单独的 `terminal result card` 发送；只有结果卡预算不足或标记无法安全编码时，才降级为普通文本
+- 只有在终态结果载体已经成功送达后，才允许把旧 execution card 中的最终答案段剔除；如果只能回退本地 transcript，或结果载体发送失败，则必须保留旧 execution card 里的最终回复
+- 如果后续 reconcile 拿到不同于先前载体的权威 `final_reply_text`，必须再次发送更正后的终态结果载体，而不能只修旧 execution card
 - 这条终态结果发送路径不重新打开执行锚点，也不改变“同一会话任一时刻最多只有一张当前执行卡片”的约束
 - 后续新的本地 prompt 或新的外部 turn，才允许创建下一张执行卡片
 - 执行卡片 reply 区的本地长度预算，只约束 display-only 的回复投影文本长度；截断提示本身也必须计入预算，不能出现“正文按上限截断、提示额外附送”的语义

@@ -117,14 +117,14 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/binding_runtime_manager.py`：binding / subscribe / attach / released 与本地 runtime snapshot 的 owner
 - `bot/thread_access_policy.py`：线程共享、Feishu 写入 owner、interaction owner 的准入 policy 边界
 - `bot/thread_runtime_coordination.py`：跨实例 live runtime lease 获取、自动转移与拒绝
-- `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、watchdog / reconcile / degrade 处理
+- `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、终态结果载体发送、watchdog / reconcile / degrade 处理
 - `bot/runtime_admin_controller.py`：`/status`、`/release-feishu-runtime` 与 control-plane 查询/管理
 - `bot/inbound_surface_controller.py`：入站命令面、卡片 action 路由、help 卡片命令复用
 - `bot/prompt_turn_entry_controller.py`：prompt 进入、lease 抢占、released -> attached 恢复编排
 - `bot/adapter_notification_controller.py`：adapter notification 的 method 路由、语义解释与下游分发
 - `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
 - `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态
-- `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 reply/log 片段拼装，不承担 thread、owner 或 binding 级状态职责
+- `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 display-only 的 `reply_segments` / `process_log` 片段拼装，并支持在权威终态结果已经单独送达后，把最后一段最终答案从 execution card 的 reply 面板里剔除；它不承担 thread、owner 或 binding 级状态职责
 - `bot/stores/thread_admission_store.py`：每实例 Feishu 可见线程的 admission
 - `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
 - `bot/stores/thread_runtime_lease_store.py`：机器级 thread live runtime lease

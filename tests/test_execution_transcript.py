@@ -27,6 +27,37 @@ class ExecutionTranscriptTests(unittest.TestCase):
         self.assertEqual(rendered[0].text, "[回复过长]")
         self.assertLessEqual(len(rendered[0].text), 6)
 
+    def test_rebuild_reply_from_snapshot_items_can_drop_terminal_final_message(self) -> None:
+        transcript = ExecutionTranscript()
+
+        rebuilt = transcript.rebuild_reply_from_snapshot_items(
+            [
+                {"type": "agentMessage", "text": "阶段总结"},
+                {"type": "commandExecution"},
+                {"type": "agentMessage", "text": "最终答案"},
+            ],
+            drop_last_text_message=True,
+        )
+
+        self.assertTrue(rebuilt)
+        self.assertEqual(
+            transcript.reply_segments,
+            [ExecutionReplySegment("assistant", "阶段总结")],
+        )
+
+    def test_rebuild_reply_from_snapshot_items_drop_last_message_can_leave_empty_display(self) -> None:
+        transcript = ExecutionTranscript(
+            reply_segments=[ExecutionReplySegment("assistant", "stale")]
+        )
+
+        rebuilt = transcript.rebuild_reply_from_snapshot_items(
+            [{"type": "agentMessage", "text": "最终答案"}],
+            drop_last_text_message=True,
+        )
+
+        self.assertFalse(rebuilt)
+        self.assertEqual(transcript.reply_text(), "stale")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,6 +52,7 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertEqual(state["started_at"], 12.5)
         self.assertEqual(state["last_runtime_event_at"], 12.5)
         self.assertEqual(state["execution_transcript"].reply_text(), "")
+        self.assertEqual(state["terminal_result_text"], "")
 
     def test_prepare_turn_started_locked_reuses_existing_execution_card(self) -> None:
         coordinator = TurnExecutionCoordinator()
@@ -193,6 +194,7 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertEqual(followup.prompt_message_id, "msg-1")
         self.assertTrue(followup.prompt_reply_in_thread)
         self.assertTrue(state["followup_sent"])
+        self.assertEqual(state["terminal_result_text"], "123456789")
         self.assertIsNone(coordinator.prepare_patch_failure_followup_locked(state))
 
     def test_plan_state_updates_are_scoped_to_current_turn(self) -> None:

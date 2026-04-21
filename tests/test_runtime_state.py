@@ -36,6 +36,7 @@ def _build_state() -> dict[str, object]:
         "mirror_watchdog_generation": 4,
         "followup_sent": False,
         "followup_text": "",
+        "terminal_result_text": "",
         "awaiting_local_turn_started": True,
         "approval_policy": "on-request",
         "sandbox": "workspace-write",
@@ -81,6 +82,7 @@ class RuntimeStateReducerTests(unittest.TestCase):
                 reply_text="fresh reply",
                 followup_sent=True,
                 followup_text="fresh reply",
+                terminal_result_text="fresh reply",
             ),
         )
 
@@ -88,6 +90,7 @@ class RuntimeStateReducerTests(unittest.TestCase):
         self.assertEqual(transcript.process_text(), "")
         self.assertTrue(state["followup_sent"])
         self.assertEqual(state["followup_text"], "fresh reply")
+        self.assertEqual(state["terminal_result_text"], "fresh reply")
 
     def test_runtime_settings_and_thread_state_only_change_requested_fields(self) -> None:
         state = _build_state()

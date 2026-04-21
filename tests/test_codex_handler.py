@@ -1139,7 +1139,8 @@ class CodexHandlerTests(unittest.TestCase):
         )
 
     def test_watchdog_reconciles_missed_terminal_notifications(self) -> None:
-        handler, _ = self._make_handler()
+        handler, bot = self._make_handler()
+        handler._terminal_result_card_limit = 200
 
         handler.handle_message("ou_user", "c1", "hello")
         handler._adapter.thread_snapshots[("thread-created", True)] = ThreadSnapshot(
@@ -1173,7 +1174,11 @@ class CodexHandlerTests(unittest.TestCase):
 
         state = handler._get_runtime_state("ou_user", "c1")
         self.assertFalse(state["running"])
-        self.assertEqual(state["execution_transcript"].reply_text(), "watchdog final")
+        self.assertEqual(state["execution_transcript"].reply_text(), "")
+        self.assertEqual(state["terminal_result_text"], "watchdog final")
+        card = json.loads(bot.sent_messages[-1][2])
+        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertIn("watchdog final", card["elements"][-1]["content"])
 
     def test_cancel_refreshes_stale_execution_card_when_turn_already_finished(self) -> None:
         handler, bot = self._make_handler()

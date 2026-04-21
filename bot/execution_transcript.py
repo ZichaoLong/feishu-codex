@@ -83,15 +83,25 @@ class ExecutionTranscript:
         items: list[dict[str, Any]] | None,
         *,
         fallback_text: str = "",
+        drop_last_text_message: bool = False,
     ) -> bool:
+        last_text_index = None
+        if drop_last_text_message:
+            for idx, item in enumerate(items or []):
+                if str(item.get("type", "") or "").strip() != "agentMessage":
+                    continue
+                if str(item.get("text", "") or "").strip():
+                    last_text_index = idx
         rebuilt: list[ExecutionReplySegment] = []
         saw_assistant = False
         saw_work_since_assistant = False
-        for item in items or []:
+        for idx, item in enumerate(items or []):
             item_type = str(item.get("type", "") or "").strip()
             if item_type == "agentMessage":
                 text = str(item.get("text", "") or "").strip()
                 if not text:
+                    continue
+                if drop_last_text_message and idx == last_text_index:
                     continue
                 if saw_assistant and saw_work_since_assistant:
                     rebuilt.append(ExecutionReplySegment("divider"))

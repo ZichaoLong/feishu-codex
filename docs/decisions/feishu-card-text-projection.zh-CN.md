@@ -101,7 +101,8 @@
 
 这里的关键要求是：
 
-- 它不是“猜测最后一个 segment”
+- 它应优先对应目标 turn 里**最后一个文本型 `agentMessage`**
+- 它不是“猜测最后一个可见 segment”
 - 也不是“把回复面板所有段落随便拼一遍”
 - 它必须是发送侧明确给出的权威结果表示
 
@@ -159,6 +160,13 @@
   - 文本内容就是权威 `final_reply_text`
   - 这是一种溢出 / 失败兜底，不是常态推荐路径
 
+对当前第一阶段 rollout，推荐把发送侧行为进一步收紧为：
+
+- 终态权威结果优先走单独的 `terminal result card`
+- `terminal result card` 发送成功后，如果终态 snapshot 能明确定位最后一个文本型 `agentMessage`，则旧 execution card 的 reply 面板应去掉这最后一段
+- 旧 execution card 只继续保留 `process_log` 与更早的过程性 `reply_segments`
+- 如果只能回退到本地 transcript，或者终态结果载体发送失败，则不要剔除 execution card 里的最终回复
+
 ### 5.3 终态超长时优先发文本，不发“部分终态卡”
 
 如果 `final_reply_text` 无法在卡片预算内完整表达：
@@ -179,6 +187,12 @@
 - 回复分段面板
 
 它们也只属于 display-only 信息。
+
+更具体地说：
+
+- 一旦权威终态结果已经通过 `terminal result card` 或降级文本成功送达，execution card 里的 `reply_segments` 应尽量只保留过程性分段
+- 如果终态 snapshot 能区分“最后一段最终答案”和“更早的阶段性回复”，则应把最后那段最终答案从 execution card 中剔除
+- 如果当前只能依赖本地 transcript，无法可靠区分最后一段，则宁可保留 execution card 原文，也不要冒“把唯一可见结果删掉”的风险
 
 本合同明确不要求：
 
@@ -324,8 +338,9 @@
    - 运行中按钮
 2. turn 终态时，额外发送一张**权威 `terminal result card`**，其中包含专门的 `final_reply_text` 区块
 3. 接收侧强合同优先消费这张终态结果卡
-4. 只有当终态结果卡也无法无损承载结果时，才降级为普通文本
-5. 普通卡片文本提取作为独立的 best-effort 能力后续补上
+4. 如果终态结果载体发送成功，且 snapshot 能区分最后一段最终答案，则回写旧 execution card，移除这最后一段
+5. 只有当终态结果卡也无法无损承载结果时，才降级为普通文本
+6. 普通卡片文本提取作为独立的 best-effort 能力后续补上
 
 这样做的原因是：
 
@@ -346,11 +361,18 @@
 3. 如果 `final_reply_text` 非空：
    - 优先发送 `terminal result card`
    - 让该卡片成为强合同载体
-4. execution card 继续保留：
+4. 如果终态结果载体发送成功，且终态 snapshot 能明确定位最后一个文本型 `agentMessage`：
+   - 回写旧 execution card
+   - 只保留更早的 `reply_segments`
+   - 去掉最后那段最终答案
+5. execution card 继续保留：
    - 终态视觉收口
    - 过程日志
    - 回复分段
-5. 只有在卡片预算不足时，才降级为普通文本
+6. 如果终态结果载体发送失败，或只能回退到本地 transcript：
+   - 不要删除 execution card 里的最终回复
+   - 以 fail-closed 为先，避免结果丢失
+7. 只有在卡片预算不足时，才降级为普通文本
 
 这里最重要的实现建议是：
 
@@ -362,7 +384,7 @@
 如果上游没有单独提供“final answer”字段，建议按下面顺序取值：
 
 1. 终态 thread snapshot 中目标 turn 的最后一个文本型 `agentMessage`
-2. 若需要保留多段终态回复，则使用终态 turn 中按顺序拼接后的 `agentMessage` 文本
+2. 同一 turn 中更早出现的文本型 `agentMessage` 继续保留在 execution card 的 `reply_segments`，仅作为 display-only 的阶段性回复
 3. 只有在 snapshot 不可得或数据残缺时，才回退到本地 transcript 的归并结果
 
 这里的关键点是：
@@ -370,10 +392,11 @@
 - 优先依赖终态 snapshot / turn items
 - 不优先依赖 live card 的显示内容
 - 不把“最后一个可见 reply segment”当作天然可靠来源
+- 一旦 later reconcile 拿到和此前不同的权威 `final_reply_text`，发送侧应再次发出更正后的终态结果载体，而不能只修 execution card
 
 当前代码里的现有能力表明，这条路径是可行的：
 
-- `snapshot_reply()` 已能从 thread snapshot 中读取 turn items 与 assistant 文本
+- `snapshot_reply()` 已能从 thread snapshot 中读取 turn items、完整 reply 文本和最后一个文本型 `agentMessage`
 - `ExecutionTranscript` 已有本地 reply / process 两条通道
 
 但后续实现时，建议把“终态权威文本”升级成显式字段，而不是继续隐含在 `reply_segments` 语义里。

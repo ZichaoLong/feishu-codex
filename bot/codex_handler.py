@@ -54,7 +54,11 @@ from bot.codex_settings_domain import CodexSettingsDomain
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
 from bot.execution_transcript import ExecutionTranscript
 from bot.execution_output_controller import ExecutionOutputController
-from bot.execution_recovery_controller import ExecutionRecoveryController, TerminalReconcileTarget
+from bot.execution_recovery_controller import (
+    ExecutionRecoveryController,
+    SnapshotReplyProjection,
+    TerminalReconcileTarget,
+)
 from bot.file_message_domain import FileMessageDomain, IncomingAttachmentMessage
 from bot.interaction_request_controller import InteractionRequestController
 from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSurfaceController
@@ -1608,7 +1612,7 @@ class CodexHandler(BotHandler):
         return str(exc)
 
     @staticmethod
-    def _snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> tuple[str, list[dict[str, Any]]]:
+    def _snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> SnapshotReplyProjection:
         return ExecutionRecoveryController.snapshot_reply(snapshot, turn_id=turn_id)
 
     def _finalize_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:

@@ -90,11 +90,13 @@ class ExecutionStateChanged(RuntimeStateEvent):
     last_patch_at: Any = UNSET
     followup_sent: Any = UNSET
     followup_text: Any = UNSET
+    terminal_result_text: Any = UNSET
     patch_timer: Any = UNSET
     mirror_watchdog_timer: Any = UNSET
     mirror_watchdog_generation: Any = UNSET
     bump_mirror_watchdog_generation: bool = False
     reset_transcript: bool = False
+    transcript: Any = UNSET
     reply_text: str | None = None
 
 
@@ -205,6 +207,8 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
                 state["followup_sent"] = change.followup_sent
             if change.followup_text is not UNSET:
                 state["followup_text"] = change.followup_text
+            if change.terminal_result_text is not UNSET:
+                state["terminal_result_text"] = change.terminal_result_text
             if change.patch_timer is not UNSET:
                 state["patch_timer"] = change.patch_timer
             if change.mirror_watchdog_timer is not UNSET:
@@ -215,6 +219,8 @@ def apply_runtime_state_message(state: MutableMapping[str, Any], message: Runtim
                 state["mirror_watchdog_generation"] += 1
             if change.reset_transcript:
                 state["execution_transcript"].reset()
+            if change.transcript is not UNSET:
+                state["execution_transcript"] = change.transcript.clone()
             if change.reply_text is not None:
                 state["execution_transcript"].set_reply_text(change.reply_text)
         case PlanStateChanged(clear=True):

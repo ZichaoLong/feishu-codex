@@ -246,7 +246,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         controller.cancel_mirror_watchdog_locked(state)
         self.assertIsNone(state["mirror_watchdog_timer"])
 
-    def test_run_terminal_execution_reconcile_only_patches_when_snapshot_reply_changes(self) -> None:
+    def test_run_terminal_execution_reconcile_does_not_reinsert_single_final_reply_into_execution_card(self) -> None:
         state = self._make_state()
         controller, snapshots, patches, _, terminal_results = self._make_controller(state)
         snapshots.append(
@@ -285,24 +285,86 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            patches,
-            [
-                {
-                    "message_id": "card-1",
-                    "reply_text": "updated reply",
-                    "running": False,
-                    "elapsed": 5,
-                    "cancelled": False,
-                }
-            ],
-        )
+        self.assertEqual(patches, [])
+        self.assertEqual(state["terminal_result_text"], "")
         self.assertEqual(
             terminal_results,
             [
                 {
                     "chat_id": "c1",
                     "final_reply_text": "updated reply",
+                    "prompt_message_id": "msg-1",
+                    "prompt_reply_in_thread": True,
+                }
+            ],
+        )
+
+    def test_run_terminal_execution_reconcile_strips_terminal_final_reply_after_publish(self) -> None:
+        state = self._make_state()
+        controller, snapshots, patches, _, terminal_results = self._make_controller(state)
+        state["current_message_id"] = "card-1"
+        state["last_execution_message_id"] = "card-1"
+        state["execution_transcript"].set_reply_text("阶段总结\n\n最终答案")
+        snapshots.append(
+            ThreadSnapshot(
+                summary=ThreadSummary(
+                    thread_id="thread-1",
+                    cwd="/tmp/project",
+                    name="demo",
+                    preview="",
+                    created_at=0,
+                    updated_at=0,
+                    source="cli",
+                    status="completed",
+                ),
+                turns=[
+                    {
+                        "id": "turn-1",
+                        "items": [
+                            {"type": "agentMessage", "text": "阶段总结"},
+                            {"type": "commandExecution"},
+                            {"type": "agentMessage", "text": "最终答案"},
+                        ],
+                    }
+                ],
+            )
+        )
+
+        controller.run_terminal_execution_reconcile(
+            TerminalReconcileTarget(
+                sender_id="ou_user",
+                chat_id="c1",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                card_message_id="card-1",
+                prompt_message_id="msg-1",
+                prompt_reply_in_thread=True,
+                transcript=state["execution_transcript"].clone(),
+                cancelled=False,
+                elapsed=5,
+            )
+        )
+
+        self.assertEqual(
+            patches,
+            [
+                {
+                    "message_id": "card-1",
+                    "reply_text": "阶段总结",
+                    "running": False,
+                    "elapsed": 5,
+                    "cancelled": False,
+                }
+            ],
+        )
+        self.assertEqual(state["execution_transcript"].reply_text(), "阶段总结")
+        self.assertEqual(state["terminal_result_text"], "最终答案")
+        self.assertEqual(
+            terminal_results,
+            [
+                {
+                    "chat_id": "c1",
+                    "final_reply_text": "最终答案",
                     "prompt_message_id": "msg-1",
                     "prompt_reply_in_thread": True,
                 }
@@ -342,3 +404,61 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_run_terminal_execution_reconcile_keeps_final_reply_on_execution_card_when_result_publish_fails(self) -> None:
+        state = self._make_state()
+        controller, snapshots, patches, _, terminal_results = self._make_controller(state)
+        state["current_message_id"] = "card-1"
+        state["last_execution_message_id"] = "card-1"
+        controller._publish_terminal_result = lambda *args, **kwargs: False
+        snapshots.append(
+            ThreadSnapshot(
+                summary=ThreadSummary(
+                    thread_id="thread-1",
+                    cwd="/tmp/project",
+                    name="demo",
+                    preview="",
+                    created_at=0,
+                    updated_at=0,
+                    source="cli",
+                    status="completed",
+                ),
+                turns=[
+                    {
+                        "id": "turn-1",
+                        "items": [{"type": "agentMessage", "text": "最终答案"}],
+                    }
+                ],
+            )
+        )
+
+        controller.run_terminal_execution_reconcile(
+            TerminalReconcileTarget(
+                sender_id="ou_user",
+                chat_id="c1",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                card_message_id="card-1",
+                prompt_message_id="msg-9",
+                prompt_reply_in_thread=False,
+                transcript=state["execution_transcript"].clone(),
+                cancelled=False,
+                elapsed=5,
+            )
+        )
+
+        self.assertEqual(
+            patches,
+            [
+                {
+                    "message_id": "card-1",
+                    "reply_text": "最终答案",
+                    "running": False,
+                    "elapsed": 5,
+                    "cancelled": False,
+                }
+            ],
+        )
+        self.assertEqual(terminal_results, [])
+        self.assertEqual(state["execution_transcript"].reply_text(), "最终答案")
+        self.assertEqual(state["terminal_result_text"], "")

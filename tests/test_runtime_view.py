@@ -31,6 +31,7 @@ def _build_state() -> dict[str, object]:
         "mirror_watchdog_generation": 4,
         "followup_sent": False,
         "followup_text": "",
+        "terminal_result_text": "",
         "awaiting_local_turn_started": True,
         "approval_policy": "on-request",
         "sandbox": "workspace-write",
@@ -60,6 +61,7 @@ class RuntimeViewTests(unittest.TestCase):
         self.assertEqual(view.execution.effective_message_id, "card-1")
         self.assertTrue(view.execution.current_prompt_reply_in_thread)
         self.assertTrue(view.execution.has_execution_anchor)
+        self.assertEqual(view.execution.terminal_result_text, "")
         self.assertEqual(view.plan.steps[0].step, "old")
 
     def test_view_holds_cloned_transcript(self) -> None:

@@ -85,6 +85,7 @@ class TurnExecutionCoordinator:
                 current_actor_open_id="",
                 followup_sent=False,
                 followup_text="",
+                terminal_result_text="",
                 awaiting_local_turn_started=False,
                 runtime_channel_state="live",
                 reset_transcript=True,
@@ -116,6 +117,7 @@ class TurnExecutionCoordinator:
                 last_runtime_event_at=started_at,
                 followup_sent=False,
                 followup_text="",
+                terminal_result_text="",
                 last_patch_at=0.0,
                 awaiting_local_turn_started=True,
                 reset_transcript=True,
@@ -206,12 +208,31 @@ class TurnExecutionCoordinator:
         reply_items: list[dict[str, Any]],
     ) -> None:
         transcript = state["execution_transcript"]
-        if reply_text and len(reply_text) >= len(transcript.reply_text()):
-            if not transcript.rebuild_reply_from_snapshot_items(
-                reply_items,
-                fallback_text=reply_text,
-            ):
-                transcript.set_reply_text(reply_text)
+        if not reply_text and not reply_items:
+            return
+        rebuilt = transcript.clone()
+        if not rebuilt.rebuild_reply_from_snapshot_items(
+            reply_items,
+            fallback_text=reply_text,
+        ):
+            return
+        if len(rebuilt.reply_text()) < len(transcript.reply_text()):
+            return
+        self.apply_runtime_state_message_locked(
+            state,
+            ExecutionStateChanged(transcript=rebuilt),
+        )
+
+    def replace_execution_transcript_locked(
+        self,
+        state: RuntimeState,
+        *,
+        transcript: ExecutionTranscript,
+    ) -> None:
+        self.apply_runtime_state_message_locked(
+            state,
+            ExecutionStateChanged(transcript=transcript),
+        )
 
     def acknowledge_running_snapshot_locked(self, state: RuntimeState, *, occurred_at: float) -> None:
         self.acknowledge_active_thread_locked(state)
@@ -228,6 +249,7 @@ class TurnExecutionCoordinator:
             ExecutionStateChanged(
                 followup_sent=True,
                 followup_text=reply_text,
+                terminal_result_text=reply_text,
             ),
         )
         return self._followup_message_from_state(state, reply_text)
@@ -342,14 +364,15 @@ class TurnExecutionCoordinator:
                 ExecutionStateChanged(
                     cancelled=False,
                     last_execution_message_id="",
-                started_at=started_at,
-                last_runtime_event_at=started_at,
-                last_patch_at=0.0,
-                followup_sent=False,
-                followup_text="",
-                runtime_channel_state="live",
-                reset_transcript=True,
-            ),
+                    started_at=started_at,
+                    last_runtime_event_at=started_at,
+                    last_patch_at=0.0,
+                    followup_sent=False,
+                    followup_text="",
+                    terminal_result_text="",
+                    runtime_channel_state="live",
+                    reset_transcript=True,
+                ),
             )
 
         self.apply_runtime_state_message_locked(

@@ -149,6 +149,9 @@ The rules are:
 - use `thread/read` only as a background reconciliation pass to fill in final
   reply content, close stale cards, and confirm that a thread is no longer
   active
+- if `thread/read` can identify the last textual `agentMessage`, and the
+  authoritative terminal-result carrier has already been delivered, a later
+  background patch may remove that last answer from the old execution card
 - treat a `thread/read` timeout or transport error as a temporary degraded
   channel, not as permission to clear the current execution anchor
 
@@ -174,6 +177,13 @@ time:
 - the authoritative terminal result should normally be sent through a separate
   `terminal result card`; only when that carrier cannot represent the text
   safely or within budget may the system fall back to plain text
+- the old execution card may remove its final-answer segment only after the
+  authoritative terminal-result carrier has been delivered successfully; if the
+  system can only fall back to the local transcript, or terminal-result
+  delivery fails, the execution card must keep that final reply
+- if later reconciliation discovers a different authoritative
+  `final_reply_text`, the system must emit a corrected terminal-result carrier
+  again instead of only patching the old execution card
 - that terminal-result delivery path does not reopen the execution anchor and
   does not weaken the "at most one active execution card" rule
 - only a new local prompt or a new external turn may create the next execution

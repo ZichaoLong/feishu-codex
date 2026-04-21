@@ -32,6 +32,13 @@ class TerminalReconcileTarget:
     elapsed: int
 
 
+@dataclass(frozen=True)
+class SnapshotReplyProjection:
+    full_reply_text: str
+    final_reply_text: str
+    reply_items: list[dict[str, Any]]
+
+
 class ExecutionRecoveryController:
     def __init__(
         self,
@@ -121,11 +128,87 @@ class ExecutionRecoveryController:
                 ),
             )
 
-    def _maybe_publish_terminal_result(
+    @staticmethod
+    def _runtime_matches_execution(runtime, execution_message_id: str) -> bool:
+        normalized_message_id = str(execution_message_id or "").strip()
+        if not normalized_message_id:
+            return False
+        return runtime.execution.current_message_id.strip() == normalized_message_id or (
+            runtime.execution.last_execution_message_id.strip() == normalized_message_id
+        )
+
+    @staticmethod
+    def _display_changed(previous: ExecutionTranscript, updated: ExecutionTranscript) -> bool:
+        return (
+            previous.process_blocks != updated.process_blocks
+            or previous.reply_segments != updated.reply_segments
+        )
+
+    @staticmethod
+    def _transcript_from_snapshot_projection(
+        base: ExecutionTranscript,
+        *,
+        projection: SnapshotReplyProjection,
+        drop_last_text_message: bool,
+    ) -> ExecutionTranscript:
+        transcript = base.clone()
+        transcript.set_reply_text("")
+        transcript.rebuild_reply_from_snapshot_items(
+            projection.reply_items,
+            fallback_text="" if drop_last_text_message else projection.full_reply_text,
+            drop_last_text_message=drop_last_text_message,
+        )
+        return transcript
+
+    def _replace_terminal_execution_transcript(
         self,
         *,
         sender_id: str,
         chat_id: str,
+        execution_message_id: str,
+        transcript: ExecutionTranscript,
+    ) -> None:
+        normalized_message_id = str(execution_message_id or "").strip()
+        if not normalized_message_id:
+            return
+        state = self._get_runtime_state(sender_id, chat_id)
+        with self._lock:
+            runtime = build_runtime_view(state)
+            if not self._runtime_matches_execution(runtime, normalized_message_id):
+                return
+            self._turn_execution.replace_execution_transcript_locked(
+                state,
+                transcript=transcript,
+            )
+
+    def _remember_terminal_result_text(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        execution_message_id: str,
+        final_reply_text: str,
+    ) -> None:
+        normalized_message_id = str(execution_message_id or "").strip()
+        normalized = str(final_reply_text or "").strip()
+        if not normalized_message_id or not normalized:
+            return
+        state = self._get_runtime_state(sender_id, chat_id)
+        with self._lock:
+            runtime = build_runtime_view(state)
+            if not self._runtime_matches_execution(runtime, normalized_message_id):
+                return
+            self._apply_runtime_state_message_locked(
+                state,
+                ExecutionStateChanged(terminal_result_text=normalized),
+            )
+
+    def _publish_terminal_result_if_needed(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        execution_message_id: str,
         final_reply_text: str,
         prompt_message_id: str = "",
         prompt_reply_in_thread: bool = False,
@@ -136,11 +219,88 @@ class ExecutionRecoveryController:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
             runtime = build_runtime_view(state)
-            if runtime.execution.followup_sent and runtime.execution.followup_text == normalized:
-                return False
-        return self._publish_terminal_result(
+            if self._runtime_matches_execution(runtime, execution_message_id):
+                if runtime.execution.terminal_result_text == normalized:
+                    return True
+        published = self._publish_terminal_result(
             chat_id,
             final_reply_text=normalized,
+            prompt_message_id=prompt_message_id,
+            prompt_reply_in_thread=prompt_reply_in_thread,
+        )
+        if published:
+            self._remember_terminal_result_text(
+                sender_id=sender_id,
+                chat_id=chat_id,
+                execution_message_id=execution_message_id,
+                final_reply_text=normalized,
+            )
+        return published
+
+    def _apply_terminal_snapshot_projection(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        execution_message_id: str,
+        prompt_message_id: str,
+        prompt_reply_in_thread: bool,
+        current_transcript: ExecutionTranscript,
+        cancelled: bool,
+        elapsed: int,
+        projection: SnapshotReplyProjection,
+    ) -> None:
+        full_transcript = self._transcript_from_snapshot_projection(
+            current_transcript,
+            projection=projection,
+            drop_last_text_message=False,
+        )
+        carrier_available = self._publish_terminal_result_if_needed(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            execution_message_id=execution_message_id,
+            final_reply_text=projection.final_reply_text,
+            prompt_message_id=prompt_message_id,
+            prompt_reply_in_thread=prompt_reply_in_thread,
+        )
+        display_transcript = full_transcript
+        if carrier_available:
+            display_transcript = self._transcript_from_snapshot_projection(
+                current_transcript,
+                projection=projection,
+                drop_last_text_message=True,
+            )
+        self._replace_terminal_execution_transcript(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            execution_message_id=execution_message_id,
+            transcript=display_transcript,
+        )
+        if not self._display_changed(current_transcript, display_transcript):
+            return
+        self._patch_execution_card_message(
+            execution_message_id,
+            transcript=display_transcript,
+            running=False,
+            elapsed=elapsed,
+            cancelled=cancelled,
+        )
+
+    def _maybe_publish_terminal_result(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        execution_message_id: str,
+        final_reply_text: str,
+        prompt_message_id: str = "",
+        prompt_reply_in_thread: bool = False,
+    ) -> bool:
+        return self._publish_terminal_result_if_needed(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            execution_message_id=execution_message_id,
+            final_reply_text=final_reply_text,
             prompt_message_id=prompt_message_id,
             prompt_reply_in_thread=prompt_reply_in_thread,
         )
@@ -170,31 +330,25 @@ class ExecutionRecoveryController:
                 self._maybe_publish_terminal_result(
                     sender_id=target.sender_id,
                     chat_id=target.chat_id,
+                    execution_message_id=target.card_message_id,
                     final_reply_text=fallback_reply_text,
                     prompt_message_id=target.prompt_message_id,
                     prompt_reply_in_thread=target.prompt_reply_in_thread,
                 )
             return
 
-        reply_text, reply_items = self.snapshot_reply(snapshot, turn_id=target.turn_id)
-        if reply_text:
-            transcript = target.transcript.clone()
-            if not transcript.rebuild_reply_from_snapshot_items(reply_items, fallback_text=reply_text):
-                transcript.set_reply_text(reply_text)
-            if transcript.reply_text() != target.transcript.reply_text():
-                self._patch_execution_card_message(
-                    target.card_message_id,
-                    transcript=transcript,
-                    running=False,
-                    elapsed=target.elapsed,
-                    cancelled=target.cancelled,
-                )
-            self._maybe_publish_terminal_result(
+        projection = self.snapshot_reply(snapshot, turn_id=target.turn_id)
+        if projection.final_reply_text:
+            self._apply_terminal_snapshot_projection(
                 sender_id=target.sender_id,
                 chat_id=target.chat_id,
-                final_reply_text=reply_text,
+                execution_message_id=target.card_message_id,
                 prompt_message_id=target.prompt_message_id,
                 prompt_reply_in_thread=target.prompt_reply_in_thread,
+                current_transcript=target.transcript,
+                cancelled=target.cancelled,
+                elapsed=target.elapsed,
+                projection=projection,
             )
             return
 
@@ -202,6 +356,7 @@ class ExecutionRecoveryController:
             self._maybe_publish_terminal_result(
                 sender_id=target.sender_id,
                 chat_id=target.chat_id,
+                execution_message_id=target.card_message_id,
                 final_reply_text=fallback_reply_text,
                 prompt_message_id=target.prompt_message_id,
                 prompt_reply_in_thread=target.prompt_reply_in_thread,
@@ -303,6 +458,7 @@ class ExecutionRecoveryController:
             with self._lock:
                 runtime = build_runtime_view(state)
                 fallback_reply_text = runtime.execution.transcript.reply_text()
+                card_message_id = runtime.execution.current_message_id.strip()
                 prompt_message_id = runtime.execution.current_prompt_message_id.strip()
                 prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
             finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
@@ -310,6 +466,7 @@ class ExecutionRecoveryController:
                 self._maybe_publish_terminal_result(
                     sender_id=sender_id,
                     chat_id=chat_id,
+                    execution_message_id=card_message_id,
                     final_reply_text=fallback_reply_text,
                     prompt_message_id=prompt_message_id,
                     prompt_reply_in_thread=prompt_reply_in_thread,
@@ -329,6 +486,7 @@ class ExecutionRecoveryController:
                 with self._lock:
                     runtime = build_runtime_view(state)
                     fallback_reply_text = runtime.execution.transcript.reply_text()
+                    card_message_id = runtime.execution.current_message_id.strip()
                     prompt_message_id = runtime.execution.current_prompt_message_id.strip()
                     prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
                 finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
@@ -336,6 +494,7 @@ class ExecutionRecoveryController:
                     self._maybe_publish_terminal_result(
                         sender_id=sender_id,
                         chat_id=chat_id,
+                        execution_message_id=card_message_id,
                         final_reply_text=fallback_reply_text,
                         prompt_message_id=prompt_message_id,
                         prompt_reply_in_thread=prompt_reply_in_thread,
@@ -351,12 +510,11 @@ class ExecutionRecoveryController:
             logger.exception("读取线程快照失败: thread=%s", normalized_thread_id[:12])
             return False
 
-        reply_text, reply_items = self.snapshot_reply(snapshot, turn_id=turn_id)
+        projection = self.snapshot_reply(snapshot, turn_id=turn_id)
         resolved = self._resolve_runtime_binding(sender_id, chat_id)
         state = resolved.state
         should_finalize = snapshot.summary.status != "active"
         with self._lock:
-            runtime_before_finalize = build_runtime_view(state)
             self._apply_persisted_runtime_state_message_locked(
                 resolved.binding,
                 state,
@@ -367,8 +525,8 @@ class ExecutionRecoveryController:
             )
             self._turn_execution.apply_snapshot_reply_locked(
                 state,
-                reply_text=reply_text,
-                reply_items=reply_items,
+                reply_text=projection.full_reply_text,
+                reply_items=projection.reply_items,
             )
             if not should_finalize:
                 self._turn_execution.acknowledge_running_snapshot_locked(
@@ -376,22 +534,47 @@ class ExecutionRecoveryController:
                     occurred_at=time.monotonic(),
                 )
                 return False
-            final_reply_text = build_runtime_view(state).execution.transcript.reply_text()
-            prompt_message_id = runtime_before_finalize.execution.current_prompt_message_id.strip()
-            prompt_reply_in_thread = runtime_before_finalize.execution.current_prompt_reply_in_thread
+            runtime = build_runtime_view(state)
+            card_message_id = runtime.execution.current_message_id.strip()
+            current_transcript = runtime.execution.transcript
+            prompt_message_id = runtime.execution.current_prompt_message_id.strip()
+            prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
+            cancelled = runtime.execution.cancelled
+            elapsed = (
+                int(max(0.0, time.monotonic() - runtime.execution.started_at))
+                if runtime.execution.started_at
+                else 0
+            )
+            fallback_reply_text = current_transcript.reply_text()
         finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
-        if finalized and final_reply_text:
+        if not finalized:
+            return False
+        if projection.final_reply_text:
+            self._apply_terminal_snapshot_projection(
+                sender_id=sender_id,
+                chat_id=chat_id,
+                execution_message_id=card_message_id,
+                prompt_message_id=prompt_message_id,
+                prompt_reply_in_thread=prompt_reply_in_thread,
+                current_transcript=current_transcript,
+                cancelled=cancelled,
+                elapsed=elapsed,
+                projection=projection,
+            )
+            return True
+        if fallback_reply_text:
             self._maybe_publish_terminal_result(
                 sender_id=sender_id,
                 chat_id=chat_id,
-                final_reply_text=final_reply_text,
+                execution_message_id=card_message_id,
+                final_reply_text=fallback_reply_text,
                 prompt_message_id=prompt_message_id,
                 prompt_reply_in_thread=prompt_reply_in_thread,
             )
         return finalized
 
     @staticmethod
-    def snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> tuple[str, list[dict[str, Any]]]:
+    def snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> SnapshotReplyProjection:
         target_turns = snapshot.turns
         normalized_turn_id = str(turn_id or "").strip()
         if normalized_turn_id:
@@ -410,5 +593,13 @@ class ExecutionRecoveryController:
                 if item.get("type") == "agentMessage" and str(item.get("text", "") or "").strip()
             ]
             if parts:
-                return "\n\n".join(parts), items
-        return "", []
+                return SnapshotReplyProjection(
+                    full_reply_text="\n\n".join(parts),
+                    final_reply_text=parts[-1],
+                    reply_items=items,
+                )
+        return SnapshotReplyProjection(
+            full_reply_text="",
+            final_reply_text="",
+            reply_items=[],
+        )

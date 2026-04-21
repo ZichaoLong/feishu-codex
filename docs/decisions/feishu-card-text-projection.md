@@ -121,6 +121,8 @@ They correspond to the current execution transcript `reply_segments` layer.
 `final_reply_text` is the terminal text result that another agent should consume
 reliably.
 
+Its expected source is the **last textual `agentMessage`** of the target turn.
+
 It is not:
 
 - "whatever the last visible segment happens to be"
@@ -193,6 +195,18 @@ the sender use a fallback form:
   - that text is the authoritative `final_reply_text`
   - this is an overflow / failure fallback rather than the normal path
 
+For the current phase-one rollout, the sender behavior is further tightened as
+follows:
+
+- prefer a separate `terminal result card` as the normal authoritative carrier
+- once that carrier has been delivered successfully, and the terminal snapshot
+  can identify the last textual `agentMessage`, patch the old execution card so
+  its reply panel no longer repeats that last terminal answer
+- the old execution card should then keep only `process_log` and earlier staged
+  `reply_segments`
+- if the sender can only fall back to the local transcript, or if terminal
+  result delivery fails, do not strip the final reply from the execution card
+
 ### 5.3 If the terminal result is too long, send plain text
 
 If `final_reply_text` cannot be represented losslessly within the card budget:
@@ -211,6 +225,18 @@ Even if terminal surfaces continue to include:
 - a reply-segments panel
 
 those remain display-only.
+
+More specifically:
+
+- once authoritative terminal output has already been delivered through a
+  `terminal result card` or fallback plain text, the execution card should try
+  to keep only staged/process reply segments
+- if the terminal snapshot can distinguish "the last terminal answer" from
+  earlier staged replies, that last answer should be removed from the execution
+  card
+- if the implementation only has the local transcript and cannot distinguish
+  those boundaries reliably, it should keep the execution card text unchanged
+  rather than risking result loss
 
 The contract does not require the receiver to:
 
@@ -360,8 +386,10 @@ The recommended first phase is this smallest reliable loop:
 2. when the turn reaches a terminal state, emit one authoritative
    `terminal result card` that contains a dedicated `final_reply_text` block
 3. let the receiver's strong contract consume that terminal-result card
-4. only if even that result card cannot fit losslessly, fall back to plain text
-5. add ordinary-card best-effort extraction separately afterward
+4. if terminal-result delivery succeeds and the snapshot can distinguish the
+   last terminal answer, patch the old execution card to remove that last reply
+5. only if even that result card cannot fit losslessly, fall back to plain text
+6. add ordinary-card best-effort extraction separately afterward
 
 Why this is recommended:
 
@@ -388,11 +416,20 @@ Recommended order:
 3. if `final_reply_text` is non-empty:
    - prefer sending a `terminal result card`
    - treat that card as the strong-contract carrier
-4. keep the execution card for:
+4. if terminal-result delivery succeeds and the terminal snapshot can identify
+   the last textual `agentMessage`:
+   - patch the old execution card
+   - keep only earlier `reply_segments`
+   - remove the final terminal answer from that card
+5. keep the execution card for:
    - terminal visual finalization
    - process logs
    - reply segments
-5. only when card limits prevent a lossless result card, fall back to plain
+6. if terminal-result delivery fails, or only the local transcript is
+   available:
+   - do not delete the terminal answer from the execution card
+   - prefer fail-closed behavior over aggressive deduplication
+7. only when card limits prevent a lossless result card, fall back to plain
    text
 
 The most important implementation guidance here is:
@@ -407,8 +444,8 @@ If upstream does not expose a dedicated "final answer" field, use this priority
 order:
 
 1. the last textual `agentMessage` in the terminal snapshot of the target turn
-2. if multi-part terminal replies must be preserved, the ordered concatenation
-   of textual `agentMessage` items from the terminal turn
+2. earlier textual `agentMessage` items from the same turn should remain on the
+   execution card as display-only staged replies
 3. only if the snapshot is unavailable or incomplete, fall back to the merged
    local transcript result
 
@@ -417,11 +454,14 @@ The key points are:
 - prefer terminal snapshot / turn items
 - do not prefer live-card display content
 - do not assume that "the last visible reply segment" is automatically reliable
+- if later reconciliation discovers a different authoritative
+  `final_reply_text`, the sender must emit a corrected terminal-result carrier
+  again instead of only patching the old execution card
 
 The current code already suggests that this path is feasible:
 
-- `snapshot_reply()` can already read turn items and assistant text from thread
-  snapshots
+- `snapshot_reply()` can already read turn items, the full reply text, and the
+  last textual `agentMessage` from thread snapshots
 - `ExecutionTranscript` already separates local reply and process channels
 
 But the later implementation should promote terminal authoritative text into an
