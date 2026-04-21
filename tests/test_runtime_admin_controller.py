@@ -34,13 +34,31 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             is_group_chat=lambda chat_id, message_id: False,
         )
         unsubscribed: list[str] = []
+        released_runtime_leases: list[str] = []
         pending_by_thread: set[str] = set()
         pending_by_binding: set[tuple[str, str]] = set()
+        admitted_thread_ids: set[str] = set()
         summaries: dict[str, ThreadSummary] = {}
         loaded_thread_ids: list[str] = []
 
         def _read_thread(thread_id: str):
             return ThreadSnapshot(summary=summaries[thread_id])
+
+        def _admit_thread(thread_id: str) -> bool:
+            normalized = str(thread_id or "").strip()
+            if not normalized:
+                return False
+            if normalized in admitted_thread_ids:
+                return False
+            admitted_thread_ids.add(normalized)
+            return True
+
+        def _revoke_thread(thread_id: str) -> bool:
+            normalized = str(thread_id or "").strip()
+            if not normalized or normalized not in admitted_thread_ids:
+                return False
+            admitted_thread_ids.remove(normalized)
+            return True
 
         controller = RuntimeAdminController(
             lock=lock,
@@ -55,7 +73,12 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             list_loaded_thread_ids=lambda: list(loaded_thread_ids),
             current_app_server_url=lambda: "http://127.0.0.1:1234",
             unsubscribe_thread=lambda thread_id: unsubscribed.append(thread_id),
+            release_service_thread_runtime_lease=lambda thread_id: released_runtime_leases.append(thread_id),
             service_control_socket_path=lambda: str(data_dir / "service.sock"),
+            instance_name=lambda: "corp-a",
+            admitted_thread_ids=lambda: tuple(sorted(admitted_thread_ids)),
+            admit_thread=_admit_thread,
+            revoke_thread=_revoke_thread,
             safe_read_runtime_config=lambda: RuntimeConfigSummary(current_model_provider="provider1"),
             current_default_profile_resolution=lambda runtime_config: types.SimpleNamespace(
                 effective_profile="default",
@@ -83,6 +106,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             summaries,
             loaded_thread_ids,
             unsubscribed,
+            released_runtime_leases,
+            admitted_thread_ids,
             pending_by_thread,
             pending_by_binding,
         )
@@ -105,7 +130,10 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             binding_runtime,
             controller,
             summaries,
-            *_,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _admitted_thread_ids,
             pending_by_thread,
             _pending_by_binding,
         ) = self._make_controller()
@@ -136,7 +164,10 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             summaries,
             _loaded_thread_ids,
             unsubscribed,
-            *_,
+            released_runtime_leases,
+            _admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
         self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
@@ -160,6 +191,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(snapshot.feishu_runtime_state, "released")
         self.assertEqual(unsubscribed, ["thread-1"])
+        self.assertEqual(released_runtime_leases, ["thread-1"])
 
     def test_handle_service_control_request_service_status_aggregates_runtime_inventory(self) -> None:
         (
@@ -169,7 +201,10 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             summaries,
             loaded_thread_ids,
             _unsubscribed,
-            *_,
+            _released_runtime_leases,
+            admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
         state = self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
@@ -185,9 +220,12 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             status="active",
         )
         loaded_thread_ids.append("thread-1")
+        admitted_thread_ids.update({"thread-1", "thread-2"})
 
         status = controller.handle_service_control_request("service/status", {})
 
+        self.assertEqual(status["instance_name"], "corp-a")
+        self.assertEqual(status["admitted_thread_count"], 2)
         self.assertEqual(status["binding_count"], 1)
         self.assertEqual(status["bound_binding_count"], 1)
         self.assertEqual(status["attached_binding_count"], 1)
@@ -204,6 +242,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             summaries,
             _loaded_thread_ids,
             _unsubscribed,
+            _released_runtime_leases,
+            _admitted_thread_ids,
             _pending_by_thread,
             pending_by_binding,
         ) = self._make_controller()
@@ -235,7 +275,10 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             summaries,
             _loaded_thread_ids,
             _unsubscribed,
-            *_,
+            _released_runtime_leases,
+            _admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
         ) = self._make_controller()
         binding_a = ("ou_user", "c1")
         binding_b = ("ou_user2", "c2")
@@ -269,3 +312,99 @@ class RuntimeAdminControllerTests(unittest.TestCase):
                 {"binding_id": "p2p:ou_user2:c2", "feishu_runtime_state": "released"},
             ],
         )
+
+    def test_handle_service_control_request_thread_admissions_lists_current_state(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
+        ) = self._make_controller()
+        admitted_thread_ids.update({"thread-2", "thread-1"})
+
+        result = controller.handle_service_control_request("thread/admissions", {})
+
+        self.assertEqual(result, {"instance_name": "corp-a", "thread_ids": ["thread-1", "thread-2"]})
+
+    def test_handle_service_control_request_thread_import_adds_admission(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
+        ) = self._make_controller()
+
+        result = controller.handle_service_control_request("thread/import", {"thread_id": "thread-1"})
+
+        self.assertEqual(
+            result,
+            {"thread_id": "thread-1", "thread_title": "demo", "imported": True},
+        )
+        self.assertEqual(admitted_thread_ids, {"thread-1"})
+
+    def test_handle_service_control_request_thread_revoke_removes_admission(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
+        ) = self._make_controller()
+        admitted_thread_ids.add("thread-1")
+
+        result = controller.handle_service_control_request("thread/revoke", {"thread_id": "thread-1"})
+
+        self.assertEqual(
+            result,
+            {"thread_id": "thread-1", "thread_title": "demo", "revoked": True},
+        )
+        self.assertEqual(admitted_thread_ids, set())
+
+    def test_handle_service_control_request_thread_revoke_rejects_when_thread_still_bound(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
+        ) = self._make_controller()
+        admitted_thread_ids.add("thread-1")
+        self._bind_thread(lock, binding_runtime, ("ou_user", "c1"), thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            controller.handle_service_control_request("thread/revoke", {"thread_id": "thread-1"})
+
+        self.assertIn("不能撤销 admission", str(ctx.exception))
+        self.assertEqual(admitted_thread_ids, {"thread-1"})

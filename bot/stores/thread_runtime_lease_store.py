@@ -8,12 +8,15 @@ from different instances are rejected.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pathlib
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from typing import Iterator
 
 from bot.instance_layout import global_data_dir
 
@@ -68,23 +71,25 @@ class ThreadRuntimeLeaseStore:
     def _file_path(self) -> pathlib.Path:
         return self._root_dir / "thread_runtime_leases.json"
 
+    def _lock_path(self) -> pathlib.Path:
+        return self._root_dir / "thread_runtime_leases.lock"
+
     def load(self, thread_id: str) -> ThreadRuntimeLease | None:
         normalized_thread_id = self._normalize_thread_id(thread_id)
         if not normalized_thread_id:
             return None
-        with self._lock:
-            data = self._read_all()
+        with self._locked_data() as data:
             raw = data.get(normalized_thread_id)
             lease = self._lease_from_data(normalized_thread_id, raw)
             if lease is None:
                 if normalized_thread_id in data:
                     data.pop(normalized_thread_id, None)
-                    self._write_all(data)
+                    self._write_all_unlocked(data)
                 return None
             cleaned = self._serialize_lease(lease)
             if raw != cleaned:
                 data[normalized_thread_id] = cleaned
-                self._write_all(data)
+                self._write_all_unlocked(data)
             return lease
 
     def acquire(
@@ -96,8 +101,7 @@ class ThreadRuntimeLeaseStore:
         if not normalized_thread_id:
             raise ValueError("thread_id 不能为空。")
         normalized_holder = self._normalize_holder(holder)
-        with self._lock:
-            data = self._read_all()
+        with self._locked_data() as data:
             current = self._lease_from_data(normalized_thread_id, data.get(normalized_thread_id))
             if current is None:
                 lease = ThreadRuntimeLease(
@@ -110,7 +114,7 @@ class ThreadRuntimeLeaseStore:
                     holders=(normalized_holder,),
                 )
                 data[normalized_thread_id] = self._serialize_lease(lease)
-                self._write_all(data)
+                self._write_all_unlocked(data)
                 return ThreadRuntimeLeaseAcquireResult(granted=True, acquired=True, lease=lease)
             if current.owner_instance != normalized_holder.instance_name:
                 return ThreadRuntimeLeaseAcquireResult(granted=False, acquired=False, lease=current)
@@ -128,7 +132,7 @@ class ThreadRuntimeLeaseStore:
                 holders=ordered_holders,
             )
             data[normalized_thread_id] = self._serialize_lease(lease)
-            self._write_all(data)
+            self._write_all_unlocked(data)
             return ThreadRuntimeLeaseAcquireResult(granted=True, acquired=acquired, lease=lease)
 
     def release(self, thread_id: str, holder_id: str) -> bool:
@@ -136,13 +140,12 @@ class ThreadRuntimeLeaseStore:
         normalized_holder_id = str(holder_id or "").strip()
         if not normalized_thread_id or not normalized_holder_id:
             return False
-        with self._lock:
-            data = self._read_all()
+        with self._locked_data() as data:
             lease = self._lease_from_data(normalized_thread_id, data.get(normalized_thread_id))
             if lease is None:
                 if normalized_thread_id in data:
                     data.pop(normalized_thread_id, None)
-                    self._write_all(data)
+                    self._write_all_unlocked(data)
                 return False
             holders = {item.holder_id: item for item in lease.holders}
             if normalized_holder_id not in holders:
@@ -164,7 +167,7 @@ class ThreadRuntimeLeaseStore:
                         holders=retained,
                     )
                 )
-            self._write_all(data)
+            self._write_all_unlocked(data)
         return True
 
     def purge_instance(
@@ -179,8 +182,7 @@ class ThreadRuntimeLeaseStore:
         normalized_token = str(owner_service_token or "").strip()
         if not normalized_thread_id or not normalized_instance_name:
             return False
-        with self._lock:
-            data = self._read_all()
+        with self._locked_data() as data:
             lease = self._lease_from_data(normalized_thread_id, data.get(normalized_thread_id))
             if lease is None:
                 return False
@@ -209,8 +211,37 @@ class ThreadRuntimeLeaseStore:
                         holders=retained,
                     )
                 )
-            self._write_all(data)
+            self._write_all_unlocked(data)
         return True
+
+    @contextmanager
+    def _locked_data(self) -> Iterator[dict[str, dict]]:
+        with self._lock:
+            lock_path = self._lock_path()
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    data = self._read_all_unlocked()
+                    if self._prune_stale_leases(data):
+                        self._write_all_unlocked(data)
+                    yield data
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _prune_stale_leases(self, data: dict[str, dict]) -> bool:
+        changed = False
+        for thread_id in list(data):
+            lease = self._lease_from_data(thread_id, data.get(thread_id))
+            if lease is None:
+                data.pop(thread_id, None)
+                changed = True
+                continue
+            cleaned = self._serialize_lease(lease)
+            if data.get(thread_id) != cleaned:
+                data[thread_id] = cleaned
+                changed = True
+        return changed
 
     @staticmethod
     def _normalize_thread_id(thread_id: str) -> str:
@@ -304,7 +335,7 @@ class ThreadRuntimeLeaseStore:
             "holders": [asdict(holder) for holder in lease.holders],
         }
 
-    def _read_all(self) -> dict[str, dict]:
+    def _read_all_unlocked(self) -> dict[str, dict]:
         path = self._file_path()
         if not path.exists():
             return {}
@@ -320,7 +351,7 @@ class ThreadRuntimeLeaseStore:
             if self._normalize_thread_id(key)
         }
 
-    def _write_all(self, data: dict[str, dict]) -> None:
+    def _write_all_unlocked(self, data: dict[str, dict]) -> None:
         path = self._file_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".json.tmp")

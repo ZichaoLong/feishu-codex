@@ -71,9 +71,9 @@ echo ""
 echo "[ 1/6 ] 检查前置条件..."
 
 PYTHON=""
-for py in python3.12 python3.11 python3.10 python3; do
+for py in python3.12 python3.11 python3; do
     if command -v "$py" &>/dev/null; then
-        ver=$("$py" -c "import sys; print(sys.version_info >= (3,10))" 2>/dev/null || echo "False")
+        ver=$("$py" -c "import sys; print(sys.version_info >= (3,11))" 2>/dev/null || echo "False")
         if [ "$ver" = "True" ]; then
             PYTHON="$py"
             break
@@ -81,7 +81,7 @@ for py in python3.12 python3.11 python3.10 python3; do
     fi
 done
 if [ -z "$PYTHON" ]; then
-    _red "  [错误] 需要 Python 3.10 或更高版本"
+    _red "  [错误] 需要 Python 3.11 或更高版本"
     exit 1
 fi
 _green "  ✓ Python: $($PYTHON --version)"

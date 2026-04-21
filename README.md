@@ -10,7 +10,7 @@
 
 ## 前置条件
 
-- Python 3.10+
+- Python 3.11+
 - 本机已安装 `codex` CLI，且 `codex --help` 可正常执行
 - 飞书开放平台已创建应用，获取 `app_id` 和 `app_secret`
 

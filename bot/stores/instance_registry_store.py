@@ -7,12 +7,15 @@ running `feishu-codex` service instance and its control/backend endpoints.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pathlib
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from typing import Iterator
 
 from bot.instance_layout import global_data_dir
 
@@ -50,11 +53,11 @@ class InstanceRegistryStore:
     def _file_path(self) -> pathlib.Path:
         return self._root_dir / "instance_registry.json"
 
+    def _lock_path(self) -> pathlib.Path:
+        return self._root_dir / "instance_registry.lock"
+
     def list_instances(self) -> list[InstanceRegistryEntry]:
-        with self._lock:
-            data = self._read_all()
-            if self._prune_stale_entries(data):
-                self._write_all(data)
+        with self._locked_data() as data:
             entries = [self._entry_from_data(item) for item in data.values()]
         return sorted((entry for entry in entries if entry is not None), key=lambda item: item.instance_name)
 
@@ -62,37 +65,45 @@ class InstanceRegistryStore:
         normalized = str(instance_name or "").strip().lower()
         if not normalized:
             return None
-        with self._lock:
-            data = self._read_all()
-            if self._prune_stale_entries(data):
-                self._write_all(data)
+        with self._locked_data() as data:
             return self._entry_from_data(data.get(normalized))
 
     def register(self, entry: InstanceRegistryEntry) -> None:
-        with self._lock:
-            data = self._read_all()
-            if self._prune_stale_entries(data):
-                self._write_all(data)
+        with self._locked_data() as data:
             current = self._entry_from_data(data.get(entry.instance_name))
             if current is not None and current.service_token != entry.service_token:
                 raise ValueError(
                     f"instance `{entry.instance_name}` 已由另一个运行中的 service 持有：pid={current.owner_pid}"
                 )
             data[entry.instance_name] = asdict(entry)
-            self._write_all(data)
+            self._write_all_unlocked(data)
 
     def unregister(self, instance_name: str, *, service_token: str) -> None:
         normalized = str(instance_name or "").strip().lower()
         normalized_token = str(service_token or "").strip()
         if not normalized or not normalized_token:
             return
-        with self._lock:
-            data = self._read_all()
+        with self._locked_data() as data:
             current = self._entry_from_data(data.get(normalized))
             if current is None or current.service_token != normalized_token:
                 return
             data.pop(normalized, None)
-            self._write_all(data)
+            self._write_all_unlocked(data)
+
+    @contextmanager
+    def _locked_data(self) -> Iterator[dict[str, dict]]:
+        with self._lock:
+            lock_path = self._lock_path()
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    data = self._read_all_unlocked()
+                    if self._prune_stale_entries(data):
+                        self._write_all_unlocked(data)
+                    yield data
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _prune_stale_entries(self, data: dict[str, dict]) -> bool:
         changed = False
@@ -137,7 +148,7 @@ class InstanceRegistryStore:
             updated_at=updated_at,
         )
 
-    def _read_all(self) -> dict[str, dict]:
+    def _read_all_unlocked(self) -> dict[str, dict]:
         path = self._file_path()
         if not path.exists():
             return {}
@@ -153,7 +164,7 @@ class InstanceRegistryStore:
             if str(key).strip()
         }
 
-    def _write_all(self, data: dict[str, dict]) -> None:
+    def _write_all_unlocked(self, data: dict[str, dict]) -> None:
         path = self._file_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".json.tmp")
