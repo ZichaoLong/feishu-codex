@@ -119,6 +119,13 @@ app_secret: "..."
 
 严格的群聊触发、管理员、`bot_open_id`、`trigger_open_ids`、历史回捞语义见 `docs/contracts/group-chat-contract.zh-CN.md`。
 
+当前还支持一个更窄的附件入口：
+
+- 飞书里的 `image`、`file`、`audio`、`media` 会先下载到当前工作目录下的 `_feishu_attachments/`
+- 附件消息本身不会直接启动 turn；需要同一发送者继续发一条文字说明来消费这些 pending 附件
+- 图片会额外作为 `localImage` 传给 Codex；其他附件只保证把本地绝对路径明确交给 Codex
+- pending 附件默认 30 分钟过期，可用 `codex.yaml` 里的 `attachment_ttl_seconds` 调整
+
 ## 群聊能力速览
 
 - 新群默认：`assistant` + `admin-only`

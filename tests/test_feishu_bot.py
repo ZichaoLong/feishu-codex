@@ -26,6 +26,7 @@ class _RecordingBot(FeishuBot):
             system_config=config,
         )
         self.received_messages: list[tuple[str, str, str, str]] = []
+        self.received_attachments: list[tuple[str, str, str, str, str, str]] = []
         self.replies: list[tuple[str, str]] = []
         self.cards: list[tuple[str, dict]] = []
         self.reply_refs: list[tuple[str, str, str]] = []
@@ -45,6 +46,19 @@ class _RecordingBot(FeishuBot):
 
     def on_card_action(self, sender_id: str, chat_id: str, message_id: str, action_value: dict):
         return self.make_card_response()
+
+    def on_attachment_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        attachment_type: str,
+        resource_key: str,
+        file_name: str,
+    ) -> None:
+        self.received_attachments.append(
+            (sender_id, chat_id, message_id, attachment_type, resource_key, file_name)
+        )
 
     def reply(self, chat_id: str, text: str, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
         self.replies.append((chat_id, text))
@@ -180,11 +194,98 @@ def _message_event(
     )
 
 
+def _attachment_message_event(
+    *,
+    message_id: str,
+    chat_id: str,
+    msg_type: str,
+    sender_user_id: str,
+    sender_open_id: str,
+    content: dict,
+    sender_type: str = "user",
+    mentions: list[dict] | None = None,
+    create_time: int = 1712476800000,
+    thread_id: str = "",
+    root_id: str = "",
+    parent_id: str = "",
+    chat_type: str = "p2p",
+) -> P2ImMessageReceiveV1:
+    return P2ImMessageReceiveV1(
+        {
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "user_id": sender_user_id,
+                        "open_id": sender_open_id,
+                    },
+                    "sender_type": sender_type,
+                },
+                "message": {
+                    "message_id": message_id,
+                    "chat_id": chat_id,
+                    "chat_type": chat_type,
+                    "message_type": msg_type,
+                    "content": json.dumps(content, ensure_ascii=False),
+                    "mentions": mentions or [],
+                    "create_time": create_time,
+                    "thread_id": thread_id,
+                    "root_id": root_id,
+                    "parent_id": parent_id,
+                },
+            }
+        }
+    )
+
+
 class FeishuBotGroupModeTests(unittest.TestCase):
     def _make_bot(self, *, system_config: dict | None = None) -> _RecordingBot:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         return _RecordingBot(pathlib.Path(tempdir.name), system_config=system_config)
+
+    def test_p2p_image_message_routes_to_attachment_handler(self) -> None:
+        bot = self._make_bot()
+
+        bot._handle_raw_message(
+            _attachment_message_event(
+                message_id="img-1",
+                chat_id="ou-user",
+                msg_type="image",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                content={"image_key": "img-key-1"},
+            )
+        )
+
+        self.assertEqual(
+            bot.received_attachments,
+            [("ou-user", "ou-user", "img-1", "image", "img-key-1", "")],
+        )
+        self.assertEqual(bot.received_messages, [])
+
+    def test_group_assistant_mode_routes_authorized_attachment_without_logging_text_context(self) -> None:
+        bot = self._make_bot()
+        bot.set_group_mode("chat-1", "assistant")
+        bot.set_group_access_policy("chat-1", "all-members")
+
+        bot._handle_raw_message(
+            _attachment_message_event(
+                message_id="file-1",
+                chat_id="chat-1",
+                chat_type="group",
+                msg_type="file",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                content={"file_key": "file-key-1", "file_name": "spec.pdf"},
+            )
+        )
+
+        self.assertEqual(
+            bot.received_attachments,
+            [("ou-user", "chat-1", "file-1", "file", "file-key-1", "spec.pdf")],
+        )
+        self.assertEqual(bot.received_messages, [])
+        self.assertEqual(bot._group_store.read_messages_between("chat-1"), [])
 
     def test_assistant_mode_logs_plain_group_message_without_triggering(self) -> None:
         bot = self._make_bot()

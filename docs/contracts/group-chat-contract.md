@@ -117,6 +117,12 @@ Those remain owned by their dedicated documents.
   - local live-log messages after the previous boundary
   - history messages returned by Feishu that are still missing from the local
     log
+- "context" in this contract means text discussion context only; it does not
+  include attachment lifecycle state such as whether a file was downloaded,
+  remains available, or has already been consumed
+- attachment download / availability / consumption state now lives in a
+  separate attachment lifecycle rather than being reconstructed from history
+  recovery or assistant-mode logs
 - main-flow (`chat` container) history recovery is constrained by
   `group_history_fetch_limit` and `group_history_fetch_lookback_seconds`
 - main-flow recovery keeps a small backward slack window around the boundary
@@ -174,3 +180,6 @@ Those remain owned by their dedicated documents.
   correctness bug
 - group commands and ordinary group messages share one backend session, but
   group commands intentionally do not enter the `assistant` context log
+- even if file names or file-like placeholder text appear in group context,
+  they must not be interpreted as meaning the corresponding attachment is still
+  available; attachment availability is outside the history-recovery contract

@@ -14,6 +14,7 @@ from bot.adapters.base import (
     RuntimeProfileSummary,
     ThreadSnapshot,
     ThreadSummary,
+    TurnInputItem,
 )
 from bot.codex_protocol.client import CodexRpcClient
 from bot.constants import DEFAULT_APP_SERVER_MODE, DEFAULT_APP_SERVER_URL, DEFAULT_SOURCE_KINDS
@@ -232,7 +233,7 @@ class CodexAppServerAdapter(AgentAdapter):
         self,
         *,
         thread_id: str,
-        text: str,
+        input_items: list[TurnInputItem],
         cwd: str | None = None,
         model: str | None = None,
         profile: str | None = None,
@@ -246,7 +247,7 @@ class CodexAppServerAdapter(AgentAdapter):
         effective_collaboration_mode = collaboration_mode or self._config.collaboration_mode or "default"
         params: dict[str, Any] = {
             "threadId": thread_id,
-            "input": [{"type": "text", "text": text}],
+            "input": [dict(item) for item in input_items],
             "cwd": cwd,
             "model": effective_model,
             "approvalPolicy": approval_policy or self._config.approval_policy or None,

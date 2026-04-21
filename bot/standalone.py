@@ -42,10 +42,23 @@ class CodexBot(FeishuBot):
     ) -> P2CardActionTriggerResponse:
         return self._handler.handle_card_action(sender_id, chat_id, message_id, action_value)
 
-    def on_file_message(
-        self, sender_id: str, chat_id: str, message_id: str, file_key: str, file_name: str
+    def on_attachment_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        attachment_type: str,
+        resource_key: str,
+        file_name: str,
     ) -> None:
-        self._handler.handle_file_message(sender_id, chat_id, message_id, file_key, file_name)
+        self._handler.handle_attachment_message(
+            sender_id,
+            chat_id,
+            message_id,
+            attachment_type,
+            resource_key,
+            file_name,
+        )
 
     def allow_group_prompt(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
         return self._handler.preflight_group_prompt(sender_id, chat_id, message_id=message_id)

@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot.cards import build_ask_user_card, build_execution_card
@@ -200,7 +201,7 @@ class _FakeAdapter:
         self,
         *,
         thread_id: str,
-        text: str,
+        input_items,
         cwd: str | None = None,
         model: str | None = None,
         profile: str | None = None,
@@ -209,10 +210,16 @@ class _FakeAdapter:
         reasoning_effort: str | None = None,
         collaboration_mode: str | None = None,
     ):
+        text_items = [
+            item.get("text", "")
+            for item in input_items or []
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
         self.start_turn_calls.append(
             {
                 "thread_id": thread_id,
-                "text": text,
+                "text": "\n".join(part for part in text_items if part),
+                "input_items": [dict(item) for item in input_items or []],
                 "cwd": cwd,
                 "model": model,
                 "profile": profile,
@@ -254,6 +261,7 @@ class _FakeBot:
             "trigger_open_ids": [],
         }
         self.runtime_bot_open_id = "ou_bot"
+        self.downloaded_resources: dict[tuple[str, str, str], object] = {}
 
     def reply(self, chat_id: str, text: str, *, parent_message_id: str = "", reply_in_thread: bool = False) -> None:
         self.replies.append((chat_id, text))
@@ -284,6 +292,14 @@ class _FakeBot:
 
     def get_message_context(self, message_id: str) -> dict:
         return dict(self.message_contexts.get(message_id, {}))
+
+    def download_message_resource(self, message_id: str, resource_key: str, *, resource_type: str):
+        resource = self.downloaded_resources.get((message_id, resource_type, resource_key))
+        if resource is None:
+            raise RuntimeError("missing downloaded resource")
+        if isinstance(resource, Exception):
+            raise resource
+        return resource
 
     def lookup_chat_type(self, chat_id: str) -> str:
         return self.chat_types.get(chat_id, "")
@@ -3047,13 +3063,119 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(handler._adapter.start_turn_calls), 1)
         self.assertEqual(bot.replies[-1], ("c1", "当前线程仍在执行，请等待结束或先执行 `/cancel`。"))
 
-    def test_file_message_reports_explicitly_not_supported_yet(self) -> None:
+    def test_file_attachment_is_staged_and_consumed_by_next_prompt(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        workspace = pathlib.Path(tempdir.name) / "workspace"
+        workspace.mkdir()
+        handler, bot = self._make_handler({"default_working_dir": str(workspace)})
+        bot.message_contexts["m-file"] = {"chat_type": "p2p", "message_type": "file"}
+        bot.message_contexts["m-text"] = {"chat_type": "p2p", "message_type": "text"}
+        bot.downloaded_resources[("m-file", "file", "file-key")] = SimpleNamespace(
+            content=b"spec-content",
+            file_name="spec.pdf",
+            content_type="application/pdf",
+        )
+
+        handler.handle_attachment_message("ou_user", "c1", "m-file", "file", "file-key", "spec.pdf")
+
+        self.assertIn("已保存到本地", bot.replies[-1][1])
+        self.assertEqual(handler._adapter.start_turn_calls, [])
+        staged_files = sorted((workspace / "_feishu_attachments").iterdir())
+        self.assertEqual(len(staged_files), 1)
+        self.assertEqual(staged_files[0].read_bytes(), b"spec-content")
+
+        handler.handle_message("ou_user", "c1", "请阅读这个文件", message_id="m-text")
+
+        input_items = handler._adapter.start_turn_calls[-1]["input_items"]
+        self.assertEqual(input_items[0]["type"], "text")
+        self.assertIn(str(staged_files[0]), input_items[0]["text"])
+        self.assertIn("spec.pdf", input_items[0]["text"])
+        self.assertEqual(handler._pending_attachment_store.list_all(), ())
+
+    def test_image_attachment_turn_includes_local_image_input(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        workspace = pathlib.Path(tempdir.name) / "workspace"
+        workspace.mkdir()
+        handler, bot = self._make_handler({"default_working_dir": str(workspace)})
+        bot.message_contexts["m-image"] = {"chat_type": "p2p", "message_type": "image"}
+        bot.message_contexts["m-text"] = {"chat_type": "p2p", "message_type": "text"}
+        bot.downloaded_resources[("m-image", "image", "img-key")] = SimpleNamespace(
+            content=b"\x89PNG\r\n\x1a\npng",
+            file_name="diagram.png",
+            content_type="image/png",
+        )
+
+        handler.handle_attachment_message("ou_user", "c1", "m-image", "image", "img-key", "")
+        handler.handle_message("ou_user", "c1", "请解释这张图", message_id="m-text")
+
+        input_items = handler._adapter.start_turn_calls[-1]["input_items"]
+        self.assertEqual([item["type"] for item in input_items], ["text", "localImage"])
+        self.assertTrue(input_items[1]["path"].endswith(".png"))
+        self.assertIn(input_items[1]["path"], input_items[0]["text"])
+
+    def test_group_attachment_pending_is_isolated_by_sender(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        workspace = pathlib.Path(tempdir.name) / "workspace"
+        workspace.mkdir()
+        handler, bot = self._make_handler({"default_working_dir": str(workspace)})
+        bot.message_contexts["g-file"] = {"chat_type": "group", "message_type": "file", "sender_open_id": "ou_user"}
+        bot.message_contexts["g-text-b"] = {"chat_type": "group", "message_type": "text", "sender_open_id": "ou_user2"}
+        bot.message_contexts["g-text-a"] = {"chat_type": "group", "message_type": "text", "sender_open_id": "ou_user"}
+        bot.downloaded_resources[("g-file", "file", "file-key")] = SimpleNamespace(
+            content=b"group-file",
+            file_name="group.txt",
+            content_type="text/plain",
+        )
+
+        handler.handle_attachment_message("ou_user", "chat-group", "g-file", "file", "file-key", "group.txt")
+        handler.handle_message("ou_user2", "chat-group", "普通提问", message_id="g-text-b")
+
+        self.assertNotIn("group.txt", handler._adapter.start_turn_calls[-1]["text"])
+        state = handler._get_runtime_state("ou_user", "chat-group", "g-text-a")
+        with handler._lock:
+            state["running"] = False
+            state["current_turn_id"] = ""
+
+        handler.handle_message("ou_user", "chat-group", "请一起看附件", message_id="g-text-a")
+
+        self.assertIn("group.txt", handler._adapter.start_turn_calls[-1]["text"])
+
+    def test_expired_attachment_blocks_follow_up_prompt(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        workspace = pathlib.Path(tempdir.name) / "workspace"
+        workspace.mkdir()
+        handler, bot = self._make_handler(
+            {"default_working_dir": str(workspace), "attachment_ttl_seconds": 1}
+        )
+        bot.message_contexts["m-file"] = {"chat_type": "p2p", "message_type": "file"}
+        bot.message_contexts["m-text"] = {"chat_type": "p2p", "message_type": "text"}
+        bot.downloaded_resources[("m-file", "file", "file-key")] = SimpleNamespace(
+            content=b"ttl",
+            file_name="ttl.txt",
+            content_type="text/plain",
+        )
+
+        with patch("bot.file_message_domain.time.time", return_value=10.0):
+            handler.handle_attachment_message("ou_user", "c1", "m-file", "file", "file-key", "ttl.txt")
+        with patch("bot.file_message_domain.time.time", return_value=20.0):
+            handler.handle_message("ou_user", "c1", "还在吗", message_id="m-text")
+
+        self.assertEqual(handler._adapter.start_turn_calls, [])
+        self.assertIn("附件已过期", bot.replies[-1][1])
+        attachment_dir = workspace / "_feishu_attachments"
+        self.assertFalse(attachment_dir.exists() and any(attachment_dir.iterdir()))
+
+    def test_unsupported_attachment_type_is_rejected_explicitly(self) -> None:
         handler, bot = self._make_handler()
+        bot.message_contexts["m-folder"] = {"chat_type": "p2p", "message_type": "folder"}
 
-        handler.handle_file_message("ou_user", "c1", "m-file", "file-key", "spec.pdf")
+        handler.handle_attachment_message("ou_user", "c1", "m-folder", "folder", "folder-key", "设计资料")
 
-        self.assertIn("暂不支持直接处理文件消息", bot.replies[-1][1])
-        self.assertIn("spec.pdf", bot.replies[-1][1])
+        self.assertIn("文件夹消息当前无法通过飞书 API 下载", bot.replies[-1][1])
 
     def test_prompt_after_switching_back_to_default_uses_default_collaboration_mode(self) -> None:
         handler, _ = self._make_handler()

@@ -63,11 +63,16 @@ class BotHandler(ABC):
         )
         return P2CardActionTriggerResponse()
 
-    def handle_file_message(
-        self, sender_id: str, chat_id: str, message_id: str,
-        file_key: str, file_name: str
+    def handle_attachment_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        attachment_type: str,
+        resource_key: str,
+        file_name: str,
     ) -> None:
-        """处理文件消息，默认忽略，需要处理文件的子类覆写此方法"""
+        """处理附件消息，默认忽略，需要处理附件的子类覆写此方法"""
         pass
 
     # ---- 会话状态 ----

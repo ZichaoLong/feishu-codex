@@ -4,7 +4,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, TypeAlias, TypedDict
 
 
 @dataclass(slots=True)
@@ -44,6 +44,19 @@ class RuntimeConfigSummary:
     current_profile: str | None = None
     current_model_provider: str | None = None
     profiles: list[RuntimeProfileSummary] = field(default_factory=list)
+
+
+class TextTurnInputItem(TypedDict):
+    type: Literal["text"]
+    text: str
+
+
+class LocalImageTurnInputItem(TypedDict):
+    type: Literal["localImage"]
+    path: str
+
+
+TurnInputItem: TypeAlias = TextTurnInputItem | LocalImageTurnInputItem
 
 
 class AgentAdapter(ABC):
@@ -122,7 +135,7 @@ class AgentAdapter(ABC):
         self,
         *,
         thread_id: str,
-        text: str,
+        input_items: list[TurnInputItem],
         cwd: str | None = None,
         model: str | None = None,
         profile: str | None = None,

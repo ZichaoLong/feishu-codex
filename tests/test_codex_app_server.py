@@ -166,7 +166,11 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         fake_rpc = _FakeRpc()
         adapter._rpc = fake_rpc
 
-        adapter.start_turn(thread_id="thread-1", text="hello", cwd="/tmp")
+        adapter.start_turn(
+            thread_id="thread-1",
+            input_items=[{"type": "text", "text": "hello"}],
+            cwd="/tmp",
+        )
 
         self.assertEqual(
             fake_rpc.calls,
@@ -209,7 +213,11 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         fake_rpc = _FakeRpc()
         adapter._rpc = fake_rpc
 
-        adapter.start_turn(thread_id="thread-1", text="hello", cwd="/tmp")
+        adapter.start_turn(
+            thread_id="thread-1",
+            input_items=[{"type": "text", "text": "hello"}],
+            cwd="/tmp",
+        )
 
         self.assertEqual(len(fake_rpc.calls), 1)
         method, params = fake_rpc.calls[0]
@@ -223,8 +231,16 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         fake_rpc = _FakeRpc()
         adapter._rpc = fake_rpc
 
-        adapter.start_turn(thread_id="thread-1", text="hello", cwd="/tmp")
-        adapter.start_turn(thread_id="thread-2", text="again", cwd="/tmp")
+        adapter.start_turn(
+            thread_id="thread-1",
+            input_items=[{"type": "text", "text": "hello"}],
+            cwd="/tmp",
+        )
+        adapter.start_turn(
+            thread_id="thread-2",
+            input_items=[{"type": "text", "text": "again"}],
+            cwd="/tmp",
+        )
 
         self.assertEqual(fake_rpc.calls[0][0], "model/list")
         self.assertEqual(fake_rpc.calls[1][0], "turn/start")
@@ -245,7 +261,7 @@ class CodexAppServerAdapterTests(unittest.TestCase):
 
         adapter.start_turn(
             thread_id="thread-1",
-            text="hello",
+            input_items=[{"type": "text", "text": "hello"}],
             cwd="/tmp",
             collaboration_mode="default",
         )
@@ -262,7 +278,12 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         fake_rpc = _FakeRpc()
         adapter._rpc = fake_rpc
 
-        adapter.start_turn(thread_id="thread-1", text="hello", cwd="/tmp", profile="provider2")
+        adapter.start_turn(
+            thread_id="thread-1",
+            input_items=[{"type": "text", "text": "hello"}],
+            cwd="/tmp",
+            profile="provider2",
+        )
 
         self.assertEqual(fake_rpc.calls[0], ("model/list", {}))
         self.assertEqual(fake_rpc.calls[1][0], "turn/start")
@@ -275,7 +296,7 @@ class CodexAppServerAdapterTests(unittest.TestCase):
 
         adapter.start_turn(
             thread_id="thread-1",
-            text="hello",
+            input_items=[{"type": "text", "text": "hello"}],
             cwd="/tmp",
             sandbox="danger-full-access",
         )

@@ -55,7 +55,7 @@ from bot.profile_resolution import DefaultProfileResolution, resolve_local_defau
 from bot.execution_transcript import ExecutionTranscript
 from bot.execution_output_controller import ExecutionOutputController
 from bot.execution_recovery_controller import ExecutionRecoveryController, TerminalReconcileTarget
-from bot.file_message_domain import FileMessageDomain, IncomingFileMessage
+from bot.file_message_domain import FileMessageDomain, IncomingAttachmentMessage
 from bot.interaction_request_controller import InteractionRequestController
 from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSurfaceController
 from bot.prompt_turn_entry_controller import PromptTurnEntryController, PromptTurnEntryPorts
@@ -81,6 +81,7 @@ from bot.session_resolution import (
     resolve_resume_target_by_name,
 )
 from bot.stores.thread_admission_store import ThreadAdmissionStore
+from bot.stores.pending_attachment_store import PendingAttachmentStore
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import (
@@ -105,6 +106,7 @@ logger = logging.getLogger(__name__)
 _CARD_REPLY_LIMIT_DEFAULT = 12000
 _CARD_LOG_LIMIT_DEFAULT = 8000
 _MIRROR_WATCHDOG_SECONDS_DEFAULT = 8.0
+_ATTACHMENT_TTL_SECONDS_DEFAULT = 1800.0
 _APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
 _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _LOCAL_THREAD_SAFETY_RULE = (
@@ -243,10 +245,14 @@ class CodexHandler(BotHandler):
         self._mirror_watchdog_seconds = float(
             cfg.get("mirror_watchdog_seconds", _MIRROR_WATCHDOG_SECONDS_DEFAULT)
         )
+        self._attachment_ttl_seconds = float(
+            cfg.get("attachment_ttl_seconds", _ATTACHMENT_TTL_SECONDS_DEFAULT)
+        )
 
         self._adapter_config = CodexAppServerConfig.from_dict(cfg)
         self._app_server_runtime = AppServerRuntimeStore(self._data_dir)
         self._chat_binding_store = ChatBindingStore(self._data_dir)
+        self._pending_attachment_store = PendingAttachmentStore(self._data_dir)
         self._binding_runtime = BindingRuntimeManager(
             lock=self._lock,
             default_working_dir=self._default_working_dir,
@@ -397,7 +403,11 @@ class CodexHandler(BotHandler):
             local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
         )
         self._session_ui_domain = CodexSessionUiDomain(self)
-        self._file_message_domain = FileMessageDomain(self)
+        self._file_message_domain = FileMessageDomain(
+            self,
+            store=self._pending_attachment_store,
+            ttl_seconds=self._attachment_ttl_seconds,
+        )
         self._thread_access_policy = ThreadAccessPolicy(
             lock=self._lock,
             is_group_chat=self._is_group_chat,
@@ -698,28 +708,43 @@ class CodexHandler(BotHandler):
             action_value,
         )
 
-    def handle_file_message(
-        self, sender_id: str, chat_id: str, message_id: str, file_key: str, file_name: str
+    def handle_attachment_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        attachment_type: str,
+        resource_key: str,
+        file_name: str,
     ) -> None:
         self._runtime_call(
-            self._handle_file_message_impl,
+            self._handle_attachment_message_impl,
             sender_id,
             chat_id,
             message_id,
-            file_key,
+            attachment_type,
+            resource_key,
             file_name,
         )
 
-    def _handle_file_message_impl(
-        self, sender_id: str, chat_id: str, message_id: str, file_key: str, file_name: str
+    def _handle_attachment_message_impl(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        attachment_type: str,
+        resource_key: str,
+        file_name: str,
     ) -> None:
         self._file_message_domain.handle_message(
-            IncomingFileMessage(
+            IncomingAttachmentMessage(
                 sender_id=sender_id,
                 chat_id=chat_id,
                 message_id=message_id,
-                file_key=file_key,
-                file_name=file_name,
+                thread_id=str(self.bot.get_message_context(message_id).get("thread_id", "") or "").strip(),
+                attachment_type=attachment_type,
+                resource_key=resource_key,
+                display_name=file_name,
             )
         )
 
@@ -1652,12 +1677,29 @@ class CodexHandler(BotHandler):
         )
 
     def _handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
-        self._prompt_turn_entry.handle_prompt(
+        prepared = self._file_message_domain.prepare_prompt_input(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+        )
+        if prepared.blocking_text:
+            self._reply_text(
+                chat_id,
+                prepared.blocking_text,
+                message_id=message_id,
+                reply_in_thread=self._message_reply_in_thread(message_id),
+            )
+            return
+        started = self._prompt_turn_entry.handle_prompt(
             sender_id,
             chat_id,
             text,
             message_id=message_id,
+            input_items=list(prepared.input_items),
         )
+        if not started and prepared.consumed_attachments:
+            self._file_message_domain.restore_consumed_attachments(prepared.consumed_attachments)
 
     def _handle_cd_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         runtime = self._get_runtime_view(sender_id, chat_id, message_id)

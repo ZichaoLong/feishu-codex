@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, MutableMapping, Protocol, TypeAlias
 
-from bot.adapters.base import ThreadSnapshot, ThreadSummary
+from bot.adapters.base import ThreadSnapshot, ThreadSummary, TurnInputItem
 from bot.cards import build_markdown_card
 from bot.execution_transcript import ExecutionTranscript
 from bot.runtime_card_publisher import build_execution_card_model
@@ -252,10 +252,24 @@ class PromptTurnEntryController:
         self._reply_text(chat_id, "当前线程仍在执行，请等待结束或先执行 `/cancel`。", message_id=message_id)
         return True
 
-    def handle_prompt(self, sender_id: str, chat_id: str, text: str, *, message_id: str = "") -> None:
+    def handle_prompt(
+        self,
+        sender_id: str,
+        chat_id: str,
+        text: str,
+        *,
+        message_id: str = "",
+        input_items: list[TurnInputItem] | tuple[TurnInputItem, ...] | None = None,
+    ) -> bool:
         if self.handle_running_prompt(sender_id, chat_id, text, message_id=message_id):
-            return
-        self.start_prompt_turn(sender_id, chat_id, text, message_id=message_id)
+            return False
+        return self.start_prompt_turn(
+            sender_id,
+            chat_id,
+            text,
+            message_id=message_id,
+            input_items=input_items,
+        )
 
     def start_prompt_turn(
         self,
@@ -265,7 +279,9 @@ class PromptTurnEntryController:
         *,
         message_id: str = "",
         actor_open_id: str = "",
-    ) -> None:
+        input_items: list[TurnInputItem] | tuple[TurnInputItem, ...] | None = None,
+    ) -> bool:
+        effective_input_items = list(input_items) if input_items is not None else [{"type": "text", "text": text}]
         resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
         state = resolved.state
         chat_binding_key = resolved.binding
@@ -287,7 +303,7 @@ class PromptTurnEntryController:
                     message_id=message_id,
                     reply_in_thread=self._message_reply_in_thread(message_id),
                 )
-                return
+                return False
             with self._lock:
                 preattached_interaction_lease = self._acquire_interaction_lease_for_binding(
                     chat_binding_key,
@@ -300,7 +316,7 @@ class PromptTurnEntryController:
                     message_id=message_id,
                     reply_in_thread=self._message_reply_in_thread(message_id),
                 )
-                return
+                return False
         try:
             thread_id = self.ensure_thread(sender_id, chat_id, message_id=message_id)
             thread_id = self.ensure_binding_runtime_attached(sender_id, chat_id, message_id=message_id)
@@ -313,7 +329,7 @@ class PromptTurnEntryController:
                 message_id=message_id,
                 text=f"准备线程失败：{exc}",
             )
-            return
+            return False
 
         sharing_violation = self._access_policy.thread_sharing_policy_violation(
             chat_id,
@@ -329,7 +345,7 @@ class PromptTurnEntryController:
                 message_id=message_id,
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )
-            return
+            return False
         interaction_lease = preattached_interaction_lease
         lease = None
         with self._lock:
@@ -346,7 +362,7 @@ class PromptTurnEntryController:
                 message_id=message_id,
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )
-            return
+            return False
         if lease is None or not lease.granted:
             if interaction_lease.acquired:
                 self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
@@ -356,7 +372,7 @@ class PromptTurnEntryController:
                 message_id=message_id,
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )
-            return
+            return False
 
         prompt_reply_in_thread = self._message_reply_in_thread(message_id)
         with self._lock:
@@ -400,7 +416,7 @@ class PromptTurnEntryController:
         def _start_turn_once(bound_thread_id: str) -> dict[str, Any]:
             return self._start_turn(
                 thread_id=bound_thread_id,
-                text=text,
+                input_items=effective_input_items,
                 cwd=state["working_dir"],
                 model=state["model"] or None,
                 profile=self._effective_default_profile() or None,
@@ -430,7 +446,7 @@ class PromptTurnEntryController:
                         prompt_reply_in_thread=prompt_reply_in_thread,
                         clear_thread_binding=self._is_thread_not_found_error(retry_exc),
                     )
-                    return
+                    return False
             else:
                 logger.exception("启动 turn 失败")
                 self._handle_start_failure(
@@ -443,7 +459,7 @@ class PromptTurnEntryController:
                     prompt_reply_in_thread=prompt_reply_in_thread,
                     clear_thread_binding=False,
                 )
-                return
+                return False
 
         turn_id = self.extract_turn_id_from_start_response(start_response)
         with self._lock:
@@ -463,6 +479,7 @@ class PromptTurnEntryController:
                         ExecutionStateChanged(pending_cancel=False),
                     )
         self._schedule_mirror_watchdog(sender_id, chat_id)
+        return True
 
     def cancel_current_turn(
         self,

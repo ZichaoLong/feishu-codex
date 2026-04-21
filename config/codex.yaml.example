@@ -83,6 +83,11 @@
 # /resume 成功后是否发送历史预览卡片；默认值：true
 # show_history_preview_on_resume: true
 
+# 飞书附件 pending 状态的过期秒数；默认值：1800（30 分钟）
+# 说明：附件会先下载到当前工作目录下的 `_feishu_attachments/`，等待同一发送者的下一条文本消费。
+# 说明：到期后不会再自动绑定到后续文本，且本地暂存文件会被清理。
+# attachment_ttl_seconds: 1800
+
 # 运行中主卡片最小 patch 间隔（毫秒）；默认值：700
 # stream_patch_interval_ms: 700
 

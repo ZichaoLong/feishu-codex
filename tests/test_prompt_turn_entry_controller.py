@@ -155,7 +155,15 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             return create_thread_result
 
         def _start_turn(**kwargs):
-            start_turn_calls.append(dict(kwargs))
+            snapshot = dict(kwargs)
+            input_items = [dict(item) for item in snapshot.get("input_items", [])]
+            snapshot["input_items"] = input_items
+            snapshot["text"] = "\n".join(
+                item.get("text", "")
+                for item in input_items
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+            start_turn_calls.append(snapshot)
             value = start_turn_behavior["value"]
             if isinstance(value, Exception):
                 if len(start_turn_calls) == 1 and isinstance(value, Exception):

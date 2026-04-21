@@ -90,6 +90,9 @@ _SENDER_NAME_CACHE_TTL = 6 * 3600
 _GROUP_HISTORY_FETCH_LIMIT = 50
 _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS = 24 * 3600
 _GROUP_HISTORY_BOUNDARY_SLACK_SECONDS = 5
+_DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES = {"image", "file", "audio", "media"}
+_UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES = {"folder", "sticker"}
+_ATTACHMENT_MESSAGE_TYPES = _DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES | _UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES
 
 
 def _non_negative_int(value: Any, default: int) -> int:
@@ -165,6 +168,13 @@ class _CachedChatType:
 class _PendingExecutionCard:
     card_message_id: str
     created_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadedMessageResource:
+    content: bytes
+    file_name: str
+    content_type: str
 
 
 def _scan_tables(text: str) -> list[tuple[int, int]]:
@@ -669,6 +679,20 @@ class FeishuBot(ABC):
             return f"[系统消息] {template}" if template else "[系统消息]"
 
         return ""
+
+    @staticmethod
+    def _attachment_message_name(msg_type: str, content_dict: dict) -> str:
+        if msg_type == "image":
+            return ""
+        if msg_type == "audio":
+            return str(content_dict.get("file_name", "") or "").strip() or "语音"
+        return str(content_dict.get("file_name", "") or "").strip()
+
+    @staticmethod
+    def _attachment_resource_key(msg_type: str, content_dict: dict) -> str:
+        if msg_type == "image":
+            return str(content_dict.get("image_key", "") or "").strip()
+        return str(content_dict.get("file_key", "") or "").strip()
 
     @staticmethod
     def _mention_payload(mention: Any) -> MentionPayload:
@@ -1736,9 +1760,6 @@ class FeishuBot(ABC):
             )
             return
 
-        # ---- 检查是否有待合并的转发消息 ----
-        pending = self._pop_pending_forward(sender_id, chat_id)
-
         try:
             content_dict = json.loads(message.content)
         except (json.JSONDecodeError, AttributeError) as e:
@@ -1758,19 +1779,34 @@ class FeishuBot(ABC):
             sender_name, sender_open_log, sender_user_log, chat_type, msg_type, message_id, message.content,
         )
 
+        is_attachment_message = msg_type in _ATTACHMENT_MESSAGE_TYPES
         text = ""
-        if msg_type == "file":
-            file_key = content_dict.get("file_key", "")
-            file_name = content_dict.get("file_name", "")
-            text = f"[文件] {file_name}".strip()
+        if is_attachment_message:
+            attachment_name = self._attachment_message_name(msg_type, content_dict)
+            label = {
+                "image": "图片",
+                "file": "文件",
+                "audio": "音频",
+                "media": "媒体",
+                "sticker": "表情包",
+                "folder": "文件夹",
+            }.get(msg_type, "附件")
+            text = f"[{label}] {attachment_name}".strip()
             logger.info(
-                "收到文件: name=%s, open_id=%s, user_id=%s, chat_type=%s, message_id=%s, file=%s",
-                sender_name, sender_open_log, sender_user_log, chat_type, message_id, file_name,
+                "收到附件: name=%s, open_id=%s, user_id=%s, chat_type=%s, msg_type=%s, message_id=%s, file=%s",
+                sender_name,
+                sender_open_log,
+                sender_user_log,
+                chat_type,
+                msg_type,
+                message_id,
+                attachment_name,
             )
         else:
             text = self._render_message_text(msg_type, content_dict)
         if chat_type == "group" and mentions:
             text = self._normalize_mentions(text, mentions)
+        pending = None if is_attachment_message else self._pop_pending_forward(sender_id, chat_id)
         if pending:
             text = (
                 f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>"
@@ -1811,94 +1847,109 @@ class FeishuBot(ABC):
             control_text = self._is_group_control_text(text)
             allowed_to_use = self.is_group_user_allowed(chat_id, open_id=sender_open_id)
             if group_mode == self._GROUP_MODE_ASSISTANT:
-                log_text = text
-                if bot_mentioned and not log_text and not control_text:
-                    log_text = "[@触发]"
-                current_seq = 0
-                if log_text and not control_text:
-                    current_seq = self._append_group_log_entry(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        created_at=message.create_time,
-                        sender_user_id=sender_user_id,
-                        sender_open_id=sender_open_id,
-                        sender_type=sender_type,
-                        msg_type=msg_type,
+                if is_attachment_message:
+                    if not allowed_to_use:
+                        return
+                else:
+                    log_text = text
+                    if bot_mentioned and not log_text and not control_text:
+                        log_text = "[@触发]"
+                    current_seq = 0
+                    if log_text and not control_text:
+                        current_seq = self._append_group_log_entry(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            created_at=message.create_time,
+                            sender_user_id=sender_user_id,
+                            sender_open_id=sender_open_id,
+                            sender_type=sender_type,
+                            msg_type=msg_type,
+                            thread_id=thread_id,
+                            text=log_text,
+                        )
+                    if not bot_mentioned:
+                        return
+                    if not allowed_to_use:
+                        self.reply(
+                            chat_id,
+                            self._group_acl_denied_text(group_mode),
+                            parent_message_id=message_id,
+                        )
+                        return
+                    if control_text:
+                        self.on_message(sender_id, chat_id, text, message_id=message_id)
+                        return
+                    if not self.allow_group_prompt(sender_id, chat_id, message_id=message_id):
+                        return
+                    if self._history_recovery_enabled():
+                        self._prepare_group_history_execution_card(chat_id, message_id)
+                    try:
+                        context_entries = self._collect_assistant_context_entries(
+                            chat_id=chat_id,
+                            current_message_id=message_id,
+                            current_create_time=message.create_time,
+                            current_seq=current_seq,
+                            thread_id=thread_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("群历史回捞失败: chat=%s, error=%s", chat_id, exc)
+                        self._notify_group_history_fetch_failed(
+                            chat_id=chat_id,
+                            parent_message_id=message_id,
+                            error=exc,
+                        )
+                        return
+                    assistant_text = self._build_assistant_turn_text(
+                        self._format_group_context_entries(context_entries),
+                        text,
+                        self._group_store.log_path(chat_id),
                         thread_id=thread_id,
-                        text=log_text,
                     )
-                if not bot_mentioned:
+                    if current_seq:
+                        boundary_message_ids = self._collect_boundary_message_ids(
+                            current_message_id=message_id,
+                            current_created_at=message.create_time,
+                            context_entries=context_entries,
+                        )
+                        self._group_store.set_last_boundary(
+                            chat_id,
+                            seq=current_seq,
+                            created_at=message.create_time,
+                            message_ids=boundary_message_ids,
+                            scope=self._group_scope_key(thread_id),
+                        )
+                    self.on_message(sender_id, chat_id, assistant_text, message_id=message_id)
                     return
-                if not allowed_to_use:
-                    self.reply(
-                        chat_id,
-                        self._group_acl_denied_text(group_mode),
-                        parent_message_id=message_id,
-                    )
-                    return
-                if control_text:
-                    self.on_message(sender_id, chat_id, text, message_id=message_id)
-                    return
-                if not self.allow_group_prompt(sender_id, chat_id, message_id=message_id):
-                    return
-                if self._history_recovery_enabled():
-                    self._prepare_group_history_execution_card(chat_id, message_id)
-                try:
-                    context_entries = self._collect_assistant_context_entries(
-                        chat_id=chat_id,
-                        current_message_id=message_id,
-                        current_create_time=message.create_time,
-                        current_seq=current_seq,
-                        thread_id=thread_id,
-                    )
-                except Exception as exc:
-                    logger.warning("群历史回捞失败: chat=%s, error=%s", chat_id, exc)
-                    self._notify_group_history_fetch_failed(
-                        chat_id=chat_id,
-                        parent_message_id=message_id,
-                        error=exc,
-                    )
-                    return
-                assistant_text = self._build_assistant_turn_text(
-                    self._format_group_context_entries(context_entries),
-                    text,
-                    self._group_store.log_path(chat_id),
-                    thread_id=thread_id,
-                )
-                if current_seq:
-                    boundary_message_ids = self._collect_boundary_message_ids(
-                        current_message_id=message_id,
-                        current_created_at=message.create_time,
-                        context_entries=context_entries,
-                    )
-                    self._group_store.set_last_boundary(
-                        chat_id,
-                        seq=current_seq,
-                        created_at=message.create_time,
-                        message_ids=boundary_message_ids,
-                        scope=self._group_scope_key(thread_id),
-                    )
-                self.on_message(sender_id, chat_id, assistant_text, message_id=message_id)
-                return
 
-            if group_mode == self._GROUP_MODE_MENTION and not bot_mentioned:
+            if group_mode == self._GROUP_MODE_MENTION and not bot_mentioned and not is_attachment_message:
                 logger.debug("忽略群聊非触发 mention 消息: chat=%s, user=%s", chat_id, sender_user_id)
                 return
 
             if not allowed_to_use:
-                if bot_mentioned or text.startswith("/"):
+                if not is_attachment_message and (bot_mentioned or text.startswith("/")):
                     self.reply(
                         chat_id,
                         self._group_acl_denied_text(group_mode),
                         parent_message_id=message_id,
                     )
                 return
-            if not control_text and not self.allow_group_prompt(sender_id, chat_id, message_id=message_id):
+            if not is_attachment_message and not control_text and not self.allow_group_prompt(
+                sender_id,
+                chat_id,
+                message_id=message_id,
+            ):
                 return
-        if msg_type == "file":
-            file_key = content_dict.get("file_key", "")
-            file_name = content_dict.get("file_name", "")
-            self.on_file_message(sender_id, chat_id, message_id, file_key, file_name)
+        if is_attachment_message:
+            resource_key = self._attachment_resource_key(msg_type, content_dict)
+            attachment_name = self._attachment_message_name(msg_type, content_dict)
+            self.on_attachment_message(
+                sender_id,
+                chat_id,
+                message_id,
+                msg_type,
+                resource_key,
+                attachment_name,
+            )
             return
 
         if not text:
@@ -2208,6 +2259,34 @@ class FeishuBot(ABC):
 
         return _make_card_response(card=card, toast=toast, toast_type=toast_type)
 
+    def download_message_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        *,
+        resource_type: str,
+    ) -> DownloadedMessageResource:
+        """下载飞书消息资源，返回内容、文件名和内容类型。"""
+        request = GetMessageResourceRequest.builder() \
+            .message_id(message_id) \
+            .file_key(file_key) \
+            .type(resource_type) \
+            .build()
+        try:
+            response = self.client.im.v1.message_resource.get(request)
+        except Exception as e:
+            raise RuntimeError(f"资源下载失败(SDK异常): {e}") from e
+        if not response.success():
+            raise RuntimeError(f"资源下载失败: code={response.code}, msg={response.msg}")
+        raw = getattr(response, "raw", None)
+        headers = getattr(raw, "headers", {}) if raw is not None else {}
+        content_type = str(headers.get("Content-Type", "") or "").strip()
+        return DownloadedMessageResource(
+            content=response.file.read(),
+            file_name=str(getattr(response, "file_name", "") or "").strip(),
+            content_type=content_type,
+        )
+
     def download_file(self, message_id: str, file_key: str) -> bytes:
         """下载飞书消息中的文件，返回文件二进制内容
 
@@ -2221,18 +2300,11 @@ class FeishuBot(ABC):
         Raises:
             RuntimeError: 下载失败时抛出
         """
-        request = GetMessageResourceRequest.builder() \
-            .message_id(message_id) \
-            .file_key(file_key) \
-            .type("file") \
-            .build()
-        try:
-            response = self.client.im.v1.message_resource.get(request)
-        except Exception as e:
-            raise RuntimeError(f"文件下载失败(SDK异常): {e}") from e
-        if not response.success():
-            raise RuntimeError(f"文件下载失败: code={response.code}, msg={response.msg}")
-        return response.file.read()
+        return self.download_message_resource(
+            message_id,
+            file_key,
+            resource_type="file",
+        ).content
 
     # ---- 业务逻辑层 (子类实现) ----
 
@@ -2248,11 +2320,16 @@ class FeishuBot(ABC):
         """处理卡片按钮点击，子类可覆写"""
         return P2CardActionTriggerResponse()
 
-    def on_file_message(
-        self, sender_id: str, chat_id: str, message_id: str,
-        file_key: str, file_name: str
+    def on_attachment_message(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        attachment_type: str,
+        resource_key: str,
+        file_name: str,
     ) -> None:
-        """处理收到的文件消息，子类可覆写"""
+        """处理收到的附件消息，子类可覆写"""
         pass
 
     def on_bot_menu(self, open_id: str, event_key: str) -> None:
