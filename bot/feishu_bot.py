@@ -10,7 +10,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -52,6 +52,11 @@ from bot.feishu_types import (
     MessageContextPayload,
 )
 from bot.forward_aggregator import ForwardAggregator, ForwardAggregatorPorts, PendingForward
+from bot.group_history_recovery import (
+    GroupHistoryRecovery,
+    GroupHistoryRecoveryPorts,
+    ListedMessagesPage,
+)
 from bot.stores.group_chat_store import (
     GroupChatStore,
 )
@@ -83,7 +88,6 @@ _SENDER_NAME_CACHE_TTL = 6 * 3600
 # assistant 模式按需回捞群历史消息的窗口
 _GROUP_HISTORY_FETCH_LIMIT = 50
 _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS = 24 * 3600
-_GROUP_HISTORY_BOUNDARY_SLACK_SECONDS = 5
 _DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES = {"image", "file", "audio", "media"}
 _UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES = {"folder", "sticker"}
 _ATTACHMENT_MESSAGE_TYPES = _DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES | _UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES
@@ -267,6 +271,23 @@ class FeishuBot(ABC):
                 _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS,
             ),
             _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS,
+        )
+        self._history_recovery = GroupHistoryRecovery(
+            ports=GroupHistoryRecoveryPorts(
+                list_messages=self._list_history_messages_page,
+                render_message_text=self._render_message_text,
+                normalize_mentions=self._normalize_mentions,
+                mention_payloads=self._mention_payloads,
+                display_name_for_sender_identity=self._display_name_for_sender_identity,
+                read_local_messages_between=self._read_group_history_local_messages,
+                get_last_boundary_seq=self._get_group_history_boundary_seq,
+                get_last_boundary_created_at=self._get_group_history_boundary_created_at,
+                get_last_boundary_message_ids=self._get_group_history_boundary_message_ids,
+                fetch_group_history_entries=self._fetch_group_history_entries,
+            ),
+            app_id=lambda: self.app_id,
+            history_fetch_limit=self._group_history_fetch_limit,
+            history_fetch_lookback_seconds=self._group_history_fetch_lookback_seconds,
         )
         configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
         self._configured_bot_open_id = configured_bot_open_id
@@ -917,17 +938,11 @@ class FeishuBot(ABC):
 
     @staticmethod
     def _group_scope_key(thread_id: str = "") -> str:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return "main"
-        return f"thread:{normalized_thread_id}"
+        return GroupHistoryRecovery.group_scope_key(thread_id)
 
     @staticmethod
     def _thread_id_for_scope(scope: str) -> str:
-        normalized_scope = str(scope or "").strip()
-        if normalized_scope.startswith("thread:"):
-            return normalized_scope.removeprefix("thread:")
-        return ""
+        return GroupHistoryRecovery.thread_id_for_scope(scope)
 
     def _append_group_log_entry(
         self,
@@ -960,60 +975,68 @@ class FeishuBot(ABC):
         }
         return self._group_store.append_message(chat_id, entry)
 
-    def _history_mentions_payloads(self, mentions: list[Any]) -> list[MentionPayload]:
-        payloads: list[MentionPayload] = []
-        for mention in mentions:
-            payloads.append(self._mention_payload(mention))
-        return payloads
+    def _read_group_history_local_messages(
+        self,
+        chat_id: str,
+        *,
+        after_seq: int,
+        before_seq: int | None,
+        scope: str,
+    ) -> list[GroupMessageEntry]:
+        return self._group_store.read_messages_between(
+            chat_id,
+            after_seq=after_seq,
+            before_seq=before_seq,
+            scope=scope,
+        )
 
-    def _is_self_history_app_sender(self, *, sender_type: str, sender_id: str) -> bool:
-        normalized_sender_type = str(sender_type or "").strip()
-        normalized_sender_id = str(sender_id or "").strip()
-        normalized_app_id = str(self.app_id or "").strip()
-        return bool(normalized_app_id) and normalized_sender_type == "app" and normalized_sender_id == normalized_app_id
+    def _get_group_history_boundary_seq(self, chat_id: str, *, scope: str) -> int:
+        return self._group_store.get_last_boundary_seq(chat_id, scope=scope)
+
+    def _get_group_history_boundary_created_at(self, chat_id: str, *, scope: str) -> int:
+        return self._group_store.get_last_boundary_created_at(chat_id, scope=scope)
+
+    def _get_group_history_boundary_message_ids(self, chat_id: str, *, scope: str) -> list[str]:
+        return self._group_store.get_last_boundary_message_ids(chat_id, scope=scope)
 
     def _history_entry_from_message(self, item: Any) -> GroupMessageEntry | None:
-        message_id = str(getattr(item, "message_id", "") or "").strip()
-        if not message_id:
-            return None
+        return self._history_recovery.history_entry_from_message(item)
 
-        msg_type = str(getattr(item, "msg_type", "") or "text").strip()
-        body = getattr(item, "body", None)
-        raw_content = str(getattr(body, "content", "") or "").strip()
-        try:
-            content_dict = json.loads(raw_content) if raw_content else {}
-        except Exception:
-            content_dict = {}
-
-        text = self._render_message_text(msg_type, content_dict)
-        mentions = getattr(item, "mentions", None) or []
-        if text and mentions:
-            text = self._normalize_mentions(text, self._history_mentions_payloads(mentions))
-        if not text:
-            return None
-
-        sender = getattr(item, "sender", None)
-        sender_type = str(getattr(sender, "sender_type", "") or "user").strip()
-        sender_id = str(getattr(sender, "id", "") or "").strip()
-        if self._is_self_history_app_sender(sender_type=sender_type, sender_id=sender_id):
-            return None
-        sender_principal_id = sender_id if sender_type in {"user", "app"} else ""
-        sender_name = self._display_name_for_sender_identity(
-            user_id="",
-            sender_principal_id=sender_principal_id,
-            sender_type=sender_type,
+    def _list_history_messages_page(
+        self,
+        *,
+        container_id_type: str,
+        container_id: str,
+        sort_type: str,
+        page_size: int = 50,
+        page_token: str = "",
+        start_time: int | str | None = None,
+        end_time: int | str | None = None,
+    ) -> ListedMessagesPage:
+        builder = (
+            ListMessageRequest.builder()
+            .container_id_type(container_id_type)
+            .container_id(container_id)
+            .sort_type(sort_type)
+            .page_size(page_size)
         )
-        return {
-            "message_id": message_id,
-            "created_at": int(getattr(item, "create_time", 0) or 0),
-            "sender_user_id": "",
-            "sender_principal_id": sender_principal_id,
-            "sender_type": sender_type,
-            "sender_name": sender_name,
-            "msg_type": msg_type,
-            "thread_id": str(getattr(item, "thread_id", "") or "").strip(),
-            "text": text,
-        }
+        if start_time is not None:
+            builder = builder.start_time(str(start_time))
+        if end_time is not None:
+            builder = builder.end_time(str(end_time))
+        if page_token:
+            builder = builder.page_token(page_token)
+        request = builder.build()
+        response = self.client.im.v1.message.list(request)
+        if not response.success():
+            raise RuntimeError(f"code={response.code}, msg={response.msg}")
+
+        body = response.data
+        return ListedMessagesPage(
+            items=list(getattr(body, "items", None) or []),
+            has_more=bool(getattr(body, "has_more", False)),
+            page_token=str(getattr(body, "page_token", "") or "").strip(),
+        )
 
     def _fetch_group_history_entries(
         self,
@@ -1027,49 +1050,20 @@ class FeishuBot(ABC):
         thread_id: str = "",
         limit: int | None = None,
     ) -> list[GroupMessageEntry]:
-        effective_limit = self._group_history_fetch_limit if limit is None else max(int(limit), 0)
-        if effective_limit <= 0 or self._group_history_fetch_lookback_seconds <= 0:
-            return []
-        min_created_at = max(int(after_created_at or 0), 0)
-        normalized_thread_id = str(thread_id or "").strip()
-        if normalized_thread_id:
-            try:
-                return self._fetch_thread_history_entries(
-                    thread_id=normalized_thread_id,
-                    current_message_id=current_message_id,
-                    existing_message_ids=existing_message_ids,
-                    min_created_at=min_created_at,
-                    boundary_message_ids=after_message_ids or set(),
-                    limit=effective_limit,
-                    descending=True,
-                )
-            except Exception as exc:
-                if not self._should_fallback_thread_history_scan(exc):
-                    raise
-                logger.warning("话题倒序历史回捞失败，回退到升序扫描: thread_id=%s error=%s", normalized_thread_id, exc)
-                return self._fetch_thread_history_entries(
-                    thread_id=normalized_thread_id,
-                    current_message_id=current_message_id,
-                    existing_message_ids=existing_message_ids,
-                    min_created_at=min_created_at,
-                    boundary_message_ids=after_message_ids or set(),
-                    limit=effective_limit,
-                    descending=False,
-                )
-        return self._fetch_chat_history_entries(
+        return self._history_recovery.fetch_group_history_entries(
             chat_id=chat_id,
             current_message_id=current_message_id,
             current_create_time=current_create_time,
             existing_message_ids=existing_message_ids,
-            min_created_at=min_created_at,
-            boundary_message_ids=after_message_ids or set(),
-            limit=effective_limit,
+            after_created_at=after_created_at,
+            after_message_ids=after_message_ids,
+            thread_id=thread_id,
+            limit=limit,
         )
 
     @staticmethod
     def _should_fallback_thread_history_scan(exc: Exception) -> bool:
-        message = str(exc).lower()
-        return "invalid request parameter" in message or "sort_type" in message
+        return GroupHistoryRecovery.should_fallback_thread_history_scan(exc)
 
     def _fetch_thread_history_entries(
         self,
@@ -1082,75 +1076,15 @@ class FeishuBot(ABC):
         limit: int,
         descending: bool,
     ) -> list[GroupMessageEntry]:
-        page_token = ""
-        seen_message_ids = set(existing_message_ids)
-        seen_message_ids.add(str(current_message_id or "").strip())
-        normalized_boundary_ids = {
-            str(item).strip()
-            for item in boundary_message_ids
-            if str(item).strip()
-        }
-        descending_entries: list[GroupMessageEntry] = []
-        ascending_entries: deque[GroupMessageEntry] = deque(maxlen=limit)
-
-        while True:
-            builder = (
-                ListMessageRequest.builder()
-                .container_id_type("thread")
-                .container_id(thread_id)
-                .sort_type("ByCreateTimeDesc" if descending else "ByCreateTimeAsc")
-                .page_size(50)
-            )
-            if page_token:
-                builder = builder.page_token(page_token)
-            request = builder.build()
-            response = self.client.im.v1.message.list(request)
-            if not response.success():
-                raise RuntimeError(f"code={response.code}, msg={response.msg}")
-
-            body = response.data
-            items = list(getattr(body, "items", None) or [])
-            stop_fetch = False
-            for item in items:
-                entry = self._history_entry_from_message(item)
-                if not entry:
-                    continue
-                if str(entry.get("thread_id", "") or "").strip() != thread_id:
-                    continue
-                entry_created_at = max(int(entry.get("created_at", 0) or 0), 0)
-                message_id = str(entry.get("message_id", "") or "").strip()
-                if min_created_at > 0 and entry_created_at < min_created_at:
-                    if descending:
-                        stop_fetch = True
-                        break
-                    continue
-                if (
-                    min_created_at > 0
-                    and entry_created_at == min_created_at
-                    and message_id in normalized_boundary_ids
-                ):
-                    continue
-                if not message_id or message_id in seen_message_ids:
-                    continue
-                seen_message_ids.add(message_id)
-                if descending:
-                    descending_entries.append(entry)
-                    if len(descending_entries) >= limit:
-                        stop_fetch = True
-                        break
-                else:
-                    ascending_entries.append(entry)
-
-            if stop_fetch or not getattr(body, "has_more", False):
-                break
-            page_token = str(getattr(body, "page_token", "") or "").strip()
-            if not page_token:
-                break
-
-        if descending:
-            descending_entries.reverse()
-            return descending_entries
-        return list(ascending_entries)
+        return self._history_recovery.fetch_thread_history_entries(
+            thread_id=thread_id,
+            current_message_id=current_message_id,
+            existing_message_ids=existing_message_ids,
+            min_created_at=min_created_at,
+            boundary_message_ids=boundary_message_ids,
+            limit=limit,
+            descending=descending,
+        )
 
     def _fetch_chat_history_entries(
         self,
@@ -1163,73 +1097,15 @@ class FeishuBot(ABC):
         boundary_message_ids: set[str],
         limit: int,
     ) -> list[GroupMessageEntry]:
-        end_time = int(int(current_create_time or 0) / 1000) if current_create_time else int(time.time())
-        if end_time <= 0:
-            end_time = int(time.time())
-        start_time = max(0, end_time - self._group_history_fetch_lookback_seconds)
-        if min_created_at > 0:
-            start_time = max(
-                start_time,
-                max(0, int(min_created_at / 1000) - _GROUP_HISTORY_BOUNDARY_SLACK_SECONDS),
-            )
-        page_token = ""
-        entries: deque[GroupMessageEntry] = deque(maxlen=limit)
-        seen_message_ids = set(existing_message_ids)
-        seen_message_ids.add(str(current_message_id or "").strip())
-        boundary_message_ids = {
-            str(item).strip()
-            for item in boundary_message_ids
-            if str(item).strip()
-        }
-
-        while True:
-            builder = ListMessageRequest.builder()
-            builder = (
-                builder
-                .container_id_type("chat")
-                .container_id(chat_id)
-                .start_time(str(start_time))
-                .end_time(str(end_time))
-                .sort_type("ByCreateTimeAsc")
-                .page_size(50)
-            )
-            if page_token:
-                builder = builder.page_token(page_token)
-            request = builder.build()
-            response = self.client.im.v1.message.list(request)
-            if not response.success():
-                raise RuntimeError(f"code={response.code}, msg={response.msg}")
-
-            body = response.data
-            items = list(getattr(body, "items", None) or [])
-            for item in items:
-                entry = self._history_entry_from_message(item)
-                if not entry:
-                    continue
-                if str(entry.get("thread_id", "") or "").strip():
-                    continue
-                entry_created_at = max(int(entry.get("created_at", 0) or 0), 0)
-                message_id = str(entry.get("message_id", "") or "").strip()
-                if min_created_at > 0 and entry_created_at < min_created_at:
-                    continue
-                if (
-                    min_created_at > 0
-                    and entry_created_at == min_created_at
-                    and message_id in boundary_message_ids
-                ):
-                    continue
-                if not message_id or message_id in seen_message_ids:
-                    continue
-                entries.append(entry)
-                seen_message_ids.add(message_id)
-
-            if not getattr(body, "has_more", False):
-                break
-            page_token = str(getattr(body, "page_token", "") or "").strip()
-            if not page_token:
-                break
-
-        return list(entries)
+        return self._history_recovery.fetch_chat_history_entries(
+            chat_id=chat_id,
+            current_message_id=current_message_id,
+            current_create_time=current_create_time,
+            existing_message_ids=existing_message_ids,
+            min_created_at=min_created_at,
+            boundary_message_ids=boundary_message_ids,
+            limit=limit,
+        )
 
     def _history_recovery_enabled(self) -> bool:
         """Whether assistant mode should perform any history recovery at all.
@@ -1239,18 +1115,11 @@ class FeishuBot(ABC):
         Feishu API does not support start/end time filters, but setting either
         value to 0 still disables all recovery paths for consistency.
         """
-        return (
-            self._group_history_fetch_limit > 0
-            and self._group_history_fetch_lookback_seconds > 0
-        )
+        return self._history_recovery.history_recovery_enabled()
 
     @staticmethod
     def _group_context_sort_key(item: GroupMessageEntry) -> tuple[int, int, int, str]:
-        created_at = max(int(item.get("created_at", 0) or 0), 0)
-        seq = item.get("seq")
-        if isinstance(seq, int):
-            return (created_at, 0, seq, str(item.get("message_id", "") or ""))
-        return (created_at, 1, 0, str(item.get("message_id", "") or ""))
+        return GroupHistoryRecovery.group_context_sort_key(item)
 
     def _collect_assistant_context_entries(
         self,
@@ -1261,37 +1130,13 @@ class FeishuBot(ABC):
         current_seq: int,
         thread_id: str = "",
     ) -> list[GroupMessageEntry]:
-        scope = self._group_scope_key(thread_id)
-        boundary_seq = self._group_store.get_last_boundary_seq(chat_id, scope=scope)
-        boundary_created_at = self._group_store.get_last_boundary_created_at(chat_id, scope=scope)
-        boundary_message_ids = set(self._group_store.get_last_boundary_message_ids(chat_id, scope=scope))
-        local_entries = self._group_store.read_messages_between(
-            chat_id,
-            after_seq=boundary_seq,
-            before_seq=current_seq or None,
-            scope=scope,
-        )
-        if not self._history_recovery_enabled():
-            return local_entries
-
-        existing_message_ids = {
-            str(item.get("message_id", "") or "").strip()
-            for item in local_entries
-            if isinstance(item, dict) and str(item.get("message_id", "") or "").strip()
-        }
-        history_entries = self._fetch_group_history_entries(
+        return self._history_recovery.collect_assistant_context_entries(
             chat_id=chat_id,
             current_message_id=current_message_id,
             current_create_time=current_create_time,
-            existing_message_ids=existing_message_ids,
-            after_created_at=boundary_created_at,
-            after_message_ids=boundary_message_ids,
+            current_seq=current_seq,
             thread_id=thread_id,
         )
-        if not history_entries:
-            return local_entries
-        merged_entries = [*local_entries, *history_entries]
-        return sorted(merged_entries, key=self._group_context_sort_key)
 
     @staticmethod
     def _collect_boundary_message_ids(
@@ -1300,20 +1145,11 @@ class FeishuBot(ABC):
         current_created_at: int | str | None,
         context_entries: list[GroupMessageEntry],
     ) -> list[str]:
-        normalized_created_at = max(int(current_created_at or 0), 0)
-        if normalized_created_at <= 0:
-            return []
-        message_ids = {
-            str(current_message_id or "").strip(),
-        }
-        for item in context_entries:
-            if max(int(item.get("created_at", 0) or 0), 0) != normalized_created_at:
-                continue
-            message_id = str(item.get("message_id", "") or "").strip()
-            if message_id:
-                message_ids.add(message_id)
-        message_ids.discard("")
-        return sorted(message_ids)
+        return GroupHistoryRecovery.collect_boundary_message_ids(
+            current_message_id=current_message_id,
+            current_created_at=current_created_at,
+            context_entries=context_entries,
+        )
 
     def _prepare_group_history_execution_card(self, chat_id: str, parent_message_id: str) -> None:
         normalized_parent_id = str(parent_message_id or "").strip()
@@ -1386,41 +1222,10 @@ class FeishuBot(ABC):
 
     @staticmethod
     def _format_ts(ts_ms: int | str | None) -> str:
-        if not ts_ms:
-            return "未知时间"
-        try:
-            from datetime import datetime, timedelta, timezone
-
-            dt = datetime.fromtimestamp(
-                int(ts_ms) / 1000,
-                tz=timezone(timedelta(hours=8)),
-            )
-            return dt.strftime("%m-%d %H:%M:%S")
-        except (ValueError, OSError):
-            return "未知时间"
+        return GroupHistoryRecovery.format_ts(ts_ms)
 
     def _format_group_context_entries(self, entries: list[GroupMessageEntry]) -> str:
-        parts: list[str] = []
-        for item in entries:
-            seq = item.get("seq")
-            ts = self._format_ts(item.get("created_at"))
-            sender_name = str(item.get("sender_name", "") or "unknown").strip()
-            sender_type = str(item.get("sender_type", "") or "user").strip()
-            msg_type = str(item.get("msg_type", "") or "text").strip()
-            text = str(item.get("text", "") or "").strip()
-            if sender_type == "app" and not sender_name.startswith("机器人:"):
-                sender_name = f"{sender_name}[机器人]"
-            if isinstance(seq, int) and seq > 0:
-                header = f"[#{seq} {ts}] {sender_name}"
-            else:
-                header = f"[{ts}] {sender_name}"
-            if msg_type and msg_type != "text":
-                header += f" ({msg_type})"
-            if text:
-                parts.append(f"{header}\n{text}")
-            else:
-                parts.append(header)
-        return "\n\n".join(parts).strip()
+        return self._history_recovery.format_group_context_entries(entries)
 
     def _build_assistant_turn_text(
         self,
@@ -1430,32 +1235,11 @@ class FeishuBot(ABC):
         *,
         thread_id: str = "",
     ) -> str:
-        current_prompt = current_text.strip() or "请基于以上群聊上下文，回复最近这段讨论。"
-        context_block = context_text.strip() or "（上次有效触发之后暂无可用群聊消息）"
-        normalized_thread_id = str(thread_id or "").strip()
-        if normalized_thread_id:
-            scope_block = (
-                "<group_chat_scope>\n"
-                "当前消息来自群话题内。你仍是本群共享的同一个助手/数字分身。\n"
-                "默认优先依据当前话题上下文回复；如需引用主聊天流或其他话题中已明确的信息，应明确说明那是本群其他讨论中的结论，并只保留与当前话题直接相关的部分。\n"
-                f"当前话题 ID：`{normalized_thread_id}`\n"
-                "</group_chat_scope>\n\n"
-            )
-        else:
-            scope_block = (
-                "<group_chat_scope>\n"
-                "当前消息来自群主聊天流，不是群话题。你仍是本群共享的同一个助手/数字分身。\n"
-                "默认优先依据当前主聊天流上下文回复；如需引用其他话题中已明确的信息，应明确说明那是本群其他讨论中的结论，并避免无关展开。\n"
-                "</group_chat_scope>\n\n"
-            )
-        return (
-            scope_block
-            + "<group_chat_context>\n"
-            "以下是本群自上次有效触发到本次触发之前的消息。\n"
-            f"群聊日志文件：`{log_path}`\n\n"
-            f"{context_block}\n"
-            "</group_chat_context>\n\n"
-            f"{current_prompt}"
+        return self._history_recovery.build_assistant_turn_text(
+            context_text,
+            current_text,
+            log_path,
+            thread_id=thread_id,
         )
 
     @staticmethod

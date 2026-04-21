@@ -156,6 +156,11 @@ Current module split:
 - `bot/forward_aggregator.py`: merged-forward buffering, timeout dispatch, and
   forwarded-message tree rendering; it owns this transport-local state machine
   instead of leaving it scattered across `FeishuBot`
+- `bot/group_history_recovery.py`: assistant-mode group-history recovery,
+  local-log merging, context formatting, and boundary `message_id` derivation;
+  it does not depend on the Feishu SDK directly, so request construction and
+  API calls stay in the `FeishuBot` transport boundary and enter through
+  explicit paginated-result ports
 - `bot/prompt_turn_entry_controller.py`: prompt entry orchestration,
   lease-acquisition, and released -> attached recovery flow
 - `bot/adapter_notification_controller.py`: adapter-notification routing,
