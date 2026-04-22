@@ -37,6 +37,7 @@ _UNSET = object()
 class SettingsDomainPorts:
     get_message_context: Callable[[str], dict[str, Any]]
     get_sender_display_name: Callable[..., str]
+    debug_sender_name_resolution: Callable[[str], dict[str, Any]]
     get_bot_identity_snapshot: Callable[[], dict[str, Any]]
     add_admin_open_id: Callable[[str], None]
     set_configured_bot_open_id: Callable[[str], None]
@@ -188,6 +189,53 @@ class CodexSettingsDomain:
                 "其中 `user_id` 仅用于排障；若未开 `contact:user.employee_id:readonly`，这里允许为空。",
             ]
         ))
+
+    def handle_debug_contact_command(
+        self,
+        sender_id: str,
+        chat_id: str,
+        arg: str,
+        *,
+        message_id: str = "",
+    ) -> CommandResult:
+        del sender_id, chat_id, message_id
+        normalized_open_id = str(arg or "").strip()
+        if not normalized_open_id:
+            return CommandResult(
+                text="用法：`/debug-contact <open_id>`\n用于排查联系人接口名字解析、缓存命中与 fallback 原因。"
+            )
+        snapshot = self._ports.debug_sender_name_resolution(normalized_open_id)
+        cache_state = "hit" if snapshot.get("cache_hit") else "miss"
+        lines = [
+            "联系人解析诊断：",
+            f"- open_id: `{snapshot.get('open_id', '') or '（空）'}`",
+            f"- cache: `{cache_state}`",
+            f"- cached_name: `{snapshot.get('cached_name', '') or '（空）'}`",
+            f"- resolved_name: `{snapshot.get('resolved_name', '') or '（空）'}`",
+            f"- source: `{snapshot.get('source', '') or '（空）'}`",
+            f"- used_fallback: `{'yes' if snapshot.get('used_fallback') else 'no'}`",
+        ]
+        fallback_reason = str(snapshot.get("fallback_reason", "") or "").strip()
+        if fallback_reason:
+            lines.append(f"- fallback_reason: `{fallback_reason}`")
+        api_code = snapshot.get("api_code")
+        if api_code not in ("", None):
+            lines.append(f"- api_code: `{api_code}`")
+        api_msg = str(snapshot.get("api_msg", "") or "").strip()
+        if api_msg:
+            lines.append(f"- api_msg: `{api_msg}`")
+        exception_text = str(snapshot.get("exception", "") or "").strip()
+        if exception_text:
+            lines.append(f"- exception: `{exception_text}`")
+        lines.extend(
+            [
+                "",
+                "排查提示：",
+                "- 如需 `/whoami`、群 ACL 卡片、群上下文显示可读名字，确认已开 `contact:contact.base:readonly`、`contact:user.base:readonly`。",
+                "- 若这里只能 fallback 到 open_id 前缀，请先检查通讯录权限、应用可用范围，以及目标成员是否仍在可见范围内。",
+            ]
+        )
+        return CommandResult(text="\n".join(lines))
 
     def handle_botinfo_command(self, chat_id: str, *, message_id: str = "") -> CommandResult:
         del chat_id, message_id

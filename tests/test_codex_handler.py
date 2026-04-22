@@ -319,6 +319,21 @@ class _FakeBot:
             return user_id[:8]
         return "unknown"
 
+    def debug_sender_name_resolution(self, open_id: str) -> dict[str, object]:
+        resolved_name = self.get_sender_display_name(open_id=open_id)
+        return {
+            "open_id": open_id,
+            "cache_hit": open_id == "ou_user",
+            "cached_name": "User" if open_id == "ou_user" else "",
+            "resolved_name": resolved_name,
+            "used_fallback": open_id not in {"ou_admin", "ou_user", "ou_user2"},
+            "fallback_reason": "" if open_id in {"ou_admin", "ou_user", "ou_user2"} else "api_non_success",
+            "api_code": "" if open_id in {"ou_admin", "ou_user", "ou_user2"} else 403,
+            "api_msg": "" if open_id in {"ou_admin", "ou_user", "ou_user2"} else "permission denied",
+            "exception": "",
+            "source": "contact_api" if open_id in {"ou_admin", "ou_user", "ou_user2"} else "fallback",
+        }
+
     def is_admin(self, *, open_id: str = "") -> bool:
         return open_id in self.admin_open_ids
 
@@ -1915,6 +1930,26 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("discovered open_id: `（空）`", reply)
         self.assertIn("runtime mention matching: `disabled`", reply)
         self.assertIn("application:application:self_manage", reply)
+
+    def test_debug_contact_command_in_p2p_returns_resolution_diagnostics(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-p2p"] = {"chat_type": "p2p", "sender_open_id": "ou_user"}
+
+        handler.handle_message("ou_user", "chat-p2p", "/debug-contact ou_user", message_id="m-p2p")
+
+        reply = bot.replies[-1][1]
+        self.assertIn("联系人解析诊断", reply)
+        self.assertIn("open_id: `ou_user`", reply)
+        self.assertIn("cache: `hit`", reply)
+        self.assertIn("resolved_name: `User`", reply)
+
+    def test_debug_contact_command_in_group_requires_p2p(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
+
+        handler.handle_message("ou_admin", "chat-group", "/debug-contact ou_user", message_id="m-group")
+
+        self.assertIn("请私聊机器人执行 `/debug-contact <open_id>`", bot.replies[-1][1])
 
     def test_init_command_requires_p2p(self) -> None:
         handler, bot = self._make_handler()
@@ -4304,6 +4339,7 @@ class CodexHandlerTests(unittest.TestCase):
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：身份与初始化")
+        self.assertIn("/debug-contact <open_id>", response["card"]["elements"][0]["content"])
         action_elements = self._action_elements(response["card"])
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],

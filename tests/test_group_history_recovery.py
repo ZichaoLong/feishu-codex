@@ -233,12 +233,23 @@ class GroupHistoryRecoveryTests(unittest.TestCase):
             "",
             pathlib.Path("/tmp/group.log"),
             thread_id="th-1",
+            current_sender_name="Alice",
         )
 
         self.assertIn("当前消息来自群话题内", text)
         self.assertIn("当前话题 ID：`th-1`", text)
         self.assertIn("历史上下文", text)
-        self.assertIn("请基于以上群聊上下文", text)
+        self.assertIn("<group_chat_current_turn>", text)
+        self.assertIn("sender_name: Alice", text)
+
+    def test_build_group_current_turn_text_uses_sender_name_and_placeholder(self) -> None:
+        recovery, _calls = self._make_recovery()
+
+        text = recovery.build_group_current_turn_text("", sender_name="Alice")
+
+        self.assertIn("<group_chat_current_turn>", text)
+        self.assertIn("sender_name: Alice", text)
+        self.assertIn("发送者没有提供额外文本", text)
 
 
 if __name__ == "__main__":

@@ -41,8 +41,9 @@
 ## 4. 私聊基础检查
 
 1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`open_id`，以及仅用于排障的 `user_id`；若未开 `contact:user.employee_id:readonly`，`user_id` 允许为空。若未开通讯录权限，`name` 允许退化成 open_id 前缀。
-2. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/groupmode`、`/acl`，且不再提已废弃的旧群聊命令。
-3. `MemberA` 私聊发送普通文本。预期：仍可正常使用私聊，不受群 ACL 影响。
+2. `Admin` 私聊发送 `/debug-contact <open_id>`。预期：能看到 cache 命中情况、live resolved name，以及 fallback 原因 / API 错误；若未开通讯录权限，应能明确看到 fallback。
+3. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/groupmode`、`/acl`，且不再提已废弃的旧群聊命令。
+4. `MemberA` 私聊发送普通文本。预期：仍可正常使用私聊，不受群 ACL 影响。
 
 ## 5. 新群默认值
 

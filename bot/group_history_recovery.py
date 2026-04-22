@@ -411,6 +411,24 @@ class GroupHistoryRecovery:
         except (ValueError, OSError):
             return "未知时间"
 
+    @staticmethod
+    def normalize_sender_name(sender_name: str) -> str:
+        normalized = " ".join(str(sender_name or "").split())
+        return normalized or "unknown"
+
+    def build_group_current_turn_text(self, current_text: str, *, sender_name: str) -> str:
+        message_text = str(current_text or "").strip()
+        if not message_text:
+            message_text = "（发送者没有提供额外文本，请基于上下文回复最近这段讨论。）"
+        return (
+            "<group_chat_current_turn>\n"
+            "以下是当前需要你直接响应的群消息。优先回复这条消息，而不是复述整段历史。\n"
+            f"sender_name: {self.normalize_sender_name(sender_name)}\n"
+            "message:\n"
+            f"{message_text}\n"
+            "</group_chat_current_turn>"
+        )
+
     def format_group_context_entries(self, entries: list[GroupMessageEntry]) -> str:
         parts: list[str] = []
         for item in entries:
@@ -441,8 +459,8 @@ class GroupHistoryRecovery:
         log_path: pathlib.Path,
         *,
         thread_id: str = "",
+        current_sender_name: str = "",
     ) -> str:
-        current_prompt = current_text.strip() or "请基于以上群聊上下文，回复最近这段讨论。"
         context_block = context_text.strip() or "（上次有效触发之后暂无可用群聊消息）"
         normalized_thread_id = str(thread_id or "").strip()
         if normalized_thread_id:
@@ -467,5 +485,8 @@ class GroupHistoryRecovery:
             f"群聊日志文件：`{log_path}`\n\n"
             f"{context_block}\n"
             "</group_chat_context>\n\n"
-            f"{current_prompt}"
+            + self.build_group_current_turn_text(
+                current_text,
+                sender_name=current_sender_name,
+            )
         )

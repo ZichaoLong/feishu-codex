@@ -54,6 +54,7 @@ class _SettingsPortsStub:
         self.runtime_view_calls: list[tuple[str, str, str]] = []
         self.update_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.resolution_calls: list[RuntimeConfigSummary | None] = []
+        self.debug_sender_snapshots: dict[str, dict[str, Any]] = {}
 
     def get_message_context(self, message_id: str) -> dict[str, Any]:
         return dict(self.message_contexts.get(message_id, {}))
@@ -70,6 +71,25 @@ class _SettingsPortsStub:
 
     def get_bot_identity_snapshot(self) -> dict[str, Any]:
         return dict(self.bot_identity)
+
+    def debug_sender_name_resolution(self, open_id: str) -> dict[str, Any]:
+        return dict(
+            self.debug_sender_snapshots.get(
+                open_id,
+                {
+                    "open_id": open_id,
+                    "cache_hit": False,
+                    "cached_name": "",
+                    "resolved_name": open_id[:8],
+                    "used_fallback": True,
+                    "fallback_reason": "api_non_success",
+                    "api_code": 999,
+                    "api_msg": "denied",
+                    "exception": "",
+                    "source": "fallback",
+                },
+            )
+        )
 
     def add_admin_open_id(self, open_id: str) -> None:
         self.added_admin_open_ids.append(open_id)
@@ -103,6 +123,7 @@ def _make_domain(stub: _SettingsPortsStub) -> CodexSettingsDomain:
         ports=SettingsDomainPorts(
             get_message_context=stub.get_message_context,
             get_sender_display_name=stub.get_sender_display_name,
+            debug_sender_name_resolution=stub.debug_sender_name_resolution,
             get_bot_identity_snapshot=stub.get_bot_identity_snapshot,
             add_admin_open_id=stub.add_admin_open_id,
             set_configured_bot_open_id=stub.set_configured_bot_open_id,
@@ -120,6 +141,37 @@ def _make_domain(stub: _SettingsPortsStub) -> CodexSettingsDomain:
 
 
 class CodexSettingsDomainTests(unittest.TestCase):
+    def test_debug_contact_command_reports_live_diagnostics(self) -> None:
+        stub = _SettingsPortsStub()
+        stub.debug_sender_snapshots["ou_user"] = {
+            "open_id": "ou_user",
+            "cache_hit": True,
+            "cached_name": "User",
+            "resolved_name": "User",
+            "used_fallback": False,
+            "fallback_reason": "",
+            "api_code": "",
+            "api_msg": "",
+            "exception": "",
+            "source": "contact_api",
+        }
+        domain = _make_domain(stub)
+
+        result = domain.handle_debug_contact_command("ou_user", "chat-a", "ou_user")
+
+        self.assertIn("联系人解析诊断", result.text)
+        self.assertIn("cache: `hit`", result.text)
+        self.assertIn("resolved_name: `User`", result.text)
+        self.assertIn("used_fallback: `no`", result.text)
+
+    def test_debug_contact_command_requires_open_id_argument(self) -> None:
+        stub = _SettingsPortsStub()
+        domain = _make_domain(stub)
+
+        result = domain.handle_debug_contact_command("ou_user", "chat-a", "")
+
+        self.assertIn("/debug-contact <open_id>", result.text)
+
     def test_profile_command_saves_profile_via_port_and_returns_card(self) -> None:
         stub = _SettingsPortsStub()
         domain = _make_domain(stub)

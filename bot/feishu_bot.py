@@ -84,6 +84,7 @@ _PENDING_EXECUTION_CARD_TTL = 600
 
 # 显示名缓存（秒）
 _SENDER_NAME_CACHE_TTL = 6 * 3600
+_SENDER_NAME_FAILURE_WARNING_TTL = 300
 
 # assistant 模式按需回捞群历史消息的窗口
 _GROUP_HISTORY_FETCH_LIMIT = 50
@@ -255,6 +256,8 @@ class FeishuBot(ABC):
         self._pending_execution_cards_lock = threading.Lock()
         self._sender_name_cache: dict[str, tuple[float, str]] = {}
         self._sender_name_cache_lock = threading.Lock()
+        self._sender_name_warning_timestamps: dict[tuple[str, str], float] = {}
+        self._sender_name_warning_lock = threading.Lock()
         config = system_config or {}
         self._admin_open_ids = {
             str(item).strip()
@@ -775,9 +778,11 @@ class FeishuBot(ABC):
         if cached:
             return cached
         if sender_principal_id:
-            resolved = self._resolve_sender_name(sender_principal_id)
-            self._cache_sender_name(sender_principal_id, user_id, value=resolved)
-            return resolved
+            resolution = self._resolve_sender_name_diagnostic(sender_principal_id)
+            resolved = str(resolution.get("resolved_name", "") or "").strip()
+            if resolved and not bool(resolution.get("used_fallback")):
+                self._cache_sender_name(sender_principal_id, user_id, value=resolved)
+            return resolved or sender_principal_id[:8]
         if user_id:
             self._cache_sender_name(user_id, value=user_id[:8])
             return user_id[:8]
@@ -897,27 +902,126 @@ class FeishuBot(ABC):
 
     def _resolve_sender_name(self, open_id: str) -> str:
         """通过 open_id 查询用户姓名，失败时返回 open_id 前 8 位作为兜底"""
+        snapshot = self._resolve_sender_name_diagnostic(open_id)
+        return str(snapshot.get("resolved_name", "") or open_id[:8]).strip() or open_id[:8]
+
+    def _log_sender_name_resolution_fallback(self, snapshot: dict[str, Any]) -> None:
+        open_id = str(snapshot.get("open_id", "") or "").strip() or "unknown"
+        fallback_reason = str(snapshot.get("fallback_reason", "") or "unknown").strip() or "unknown"
+        cache_key = (open_id, fallback_reason)
+        level = logging.WARNING
+        now = time.time()
+        with self._sender_name_warning_lock:
+            last_at = self._sender_name_warning_timestamps.get(cache_key, 0.0)
+            if now - last_at < _SENDER_NAME_FAILURE_WARNING_TTL:
+                level = logging.DEBUG
+            else:
+                self._sender_name_warning_timestamps[cache_key] = now
+        extra_parts: list[str] = [f"reason={fallback_reason}"]
+        api_code = snapshot.get("api_code")
+        api_msg = str(snapshot.get("api_msg", "") or "").strip()
+        if api_code not in (None, ""):
+            extra_parts.append(f"code={api_code}")
+        if api_msg:
+            extra_parts.append(f"msg={api_msg}")
+        exception_text = str(snapshot.get("exception", "") or "").strip()
+        if exception_text:
+            extra_parts.append(f"error={exception_text}")
+        logger.log(
+            level,
+            "发送者姓名解析回退: open_id=%s, %s",
+            open_id,
+            ", ".join(extra_parts),
+        )
+
+    def _resolve_sender_name_diagnostic(
+        self,
+        open_id: str,
+        *,
+        log_failures: bool = True,
+    ) -> dict[str, Any]:
+        normalized_open_id = str(open_id or "").strip()
+        fallback_name = normalized_open_id[:8] or "unknown"
+        snapshot: dict[str, Any] = {
+            "open_id": normalized_open_id,
+            "resolved_name": fallback_name,
+            "used_fallback": False,
+            "fallback_reason": "",
+            "api_code": "",
+            "api_msg": "",
+            "exception": "",
+            "source": "contact_api",
+        }
+        if not normalized_open_id:
+            snapshot.update(
+                resolved_name="unknown",
+                used_fallback=True,
+                fallback_reason="empty_open_id",
+                source="fallback",
+            )
+            return snapshot
         try:
             from lark_oapi.api.contact.v3 import GetUserRequest as GetContactUserReq
             request = (GetContactUserReq.builder()
-                       .user_id(open_id)
+                       .user_id(normalized_open_id)
                        .user_id_type("open_id")
                        .build())
             response = self.client.contact.v3.user.get(request)
             if response.success() and response.data and response.data.user:
                 name = response.data.user.name or response.data.user.nickname
                 if name:
-                    return name
+                    snapshot["resolved_name"] = str(name).strip()
+                    return snapshot
+                snapshot.update(
+                    used_fallback=True,
+                    fallback_reason="empty_name",
+                    source="fallback",
+                )
+            else:
+                snapshot.update(
+                    used_fallback=True,
+                    fallback_reason="api_non_success" if not response.success() else "empty_user",
+                    api_code=getattr(response, "code", ""),
+                    api_msg=str(getattr(response, "msg", "") or "").strip(),
+                    source="fallback",
+                )
         except Exception as e:
-            logger.debug("解析用户名失败: open_id=%s, error=%s", open_id, e)
-        return open_id[:8]
+            snapshot.update(
+                used_fallback=True,
+                fallback_reason="exception",
+                exception=str(e),
+                source="fallback",
+            )
+        if bool(snapshot.get("used_fallback")) and log_failures:
+            self._log_sender_name_resolution_fallback(snapshot)
+        return snapshot
 
     def _batch_resolve_sender_names(self, open_ids: set[str]) -> dict[str, str]:
         """批量解析 open_id → 用户姓名，返回映射表"""
         name_map: dict[str, str] = {}
         for oid in open_ids:
-            name_map[oid] = self._resolve_sender_name(oid)
+            name_map[oid] = self._display_name_for_sender_identity(
+                sender_principal_id=oid,
+                sender_type="user",
+            )
         return name_map
+
+    def debug_sender_name_resolution(self, open_id: str) -> dict[str, Any]:
+        normalized_open_id = str(open_id or "").strip()
+        cached_name = self.lookup_cached_sender_name(normalized_open_id)
+        live = self._resolve_sender_name_diagnostic(
+            normalized_open_id,
+            log_failures=False,
+        )
+        resolved_name = str(live.get("resolved_name", "") or "").strip()
+        if resolved_name and not bool(live.get("used_fallback")):
+            self._cache_sender_name(normalized_open_id, value=resolved_name)
+        return {
+            "open_id": normalized_open_id,
+            "cache_hit": bool(cached_name),
+            "cached_name": cached_name,
+            **live,
+        }
 
     @staticmethod
     def _mention_payloads(mentions: list) -> list[MentionPayload]:
@@ -1159,12 +1263,20 @@ class FeishuBot(ABC):
         log_path: pathlib.Path,
         *,
         thread_id: str = "",
+        current_sender_name: str = "",
     ) -> str:
         return self._history_recovery.build_assistant_turn_text(
             context_text,
             current_text,
             log_path,
             thread_id=thread_id,
+            current_sender_name=current_sender_name,
+        )
+
+    def _build_group_current_turn_text(self, current_text: str, *, sender_name: str) -> str:
+        return self._history_recovery.build_group_current_turn_text(
+            current_text,
+            sender_name=sender_name,
         )
 
     @staticmethod
@@ -1241,6 +1353,7 @@ class FeishuBot(ABC):
         parent_id = str(getattr(message, "parent_id", "") or "").strip()
         mentions = getattr(message, "mentions", None) or []
         group_mode = self.get_group_mode(chat_id) if chat_type == "group" else ""
+        control_text = False
         self.remember_chat_type(chat_id, chat_type)
 
         # 消息去重，防止飞书重试导致重复处理
@@ -1425,6 +1538,7 @@ class FeishuBot(ABC):
                         text,
                         self._group_store.log_path(chat_id),
                         thread_id=thread_id,
+                        current_sender_name=sender_name,
                     )
                     if current_seq:
                         boundary_message_ids = self._collect_boundary_message_ids(
@@ -1475,7 +1589,12 @@ class FeishuBot(ABC):
 
         if not text:
             if chat_type == "group" and bot_mentioned:
-                self.on_message(sender_id, chat_id, "", message_id=message_id)
+                self.on_message(
+                    sender_id,
+                    chat_id,
+                    self._build_group_current_turn_text("", sender_name=sender_name),
+                    message_id=message_id,
+                )
             elif chat_type != "group":
                 logger.info(
                     "忽略空文本消息: name=%s, open_id=%s, user_id=%s, msg_type=%s, message_id=%s",
@@ -1488,7 +1607,13 @@ class FeishuBot(ABC):
             "收到消息: name=%s, open_id=%s, user_id=%s, chat_type=%s, message_id=%s, text=%s",
             sender_name, sender_open_log, sender_user_log, chat_type, message_id, text,
         )
-        self.on_message(sender_id, chat_id, text, message_id=message_id)
+        outbound_text = text
+        if chat_type == "group" and not control_text:
+            outbound_text = self._build_group_current_turn_text(
+                text,
+                sender_name=sender_name,
+            )
+        self.on_message(sender_id, chat_id, outbound_text, message_id=message_id)
 
     def _on_raw_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         """解析卡片按钮点击事件，交给子类处理"""

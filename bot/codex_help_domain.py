@@ -282,6 +282,7 @@ class CodexHelpDomain:
                 markdown=(
                     "- `/whoami`：私聊查看自己的 `open_id` 等身份信息\n"
                     "- `/whoareyou`：查看机器人的 `app_id`、配置的 `bot_open_id`、实时探测结果\n"
+                    "- `/debug-contact <open_id>`：私聊排查通讯录名字解析、缓存命中与 fallback 原因\n"
                     "- `/init <token>`：私聊初始化管理员与 `bot_open_id`\n\n"
                     "注意：`/whoami` 与 `/init` 只支持私聊；如果在群里触发，会按 slash 语义拒绝。"
                 ),

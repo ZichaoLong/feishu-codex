@@ -328,6 +328,7 @@ class CodexHandler(BotHandler):
             ports=SettingsDomainPorts(
                 get_message_context=lambda message_id: self.bot.get_message_context(message_id),
                 get_sender_display_name=lambda **kwargs: self.bot.get_sender_display_name(**kwargs),
+                debug_sender_name_resolution=lambda open_id: self.bot.debug_sender_name_resolution(open_id),
                 get_bot_identity_snapshot=lambda: self.bot.get_bot_identity_snapshot(),
                 add_admin_open_id=lambda open_id: self.bot.add_admin_open_id(open_id),
                 set_configured_bot_open_id=lambda open_id: self.bot.set_configured_bot_open_id(open_id),
@@ -1346,6 +1347,13 @@ class CodexHandler(BotHandler):
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_botinfo_command(
                     chat_id, message_id=message_id
                 ),
+            ),
+            "/debug-contact": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_debug_contact_command(
+                    sender_id, chat_id, arg, message_id=message_id
+                ),
+                scope="p2p",
+                scope_denied_text="请私聊机器人执行 `/debug-contact <open_id>`。",
             ),
             "/profile": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_profile_command(

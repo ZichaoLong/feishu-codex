@@ -117,6 +117,11 @@ Those remain owned by their dedicated documents.
   - local live-log messages after the previous boundary
   - history messages returned by Feishu that are still missing from the local
     log
+- the current message that actually triggers backend execution must not be
+  flattened back into the history block; it should be sent as a separate
+  current-turn block and should prefer `sender_name`
+- only when the current sender name cannot be resolved may that current-turn
+  block fall back to a short `sender_id` / `open_id` form
 - "context" in this contract means text discussion context only; it does not
   include attachment lifecycle state such as whether a file was downloaded,
   remains available, or has already been consumed
