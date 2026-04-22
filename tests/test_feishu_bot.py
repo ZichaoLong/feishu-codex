@@ -313,7 +313,7 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
     def test_history_entry_projects_interactive_terminal_result_from_other_app_sender(self) -> None:
         bot = self._make_bot()
 
-        entry = bot._history_entry_from_message(
+        entry = bot._history_recovery.history_entry_from_message(
             SimpleNamespace(
                 message_id="hist-card",
                 msg_type="interactive",
@@ -770,8 +770,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        entries = FeishuBot._fetch_group_history_entries(
-            bot,
+        entries = bot._history_recovery.fetch_group_history_entries(
             chat_id="chat-1",
             current_message_id="m-current",
             current_create_time=5000,
@@ -819,8 +818,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        entries = FeishuBot._fetch_group_history_entries(
-            bot,
+        entries = bot._history_recovery.fetch_group_history_entries(
             chat_id="chat-1",
             current_message_id="m-current",
             current_create_time=7000,
@@ -852,8 +850,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        entries = FeishuBot._fetch_group_history_entries(
-            bot,
+        entries = bot._history_recovery.fetch_group_history_entries(
             chat_id="chat-1",
             current_message_id="m-current",
             current_create_time=10000,
@@ -885,8 +882,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        entries = FeishuBot._fetch_group_history_entries(
-            bot,
+        entries = bot._history_recovery.fetch_group_history_entries(
             chat_id="chat-1",
             current_message_id="m-current",
             current_create_time=2000,
@@ -1411,7 +1407,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_history_entry_uses_sender_principal_id_for_app_sender(self) -> None:
         bot = self._make_bot()
 
-        entry = bot._history_entry_from_message(
+        entry = bot._history_recovery.history_entry_from_message(
             _history_item(
                 message_id="hist-app",
                 created_at=1712476800000,
@@ -1430,7 +1426,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         bot = self._make_bot()
         bot.app_id = "cli_self_bot"
 
-        entry = bot._history_entry_from_message(
+        entry = bot._history_recovery.history_entry_from_message(
             _history_item(
                 message_id="hist-self-app",
                 created_at=1712476800000,
@@ -1477,8 +1473,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        entries = FeishuBot._fetch_group_history_entries(
-            bot,
+        entries = bot._history_recovery.fetch_group_history_entries(
             chat_id="chat-1",
             current_message_id="m-current",
             current_create_time=2000,

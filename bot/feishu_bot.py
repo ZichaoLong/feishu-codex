@@ -996,9 +996,6 @@ class FeishuBot(ABC):
     def _get_group_history_boundary_message_ids(self, chat_id: str, *, scope: str) -> list[str]:
         return self._group_store.get_last_boundary_message_ids(chat_id, scope=scope)
 
-    def _history_entry_from_message(self, item: Any) -> GroupMessageEntry | None:
-        return self._history_recovery.history_entry_from_message(item)
-
     def _list_history_messages_page(
         self,
         *,
@@ -1033,75 +1030,6 @@ class FeishuBot(ABC):
             items=list(getattr(body, "items", None) or []),
             has_more=bool(getattr(body, "has_more", False)),
             page_token=str(getattr(body, "page_token", "") or "").strip(),
-        )
-
-    def _fetch_group_history_entries(
-        self,
-        *,
-        chat_id: str,
-        current_message_id: str,
-        current_create_time: int | str | None,
-        existing_message_ids: set[str],
-        after_created_at: int | str | None = None,
-        after_message_ids: set[str] | None = None,
-        thread_id: str = "",
-        limit: int | None = None,
-    ) -> list[GroupMessageEntry]:
-        return self._history_recovery.fetch_group_history_entries(
-            chat_id=chat_id,
-            current_message_id=current_message_id,
-            current_create_time=current_create_time,
-            existing_message_ids=existing_message_ids,
-            after_created_at=after_created_at,
-            after_message_ids=after_message_ids,
-            thread_id=thread_id,
-            limit=limit,
-        )
-
-    @staticmethod
-    def _should_fallback_thread_history_scan(exc: Exception) -> bool:
-        return GroupHistoryRecovery.should_fallback_thread_history_scan(exc)
-
-    def _fetch_thread_history_entries(
-        self,
-        *,
-        thread_id: str,
-        current_message_id: str,
-        existing_message_ids: set[str],
-        min_created_at: int,
-        boundary_message_ids: set[str],
-        limit: int,
-        descending: bool,
-    ) -> list[GroupMessageEntry]:
-        return self._history_recovery.fetch_thread_history_entries(
-            thread_id=thread_id,
-            current_message_id=current_message_id,
-            existing_message_ids=existing_message_ids,
-            min_created_at=min_created_at,
-            boundary_message_ids=boundary_message_ids,
-            limit=limit,
-            descending=descending,
-        )
-
-    def _fetch_chat_history_entries(
-        self,
-        *,
-        chat_id: str,
-        current_message_id: str,
-        current_create_time: int | str | None,
-        existing_message_ids: set[str],
-        min_created_at: int,
-        boundary_message_ids: set[str],
-        limit: int,
-    ) -> list[GroupMessageEntry]:
-        return self._history_recovery.fetch_chat_history_entries(
-            chat_id=chat_id,
-            current_message_id=current_message_id,
-            current_create_time=current_create_time,
-            existing_message_ids=existing_message_ids,
-            min_created_at=min_created_at,
-            boundary_message_ids=boundary_message_ids,
-            limit=limit,
         )
 
     def _history_recovery_enabled(self) -> bool:
