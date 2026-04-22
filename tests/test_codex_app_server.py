@@ -418,11 +418,33 @@ class AppServerRuntimeStoreTests(unittest.TestCase):
                 app_server_pid=999999,
             )
 
-            with patch("bot.stores.app_server_runtime_store._process_exists", return_value=False):
+            with patch("bot.stores.app_server_runtime_store.process_exists", return_value=False):
                 self.assertEqual(
                     resolve_effective_app_server_url("ws://127.0.0.1:8765", data_dir=data_dir),
                     "ws://127.0.0.1:8765",
                 )
+            self.assertFalse((data_dir / "app_server_runtime.json").exists())
+
+    def test_load_managed_runtime_clears_file_when_app_server_pid_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = AppServerRuntimeStore(data_dir)
+            store.save_managed_runtime(
+                configured_url="ws://127.0.0.1:8765",
+                active_url="ws://127.0.0.1:43210",
+                owner_pid=1234,
+                app_server_pid=5678,
+            )
+
+            with patch(
+                "bot.stores.app_server_runtime_store.process_exists",
+                side_effect=[True, False],
+            ) as mock_process_exists:
+                self.assertIsNone(store.load_managed_runtime())
+
+            self.assertEqual(mock_process_exists.call_args_list[0].args, (1234,))
+            self.assertEqual(mock_process_exists.call_args_list[1].args, (5678,))
+            self.assertFalse((data_dir / "app_server_runtime.json").exists())
 
 
 class InteractionLeaseStoreTests(unittest.TestCase):
@@ -1148,6 +1170,58 @@ class FCodexTests(unittest.TestCase):
             ["codex", "--remote", "ws://127.0.0.1:9101", "--cd", "/home/tester/project"],
         )
 
+    def test_fcodex_uses_subprocess_on_windows_and_cleans_proxy(self) -> None:
+        proxy_process = Mock()
+        proxy_process.poll.return_value = None
+        child_process = Mock()
+        child_process.wait.return_value = 7
+        child_process.poll.return_value = 7
+        with patch("bot.fcodex.is_windows", return_value=True):
+            with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+                with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                    with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                        mock_resolve.return_value.effective_profile = ""
+                        mock_resolve.return_value.stale_profile = ""
+                        with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9101", proxy_process)):
+                            with patch("bot.fcodex.subprocess.Popen", return_value=child_process) as mock_popen:
+                                with patch("sys.argv", ["fcodex", "--cd", "/home/tester/project"]):
+                                    with self.assertRaises(SystemExit) as exc:
+                                        fcodex_main()
+
+        self.assertEqual(exc.exception.code, 7)
+        self.assertEqual(
+            mock_popen.call_args.args[0],
+            ["codex", "--remote", "ws://127.0.0.1:9101", "--cd", "/home/tester/project"],
+        )
+        self.assertEqual(mock_popen.call_args.kwargs["env"]["FC_INSTANCE"], "default")
+        self.assertEqual(mock_popen.call_args.kwargs["env"]["FC_DATA_DIR"], str(_default_data_dir()))
+        proxy_process.terminate.assert_called_once_with()
+        proxy_process.wait.assert_called_once_with(timeout=1.0)
+
+    def test_fcodex_windows_interrupt_cleans_codex_and_proxy(self) -> None:
+        proxy_process = Mock()
+        proxy_process.poll.return_value = None
+        child_process = Mock()
+        child_process.wait.side_effect = [KeyboardInterrupt, None]
+        child_process.poll.return_value = None
+        with patch("bot.fcodex.is_windows", return_value=True):
+            with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+                with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                    with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                        mock_resolve.return_value.effective_profile = ""
+                        mock_resolve.return_value.stale_profile = ""
+                        with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9101", proxy_process)):
+                            with patch("bot.fcodex.subprocess.Popen", return_value=child_process):
+                                with patch("sys.argv", ["fcodex", "--cd", "/home/tester/project"]):
+                                    with self.assertRaises(KeyboardInterrupt):
+                                        fcodex_main()
+
+        child_process.terminate.assert_called_once_with()
+        self.assertEqual(child_process.wait.call_args_list[0].args, ())
+        self.assertEqual(child_process.wait.call_args_list[1].kwargs, {"timeout": 1.0})
+        proxy_process.terminate.assert_called_once_with()
+        proxy_process.wait.assert_called_once_with(timeout=1.0)
+
     def test_launch_local_cwd_proxy_passes_parent_pid(self) -> None:
         process = Mock()
         process.stdout.readline.return_value = "ws://127.0.0.1:9100\n"
@@ -1306,6 +1380,27 @@ class FCodexTests(unittest.TestCase):
             if backend_server is not None:
                 backend_server.shutdown()
             backend_thread.join(timeout=1)
+
+    def test_proxy_exits_when_parent_process_disappears(self) -> None:
+        proxy_url_queue: queue.Queue[str] = queue.Queue()
+        with patch("bot.fcodex_proxy.process_exists", return_value=False) as mock_process_exists:
+            proxy_thread = threading.Thread(
+                target=run_proxy,
+                kwargs={
+                    "backend_url": "ws://127.0.0.1:8765",
+                    "cwd": "/tmp/project",
+                    "parent_pid": 4321,
+                    "on_listen": proxy_url_queue.put,
+                },
+                daemon=True,
+            )
+            proxy_thread.start()
+            proxy_url = proxy_url_queue.get(timeout=1)
+            self.assertTrue(proxy_url.startswith("ws://127.0.0.1:"))
+            proxy_thread.join(timeout=1)
+
+        self.assertFalse(proxy_thread.is_alive())
+        self.assertEqual(mock_process_exists.call_args_list[0].args, (4321,))
 
 
 class ProxyInteractionGateTests(unittest.TestCase):

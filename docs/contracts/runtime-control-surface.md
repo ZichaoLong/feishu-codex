@@ -478,6 +478,9 @@ The contract is:
 - the control endpoint is not the ownership primitive
 - the owner writes metadata including `owner_pid`, `owner_token`, and
   `control_endpoint`
+- the on-disk owner metadata contains a local control token and must be treated
+  as sensitive local state; on Windows this relies on the current user's
+  profile path and NTFS ACLs rather than POSIX `0600` semantics
 - if startup fails after ownership is acquired, partially started runtime
   components must be fully rolled back before the lease is released
 - shutdown may only clean up ownership metadata that still belong to the same

@@ -20,7 +20,7 @@ from bot.constants import DEFAULT_APP_SERVER_URL, display_path
 from bot.env_file import load_env_file
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, resolve_instance_paths, validate_instance_name
 from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
-from bot.platform_paths import default_data_root
+from bot.platform_paths import default_data_root, is_windows
 from bot.profile_resolution import resolve_local_default_profile_via_remote_backend
 from bot.session_resolution import (
     list_current_dir_threads,
@@ -731,6 +731,40 @@ def _launch_local_cwd_proxy(
         raise
 
 
+def _stop_child_process(process: subprocess.Popen[str] | None, *, timeout_seconds: float = 1.0) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def _run_upstream_codex(
+    argv: list[str],
+    env: dict[str, str],
+    *,
+    proxy_process: subprocess.Popen[str] | None,
+) -> int | None:
+    if not is_windows():
+        try:
+            os.execvpe(argv[0], argv, env)
+        except Exception:
+            _stop_child_process(proxy_process)
+            raise
+        return None
+
+    codex_process = subprocess.Popen(argv, env=env)
+    try:
+        return codex_process.wait()
+    except BaseException:
+        _stop_child_process(codex_process)
+        raise
+    finally:
+        _stop_child_process(proxy_process)
+
+
 def _print_wrapper_usage() -> None:
     print("用法：", file=sys.stderr)
     for usage in shared_wrapper_usage_lines():
@@ -887,12 +921,10 @@ def main() -> None:
             raise SystemExit(2)
         argv.extend(["--remote", proxy_url])
     argv.extend(user_args)
-    try:
-        env = os.environ.copy()
-        env["FC_DATA_DIR"] = str(data_dir)
-        env["FC_INSTANCE"] = resolved_target.instance_name
-        os.execvpe(argv[0], argv, env)
-    except Exception:
-        if proxy_process is not None and proxy_process.poll() is None:
-            proxy_process.terminate()
-        raise
+    env = os.environ.copy()
+    env["FC_DATA_DIR"] = str(data_dir)
+    env["FC_INSTANCE"] = resolved_target.instance_name
+    exit_code = _run_upstream_codex(argv, env, proxy_process=proxy_process)
+    if exit_code is not None:
+        raise SystemExit(exit_code)
+    return

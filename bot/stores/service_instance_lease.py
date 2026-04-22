@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 
+from bot.file_permissions import ensure_private_file_permissions
 from bot.file_lock import FileLockBusyError, acquire_file_lock, release_file_lock
 from bot.process_utils import process_exists
 
@@ -180,10 +181,7 @@ class ServiceInstanceLease:
             "started_at": metadata.started_at,
         }
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass
+        ensure_private_file_permissions(tmp_path)
         os.replace(tmp_path, path)
 
     def _delete_metadata_unlocked(self) -> None:

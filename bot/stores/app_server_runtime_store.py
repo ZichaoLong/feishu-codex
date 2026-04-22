@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 
 from bot.constants import DEFAULT_APP_SERVER_URL
+from bot.process_utils import process_exists
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,18 +30,6 @@ class ManagedAppServerRuntime:
 def uses_default_app_server_url(url: str) -> bool:
     normalized = str(url).strip() or DEFAULT_APP_SERVER_URL
     return normalized == DEFAULT_APP_SERVER_URL
-
-
-def _process_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 class AppServerRuntimeStore:
@@ -68,10 +57,10 @@ class AppServerRuntimeStore:
             runtime = self._runtime_from_data(data)
             if runtime is None:
                 return None
-            if runtime.owner_pid > 0 and not _process_exists(runtime.owner_pid):
+            if runtime.owner_pid > 0 and not process_exists(runtime.owner_pid):
                 self._delete_file()
                 return None
-            if runtime.app_server_pid > 0 and not _process_exists(runtime.app_server_pid):
+            if runtime.app_server_pid > 0 and not process_exists(runtime.app_server_pid):
                 self._delete_file()
                 return None
             return runtime

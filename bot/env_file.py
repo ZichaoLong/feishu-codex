@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import pathlib
 
+from bot.file_permissions import ensure_private_file_permissions
 from bot.platform_paths import default_env_file
 
 
@@ -71,4 +72,5 @@ def ensure_env_template(path: pathlib.Path | str | None = None) -> pathlib.Path:
         ),
         encoding="utf-8",
     )
+    ensure_private_file_permissions(resolved)
     return resolved

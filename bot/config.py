@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from bot.file_permissions import ensure_private_file_permissions
 from bot.instance_layout import default_config_root
 
 _INIT_TOKEN_FILENAME = "init.token"
@@ -44,7 +45,10 @@ def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> Non
     tmp_path = path.with_name(f"{path.name}.tmp")
     tmp_path.write_text(text, encoding="utf-8")
     if mode is not None:
-        os.chmod(tmp_path, mode)
+        if mode == 0o600:
+            ensure_private_file_permissions(tmp_path)
+        else:
+            os.chmod(tmp_path, mode)
     os.replace(tmp_path, path)
 
 
@@ -55,7 +59,7 @@ def load_system_config_raw() -> dict[str, Any]:
 def save_system_config(config: dict[str, Any]) -> Path:
     path = system_config_path()
     rendered = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-    _atomic_write_text(path, rendered)
+    _atomic_write_text(path, rendered, mode=0o600)
     return path
 
 

@@ -1,5 +1,6 @@
 import pathlib
 import plistlib
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -7,9 +8,11 @@ from unittest.mock import patch
 from bot.instance_layout import InstancePaths
 from bot.service_manager import (
     LaunchdUserServiceManager,
+    ServiceManagerError,
     SystemdUserServiceManager,
     WindowsTaskSchedulerServiceManager,
     build_service_definition,
+    current_service_manager,
 )
 
 
@@ -73,6 +76,110 @@ class ServiceManagerTests(unittest.TestCase):
             rendered = launcher_path.read_text(encoding="utf-8")
             self.assertIn("bot.__main__", rendered)
             self.assertEqual(run_calls[0][0:4], ("schtasks", "/Create", "/TN", "feishu-codex-corp-a"))
+
+    def test_systemd_manager_lifecycle_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            definition = _definition(root)
+            manager = SystemdUserServiceManager()
+            calls: list[tuple[tuple[str, ...], dict]] = []
+
+            def _run(*args, **kwargs):
+                calls.append((args, kwargs))
+                if args[:3] == ("systemctl", "--user", "is-active"):
+                    return subprocess.CompletedProcess(args, 0, stdout="active\n", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with patch("bot.service_manager.default_systemd_user_dir", return_value=root / "systemd"):
+                with patch.object(manager, "_run", side_effect=_run):
+                    manager.start(definition)
+                    status = manager.status(definition)
+                    manager.uninstall(definition)
+
+            self.assertTrue(status.installed)
+            self.assertTrue(status.running)
+            self.assertEqual(status.detail, "active")
+            self.assertEqual(calls[1][0], ("systemctl", "--user", "enable", "feishu-codex-corp-a"))
+            self.assertEqual(calls[2][0], ("systemctl", "--user", "start", "feishu-codex-corp-a"))
+            self.assertEqual(calls[3][0], ("systemctl", "--user", "is-active", "feishu-codex-corp-a"))
+            self.assertEqual(calls[4][0], ("systemctl", "--user", "disable", "feishu-codex-corp-a"))
+            self.assertEqual(calls[5][0], ("systemctl", "--user", "stop", "feishu-codex-corp-a"))
+            self.assertEqual(calls[6][0], ("systemctl", "--user", "daemon-reload"))
+            self.assertFalse((root / "systemd" / "feishu-codex-corp-a.service").exists())
+
+    def test_launchd_manager_lifecycle_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            definition = _definition(root)
+            manager = LaunchdUserServiceManager()
+            calls: list[tuple[tuple[str, ...], dict]] = []
+
+            def _run(*args, **kwargs):
+                calls.append((args, kwargs))
+                if args[:2] == ("launchctl", "print"):
+                    return subprocess.CompletedProcess(args, 0, stdout="state = running\n", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with patch("bot.service_manager.default_launch_agent_dir", return_value=root / "LaunchAgents"):
+                with patch.object(manager, "_uid_domain", return_value="gui/501"):
+                    with patch.object(manager, "_run", side_effect=_run):
+                        manager.start(definition)
+                        status = manager.status(definition)
+                        manager.uninstall(definition)
+
+            self.assertTrue(status.installed)
+            self.assertTrue(status.running)
+            self.assertEqual(calls[0][0], ("launchctl", "bootout", "gui/501", "io.feishu-codex.corp-a"))
+            self.assertEqual(calls[1][0], ("launchctl", "bootstrap", "gui/501", str(root / "LaunchAgents" / "io.feishu-codex.corp-a.plist")))
+            self.assertEqual(calls[2][0], ("launchctl", "kickstart", "-k", "gui/501/io.feishu-codex.corp-a"))
+            self.assertEqual(calls[3][0], ("launchctl", "print", "gui/501/io.feishu-codex.corp-a"))
+            self.assertEqual(calls[4][0], ("launchctl", "bootout", "gui/501", "io.feishu-codex.corp-a"))
+            self.assertFalse((root / "LaunchAgents" / "io.feishu-codex.corp-a.plist").exists())
+
+    def test_windows_manager_lifecycle_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            definition = _definition(root)
+            manager = WindowsTaskSchedulerServiceManager()
+            calls: list[tuple[tuple[str, ...], dict]] = []
+
+            def _run(*args, **kwargs):
+                calls.append((args, kwargs))
+                if args[:2] == ("schtasks", "/Query"):
+                    return subprocess.CompletedProcess(args, 0, stdout="Status: Running\n", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+            with patch.object(manager, "_run", side_effect=_run):
+                manager.start(definition)
+                status = manager.status(definition)
+                manager.uninstall(definition)
+
+            self.assertTrue(status.installed)
+            self.assertTrue(status.running)
+            self.assertEqual(calls[0][0][:4], ("schtasks", "/Create", "/TN", "feishu-codex-corp-a"))
+            self.assertEqual(calls[1][0], ("schtasks", "/Run", "/TN", "feishu-codex-corp-a"))
+            self.assertEqual(calls[2][0], ("schtasks", "/Query", "/TN", "feishu-codex-corp-a", "/FO", "LIST", "/V"))
+            self.assertEqual(calls[3][0], ("schtasks", "/End", "/TN", "feishu-codex-corp-a"))
+            self.assertEqual(calls[4][0], ("schtasks", "/Delete", "/TN", "feishu-codex-corp-a", "/F"))
+            self.assertFalse((definition.paths.data_dir / "service-launch.cmd").exists())
+
+    def test_current_service_manager_factory(self) -> None:
+        with patch("bot.service_manager.is_windows", return_value=True):
+            self.assertIsInstance(current_service_manager(), WindowsTaskSchedulerServiceManager)
+        with patch("bot.service_manager.is_windows", return_value=False):
+            with patch("bot.service_manager.is_macos", return_value=True):
+                self.assertIsInstance(current_service_manager(), LaunchdUserServiceManager)
+        with patch("bot.service_manager.is_windows", return_value=False):
+            with patch("bot.service_manager.is_macos", return_value=False):
+                with patch("bot.service_manager.is_linux", return_value=True):
+                    self.assertIsInstance(current_service_manager(), SystemdUserServiceManager)
+
+    def test_current_service_manager_rejects_unsupported_platform(self) -> None:
+        with patch("bot.service_manager.is_windows", return_value=False):
+            with patch("bot.service_manager.is_macos", return_value=False):
+                with patch("bot.service_manager.is_linux", return_value=False):
+                    with self.assertRaises(ServiceManagerError):
+                        current_service_manager()
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 from websockets.sync.server import serve
 
+from bot.process_utils import process_exists
 from bot.stores.instance_registry_store import InstanceRegistryStore
 from bot.stores.interaction_lease_store import (
     InteractionLeaseStore,
@@ -417,18 +418,6 @@ def _relay_messages(
         pass
 
 
-def _process_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 def run_proxy(
     *,
     backend_url: str,
@@ -488,7 +477,7 @@ def run_proxy(
         if parent_pid is None:
             return
         while not shutdown_once.is_set():
-            if not _process_exists(parent_pid):
+            if not process_exists(parent_pid):
                 _shutdown_server()
                 return
             time.sleep(0.25)

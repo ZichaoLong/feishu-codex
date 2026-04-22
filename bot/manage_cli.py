@@ -16,6 +16,7 @@ import time
 
 from bot import __main__ as daemon_entry
 from bot.env_file import ensure_env_template
+from bot.file_permissions import ensure_private_file_permissions
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, apply_instance_environment, resolve_instance_paths, validate_instance_name
 from bot.install_templates import CODEX_YAML_TEMPLATE, SYSTEM_YAML_TEMPLATE
 from bot.platform_paths import default_config_root, default_data_root, default_log_file, default_user_bin_dir, is_windows
@@ -55,11 +56,13 @@ def _repo_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parent.parent
 
 
-def _ensure_text_file(path: pathlib.Path, contents: str, *, overwrite: bool) -> None:
+def _ensure_text_file(path: pathlib.Path, contents: str, *, overwrite: bool, private: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and not overwrite:
         return
     path.write_text(contents, encoding="utf-8")
+    if private:
+        ensure_private_file_permissions(path)
 
 
 def _ensure_init_token(path: pathlib.Path) -> None:
@@ -67,10 +70,7 @@ def _ensure_init_token(path: pathlib.Path) -> None:
     if path.exists() and path.read_text(encoding="utf-8").strip():
         return
     path.write_text(secrets.token_urlsafe(24) + "\n", encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    ensure_private_file_permissions(path)
 
 
 def _ensure_instance_scaffold(instance_name: str) -> None:
@@ -80,7 +80,7 @@ def _ensure_instance_scaffold(instance_name: str) -> None:
     paths.global_data_dir.mkdir(parents=True, exist_ok=True)
     _ensure_text_file(paths.config_dir / "system.yaml.example", SYSTEM_YAML_TEMPLATE, overwrite=True)
     _ensure_text_file(paths.config_dir / "codex.yaml.example", CODEX_YAML_TEMPLATE, overwrite=True)
-    _ensure_text_file(paths.config_dir / "system.yaml", SYSTEM_YAML_TEMPLATE, overwrite=False)
+    _ensure_text_file(paths.config_dir / "system.yaml", SYSTEM_YAML_TEMPLATE, overwrite=False, private=True)
     _ensure_text_file(paths.config_dir / "codex.yaml", CODEX_YAML_TEMPLATE, overwrite=False)
     ensure_env_template()
     _ensure_init_token(paths.config_dir / "init.token")

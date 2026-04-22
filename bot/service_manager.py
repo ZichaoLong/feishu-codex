@@ -173,6 +173,8 @@ class SystemdUserServiceManager(ServiceManager):
 
 
 class LaunchdUserServiceManager(ServiceManager):
+    """macOS-only launchd user service manager."""
+
     def _uid_domain(self) -> str:
         return f"gui/{os.getuid()}"
 

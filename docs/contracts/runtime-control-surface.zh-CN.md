@@ -464,6 +464,7 @@
 - 第二个实例必须 fail-fast
 - control endpoint 不是所有权原语
 - owner 会写入包含 `owner_pid`、`owner_token`、`control_endpoint` 的元数据
+- 这份本地 owner metadata 含有本机控制令牌，必须按敏感本地状态处理；在 Windows 上，其保密性依赖当前用户目录与 NTFS ACL，而不是 POSIX `0600` 语义
 - 如果在拿到 owner 之后启动失败，所有已部分启动的 runtime 组件都必须先完整回滚，再释放 lease
 - 停止时只允许清理由同一个 owner token 仍持有的所有权元数据
 

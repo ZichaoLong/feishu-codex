@@ -1,10 +1,11 @@
 import os
 import pathlib
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from bot.manage_cli import _handle_install
+from bot.manage_cli import _handle_install, _write_wrapper
 
 
 class ManageCliTests(unittest.TestCase):
@@ -36,6 +37,34 @@ class ManageCliTests(unittest.TestCase):
             self.assertTrue((bin_dir / "feishu-codexd").exists())
             self.assertTrue((bin_dir / "feishu-codexctl").exists())
             self.assertTrue((bin_dir / "fcodex").exists())
+            self.assertEqual(stat.S_IMODE((config_root / "system.yaml").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE((config_root / "init.token").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
+
+    def test_write_wrapper_creates_windows_cmd_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            with patch("bot.manage_cli.is_windows", return_value=True):
+                with patch("bot.manage_cli._venv_python", return_value=pathlib.Path("C:/Python311/python.exe")):
+                    _write_wrapper(root / "feishu-codex", "bot.manage_cli")
+
+            wrapper_path = root / "feishu-codex.cmd"
+            self.assertTrue(wrapper_path.exists())
+            rendered = wrapper_path.read_text(encoding="utf-8")
+            self.assertIn('"C:/Python311/python.exe" -m bot.manage_cli %*', rendered)
+
+    def test_write_wrapper_creates_unix_shell_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            wrapper_path = root / "feishu-codex"
+            with patch("bot.manage_cli.is_windows", return_value=False):
+                with patch("bot.manage_cli._venv_python", return_value=pathlib.Path("/tmp/venv/bin/python")):
+                    _write_wrapper(wrapper_path, "bot.manage_cli")
+
+            self.assertTrue(wrapper_path.exists())
+            rendered = wrapper_path.read_text(encoding="utf-8")
+            self.assertIn('exec "/tmp/venv/bin/python" -m bot.manage_cli "$@"', rendered)
+            self.assertEqual(stat.S_IMODE(wrapper_path.stat().st_mode), 0o755)
 
 
 if __name__ == "__main__":

@@ -169,6 +169,12 @@ provider2_api_key=...
 
 `feishu-codexd` 与 `fcodex` 都会在启动时主动加载这个文件；不再依赖某个特定平台的 service manager 环境注入机制。
 
+安全说明：
+
+- `system.yaml`、`init.token`、`feishu-codex.env`、service owner metadata 都按敏感文件处理
+- Linux / macOS 上会尽量收敛到 `0600`
+- Windows 上不承诺 POSIX `0600` 语义，而是依赖当前用户目录与 NTFS ACL；请把 `FC_CONFIG_ROOT` / `FC_DATA_ROOT` 放在当前用户私有路径下，不要放到共享目录
+
 [飞书开放平台](https://open.feishu.cn)里，建议先把应用权限、事件与回调一次性配好。
 
 在「权限管理」中，建议至少开通这些权限：
