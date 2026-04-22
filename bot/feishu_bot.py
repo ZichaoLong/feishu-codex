@@ -1279,6 +1279,12 @@ class FeishuBot(ABC):
             sender_name=sender_name,
         )
 
+    def _build_group_turn_text(self, current_text: str, *, sender_name: str) -> str:
+        return self._history_recovery.build_group_turn_text(
+            current_text,
+            sender_name=sender_name,
+        )
+
     @staticmethod
     def _group_acl_denied_text(group_mode: str) -> str:
         normalized_mode = str(group_mode or "").strip().lower()
@@ -1589,12 +1595,20 @@ class FeishuBot(ABC):
 
         if not text:
             if chat_type == "group" and bot_mentioned:
-                self.on_message(
-                    sender_id,
-                    chat_id,
-                    self._build_group_current_turn_text("", sender_name=sender_name),
-                    message_id=message_id,
-                )
+                if group_mode == self._GROUP_MODE_MENTION:
+                    self.on_message(
+                        sender_id,
+                        chat_id,
+                        self._build_group_turn_text("", sender_name=sender_name),
+                        message_id=message_id,
+                    )
+                elif group_mode == self._GROUP_MODE_ASSISTANT:
+                    self.on_message(
+                        sender_id,
+                        chat_id,
+                        self._build_group_current_turn_text("", sender_name=sender_name),
+                        message_id=message_id,
+                    )
             elif chat_type != "group":
                 logger.info(
                     "忽略空文本消息: name=%s, open_id=%s, user_id=%s, msg_type=%s, message_id=%s",
@@ -1608,8 +1622,8 @@ class FeishuBot(ABC):
             sender_name, sender_open_log, sender_user_log, chat_type, message_id, text,
         )
         outbound_text = text
-        if chat_type == "group" and not control_text:
-            outbound_text = self._build_group_current_turn_text(
+        if chat_type == "group" and not control_text and group_mode == self._GROUP_MODE_MENTION:
+            outbound_text = self._build_group_turn_text(
                 text,
                 sender_name=sender_name,
             )
