@@ -251,6 +251,16 @@ class GroupHistoryRecoveryTests(unittest.TestCase):
         self.assertIn("sender_name: Alice", text)
         self.assertIn("发送者没有提供额外文本", text)
 
+    def test_build_group_turn_text_is_neutral(self) -> None:
+        recovery, _calls = self._make_recovery()
+
+        text = recovery.build_group_turn_text("请总结", sender_name="Alice")
+
+        self.assertIn("<group_chat_current_turn>", text)
+        self.assertIn("sender_name: Alice", text)
+        self.assertIn("请总结", text)
+        self.assertNotIn("优先回复这条消息", text)
+
 
 if __name__ == "__main__":
     unittest.main()

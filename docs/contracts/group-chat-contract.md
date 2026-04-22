@@ -84,10 +84,15 @@ Those remain owned by their dedicated documents.
 
 - does not cache group context
 - triggers only on valid trigger mentions
+- backend input contains only the current group message, without history context
+- the current group message is sent through a lightweight `group_chat_current_turn`
+  wrapper and should prefer `sender_name`
 
 ### 4.3 `all`
 
 - human group messages can trigger directly
+- backend input is passed through like p2p by default: no history context and
+  no extra `group turn` wrapper
 - has the highest spam risk
 
 ## 5. Group-Command Triggering

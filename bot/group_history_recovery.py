@@ -416,6 +416,18 @@ class GroupHistoryRecovery:
         normalized = " ".join(str(sender_name or "").split())
         return normalized or "unknown"
 
+    def build_group_turn_text(self, current_text: str, *, sender_name: str) -> str:
+        message_text = str(current_text or "").strip()
+        if not message_text:
+            message_text = "（发送者没有提供额外文本，请基于上下文回复最近这段讨论。）"
+        return (
+            "<group_chat_current_turn>\n"
+            f"sender_name: {self.normalize_sender_name(sender_name)}\n"
+            "message:\n"
+            f"{message_text}\n"
+            "</group_chat_current_turn>"
+        )
+
     def build_group_current_turn_text(self, current_text: str, *, sender_name: str) -> str:
         message_text = str(current_text or "").strip()
         if not message_text:

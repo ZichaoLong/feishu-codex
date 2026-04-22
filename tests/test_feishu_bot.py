@@ -470,7 +470,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("请总结一下", text)
         self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 2)
 
-    def test_group_all_mode_wraps_current_turn_with_sender_name(self) -> None:
+    def test_group_all_mode_passes_text_through_directly(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "all")
         bot.set_group_access_policy("chat-1", "all-members")
@@ -487,9 +487,36 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(len(bot.received_messages), 1)
         _, _, text, _ = bot.received_messages[0]
+        self.assertEqual(text, "请直接总结今天讨论")
+
+    def test_group_mention_only_wraps_current_turn_with_sender_name(self) -> None:
+        bot = self._make_bot()
+        bot.set_group_mode("chat-1", "mention_only")
+        bot.set_group_access_policy("chat-1", "all-members")
+
+        bot._handle_raw_message(
+            _message_event(
+                message_id="m-1",
+                chat_id="chat-1",
+                text="@_user_1 请直接总结今天讨论",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+                mentions=[
+                    {
+                        "key": "@_user_1",
+                        "id": {"user_id": "u-bot", "open_id": "ou-bot"},
+                        "name": "Codex",
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(len(bot.received_messages), 1)
+        _, _, text, _ = bot.received_messages[0]
         self.assertIn("<group_chat_current_turn>", text)
         self.assertIn("sender_name: ou-user", text)
         self.assertIn("请直接总结今天讨论", text)
+        self.assertNotIn("优先回复这条消息", text)
 
     def test_assistant_mode_keeps_history_recovered_bot_messages_in_context(self) -> None:
         bot = self._make_bot()
