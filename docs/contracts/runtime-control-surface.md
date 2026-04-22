@@ -475,18 +475,18 @@ The contract is:
 
 - ownership is established before adapter/control-plane startup
 - a second instance must fail fast
-- the control socket is not the ownership primitive
+- the control endpoint is not the ownership primitive
 - the owner writes metadata including `owner_pid`, `owner_token`, and
-  `socket_path`
+  `control_endpoint`
 - if startup fails after ownership is acquired, partially started runtime
   components must be fully rolled back before the lease is released
-- shutdown may only clean up metadata/socket that still belong to the same
+- shutdown may only clean up ownership metadata that still belong to the same
   owner token
 
-Therefore `feishu-codex run` and a systemd-managed service must not coexist on
-the same `FC_DATA_DIR`.
+Therefore `feishu-codex run` and a background service started via
+`feishu-codex start` must not coexist on the same `FC_DATA_DIR`.
 If both point at the same directory, the later starter must exit instead of
-trying to replace the socket.
+trying to replace the published control endpoint.
 
 ### 6.8 Instance Scope, Admission, and Global Coordination
 
@@ -523,7 +523,7 @@ There are also two machine-level coordination facts:
 
 - `InstanceRegistry`
   - records which instances are currently running and how local CLIs can reach
-    their control socket / backend endpoints
+    their control endpoint / backend endpoints
   - used by `fcodex` and `feishu-codexctl instance list`
 - `ThreadRuntimeLease`
   - records which instance currently owns live backend runtime residency for a

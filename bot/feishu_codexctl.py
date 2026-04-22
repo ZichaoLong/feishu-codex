@@ -8,18 +8,21 @@ import pathlib
 import sys
 from typing import Any
 
-from bot.constants import FC_DATA_DIR, display_path
+from bot.constants import display_path
+from bot.env_file import load_env_file
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, resolve_instance_paths, validate_instance_name
 from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
-from bot.service_control_plane import ServiceControlError, control_request, control_socket_path
+from bot.platform_paths import default_data_root
+from bot.service_control_plane import ServiceControlError, control_request
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore
+from bot.stores.service_instance_lease import ServiceInstanceLease
 
 
 def _data_dir() -> pathlib.Path:
     raw = os.environ.get("FC_DATA_DIR", "").strip()
     if raw:
         return pathlib.Path(raw).expanduser()
-    return FC_DATA_DIR
+    return default_data_root()
 
 
 def _resolve_target_data_dir(explicit_instance: str | None) -> pathlib.Path:
@@ -58,12 +61,13 @@ def _thread_target_params(args: argparse.Namespace) -> dict[str, str]:
 
 
 def _print_service_status(data_dir: pathlib.Path) -> int:
-    socket_path = control_socket_path(data_dir)
+    metadata = ServiceInstanceLease(data_dir).load_metadata()
+    published_endpoint = metadata.control_endpoint if metadata is not None else ""
     try:
         result = _request(data_dir, "service/status")
     except ServiceControlError as exc:
         print("service: stopped")
-        print(f"control socket: {socket_path}")
+        print(f"control endpoint: {published_endpoint or 'unavailable'}")
         runtime = AppServerRuntimeStore(data_dir).load_managed_runtime()
         if runtime is not None:
             print(f"last known app server: {runtime.active_url}")
@@ -73,7 +77,7 @@ def _print_service_status(data_dir: pathlib.Path) -> int:
         print(f"instance: {result['instance_name']}")
     print("service: running")
     print(f"pid: {result['pid']}")
-    print(f"control socket: {result['control_socket_path']}")
+    print(f"control endpoint: {result['control_endpoint']}")
     print(f"app server: {result['app_server_url']}")
     if "admitted_thread_count" in result:
         print(f"admitted threads: {result['admitted_thread_count']}")
@@ -220,7 +224,7 @@ def _list_running_instances() -> int:
         return 0
     print("INSTANCE\tPID\tCONTROL\tAPP_SERVER")
     for item in instances:
-        control = display_path(item.control_socket_path)
+        control = item.control_endpoint
         app_server = item.app_server_url or "-"
         print(f"{item.instance_name}\t{item.owner_pid}\t{control}\t{app_server}")
     return 0
@@ -302,6 +306,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    load_env_file()
     parser = _build_parser()
     args = parser.parse_args()
     try:

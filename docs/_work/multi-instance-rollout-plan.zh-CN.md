@@ -184,7 +184,7 @@
   - `instance_name`
   - `FC_CONFIG_DIR`
   - `FC_DATA_DIR`
-  - control socket path
+  - control endpoint
   - backend URL
   - owner pid / started_at
 - 为 `feishu-codexctl` 和 `fcodex` 提供“先找实例，再决定连谁”的统一发现面

@@ -16,9 +16,11 @@ from dataclasses import dataclass, replace
 from bot.adapters.base import ThreadSummary
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.config import load_config_file
-from bot.constants import DEFAULT_APP_SERVER_URL, FC_DATA_DIR, PROJECT_ROOT, display_path
+from bot.constants import DEFAULT_APP_SERVER_URL, display_path
+from bot.env_file import load_env_file
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, resolve_instance_paths, validate_instance_name
 from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
+from bot.platform_paths import default_data_root
 from bot.profile_resolution import resolve_local_default_profile_via_remote_backend
 from bot.session_resolution import (
     list_current_dir_threads,
@@ -98,19 +100,11 @@ def _has_explicit_cwd(user_args: list[str]) -> bool:
     return _has_option(user_args, ("-C", "--cd"))
 
 
-def _looks_like_dev_layout() -> bool:
-    return (PROJECT_ROOT / "bot").is_dir() and (PROJECT_ROOT / "config").is_dir()
-
-
 def _default_data_dir() -> pathlib.Path:
     raw = os.environ.get("FC_DATA_DIR", "").strip()
     if raw:
         return pathlib.Path(raw).expanduser()
-    if _looks_like_dev_layout():
-        return FC_DATA_DIR
-    # install.sh 的标准安装目录。即使外层 wrapper 漏传 FC_DATA_DIR，
-    # 也能继续与 feishu-codex 服务共用同一份本地状态。
-    return pathlib.Path.home() / ".local" / "share" / "feishu-codex"
+    return default_data_root()
 
 
 def _consume_instance_arg(user_args: list[str]) -> tuple[str, list[str]]:
@@ -808,6 +802,7 @@ def _handle_internal_command(
 
 
 def main() -> None:
+    load_env_file()
     cfg = load_config_file("codex")
     codex_command = str(cfg.get("codex_command", "codex")).strip() or "codex"
     explicit_instance, user_args = _consume_instance_arg(sys.argv[1:])

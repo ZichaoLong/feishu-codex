@@ -42,7 +42,6 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.card_text_projection import project_interactive_card_text
-from bot.constants import FC_DATA_DIR
 from bot.feishu_types import (
     BotIdentitySnapshot,
     GroupAclSnapshot,
@@ -60,6 +59,7 @@ from bot.group_history_recovery import (
 from bot.stores.group_chat_store import (
     GroupChatStore,
 )
+from bot.platform_paths import default_data_root
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,7 @@ class FeishuBot(ABC):
         self.request_timeout_seconds = float(request_timeout_seconds)
         self._seen_messages: OrderedDict[str, float] = OrderedDict()
         self._dedup_lock = threading.Lock()
-        self._group_store = GroupChatStore(data_dir or FC_DATA_DIR)
+        self._group_store = GroupChatStore(data_dir or default_data_root())
         self._message_contexts: OrderedDict[str, _MessageContext] = OrderedDict()
         self._message_context_lock = threading.Lock()
         self._chat_type_cache: OrderedDict[str, _CachedChatType] = OrderedDict()

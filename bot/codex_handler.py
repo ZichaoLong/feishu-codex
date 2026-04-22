@@ -36,7 +36,6 @@ from bot.constants import (
     DEFAULT_SESSION_RECENT_LIMIT,
     DEFAULT_STREAM_PATCH_INTERVAL_MS,
     DEFAULT_THREAD_LIST_QUERY_LIMIT,
-    FC_DATA_DIR,
     GROUP_SHARED_BINDING_OWNER_ID,
     KEYWORD,
     display_path,
@@ -107,6 +106,7 @@ from bot.thread_runtime_coordination import acquire_thread_runtime_holder_or_rai
 from bot.thread_access_policy import ThreadAccessPolicy
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
+from bot.platform_paths import default_data_root
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ class CodexHandler(BotHandler):
         super().__init__()
         cfg = load_config_file("codex")
 
-        self._data_dir = data_dir or FC_DATA_DIR
+        self._data_dir = data_dir or default_data_root()
         self._config_dir = config_dir
         self._instance_name = current_instance_name(config_dir=self._config_dir, data_dir=self._data_dir)
         self._global_data_dir = global_data_dir()
@@ -176,7 +176,8 @@ class CodexHandler(BotHandler):
         self._service_control_plane = ServiceControlPlane(
             data_dir=self._data_dir,
             dispatch=self._handle_service_control_request,
-            owns_socket_path=self._service_instance_lease.owns_socket_path,
+            owns_current_lease=self._service_instance_lease.owns_current_lease,
+            auth_token=lambda: self._service_instance_lease.owner_token,
         )
         self._last_runtime_config: RuntimeConfigSummary | None = None
 
@@ -410,7 +411,7 @@ class CodexHandler(BotHandler):
             current_app_server_url=lambda: self._adapter.current_app_server_url(),
             unsubscribe_thread=lambda thread_id: self._adapter.unsubscribe_thread(thread_id),
             release_service_thread_runtime_lease=self._release_service_thread_runtime_lease,
-            service_control_socket_path=lambda: str(self._service_control_plane.socket_path),
+            service_control_endpoint=lambda: self._service_control_plane.control_endpoint,
             instance_name=lambda: self._instance_name,
             admitted_thread_ids=lambda: tuple(sorted(self._thread_admission_store.list_all())),
             admit_thread=self._thread_admission_store.admit,
@@ -552,10 +553,11 @@ class CodexHandler(BotHandler):
     def on_register(self, bot) -> None:
         super().on_register(bot)
         try:
-            self._service_instance_lease.acquire(socket_path=self._service_control_plane.socket_path)
+            self._service_instance_lease.acquire()
             self._runtime_loop.start()
             self._adapter.start()
-            self._service_control_plane.start()
+            control_endpoint = self._service_control_plane.start()
+            self._service_instance_lease.publish_control_endpoint(control_endpoint)
             self._register_instance_runtime()
             self._restore_service_thread_runtime_leases()
         except ServiceInstanceLeaseError:
@@ -586,7 +588,7 @@ class CodexHandler(BotHandler):
         entry = build_instance_registry_entry(
             instance_name=self._instance_name,
             service_token=self._service_instance_lease.owner_token,
-            control_socket_path=str(self._service_control_plane.socket_path),
+            control_endpoint=self._service_control_plane.control_endpoint,
             app_server_url=self._adapter.current_app_server_url(),
             config_dir=self._config_dir or pathlib.Path(""),
             data_dir=self._data_dir,
@@ -606,7 +608,7 @@ class CodexHandler(BotHandler):
             instance_name=self._instance_name,
             owner_pid=os.getpid(),
             owner_service_token=self._service_instance_lease.owner_token,
-            control_socket_path=str(self._service_control_plane.socket_path),
+            control_endpoint=self._service_control_plane.control_endpoint,
             backend_url=self._adapter.current_app_server_url(),
             updated_at=time.time(),
         )

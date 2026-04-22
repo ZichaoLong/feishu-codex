@@ -410,8 +410,8 @@ The repository is easier to understand by responsibility than by a frozen
 full-tree dump.
 
 - repository root
-  - operator-facing material and packaging live in `README.md`, `install.sh`,
-    and `pyproject.toml`
+  - operator-facing material and packaging live in `README.md`, `install.py`,
+    `install.sh`, `install.ps1`, and `pyproject.toml`
   - the tracked agent-preference template lives in `AGENTS.example.md`
   - real local override files such as `AGENTS.md` and `AGENTS.zh-CN.md`
     remain intentionally gitignored

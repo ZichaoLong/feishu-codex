@@ -79,7 +79,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             current_app_server_url=lambda: "http://127.0.0.1:1234",
             unsubscribe_thread=lambda thread_id: unsubscribed.append(thread_id),
             release_service_thread_runtime_lease=lambda thread_id: released_runtime_leases.append(thread_id),
-            service_control_socket_path=lambda: str(data_dir / "service.sock"),
+            service_control_endpoint=lambda: "tcp://127.0.0.1:32001",
             instance_name=lambda: "corp-a",
             admitted_thread_ids=lambda: tuple(sorted(admitted_thread_ids)),
             admit_thread=_admit_thread,

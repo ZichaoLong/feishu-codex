@@ -19,7 +19,7 @@ def _holder(*, instance_name: str, holder_id: str, service_token: str, owner_pid
         instance_name=instance_name,
         owner_pid=owner_pid or os.getpid(),
         owner_service_token=service_token,
-        control_socket_path=f"/tmp/{instance_name}.sock",
+        control_endpoint=f"tcp://127.0.0.1:{9100 if instance_name == 'corp-a' else 9200}",
         backend_url=f"ws://127.0.0.1:{9100 if instance_name == 'corp-a' else 9200}",
         updated_at=time.time(),
     )

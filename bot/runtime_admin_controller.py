@@ -53,7 +53,7 @@ class RuntimeAdminController:
         current_app_server_url: Callable[[], str],
         unsubscribe_thread: Callable[[str], None],
         release_service_thread_runtime_lease: Callable[[str], None],
-        service_control_socket_path: Callable[[], str],
+        service_control_endpoint: Callable[[], str],
         instance_name: Callable[[], str],
         admitted_thread_ids: Callable[[], tuple[str, ...]],
         admit_thread: Callable[[str], bool],
@@ -77,7 +77,7 @@ class RuntimeAdminController:
         self._current_app_server_url = current_app_server_url
         self._unsubscribe_thread = unsubscribe_thread
         self._release_service_thread_runtime_lease = release_service_thread_runtime_lease
-        self._service_control_socket_path = service_control_socket_path
+        self._service_control_endpoint = service_control_endpoint
         self._instance_name = instance_name
         self._admitted_thread_ids = admitted_thread_ids
         self._admit_thread = admit_thread
@@ -571,7 +571,7 @@ class RuntimeAdminController:
             return {
                 "instance_name": self._instance_name(),
                 "pid": os.getpid(),
-                "control_socket_path": self._service_control_socket_path(),
+                "control_endpoint": self._service_control_endpoint(),
                 "app_server_url": self._current_app_server_url(),
                 "admitted_thread_count": len(self._admitted_thread_ids()),
                 "binding_count": len(bindings),

@@ -8,7 +8,6 @@ from different instances are rejected.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import pathlib
@@ -18,19 +17,9 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Iterator
 
+from bot.file_lock import acquire_file_lock, release_file_lock
 from bot.instance_layout import global_data_dir
-
-
-def _process_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+from bot.process_utils import process_exists
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +29,7 @@ class ThreadRuntimeLeaseHolder:
     instance_name: str
     owner_pid: int
     owner_service_token: str
-    control_socket_path: str
+    control_endpoint: str
     backend_url: str
     updated_at: float
 
@@ -50,7 +39,7 @@ class ThreadRuntimeLease:
     thread_id: str
     owner_instance: str
     owner_service_token: str
-    control_socket_path: str
+    control_endpoint: str
     backend_url: str
     attached_at: float
     holders: tuple[ThreadRuntimeLeaseHolder, ...]
@@ -108,7 +97,7 @@ class ThreadRuntimeLeaseStore:
                     thread_id=normalized_thread_id,
                     owner_instance=normalized_holder.instance_name,
                     owner_service_token=normalized_holder.owner_service_token,
-                    control_socket_path=normalized_holder.control_socket_path,
+                    control_endpoint=normalized_holder.control_endpoint,
                     backend_url=normalized_holder.backend_url,
                     attached_at=normalized_holder.updated_at,
                     holders=(normalized_holder,),
@@ -126,7 +115,7 @@ class ThreadRuntimeLeaseStore:
                 thread_id=normalized_thread_id,
                 owner_instance=current.owner_instance,
                 owner_service_token=normalized_holder.owner_service_token or current.owner_service_token,
-                control_socket_path=normalized_holder.control_socket_path or current.control_socket_path,
+                control_endpoint=normalized_holder.control_endpoint or current.control_endpoint,
                 backend_url=normalized_holder.backend_url or current.backend_url,
                 attached_at=current.attached_at or normalized_holder.updated_at,
                 holders=ordered_holders,
@@ -161,7 +150,7 @@ class ThreadRuntimeLeaseStore:
                         thread_id=normalized_thread_id,
                         owner_instance=first.instance_name,
                         owner_service_token=first.owner_service_token,
-                        control_socket_path=first.control_socket_path,
+                        control_endpoint=first.control_endpoint,
                         backend_url=first.backend_url,
                         attached_at=lease.attached_at,
                         holders=retained,
@@ -205,7 +194,7 @@ class ThreadRuntimeLeaseStore:
                         thread_id=normalized_thread_id,
                         owner_instance=first.instance_name,
                         owner_service_token=first.owner_service_token,
-                        control_socket_path=first.control_socket_path,
+                        control_endpoint=first.control_endpoint,
                         backend_url=first.backend_url,
                         attached_at=lease.attached_at,
                         holders=retained,
@@ -220,14 +209,14 @@ class ThreadRuntimeLeaseStore:
             lock_path = self._lock_path()
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with lock_path.open("a+", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                acquire_file_lock(lock_file, blocking=True)
                 try:
                     data = self._read_all_unlocked()
                     if self._prune_stale_leases(data):
                         self._write_all_unlocked(data)
                     yield data
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    release_file_lock(lock_file)
 
     def _prune_stale_leases(self, data: dict[str, dict]) -> bool:
         changed = False
@@ -255,7 +244,7 @@ class ThreadRuntimeLeaseStore:
             instance_name=str(holder.instance_name or "").strip().lower(),
             owner_pid=int(holder.owner_pid or 0),
             owner_service_token=str(holder.owner_service_token or "").strip(),
-            control_socket_path=str(holder.control_socket_path or "").strip(),
+            control_endpoint=str(holder.control_endpoint or "").strip(),
             backend_url=str(holder.backend_url or "").strip(),
             updated_at=float(holder.updated_at or time.time()),
         )
@@ -264,34 +253,32 @@ class ThreadRuntimeLeaseStore:
         if not isinstance(raw, dict):
             return None
         holders_raw = raw.get("holders")
-        if not isinstance(holders_raw, list):
+        if not isinstance(holders_raw, list) or not holders_raw:
             return None
         holders: list[ThreadRuntimeLeaseHolder] = []
         for item in holders_raw:
             holder = self._holder_from_data(item)
             if holder is None:
                 continue
-            if not _process_exists(holder.owner_pid):
+            if holder.owner_pid > 0 and not process_exists(holder.owner_pid):
                 continue
             holders.append(holder)
         if not holders:
             return None
-        holders.sort(key=lambda item: item.holder_id)
-        owner_instance = holders[0].instance_name
-        if any(holder.instance_name != owner_instance for holder in holders):
-            return None
-        attached_at = raw.get("attached_at")
+        holders = sorted(holders, key=lambda item: item.holder_id)
+        first = holders[0]
         try:
-            normalized_attached_at = float(attached_at or holders[0].updated_at)
+            attached_at = float(raw.get("attached_at") or 0.0)
         except (TypeError, ValueError):
-            normalized_attached_at = holders[0].updated_at
+            attached_at = first.updated_at
         return ThreadRuntimeLease(
             thread_id=thread_id,
-            owner_instance=owner_instance,
-            owner_service_token=str(raw.get("owner_service_token", "") or "").strip() or holders[0].owner_service_token,
-            control_socket_path=str(raw.get("control_socket_path", "") or "").strip() or holders[0].control_socket_path,
-            backend_url=str(raw.get("backend_url", "") or "").strip() or holders[0].backend_url,
-            attached_at=normalized_attached_at,
+            owner_instance=str(raw.get("owner_instance") or first.instance_name).strip().lower() or first.instance_name,
+            owner_service_token=str(raw.get("owner_service_token") or first.owner_service_token).strip()
+            or first.owner_service_token,
+            control_endpoint=str(raw.get("control_endpoint") or first.control_endpoint).strip() or first.control_endpoint,
+            backend_url=str(raw.get("backend_url") or first.backend_url).strip() or first.backend_url,
+            attached_at=attached_at or first.updated_at,
             holders=tuple(holders),
         )
 
@@ -305,7 +292,7 @@ class ThreadRuntimeLeaseStore:
             instance_name = str(raw.get("instance_name", "") or "").strip().lower()
             owner_pid = int(raw.get("owner_pid") or 0)
             owner_service_token = str(raw.get("owner_service_token", "") or "").strip()
-            control_socket_path = str(raw.get("control_socket_path", "") or "").strip()
+            control_endpoint = str(raw.get("control_endpoint", "") or "").strip()
             backend_url = str(raw.get("backend_url", "") or "").strip()
             updated_at = float(raw.get("updated_at") or 0.0)
         except (TypeError, ValueError):
@@ -318,7 +305,7 @@ class ThreadRuntimeLeaseStore:
             instance_name=instance_name,
             owner_pid=owner_pid,
             owner_service_token=owner_service_token,
-            control_socket_path=control_socket_path,
+            control_endpoint=control_endpoint,
             backend_url=backend_url,
             updated_at=updated_at or time.time(),
         )
@@ -329,7 +316,7 @@ class ThreadRuntimeLeaseStore:
             "thread_id": lease.thread_id,
             "owner_instance": lease.owner_instance,
             "owner_service_token": lease.owner_service_token,
-            "control_socket_path": lease.control_socket_path,
+            "control_endpoint": lease.control_endpoint,
             "backend_url": lease.backend_url,
             "attached_at": lease.attached_at,
             "holders": [asdict(holder) for holder in lease.holders],
@@ -346,18 +333,17 @@ class ThreadRuntimeLeaseStore:
         if not isinstance(raw, dict):
             return {}
         return {
-            self._normalize_thread_id(key): value
-            for key, value in raw.items()
-            if self._normalize_thread_id(key)
+            str(thread_id).strip(): value
+            for thread_id, value in raw.items()
+            if str(thread_id).strip() and isinstance(value, dict)
         }
 
     def _write_all_unlocked(self, data: dict[str, dict]) -> None:
         path = self._file_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".json.tmp")
-        rendered = {
-            str(key): value
-            for key, value in sorted(data.items())
-        }
-        tmp_path.write_text(json.dumps(rendered, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_path, path)
+        tmp_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(str(tmp_path), str(path))

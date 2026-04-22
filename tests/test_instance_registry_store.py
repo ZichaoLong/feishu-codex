@@ -25,7 +25,7 @@ def _register_instances_worker(
                 build_instance_registry_entry(
                     instance_name=instance_name,
                     service_token=f"token-{instance_name}",
-                    control_socket_path=f"/tmp/{instance_name}.sock",
+                    control_endpoint=f"tcp://127.0.0.1:{9100 + len(instance_name)}",
                     app_server_url=f"ws://127.0.0.1:{9100 + len(instance_name)}",
                     config_dir=pathlib.Path(f"/tmp/{instance_name}/config"),
                     data_dir=pathlib.Path(f"/tmp/{instance_name}/data"),
@@ -55,7 +55,7 @@ class InstanceRegistryStoreTests(unittest.TestCase):
         entry = build_instance_registry_entry(
             instance_name="corp-a",
             service_token="token-a",
-            control_socket_path="/tmp/corp-a.sock",
+            control_endpoint="tcp://127.0.0.1:9101",
             app_server_url="ws://127.0.0.1:9101",
             config_dir=pathlib.Path("/tmp/config-a"),
             data_dir=pathlib.Path("/tmp/data-a"),
@@ -81,7 +81,7 @@ class InstanceRegistryStoreTests(unittest.TestCase):
         stale = build_instance_registry_entry(
             instance_name="corp-b",
             service_token="token-b",
-            control_socket_path="/tmp/corp-b.sock",
+            control_endpoint="tcp://127.0.0.1:9102",
             app_server_url="ws://127.0.0.1:9102",
             config_dir=pathlib.Path("/tmp/config-b"),
             data_dir=pathlib.Path("/tmp/data-b"),

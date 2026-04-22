@@ -7,7 +7,6 @@ running `feishu-codex` service instance and its control/backend endpoints.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import pathlib
@@ -17,19 +16,9 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Iterator
 
+from bot.file_lock import acquire_file_lock, release_file_lock
 from bot.instance_layout import global_data_dir
-
-
-def _process_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+from bot.process_utils import process_exists
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +26,7 @@ class InstanceRegistryEntry:
     instance_name: str
     owner_pid: int
     service_token: str
-    control_socket_path: str
+    control_endpoint: str
     app_server_url: str
     config_dir: str
     data_dir: str
@@ -96,14 +85,14 @@ class InstanceRegistryStore:
             lock_path = self._lock_path()
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with lock_path.open("a+", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                acquire_file_lock(lock_file, blocking=True)
                 try:
                     data = self._read_all_unlocked()
                     if self._prune_stale_entries(data):
                         self._write_all_unlocked(data)
                     yield data
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    release_file_lock(lock_file)
 
     def _prune_stale_entries(self, data: dict[str, dict]) -> bool:
         changed = False
@@ -113,7 +102,7 @@ class InstanceRegistryStore:
                 data.pop(instance_name, None)
                 changed = True
                 continue
-            if not _process_exists(entry.owner_pid):
+            if not process_exists(entry.owner_pid):
                 data.pop(instance_name, None)
                 changed = True
         return changed
@@ -126,7 +115,7 @@ class InstanceRegistryStore:
             instance_name = str(raw.get("instance_name", "") or "").strip().lower()
             owner_pid = int(raw.get("owner_pid") or 0)
             service_token = str(raw.get("service_token", "") or "").strip()
-            control_socket_path = str(raw.get("control_socket_path", "") or "").strip()
+            control_endpoint = str(raw.get("control_endpoint", "") or "").strip()
             app_server_url = str(raw.get("app_server_url", "") or "").strip()
             config_dir = str(raw.get("config_dir", "") or "").strip()
             data_dir = str(raw.get("data_dir", "") or "").strip()
@@ -134,13 +123,13 @@ class InstanceRegistryStore:
             updated_at = float(raw.get("updated_at") or 0.0)
         except (TypeError, ValueError):
             return None
-        if not instance_name or not service_token or not control_socket_path or not data_dir:
+        if not instance_name or not service_token or not control_endpoint or not data_dir:
             return None
         return InstanceRegistryEntry(
             instance_name=instance_name,
             owner_pid=owner_pid,
             service_token=service_token,
-            control_socket_path=control_socket_path,
+            control_endpoint=control_endpoint,
             app_server_url=app_server_url,
             config_dir=config_dir,
             data_dir=data_dir,
@@ -168,10 +157,7 @@ class InstanceRegistryStore:
         path = self._file_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".json.tmp")
-        rendered = {
-            str(key): value
-            for key, value in sorted(data.items())
-        }
+        rendered = {str(key): value for key, value in sorted(data.items())}
         tmp_path.write_text(json.dumps(rendered, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp_path, path)
 
@@ -180,7 +166,7 @@ def build_instance_registry_entry(
     *,
     instance_name: str,
     service_token: str,
-    control_socket_path: str,
+    control_endpoint: str,
     app_server_url: str,
     config_dir: pathlib.Path,
     data_dir: pathlib.Path,
@@ -192,7 +178,7 @@ def build_instance_registry_entry(
         instance_name=str(instance_name or "").strip().lower(),
         owner_pid=int(owner_pid or os.getpid()),
         service_token=str(service_token or "").strip(),
-        control_socket_path=str(control_socket_path or "").strip(),
+        control_endpoint=str(control_endpoint or "").strip(),
         app_server_url=str(app_server_url or "").strip(),
         config_dir=str(pathlib.Path(config_dir)),
         data_dir=str(pathlib.Path(data_dir)),

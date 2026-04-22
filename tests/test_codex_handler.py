@@ -495,7 +495,7 @@ class CodexHandlerTests(unittest.TestCase):
         data_dir = pathlib.Path(tempdir.name)
         handler, bot = self._make_handler(data_dir=data_dir)
         lease = ServiceInstanceLease(data_dir)
-        lease.acquire(socket_path=data_dir / "service-control.sock")
+        lease.acquire(control_endpoint="tcp://127.0.0.1:32001")
         self.addCleanup(lease.release)
 
         with self.assertRaises(ServiceInstanceLeaseError):
@@ -507,16 +507,14 @@ class CodexHandlerTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        socket_path = data_dir / "service-control.sock"
         metadata_path = data_dir / "service-instance.json"
         data_dir.mkdir(parents=True, exist_ok=True)
-        socket_path.write_text("stale", encoding="utf-8")
         metadata_path.write_text(
             json.dumps(
                 {
                     "owner_pid": 999999,
                     "owner_token": "stale-owner-token",
-                    "socket_path": str(socket_path),
+                    "control_endpoint": "tcp://127.0.0.1:32001",
                     "started_at": 1.0,
                 }
             ),
@@ -533,8 +531,8 @@ class CodexHandlerTests(unittest.TestCase):
         assert metadata is not None
         self.assertEqual(metadata.owner_pid, os.getpid())
         self.assertNotEqual(metadata.owner_token, "stale-owner-token")
-        self.assertTrue(socket_path.exists())
-        self.assertTrue(handler._service_instance_lease.owns_socket_path(socket_path))
+        self.assertTrue(handler._service_instance_lease.owns_current_lease())
+        self.assertTrue(metadata.control_endpoint.startswith("tcp://127.0.0.1:"))
         self.assertEqual(status["pid"], os.getpid())
 
     def test_on_register_rolls_back_runtime_loop_when_adapter_start_fails(self) -> None:
@@ -560,19 +558,17 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(stop_calls, ["adapter"])
         self.assertIsNone(handler._service_instance_lease.load_metadata())
 
-    def test_on_register_rolls_back_adapter_and_socket_when_control_plane_start_fails(self) -> None:
+    def test_on_register_rolls_back_adapter_when_control_plane_start_fails(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
         handler, bot = self._make_handler(data_dir=data_dir)
         stop_calls: list[str] = []
-        socket_path = handler._service_control_plane.socket_path
 
         def _stop_adapter() -> None:
             stop_calls.append("adapter")
 
         def _start_control_plane() -> None:
-            socket_path.write_text("stale", encoding="utf-8")
             raise RuntimeError("control plane start failed")
 
         handler._adapter.stop = _stop_adapter
@@ -583,7 +579,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertTrue(handler._runtime_loop._closed)
         self.assertEqual(stop_calls, ["adapter"])
-        self.assertFalse(socket_path.exists())
+        self.assertEqual(handler._service_control_plane.control_endpoint, "")
         self.assertIsNone(handler._service_instance_lease.load_metadata())
 
     def test_external_turn_started_opens_new_execution_card(self) -> None:
@@ -2670,7 +2666,7 @@ class CodexHandlerTests(unittest.TestCase):
         result = control_request(data_dir, "thread/release-feishu-runtime", {"thread_id": "thread-1"})
 
         self.assertEqual(status["binding_count"], 1)
-        self.assertTrue(status["control_socket_path"].endswith("service-control.sock"))
+        self.assertTrue(status["control_endpoint"].startswith("tcp://127.0.0.1:"))
         self.assertTrue(result["changed"])
         self.assertEqual(result["backend_thread_status"], "notLoaded")
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])

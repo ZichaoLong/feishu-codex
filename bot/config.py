@@ -1,10 +1,7 @@
 """
-配置加载模块
+配置加载模块。
 
-从配置目录读取系统配置和组件配置。
-配置目录优先从环境变量 FC_CONFIG_DIR 读取，回落到项目根目录下的 config/。
-- system.yaml: 飞书应用凭证（app_id, app_secret）
-- {name}.yaml: 各组件独立配置
+配置目录按当前实例路径动态解析，避免模块导入时过早冻结目录状态。
 """
 
 import os
@@ -14,24 +11,24 @@ from typing import Any
 
 import yaml
 
-_CONFIG_DIR = (
-    Path(os.environ["FC_CONFIG_DIR"])
-    if "FC_CONFIG_DIR" in os.environ
-    else Path(__file__).parent.parent / "config"  # fallback：仅开发环境原地运行时有效
-)
+from bot.instance_layout import default_config_root
+
 _INIT_TOKEN_FILENAME = "init.token"
 
 
 def config_dir() -> Path:
-    return _CONFIG_DIR
+    raw = os.environ.get("FC_CONFIG_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return default_config_root()
 
 
 def system_config_path() -> Path:
-    return _CONFIG_DIR / "system.yaml"
+    return config_dir() / "system.yaml"
 
 
 def init_token_path() -> Path:
-    return _CONFIG_DIR / _INIT_TOKEN_FILENAME
+    return config_dir() / _INIT_TOKEN_FILENAME
 
 
 def _load_yaml_file(path: Path) -> dict[str, Any]:
@@ -85,7 +82,9 @@ def load_config() -> dict:
     if not path.exists():
         raise FileNotFoundError(
             f"系统配置文件不存在: {path}\n"
-            "请运行 bash install.sh 初始化配置，或手动复制 config/system.yaml.example 并填入实际值。"
+            "请运行仓库根目录的 install.py 初始化配置"
+            "（也可通过 macOS/Linux 的 `bash install.sh` 或 Windows PowerShell 的 `.\\install.ps1` 调用），"
+            "或手动复制 config/system.yaml.example 并填入实际值。"
         )
 
     config = _load_yaml_file(path)
@@ -101,5 +100,5 @@ def load_config_file(name: str) -> dict:
 
     文件不存在时返回空字典，组件将使用各自的默认值。
     """
-    path = _CONFIG_DIR / f"{name}.yaml"
+    path = config_dir() / f"{name}.yaml"
     return _load_yaml_file(path)

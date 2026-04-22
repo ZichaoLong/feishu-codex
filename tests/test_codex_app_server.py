@@ -455,7 +455,7 @@ class InteractionLeaseStoreTests(unittest.TestCase):
             store.force_acquire("thread-1", stale_holder)
 
             with patch(
-                "bot.stores.interaction_lease_store._process_exists",
+                "bot.stores.interaction_lease_store.process_exists",
                 side_effect=lambda pid: pid == os.getpid(),
             ):
                 acquired = store.acquire("thread-1", current_holder)
@@ -587,12 +587,11 @@ class FCodexTests(unittest.TestCase):
 
     def test_default_data_dir_falls_back_to_install_path_when_not_in_dev_layout(self) -> None:
         with patch.dict("bot.fcodex.os.environ", {}, clear=True):
-            with patch("bot.fcodex._looks_like_dev_layout", return_value=False):
-                with patch("bot.fcodex.pathlib.Path.home", return_value=Path("/home/tester")):
-                    self.assertEqual(
-                        _default_data_dir(),
-                        Path("/home/tester/.local/share/feishu-codex"),
-                    )
+            with patch("bot.fcodex.default_data_root", return_value=Path("/home/tester/.local/share/feishu-codex")):
+                self.assertEqual(
+                    _default_data_dir(),
+                    Path("/home/tester/.local/share/feishu-codex"),
+                )
 
     def test_fcodex_injects_remote_url(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
@@ -721,7 +720,7 @@ class FCodexTests(unittest.TestCase):
             instance_name="corp-a",
             owner_pid=111,
             service_token="token-a",
-            control_socket_path="/tmp/corp-a.sock",
+            control_endpoint="tcp://127.0.0.1:9101",
             app_server_url="ws://127.0.0.1:9101",
             config_dir="/tmp/config-a",
             data_dir="/tmp/data-a",
@@ -732,7 +731,7 @@ class FCodexTests(unittest.TestCase):
             instance_name="corp-b",
             owner_pid=222,
             service_token="token-b",
-            control_socket_path="/tmp/corp-b.sock",
+            control_endpoint="tcp://127.0.0.1:9102",
             app_server_url="ws://127.0.0.1:9102",
             config_dir="/tmp/config-b",
             data_dir="/tmp/data-b",
@@ -743,7 +742,7 @@ class FCodexTests(unittest.TestCase):
             thread_id="thread-1",
             owner_instance="corp-b",
             owner_service_token="token-b",
-            control_socket_path="/tmp/corp-b.sock",
+            control_endpoint="tcp://127.0.0.1:9102",
             backend_url="ws://127.0.0.1:9102",
             attached_at=1.0,
             holders=(),
@@ -779,7 +778,7 @@ class FCodexTests(unittest.TestCase):
             instance_name="corp-a",
             owner_pid=111,
             service_token="token-a",
-            control_socket_path="/tmp/corp-a.sock",
+            control_endpoint="tcp://127.0.0.1:9101",
             app_server_url="ws://127.0.0.1:9101",
             config_dir="/tmp/config-a",
             data_dir="/tmp/data-a",
@@ -790,7 +789,7 @@ class FCodexTests(unittest.TestCase):
             instance_name="corp-b",
             owner_pid=222,
             service_token="token-b",
-            control_socket_path="/tmp/corp-b.sock",
+            control_endpoint="tcp://127.0.0.1:9102",
             app_server_url="ws://127.0.0.1:9102",
             config_dir="/tmp/config-b",
             data_dir="/tmp/data-b",

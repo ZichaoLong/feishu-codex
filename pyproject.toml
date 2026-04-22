@@ -11,7 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
-feishu-codex = "bot.__main__:main"
+feishu-codex = "bot.manage_cli:main"
+feishu-codexd = "bot.__main__:main"
 feishu-codexctl = "bot.feishu_codexctl:main"
 fcodex = "bot.fcodex:main"
 

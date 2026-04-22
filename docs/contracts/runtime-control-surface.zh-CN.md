@@ -462,14 +462,14 @@
 
 - 所有权必须先于 adapter / control plane 启动建立
 - 第二个实例必须 fail-fast
-- control socket 不是所有权原语
-- owner 会写入包含 `owner_pid`、`owner_token`、`socket_path` 的元数据
+- control endpoint 不是所有权原语
+- owner 会写入包含 `owner_pid`、`owner_token`、`control_endpoint` 的元数据
 - 如果在拿到 owner 之后启动失败，所有已部分启动的 runtime 组件都必须先完整回滚，再释放 lease
-- 停止时只允许清理由同一个 owner token 仍持有的 metadata / socket
+- 停止时只允许清理由同一个 owner token 仍持有的所有权元数据
 
-因此，`python -m bot` 直接运行和 systemd 管理的 service，不允许在同一个
-`FC_DATA_DIR` 上并存。
-如果二者指向同一目录，后启动的一方必须直接退出，而不是尝试抢 socket。
+因此，`feishu-codex run` 前台直跑和通过 `feishu-codex start` 安装/启动的后台服务，
+不允许在同一个 `FC_DATA_DIR` 上并存。
+如果二者指向同一目录，后启动的一方必须直接退出，而不是尝试替换已发布的 control endpoint。
 
 ### 6.8 实例作用域、admission 与全局协调
 
@@ -502,7 +502,7 @@
 机器级还有两份共享协调事实：
 
 - `InstanceRegistry`
-  - 记录当前有哪些运行中的实例，以及它们的 control socket / backend 入口
+  - 记录当前有哪些运行中的实例，以及它们的 control endpoint / backend 入口
   - 供 `fcodex` 与 `feishu-codexctl instance list` 做实例发现
 - `ThreadRuntimeLease`
   - 记录某个 thread 当前由哪个实例持有 live backend runtime

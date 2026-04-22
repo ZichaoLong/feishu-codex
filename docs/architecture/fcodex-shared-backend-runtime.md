@@ -88,7 +88,7 @@ Specifically:
 The installed `fcodex` wrapper first prepares the base environment, then hands
 off to the Python wrapper for actual instance selection. That layer:
 
-1. loads `~/.config/environment.d/90-codex.conf` when present
+1. loads the shared `feishu-codex.env` from the machine config root when present
 2. prepares default-instance `FC_CONFIG_DIR` / `FC_DATA_DIR` root information
 3. resolves `--instance`, the instance registry, and the runtime lease to pick
    the target instance for this launch
@@ -97,6 +97,8 @@ So "wrapper and service share local state" should now be read as:
 
 - the wrapper and service of the same instance share that instance's config,
   profile-state, and runtime backend-discovery state
+- the wrapper and daemon both load the same machine-level `feishu-codex.env`
+  provider environment file
 - all instances share `CODEX_HOME`
 - all instances share the machine-level instance registry and thread runtime
   lease

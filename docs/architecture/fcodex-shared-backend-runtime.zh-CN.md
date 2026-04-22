@@ -80,13 +80,14 @@ fcodex shell wrapper
 安装后的 `fcodex` wrapper 会先做基础环境准备，再把控制权交给 Python wrapper。
 这一层会：
 
-1. 如果存在，则加载 `~/.config/environment.d/90-codex.conf`
+1. 如果存在，则加载机器级配置根目录下共享的 `feishu-codex.env`
 2. 准备默认实例的 `FC_CONFIG_DIR` / `FC_DATA_DIR` 根信息
 3. 再由 Python wrapper 解析 `--instance`、实例注册表、runtime lease，为本次启动选出目标实例
 
 因此，“wrapper 与 service 共享的本地状态”应理解为：
 
 - **同一实例**共享自己的配置目录、profile-state、runtime backend 发现状态
+- wrapper 与 daemon 都会加载同一个机器级 `feishu-codex.env` provider 环境文件
 - **所有实例**共享 `CODEX_HOME`
 - **所有实例**共享机器级实例注册表与 thread runtime lease
 

@@ -130,7 +130,7 @@
 
 1. 先在某群设置非默认工作态和 ACL。
 2. 重启服务：
-   `systemctl --user restart feishu-codex`
+   `feishu-codex restart`
 3. 重新验证：
    `@机器人 /groupmode`
    `@机器人 /acl`

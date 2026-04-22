@@ -17,7 +17,8 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from typing import Iterator
 
-import fcntl
+from bot.file_lock import acquire_file_lock, release_file_lock
+from bot.process_utils import process_exists
 
 
 @dataclass(slots=True, frozen=True)
@@ -86,18 +87,6 @@ def feishu_binding_from_holder(holder: InteractionLeaseHolder) -> tuple[str, str
     if not sender_id or not chat_id:
         return None
     return (sender_id, chat_id)
-
-
-def _process_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 class InteractionLeaseStore:
@@ -187,7 +176,7 @@ class InteractionLeaseStore:
             lock_path = self._lock_path()
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with lock_path.open("a+", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                acquire_file_lock(lock_file, blocking=True)
                 try:
                     data = self._read_all_unlocked()
                     if self._prune_stale_leases(data):
@@ -195,7 +184,7 @@ class InteractionLeaseStore:
                     yield data
                     self._write_all_unlocked(data)
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    release_file_lock(lock_file)
 
     def _prune_stale_leases(self, data: dict[str, dict]) -> bool:
         stale_thread_ids: list[str] = []
@@ -205,7 +194,7 @@ class InteractionLeaseStore:
                 stale_thread_ids.append(thread_id)
                 continue
             owner_pid = int(lease.holder.owner_pid or 0)
-            if owner_pid > 0 and not _process_exists(owner_pid):
+            if owner_pid > 0 and not process_exists(owner_pid):
                 stale_thread_ids.append(thread_id)
         if not stale_thread_ids:
             return False

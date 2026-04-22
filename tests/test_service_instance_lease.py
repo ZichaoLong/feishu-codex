@@ -13,48 +13,48 @@ class ServiceInstanceLeaseTests(unittest.TestCase):
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
         lease = ServiceInstanceLease(data_dir)
-        socket_path = data_dir / "service-control.sock"
+        control_endpoint = "tcp://127.0.0.1:32001"
 
-        metadata = lease.acquire(socket_path=socket_path)
+        metadata = lease.acquire(control_endpoint=control_endpoint)
 
         self.assertEqual(metadata.owner_pid, os.getpid())
         self.assertTrue(metadata.owner_token)
-        self.assertEqual(metadata.socket_path, str(socket_path))
-        self.assertTrue(lease.owns_socket_path(socket_path))
+        self.assertEqual(metadata.control_endpoint, control_endpoint)
+        self.assertTrue(lease.owns_current_lease())
         self.assertIsNotNone(lease.load_metadata())
 
         lease.release()
 
-        self.assertFalse(lease.owns_socket_path(socket_path))
+        self.assertFalse(lease.owns_current_lease())
         self.assertIsNone(lease.load_metadata())
 
     def test_second_acquire_fails_fast_with_existing_owner_metadata(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        socket_path = data_dir / "service-control.sock"
+        control_endpoint = "tcp://127.0.0.1:32001"
         first = ServiceInstanceLease(data_dir)
         second = ServiceInstanceLease(data_dir)
 
-        first.acquire(socket_path=socket_path)
+        first.acquire(control_endpoint=control_endpoint)
         self.addCleanup(first.release)
         self.addCleanup(second.release)
 
         with self.assertRaisesRegex(ServiceInstanceLeaseError, "owner_pid="):
-            second.acquire(socket_path=socket_path)
+            second.acquire(control_endpoint=control_endpoint)
 
     def test_release_does_not_delete_foreign_metadata(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        socket_path = data_dir / "service-control.sock"
+        control_endpoint = "tcp://127.0.0.1:32001"
         lease = ServiceInstanceLease(data_dir)
 
-        lease.acquire(socket_path=socket_path)
+        lease.acquire(control_endpoint=control_endpoint)
         foreign_metadata = {
             "owner_pid": 999999,
             "owner_token": "foreign-token",
-            "socket_path": str(socket_path),
+            "control_endpoint": control_endpoint,
             "started_at": 1.0,
         }
         metadata_path = data_dir / "service-instance.json"
@@ -68,7 +68,7 @@ class ServiceInstanceLeaseTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        socket_path = data_dir / "service-control.sock"
+        control_endpoint = "tcp://127.0.0.1:32001"
         metadata_path = data_dir / "service-instance.json"
         data_dir.mkdir(parents=True, exist_ok=True)
         metadata_path.write_text(
@@ -76,7 +76,7 @@ class ServiceInstanceLeaseTests(unittest.TestCase):
                 {
                     "owner_pid": 999999,
                     "owner_token": "stale-owner-token",
-                    "socket_path": str(socket_path),
+                    "control_endpoint": control_endpoint,
                     "started_at": 1.0,
                 }
             ),
@@ -85,9 +85,9 @@ class ServiceInstanceLeaseTests(unittest.TestCase):
         lease = ServiceInstanceLease(data_dir)
         self.addCleanup(lease.release)
 
-        metadata = lease.acquire(socket_path=socket_path)
+        metadata = lease.acquire(control_endpoint=control_endpoint)
 
         self.assertEqual(metadata.owner_pid, os.getpid())
         self.assertNotEqual(metadata.owner_token, "stale-owner-token")
-        self.assertEqual(metadata.socket_path, str(socket_path))
+        self.assertEqual(metadata.control_endpoint, control_endpoint)
         self.assertEqual(lease.load_metadata(), metadata)

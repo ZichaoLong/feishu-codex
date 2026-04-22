@@ -301,7 +301,7 @@ shared backend 与 wrapper 的具体机制，见
 与其维护一份容易过时的完整树状清单，更适合按职责理解当前仓库：
 
 - 仓库根目录
-  - 面向操作者的说明与打包入口放在 `README.md`、`install.sh`、`pyproject.toml`
+  - 面向操作者的说明与打包入口放在 `README.md`、`install.py`、`install.sh`、`install.ps1`、`pyproject.toml`
   - 仓库内跟踪的 agent 偏好模板放在 `AGENTS.example.md`
   - 真正的本地私有覆盖文件（如 `AGENTS.md`、`AGENTS.zh-CN.md`）仍应保持未跟踪，并有意加入 gitignore
 - `bot/`

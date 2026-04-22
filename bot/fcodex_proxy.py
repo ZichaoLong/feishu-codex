@@ -238,7 +238,7 @@ class _ProxyInteractionGate:
             instance_name=self._instance_name,
             owner_pid=self._holder.owner_pid,
             owner_service_token=self._service_token,
-            control_socket_path="",
+            control_endpoint="",
             backend_url="",
             updated_at=time.time(),
         )

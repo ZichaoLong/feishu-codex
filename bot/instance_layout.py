@@ -13,7 +13,8 @@ import pathlib
 import re
 from dataclasses import dataclass
 
-from bot.constants import FC_DATA_DIR, PROJECT_ROOT
+from bot.platform_paths import default_config_root as platform_default_config_root
+from bot.platform_paths import default_data_root as platform_default_data_root
 
 DEFAULT_INSTANCE_NAME = "default"
 _INSTANCES_SEGMENT = "instances"
@@ -21,26 +22,12 @@ _GLOBAL_SEGMENT = "_global"
 _INSTANCE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,63})$")
 
 
-def _looks_like_dev_layout() -> bool:
-    return (PROJECT_ROOT / "bot").is_dir() and (PROJECT_ROOT / "config").is_dir()
-
-
 def default_config_root() -> pathlib.Path:
-    raw = os.environ.get("FC_CONFIG_ROOT", "").strip()
-    if raw:
-        return pathlib.Path(raw).expanduser()
-    if _looks_like_dev_layout():
-        return PROJECT_ROOT / "config"
-    return pathlib.Path.home() / ".config" / "feishu-codex"
+    return platform_default_config_root()
 
 
 def default_data_root() -> pathlib.Path:
-    raw = os.environ.get("FC_DATA_ROOT", "").strip()
-    if raw:
-        return pathlib.Path(raw).expanduser()
-    if _looks_like_dev_layout():
-        return FC_DATA_DIR
-    return pathlib.Path.home() / ".local" / "share" / "feishu-codex"
+    return platform_default_data_root()
 
 
 def global_data_dir() -> pathlib.Path:
@@ -139,3 +126,14 @@ def resolve_instance_paths(instance_name: str) -> InstancePaths:
         data_dir=instance_data_dir(normalized),
         global_data_dir=global_data_dir(),
     )
+
+
+def apply_instance_environment(instance_name: str) -> InstancePaths:
+    paths = resolve_instance_paths(instance_name)
+    os.environ["FC_INSTANCE"] = paths.instance_name
+    os.environ["FC_CONFIG_ROOT"] = str(default_config_root())
+    os.environ["FC_DATA_ROOT"] = str(default_data_root())
+    os.environ["FC_GLOBAL_DATA_DIR"] = str(paths.global_data_dir)
+    os.environ["FC_CONFIG_DIR"] = str(paths.config_dir)
+    os.environ["FC_DATA_DIR"] = str(paths.data_dir)
+    return paths
