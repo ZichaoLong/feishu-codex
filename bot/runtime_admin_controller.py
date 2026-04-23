@@ -307,7 +307,6 @@ class RuntimeAdminController:
             f"feishu runtime：`{snapshot['feishu_runtime_state']}`",
             f"backend thread status：`{snapshot['backend_thread_status']}`",
             f"backend running turn：`{'yes' if snapshot['backend_running_turn'] else 'no'}`",
-            f"Feishu 写入 owner：`{snapshot['feishu_write_owner_binding_id'] or snapshot['feishu_write_owner_relation']}`",
             f"交互 owner：`{snapshot['interaction_owner']['label']}`",
             f"re-profile possible：`{'yes' if snapshot['reprofile_possible'] else 'no'}`",
             (
@@ -545,7 +544,6 @@ class RuntimeAdminController:
             "bound_binding_ids": snapshot["bound_binding_ids"],
             "attached_binding_ids": snapshot["attached_binding_ids"],
             "released_binding_ids": snapshot["released_binding_ids"],
-            "feishu_write_owner_binding_id": snapshot["feishu_write_owner_binding_id"],
             "interaction_owner": snapshot["interaction_owner"],
             "reprofile_possible": backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED,
             "release_feishu_runtime_available": snapshot["release_feishu_runtime_available"],

@@ -71,7 +71,6 @@ class StoredChatBinding(TypedDict):
     current_thread_id: str
     current_thread_title: str
     feishu_runtime_state: str
-    current_thread_write_owner_thread_id: str
     approval_policy: str
     sandbox: str
     collaboration_mode: str

@@ -203,39 +203,21 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 具体来说：
 
-- Feishu 内部写入准入由 `Feishu 写入 owner` 控制
-- 跨 Feishu / `fcodex` 的审批、补充输入、中断等交互准入由 `interaction owner` 控制
+- 同实例 Feishu / `fcodex` 的写入准入与审批、补充输入、中断等交互准入，统一由 `interaction owner` 控制
 - 当某线程当前没有显式 owner，但只有一个 Feishu subscriber 时，运行时可以按“唯一 subscriber”补位路由；一旦出现多个 subscriber，就必须依赖明确 owner，而不再靠“最后一个绑定”猜测
 
 这带来的用户侧结论是：
 
 - 非 owner 的 Feishu 会话仍可以保留 binding，并继续观察线程的共享事实状态
-- 非 owner 不能继续写入，也不能处理当前 turn 的审批 / 输入请求
-- 当前仍不承诺“多个飞书会话都看到完全镜像的可交互 live UI”；执行卡片、审批卡和 request 驱动事件仍按 owner 路径路由，而不是向所有 subscriber 广播
+- 已订阅该 thread 的 Feishu 会话会收到普通执行流、终态执行卡和终态结果载体
+- 非 owner 不能继续写入，也不能处理当前 turn 的审批 / 输入 / 中断请求
+- 当前不承诺“多个飞书会话都看到完全镜像的可交互 live UI”；审批卡和 request 驱动交互事件仍只路由给当前 `interaction owner`
 
 因此，这一层的决策结论是：
 
 - 飞书内部允许多 subscriber，共享同一 backend thread
 - 可写性与可交互性由 owner lease 决定
-- “只有一个主要通知绑定”已经不是当前模型
-
-### 8.3 跨实例边界
-
-多实例并不改变上面这套“实例内多 subscriber”结论，但还要再补两条边界：
-
-- 不同实例之间不共享 live backend
-- 同一 thread 若需要跨实例继续，必须先经过：
-  - admission（是否对目标实例 Feishu 可见）
-  - thread runtime lease（当前是否允许目标实例接管 live runtime）
-
-因此：
-
-- 多实例共享的是 persisted thread namespace
-- 不共享的是 live thread 内存态、binding、ACL、owner 和 control plane
-
-精确状态词汇与状态迁移，以
-`docs/contracts/runtime-control-surface.zh-CN.md`
-和 `docs/contracts/feishu-thread-lifecycle.zh-CN.md` 为准。
+- 普通回复与终态输出按 subscriber 广播，交互请求按 owner 路由
 
 ## 9. 相关文档
 

@@ -4,7 +4,6 @@ from typing import Callable, TypeAlias
 
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.reason_codes import (
-    PROMPT_DENIED_BY_FEISHU_WRITE_OWNER,
     PROMPT_DENIED_BY_GROUP_ALL_MODE_SHARING,
     PROMPT_DENIED_BY_INTERACTION_OWNER,
     PROMPT_DENIED_BY_OTHER_GROUP_ALL_OWNER,
@@ -25,7 +24,6 @@ class ThreadAccessPolicy:
         thread_subscribers_locked: Callable[[str], tuple[ChatBindingKey, ...]],
         current_interaction_lease_locked: Callable[[str], InteractionLease | None],
         feishu_interaction_holder: Callable[[ChatBindingKey], InteractionLeaseHolder],
-        thread_write_owner_locked: Callable[[str], ChatBindingKey | None],
     ) -> None:
         self._lock = lock
         self._is_group_chat = is_group_chat
@@ -33,7 +31,6 @@ class ThreadAccessPolicy:
         self._thread_subscribers_locked = thread_subscribers_locked
         self._current_interaction_lease_locked = current_interaction_lease_locked
         self._feishu_interaction_holder = feishu_interaction_holder
-        self._thread_write_owner_locked = thread_write_owner_locked
 
     @staticmethod
     def write_denied_check(owner_label: str, *, reason_code: str) -> ReasonedCheck:
@@ -55,13 +52,6 @@ class ThreadAccessPolicy:
     @classmethod
     def interaction_denied_text(cls, lease: InteractionLease | None) -> str:
         return cls.interaction_denied_check(lease).reason_text
-
-    @classmethod
-    def write_denied_text(cls, owner_label: str) -> str:
-        return cls.write_denied_check(
-            owner_label,
-            reason_code=PROMPT_DENIED_BY_FEISHU_WRITE_OWNER,
-        ).reason_text
 
     def thread_sharing_policy_violation_check(
         self,
@@ -151,12 +141,6 @@ class ThreadAccessPolicy:
                 self._feishu_interaction_holder(binding)
             ):
                 return self.interaction_denied_check(interaction_lease)
-            write_owner = self._thread_write_owner_locked(thread_id)
-            if write_owner is not None and write_owner != binding:
-                return self.write_denied_check(
-                    "另一飞书会话",
-                    reason_code=PROMPT_DENIED_BY_FEISHU_WRITE_OWNER,
-                )
         return ReasonedCheck.allow()
 
     def prompt_write_denial_text(

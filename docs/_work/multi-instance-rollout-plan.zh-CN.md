@@ -218,7 +218,7 @@
 
 - 它只负责“哪个实例当前持有这个 thread 的 live backend runtime”
 - 它不负责飞书 chat 级 binding、群 ACL、审批 owner、interaction owner
-- Feishu write owner / interaction owner 仍然是实例内运行态事实，不升级成全局概念
+- interaction owner 仍然是实例内运行态事实，不升级成全局概念
 
 建议先采用这条流转规则：
 

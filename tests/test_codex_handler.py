@@ -1031,7 +1031,7 @@ class CodexHandlerTests(unittest.TestCase):
         patched_card = json.loads(bot2.patches[-1][1])
         self.assertIn("群重启后事件正常路由", json.dumps(patched_card, ensure_ascii=False))
 
-    def test_restart_restores_write_owner_for_multi_subscriber_running_thread(self) -> None:
+    def test_restart_keeps_interaction_owner_for_multi_subscriber_running_thread(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
@@ -1054,7 +1054,12 @@ class CodexHandlerTests(unittest.TestCase):
         handler2, bot2 = self._make_handler(data_dir=data_dir)
 
         self.assertEqual(handler2._thread_subscribers("thread-1"), (("ou_user", "chat-a"), ("ou_user", "chat-b")))
-        self.assertEqual(handler2._thread_write_owner("thread-1"), ("ou_user", "chat-a"))
+        interaction_owner = handler2._binding_runtime.interaction_owner_snapshot_locked(
+            "thread-1",
+            current_binding=("ou_user", "chat-a"),
+        )
+        self.assertEqual(interaction_owner["binding_id"], "p2p:ou_user:chat-a")
+        self.assertEqual(interaction_owner["relation"], "current")
 
         handler2._handle_adapter_request_impl(
             "req-1",
@@ -1075,7 +1080,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         self.assertEqual(
             handler2._get_runtime_state("ou_user", "chat-b")["execution_transcript"].reply_text(),
-            "",
+            "恢复后继续",
         )
 
     def test_status_shows_untitled_instead_of_unbound_when_thread_exists(self) -> None:
@@ -1411,7 +1416,13 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "chat-a", "first turn")
 
-        self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-a"))
+        self.assertEqual(
+            handler._binding_runtime.interaction_owner_snapshot_locked(
+                "thread-1",
+                current_binding=("ou_user", "chat-a"),
+            )["relation"],
+            "current",
+        )
         self.assertEqual(handler._adapter.start_turn_calls[-1]["thread_id"], "thread-1")
 
         handler.handle_message("ou_user", "chat-b", "second turn")
@@ -1419,17 +1430,29 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(handler._adapter.start_turn_calls), 1)
         self.assertEqual(bot.replies[-1][0], "chat-b")
         self.assertIn("当前线程正由另一飞书会话执行", bot.replies[-1][1])
-        self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-a"))
+        self.assertEqual(
+            handler._binding_runtime.interaction_owner_snapshot_locked(
+                "thread-1",
+                current_binding=("ou_user", "chat-a"),
+            )["relation"],
+            "current",
+        )
 
         handler._handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
 
-        self.assertIsNone(handler._thread_write_owner("thread-1"))
+        self.assertEqual(handler._binding_runtime.interaction_owner_snapshot_locked("thread-1")["kind"], "none")
 
         handler.handle_message("ou_user", "chat-b", "third turn")
 
         self.assertEqual(len(handler._adapter.start_turn_calls), 2)
         self.assertEqual(handler._adapter.start_turn_calls[-1]["thread_id"], "thread-1")
-        self.assertEqual(handler._thread_write_owner("thread-1"), ("ou_user", "chat-b"))
+        self.assertEqual(
+            handler._binding_runtime.interaction_owner_snapshot_locked(
+                "thread-1",
+                current_binding=("ou_user", "chat-b"),
+            )["relation"],
+            "current",
+        )
 
     def test_resume_rejects_thread_shared_by_all_mode_group(self) -> None:
         handler, bot = self._make_handler()
@@ -1455,7 +1478,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`all` 模式", bot.replies[-1][1])
         self.assertIn("其他群聊独占", bot.replies[-1][1])
 
-    def test_turn_completion_notifies_active_non_owner_subscribers(self) -> None:
+    def test_turn_completion_finalizes_all_subscribers_without_owner_notice(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -1473,16 +1496,18 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("ou_user", "chat-a", "first turn")
         handler.handle_message("ou_user", "chat-b", "second turn")
 
+        handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-1"}})
+        handler._handle_agent_message_delta({"threadId": "thread-1", "delta": "done"})
         handler._handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
 
-        self.assertIn(
+        self.assertNotIn(
             ("chat-b", "线程 `thread-1…` 的上一轮执行已结束；本会话现在可继续提问。"),
             bot.replies,
         )
-        self.assertNotIn(
-            ("chat-a", "线程 `thread-1…` 的上一轮执行已结束；本会话现在可继续提问。"),
-            bot.replies,
-        )
+        state_b = handler._get_runtime_state("ou_user", "chat-b")
+        self.assertEqual(state_b["execution_transcript"].reply_text(), "done")
+        self.assertEqual(state_b["current_message_id"], "")
+        self.assertTrue(state_b["last_execution_message_id"])
 
     def test_handle_chat_unavailable_clears_binding_and_persistence(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -1630,7 +1655,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(bot.reply_refs[-1][0], "m-thread")
         self.assertTrue(bot.reply_ref_calls[-1][3])
 
-    def test_approval_request_routes_to_current_thread_write_owner(self) -> None:
+    def test_approval_request_routes_to_current_interaction_owner(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",

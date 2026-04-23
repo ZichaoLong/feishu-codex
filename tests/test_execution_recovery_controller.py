@@ -10,7 +10,7 @@ from bot.execution_recovery_controller import ExecutionRecoveryController, Termi
 from bot.runtime_state import apply_runtime_state_message
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import InteractionLeaseStore
-from bot.thread_lease_registry import ThreadLeaseRegistry
+from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
 
@@ -36,7 +36,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
             default_model="gpt-5.4",
             default_reasoning_effort="medium",
             chat_binding_store=ChatBindingStore(data_dir),
-            thread_lease_registry=ThreadLeaseRegistry(),
+            thread_subscription_registry=ThreadSubscriptionRegistry(),
             interaction_lease_store=InteractionLeaseStore(data_dir),
             is_group_chat=lambda chat_id, message_id: False,
         )

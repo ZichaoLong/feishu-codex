@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, TypeAlias
@@ -30,9 +29,7 @@ from bot.stores.interaction_lease_store import (
     feishu_binding_from_holder,
     make_feishu_interaction_holder,
 )
-from bot.thread_lease_registry import ThreadLeaseRegistry
-
-logger = logging.getLogger(__name__)
+from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 
 ChatBindingKey: TypeAlias = tuple[str, str]
 
@@ -78,7 +75,7 @@ class BindingRuntimeManager:
         default_model: str,
         default_reasoning_effort: str,
         chat_binding_store: ChatBindingStore,
-        thread_lease_registry: ThreadLeaseRegistry,
+        thread_subscription_registry: ThreadSubscriptionRegistry,
         interaction_lease_store: InteractionLeaseStore,
         is_group_chat: Callable[[str, str], bool],
     ) -> None:
@@ -90,7 +87,7 @@ class BindingRuntimeManager:
         self._default_model = str(default_model or "").strip()
         self._default_reasoning_effort = str(default_reasoning_effort or "").strip()
         self._chat_binding_store = chat_binding_store
-        self._thread_lease_registry = thread_lease_registry
+        self._thread_subscription_registry = thread_subscription_registry
         self._interaction_lease_store = interaction_lease_store
         self._is_group_chat = is_group_chat
         self._runtime_state_by_binding: dict[ChatBindingKey, RuntimeStateDict] = {}
@@ -117,7 +114,6 @@ class BindingRuntimeManager:
             "current_thread_id": "",
             "current_thread_title": "",
             "feishu_runtime_state": "",
-            "current_thread_write_owner_thread_id": "",
             "approval_policy": self._default_approval_policy,
             "sandbox": self._default_sandbox,
             "collaboration_mode": self._default_collaboration_mode,
@@ -180,22 +176,13 @@ class BindingRuntimeManager:
         )
 
     def subscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._thread_lease_registry.subscribe(binding, thread_id)
+        return self._thread_subscription_registry.subscribe(binding, thread_id)
 
     def unsubscribe_thread_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._thread_lease_registry.unsubscribe(binding, thread_id).thread_orphaned
-
-    def acquire_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str):
-        return self._thread_lease_registry.acquire_write_lease(binding, thread_id)
-
-    def release_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._thread_lease_registry.release_write_lease(binding, thread_id)
+        return self._thread_subscription_registry.unsubscribe(binding, thread_id)
 
     def thread_subscribers(self, thread_id: str) -> tuple[ChatBindingKey, ...]:
-        return self._thread_lease_registry.subscribers(thread_id)
-
-    def thread_write_owner(self, thread_id: str) -> ChatBindingKey | None:
-        return self._thread_lease_registry.lease_owner(thread_id)
+        return self._thread_subscription_registry.subscribers(thread_id)
 
     @staticmethod
     def _feishu_interaction_holder(binding: ChatBindingKey):
@@ -251,27 +238,6 @@ class BindingRuntimeManager:
             self.acquire_interaction_lease_for_binding(binding, thread_id)
         return binding, False
 
-    def execution_binding_for_thread_locked(
-        self,
-        thread_id: str,
-        *,
-        adopt_sole_subscriber: bool = False,
-    ) -> ChatBindingKey | None:
-        owner = self.thread_write_owner(thread_id)
-        if owner is not None:
-            return owner
-        subscribers = self.thread_subscribers(thread_id)
-        if len(subscribers) != 1:
-            return None
-        binding = subscribers[0]
-        if adopt_sole_subscriber:
-            lease = self.acquire_thread_write_lease_locked(binding, thread_id)
-            if lease.granted:
-                state = self._runtime_state_by_binding.get(binding)
-                if state is not None:
-                    self.sync_stored_binding_locked(binding, state)
-        return binding
-
     def existing_chat_binding_key_locked(self, sender_id: str, chat_id: str) -> ChatBindingKey | None:
         group_binding = (GROUP_SHARED_BINDING_OWNER_ID, chat_id)
         if group_binding in self._runtime_state_by_binding:
@@ -300,13 +266,6 @@ class BindingRuntimeManager:
             current_thread_id = str(state["current_thread_id"] or "").strip()
             if state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED:
                 self.subscribe_thread_locked(binding, current_thread_id)
-            owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
-            if (
-                state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED
-                and owner_thread_id
-                and owner_thread_id == current_thread_id
-            ):
-                self.acquire_thread_write_lease_locked(binding, owner_thread_id)
         self._runtime_state_by_binding[binding] = state
         return state
 
@@ -342,19 +301,11 @@ class BindingRuntimeManager:
         feishu_runtime_state = str(state["feishu_runtime_state"]).strip()
         if not current_thread_id:
             feishu_runtime_state = ""
-        current_thread_write_owner_thread_id = ""
-        if (
-            current_thread_id
-            and feishu_runtime_state == FEISHU_RUNTIME_ATTACHED
-            and self._thread_lease_registry.lease_owner(current_thread_id) == binding
-        ):
-            current_thread_write_owner_thread_id = current_thread_id
         return {
             "working_dir": str(state["working_dir"]).strip(),
             "current_thread_id": current_thread_id,
             "current_thread_title": str(state["current_thread_title"]).strip(),
             "feishu_runtime_state": feishu_runtime_state,
-            "current_thread_write_owner_thread_id": current_thread_write_owner_thread_id,
             "approval_policy": str(state["approval_policy"]).strip(),
             "sandbox": str(state["sandbox"]).strip(),
             "collaboration_mode": str(state["collaboration_mode"]).strip(),
@@ -388,31 +339,6 @@ class BindingRuntimeManager:
                 current_thread_id = str(state["current_thread_id"] or "").strip()
                 if state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED:
                     self.subscribe_thread_locked(binding, current_thread_id)
-                owner_thread_id = str(stored_binding.get("current_thread_write_owner_thread_id", "") or "").strip()
-                if (
-                    state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED
-                    and owner_thread_id
-                    and owner_thread_id == current_thread_id
-                ):
-                    interaction_lease = self.acquire_interaction_lease_for_binding(binding, owner_thread_id)
-                    if not interaction_lease.granted and interaction_lease.lease is not None:
-                        logger.warning(
-                            "stored interaction owner conflicted during hydration: thread=%s owner=%s ignored=%s",
-                            owner_thread_id[:12],
-                            interaction_lease.lease.holder.holder_id,
-                            binding,
-                        )
-                        self.sync_stored_binding_locked(binding, state)
-                        continue
-                    lease = self.acquire_thread_write_lease_locked(binding, owner_thread_id)
-                    if not lease.granted and lease.owner != binding:
-                        logger.warning(
-                            "stored write owner conflicted during hydration: thread=%s owner=%s ignored=%s",
-                            owner_thread_id[:12],
-                            lease.owner,
-                            binding,
-                        )
-                        self.sync_stored_binding_locked(binding, state)
 
     @staticmethod
     def binding_has_inflight_turn_locked(state: RuntimeStateDict) -> bool:
@@ -431,7 +357,6 @@ class BindingRuntimeManager:
         if on_deactivate_state is not None:
             on_deactivate_state(state)
         thread_id = str(state["current_thread_id"] or "").strip()
-        self.release_thread_write_lease_locked(binding, thread_id)
         self.release_interaction_lease_for_binding(binding, thread_id)
         if self.unsubscribe_thread_locked(binding, thread_id):
             return thread_id
@@ -547,27 +472,6 @@ class BindingRuntimeManager:
             )
         )
 
-    def active_chat_ids_for_thread_locked(
-        self,
-        thread_id: str,
-        *,
-        exclude_binding: ChatBindingKey | None = None,
-    ) -> list[str]:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return []
-        chat_ids: set[str] = set()
-        for binding in self.thread_subscribers(normalized_thread_id):
-            if exclude_binding is not None and binding == exclude_binding:
-                continue
-            state = self._runtime_state_by_binding.get(binding)
-            if state is None or not bool(state["active"]):
-                continue
-            if str(state["current_thread_id"] or "").strip() != normalized_thread_id:
-                continue
-            chat_ids.add(binding[1])
-        return sorted(chat_ids)
-
     def interaction_owner_snapshot_locked(
         self,
         thread_id: str,
@@ -635,7 +539,6 @@ class BindingRuntimeManager:
             state = self._runtime_state_by_binding.get(binding)
             if state is None:
                 continue
-            self.release_thread_write_lease_locked(binding, normalized_thread_id)
             self.release_interaction_lease_for_binding(binding, normalized_thread_id)
             self.unsubscribe_thread_locked(binding, normalized_thread_id)
             if on_release_binding_state is not None:
@@ -697,16 +600,6 @@ class BindingRuntimeManager:
         if state is None:
             raise ValueError(f"未找到绑定：{format_binding_id(binding)}")
         thread_id = str(state["current_thread_id"] or "").strip()
-        owner = self._thread_lease_registry.lease_owner(thread_id) if thread_id else None
-        if owner is None:
-            feishu_write_owner_relation = "none"
-            feishu_write_owner_binding_id = ""
-        elif owner == binding:
-            feishu_write_owner_relation = "current"
-            feishu_write_owner_binding_id = format_binding_id(owner)
-        else:
-            feishu_write_owner_relation = "other"
-            feishu_write_owner_binding_id = format_binding_id(owner)
         return {
             "binding_id": format_binding_id(binding),
             "binding_kind": binding_kind(binding),
@@ -719,8 +612,6 @@ class BindingRuntimeManager:
             "feishu_runtime_state": (
                 str(state["feishu_runtime_state"] or "").strip() or FEISHU_RUNTIME_NOT_APPLICABLE
             ),
-            "feishu_write_owner_binding_id": feishu_write_owner_binding_id,
-            "feishu_write_owner_relation": feishu_write_owner_relation,
             "interaction_owner": self.interaction_owner_snapshot_locked(
                 thread_id,
                 current_binding=binding,
@@ -743,7 +634,6 @@ class BindingRuntimeManager:
             raise ValueError("thread_id 不能为空。")
         bound_bindings = self.bound_bindings_for_thread_locked(normalized_thread_id)
         attached_bindings = self.attached_bindings_for_thread_locked(normalized_thread_id)
-        owner = self.thread_write_owner(normalized_thread_id)
         interaction_owner = self.interaction_owner_snapshot_locked(normalized_thread_id)
         release_available, release_reason = release_feishu_runtime_availability(normalized_thread_id)
         if not bound_bindings:
@@ -757,7 +647,6 @@ class BindingRuntimeManager:
             "released_binding_ids": [
                 format_binding_id(binding) for binding in bound_bindings if binding not in attached_binding_set
             ],
-            "feishu_write_owner_binding_id": format_binding_id(owner) if owner is not None else "",
             "interaction_owner": interaction_owner,
             "release_feishu_runtime_available": bool(release_available and bound_bindings),
             "release_feishu_runtime_reason": release_reason,
@@ -779,9 +668,6 @@ class BindingRuntimeManager:
                     "working_dir": str(state["working_dir"] or "").strip(),
                     "feishu_runtime_state": (
                         str(state["feishu_runtime_state"] or "").strip() or FEISHU_RUNTIME_NOT_APPLICABLE
-                    ),
-                    "feishu_write_owner": bool(
-                        thread_id and self.thread_write_owner(thread_id) == binding
                     ),
                     "running_turn": self.binding_has_inflight_turn_locked(state),
                     "approval_policy": str(state["approval_policy"] or "").strip(),

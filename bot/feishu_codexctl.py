@@ -93,10 +93,9 @@ def _print_binding_list(data_dir: pathlib.Path) -> int:
     if not bindings:
         print("当前没有可见 binding。")
         return 0
-    print("BINDING_ID\tKIND\tSTATE\tRUNTIME\tTHREAD\tOWNER\tCWD")
+    print("BINDING_ID\tKIND\tSTATE\tRUNTIME\tTHREAD\tCWD")
     for item in bindings:
         thread = item["thread_id"][:8] + "…" if item["thread_id"] else "-"
-        owner = "yes" if item["feishu_write_owner"] else "no"
         cwd = display_path(str(item["working_dir"] or ""))
         print(
             "\t".join(
@@ -106,7 +105,6 @@ def _print_binding_list(data_dir: pathlib.Path) -> int:
                     item["binding_state"],
                     item["feishu_runtime_state"],
                     thread,
-                    owner,
                     cwd,
                 ]
             )
@@ -127,7 +125,6 @@ def _print_binding_status(data_dir: pathlib.Path, binding_id: str) -> int:
     print(f"feishu runtime: {snapshot['feishu_runtime_state']}")
     print(f"backend thread status: {snapshot['backend_thread_status']}")
     print(f"backend running turn: {'yes' if snapshot['backend_running_turn'] else 'no'}")
-    print(f"feishu write owner: {snapshot['feishu_write_owner_binding_id'] or snapshot['feishu_write_owner_relation']}")
     print(f"interaction owner: {snapshot['interaction_owner']['label']}")
     if snapshot["next_prompt_allowed"]:
         print("next prompt: accepted")
@@ -174,7 +171,6 @@ def _print_thread_status(data_dir: pathlib.Path, target_params: dict[str, str]) 
     print(f"bound bindings: {', '.join(snapshot['bound_binding_ids']) or '（无）'}")
     print(f"attached bindings: {', '.join(snapshot['attached_binding_ids']) or '（无）'}")
     print(f"released bindings: {', '.join(snapshot['released_binding_ids']) or '（无）'}")
-    print(f"feishu write owner: {snapshot['feishu_write_owner_binding_id'] or 'none'}")
     print(f"interaction owner: {snapshot['interaction_owner']['label']}")
     print(f"re-profile possible: {'yes' if snapshot['reprofile_possible'] else 'no'}")
     availability = "available" if snapshot["release_feishu_runtime_available"] else "blocked"

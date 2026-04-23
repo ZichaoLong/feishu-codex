@@ -44,13 +44,9 @@
 这只是对 `subscription` 的显式命名收紧，不改变它与 `binding` / `loaded runtime`
 必须严格区分的合同。
 
-在运行控制层面，还必须继续把下列事实区分开：
+在运行控制层面，还必须把 `交互 owner` 与 binding/runtime 这两条状态轴区分开。
 
-- `Feishu 写入 owner`
-- `交互 owner`
-
-它们都是临时租约，不属于 binding/runtime 这两条状态轴。
-精确定义见 `docs/contracts/runtime-control-surface.zh-CN.md`。
+`交互 owner` 是临时租约；它负责同实例 Feishu / `fcodex` 前端的 turn 发起权与审批、补充输入、中断等交互路由。精确定义见 `docs/contracts/runtime-control-surface.zh-CN.md`。
 
 ## 3. 为什么飞书侧不能照搬 `fcodex`
 

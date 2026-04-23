@@ -86,70 +86,30 @@ A derived judgment:
 This answers whether the backend is currently executing a turn on that thread.
 It does not mean the current Feishu chat owns that execution.
 
-### 2.5 `Feishu write owner`
+### 2.5 `interaction owner`
 
-The Feishu-internal single-writer lease for a shared thread.
+This is the same-instance, cross-frontend turn / interaction lease. In the current contract, it is the only same-instance frontend owner shared by Feishu and `fcodex`.
 
-- it only exists inside `feishu-codex`
-- it does not describe `fcodex` or other frontends
-- it answers which Feishu binding may currently write
+It answers:
 
-### 2.6 `interaction owner`
-
-The cross-frontend interaction lease shared between Feishu and `fcodex`.
-
-It answers who may currently handle:
-
-- interrupts
-- approvals
-- user-input requests
+- which frontend may start the next turn on the thread
+- who may handle interrupts, approvals, and user-input requests
 
 Typical holders:
 
-- a Feishu binding
-- a local `fcodex` terminal
-- `none`
+- one Feishu binding
+- one `fcodex` TUI proxy holder
 
-### 2.7 `re-profile possible`
+Ordinary reply streams are not interaction requests: replies from the same backend are broadcast to same-instance Feishu subscribers and `fcodex` subscribers. Approval, user-input, and interrupt requests are routed only to the current `interaction owner`.
 
-This is a derived judgment, not stored state.
-
-Current contract:
-
-- `yes` when `backend thread status == notLoaded`
-- otherwise `no`
-
-It means the thread is currently in a state where the next resume / auto-reattach
-may re-resolve profile / provider.
-
-Avoid the term “original thread profile” in this repo’s contract.
-The precise wording is:
-
-- resume with the current-instance / selected-instance local default profile
-- resume with an explicit profile
-- a live loaded runtime cannot be re-profiled via resume
-
-## 3. Residency, Leases, and State Transitions
-
-### 3.1 `attached/released` is not an owner lease
-
-`feishu runtime` only answers whether the running `feishu-codex` service still
-keeps runtime residency on the thread.
-
-It does not answer:
-
-- which Feishu binding may start the next turn
-- which frontend may handle approval / input / interrupt requests
-
-Those are separate lease facts.
+The old `Feishu write owner` is no longer a separate product concept; Feishu prompt admission no longer maintains an additional Feishu-only write lease.
 
 ### 3.2 Lease comparison
 
 | Fact | Scope | Question it answers | Can exist while `feishu runtime == released`? |
 | --- | --- | --- | --- |
 | `feishu runtime` = `attached/released` | Feishu service connection | Is the running Feishu service still attached to the thread at all? | This is the state itself |
-| `Feishu write owner` | Feishu only | Which Feishu binding may currently write to the shared thread? | No meaningful Feishu write owner should remain after release |
-| `interaction owner` | Cross-frontend (`feishu-codex` + `fcodex`) | Who may currently handle interrupts, approvals, and user-input requests? | Yes. An external owner such as `fcodex` may still exist |
+| `interaction owner` | Cross-frontend (`feishu-codex` + `fcodex`) | Who may start turns and handle interrupts, approvals, and user-input requests? | Yes. An external owner such as `fcodex` may still exist |
 
 Practical consequence:
 
@@ -166,8 +126,7 @@ current turn owner. This is the normal idle steady state after a turn finishes.
 
 ### `bound + attached + active + current binding is owner`
 
-The binding is attached and currently owns both the Feishu write lease and the
-cross-frontend interaction lease for the running turn.
+The binding is attached and currently owns the cross-frontend interaction lease for the running turn.
 
 ### `bound + released + notLoaded`
 
@@ -193,8 +152,8 @@ The table below is authoritative for Feishu-facing state transitions.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `unbound` | `not-applicable` | `not-applicable` | ordinary prompt or `/new` | accepted | `bound` | `attached` | `idle` or `active` | Creates a new thread, then starts or prepares the turn |
 | `unbound` | `not-applicable` | any | `/resume <thread>` | target resolved and allowed | `bound` | `attached` | usually `idle` | Binds the chat to the resumed thread |
-| `bound` | `attached` | `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Acquires Feishu write owner and interaction owner for the turn |
-| `bound` | `attached` | `active` | turn terminal event | none | `bound` | `attached` | usually `idle` | Clears owner leases; binding and attachment remain |
+| `bound` | `attached` | `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Acquires the interaction owner for the turn |
+| `bound` | `attached` | `active` | turn terminal event | none | `bound` | `attached` | usually `idle` | Clears the interaction owner; binding and attachment remain |
 | `bound` | `attached` | `idle` or `active` | `/release-feishu-runtime` | no Feishu in-flight turn and no pending Feishu approval / input | `bound` | `released` | `notLoaded`, `idle`, or `active` | Release drops Feishu residency across the whole running service |
 | `bound` | `released` | `notLoaded` or `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Feishu reattaches / resumes first, then starts the turn |
 | `bound` | `released` | any | ordinary prompt | prompt preflight denied | unchanged | unchanged | unchanged | Pure reject: no resume, no subscriber add, no `released -> attached` flip |
@@ -208,7 +167,7 @@ The table below is authoritative for Feishu-facing state transitions.
 - A denied prompt is a pure reject.
   It must not call `thread/resume`, add a Feishu subscriber, or mutate
   `feishu runtime` from `released` to `attached`.
-- Releasing Feishu runtime drops Feishu residency and Feishu-local leases, but
+- Releasing Feishu runtime drops Feishu residency and clears the interaction owner when Feishu currently owns it, but
   it does not erase the chat's binding bookmark.
 
 ## 4. `/status` Contract
@@ -226,7 +185,6 @@ It answers, for the current chat binding:
 - `feishu runtime`
 - `backend thread status`
 - `backend running turn`
-- `Feishu write owner`
 - `interaction owner`
 - `re-profile possible`
 - whether `/release-feishu-runtime` is currently allowed
@@ -286,7 +244,6 @@ It is not a per-chat “soft local flag”.
 On success it:
 
 - keeps all Feishu bindings that point to that thread
-- clears the Feishu write owner for that thread
 - clears the Feishu interaction owner for that thread when Feishu currently owns it
 - flips all still-`attached` Feishu bindings on that thread to `released`
 - makes the running `feishu-codex` service unsubscribe its own app-server connection from that thread
@@ -544,8 +501,7 @@ The formal contract for cross-instance live-runtime transfer is:
 - no queueing, no implicit stealing, and no "last binder wins" guesswork
 
 This `ThreadRuntimeLease` is a machine-level live-runtime fact.
-It is not the same thing as Feishu chat binding, Feishu write owner, or
-interaction owner.
+It is not the same thing as Feishu chat binding or interaction owner.
 
 ## 7. Shared Vocabulary, Not Forced Command Symmetry
 

@@ -58,7 +58,6 @@ class PromptTurnEntryPorts:
     access_policy: _ThreadAccessPolicy
     acquire_interaction_lease_for_binding: Callable[[ChatBindingKey, str], Any]
     release_interaction_lease_for_binding: Callable[[ChatBindingKey, str], bool]
-    acquire_thread_write_lease_locked: Callable[[ChatBindingKey, str], Any]
     sync_stored_binding_locked: Callable[[ChatBindingKey, RuntimeState], None]
     clear_plan_state: Callable[[RuntimeState], None]
     apply_runtime_state_message_locked: Callable[[RuntimeState, Any], None]
@@ -109,7 +108,6 @@ class PromptTurnEntryController:
         self._access_policy = ports.access_policy
         self._acquire_interaction_lease_for_binding = ports.acquire_interaction_lease_for_binding
         self._release_interaction_lease_for_binding = ports.release_interaction_lease_for_binding
-        self._acquire_thread_write_lease_locked = ports.acquire_thread_write_lease_locked
         self._sync_stored_binding_locked = ports.sync_stored_binding_locked
         self._clear_plan_state = ports.clear_plan_state
         self._apply_runtime_state_message_locked = ports.apply_runtime_state_message_locked
@@ -347,28 +345,15 @@ class PromptTurnEntryController:
             )
             return False
         interaction_lease = preattached_interaction_lease
-        lease = None
         with self._lock:
             if interaction_lease is None:
                 interaction_lease = self._acquire_interaction_lease_for_binding(chat_binding_key, thread_id)
             if interaction_lease.granted:
-                lease = self._acquire_thread_write_lease_locked(chat_binding_key, thread_id)
-                if lease.granted:
-                    self._sync_stored_binding_locked(chat_binding_key, state)
+                self._sync_stored_binding_locked(chat_binding_key, state)
         if not interaction_lease.granted:
             self._reply_text(
                 chat_id,
                 self._access_policy.interaction_denied_text(interaction_lease.lease),
-                message_id=message_id,
-                reply_in_thread=self._message_reply_in_thread(message_id),
-            )
-            return False
-        if lease is None or not lease.granted:
-            if interaction_lease.acquired:
-                self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
-            self._reply_text(
-                chat_id,
-                "当前线程正由另一飞书会话执行；本会话可继续查看，但暂时不能写入。待对方执行结束后再试。",
                 message_id=message_id,
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )
@@ -497,8 +482,10 @@ class PromptTurnEntryController:
         *,
         message_id: str = "",
     ) -> tuple[bool, str]:
-        runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        state = self._get_runtime_state(sender_id, chat_id, message_id)
+        resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
+        state = resolved.state
+        with self._lock:
+            runtime = build_runtime_view(state)
         thread_id = runtime.current_thread_id
         turn_id = runtime.execution.current_turn_id
         if not runtime.running or not thread_id:
@@ -506,6 +493,14 @@ class PromptTurnEntryController:
                 self._refresh_terminal_execution_card_from_state(sender_id, chat_id)
                 return True, "当前执行已结束，已刷新卡片状态。"
             return False, "当前没有正在执行的 turn。"
+        denial_text = self._access_policy.prompt_write_denial_text(
+            resolved.binding,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
+        if denial_text:
+            return False, denial_text
         if not turn_id:
             with self._lock:
                 self._turn_execution.request_cancel_without_turn_id_locked(state)

@@ -11,7 +11,7 @@ from bot.reason_codes import (
 )
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_feishu_interaction_holder
 from bot.thread_access_policy import ThreadAccessPolicy
-from bot.thread_lease_registry import ThreadLeaseRegistry
+from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 
 
 class ThreadAccessPolicyTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class ThreadAccessPolicyTests(unittest.TestCase):
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
         lock = threading.RLock()
-        registry = ThreadLeaseRegistry()
+        registry = ThreadSubscriptionRegistry()
         interaction_store = InteractionLeaseStore(data_dir)
         group_modes: dict[str, str] = {}
         policy = ThreadAccessPolicy(
@@ -34,7 +34,6 @@ class ThreadAccessPolicyTests(unittest.TestCase):
                 binding[1],
                 owner_pid=os.getpid(),
             ),
-            thread_write_owner_locked=registry.lease_owner,
         )
         return lock, registry, interaction_store, group_modes, policy
 

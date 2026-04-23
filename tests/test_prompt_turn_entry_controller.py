@@ -11,7 +11,7 @@ from bot.runtime_view import build_runtime_view
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import InteractionLeaseStore
 from bot.thread_access_policy import ThreadAccessPolicy
-from bot.thread_lease_registry import ThreadLeaseRegistry
+from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
 
@@ -40,7 +40,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             default_model="gpt-5.4",
             default_reasoning_effort="medium",
             chat_binding_store=chat_binding_store,
-            thread_lease_registry=ThreadLeaseRegistry(),
+            thread_subscription_registry=ThreadSubscriptionRegistry(),
             interaction_lease_store=InteractionLeaseStore(data_dir),
             is_group_chat=lambda chat_id, message_id: False,
         )
@@ -98,7 +98,6 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             thread_subscribers_locked=binding_runtime.thread_subscribers,
             current_interaction_lease_locked=binding_runtime.current_interaction_lease_locked,
             feishu_interaction_holder=binding_runtime.feishu_interaction_holder,
-            thread_write_owner_locked=binding_runtime.thread_write_owner,
         )
 
         def _resolve_runtime_binding(sender_id: str, chat_id: str, message_id: str = "") -> ResolvedRuntimeBinding:
@@ -193,7 +192,6 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
                 access_policy=access_policy,
                 acquire_interaction_lease_for_binding=binding_runtime.acquire_interaction_lease_for_binding,
                 release_interaction_lease_for_binding=binding_runtime.release_interaction_lease_for_binding,
-                acquire_thread_write_lease_locked=binding_runtime.acquire_thread_write_lease_locked,
                 sync_stored_binding_locked=binding_runtime.sync_stored_binding_locked,
                 clear_plan_state=turn_execution.clear_plan_state_locked,
                 apply_runtime_state_message_locked=binding_runtime.apply_runtime_state_message_locked,
@@ -312,12 +310,12 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             [("c1", "当前线程仍在执行，请等待结束或先执行 `/cancel`。", "msg-1", False)],
         )
 
-    def test_start_prompt_turn_rejects_when_write_lease_is_held_by_another_binding(self) -> None:
+    def test_start_prompt_turn_rejects_when_interaction_lease_is_held_by_another_binding(self) -> None:
         env = self._make_controller()
         controller = env["controller"]
         self._bind_thread(env, thread_id="thread-1")
         with env["lock"]:
-            env["binding_runtime"].acquire_thread_write_lease_locked(("ou_other", "c2"), "thread-1")
+            env["binding_runtime"].acquire_interaction_lease_for_binding(("ou_other", "c2"), "thread-1")
 
         controller.start_prompt_turn("ou_user", "c1", "hello", message_id="msg-1")
 

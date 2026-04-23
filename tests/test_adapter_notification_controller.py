@@ -8,7 +8,7 @@ from bot.binding_runtime_manager import BindingRuntimeManager
 from bot.runtime_state import ExecutionStateChanged, apply_runtime_state_message
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import InteractionLeaseStore
-from bot.thread_lease_registry import ThreadLeaseRegistry
+from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 
 
@@ -26,13 +26,13 @@ class AdapterNotificationControllerTests(unittest.TestCase):
             default_model="gpt-5.4",
             default_reasoning_effort="medium",
             chat_binding_store=ChatBindingStore(data_dir),
-            thread_lease_registry=ThreadLeaseRegistry(),
+            thread_subscription_registry=ThreadSubscriptionRegistry(),
             interaction_lease_store=InteractionLeaseStore(data_dir),
             is_group_chat=lambda chat_id, message_id: False,
         )
         return manager.build_default_runtime_state()
 
-    def _make_controller(self, states, binding_for_thread, subscribers_for_thread, write_owner_for_thread):
+    def _make_controller(self, states, subscribers_for_thread):
         lock = threading.RLock()
         note_events: list[tuple[str, str]] = []
         patches: list[dict[str, object]] = []
@@ -60,9 +60,7 @@ class AdapterNotificationControllerTests(unittest.TestCase):
         controller = AdapterNotificationController(
             lock=lock,
             turn_execution=TurnExecutionCoordinator(),
-            execution_binding_for_thread=lambda thread_id, adopt_sole_subscriber: binding_for_thread.get(thread_id),
             thread_subscribers=lambda thread_id: subscribers_for_thread.get(thread_id, ()),
-            thread_write_owner=lambda thread_id: write_owner_for_thread.get(thread_id),
             get_runtime_state=lambda sender_id, chat_id: states[(sender_id, chat_id)],
             note_runtime_event=lambda sender_id, chat_id: note_events.append((sender_id, chat_id)),
             apply_runtime_state_message_locked=apply_runtime_state_message,
@@ -104,8 +102,6 @@ class AdapterNotificationControllerTests(unittest.TestCase):
         state = self._make_state()
         controller, *_, resolved = self._make_controller(
             {binding: state},
-            {"thread-1": binding},
-            {},
             {},
         )
 
@@ -126,14 +122,12 @@ class AdapterNotificationControllerTests(unittest.TestCase):
 
         controller, note_events, *_ = self._make_controller(
             {binding_a: state_a, binding_b: state_b},
-            {"thread-1": binding_a},
             {"thread-1": (binding_a, binding_b)},
-            {"thread-1": binding_a},
         )
 
         controller.handle_thread_name_updated({"threadId": "thread-1", "threadName": "new-title"})
 
-        self.assertEqual(note_events, [binding_a])
+        self.assertEqual(note_events, [binding_a, binding_b])
         self.assertEqual(state_a["current_thread_title"], "new-title")
         self.assertEqual(state_b["current_thread_title"], "new-title")
 
@@ -155,9 +149,7 @@ class AdapterNotificationControllerTests(unittest.TestCase):
             *_,
         ) = self._make_controller(
             {binding: state},
-            {"thread-1": binding},
             {"thread-1": (binding,)},
-            {"thread-1": binding},
         )
 
         controller.handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-2"}})
@@ -174,6 +166,41 @@ class AdapterNotificationControllerTests(unittest.TestCase):
         self.assertEqual(watchdogs, [binding])
         self.assertEqual(updates, [binding])
 
+    def test_handle_turn_started_sends_execution_card_to_each_subscriber(self) -> None:
+        binding_a = ("ou_user", "chat-a")
+        binding_b = ("ou_user", "chat-b")
+        state_a = self._make_state()
+        state_b = self._make_state()
+        state_a["current_thread_id"] = "thread-1"
+        state_b["current_thread_id"] = "thread-1"
+        state_a["current_message_id"] = "card-a"
+        state_a["running"] = True
+        state_a["awaiting_local_turn_started"] = True
+
+        (
+            controller,
+            note_events,
+            _patches,
+            sent_cards,
+            watchdogs,
+            updates,
+            *_,
+        ) = self._make_controller(
+            {binding_a: state_a, binding_b: state_b},
+            {"thread-1": (binding_a, binding_b)},
+        )
+
+        controller.handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-1"}})
+
+        self.assertEqual(note_events, [binding_a, binding_b])
+        self.assertEqual(sent_cards, [("chat-b", "", False)])
+        self.assertEqual(state_a["current_message_id"], "card-a")
+        self.assertEqual(state_b["current_message_id"], "new-card")
+        self.assertEqual(state_a["current_turn_id"], "turn-1")
+        self.assertEqual(state_b["current_turn_id"], "turn-1")
+        self.assertEqual(watchdogs, [binding_a, binding_b])
+        self.assertEqual(updates, [binding_a, binding_b])
+
     def test_handle_turn_completed_delegates_terminal_finalize(self) -> None:
         binding = ("ou_user", "chat-1")
         state = self._make_state()
@@ -183,12 +210,36 @@ class AdapterNotificationControllerTests(unittest.TestCase):
 
         controller, note_events, _, _, _, _, _, _, _, finalizations, _ = self._make_controller(
             {binding: state},
-            {"thread-1": binding},
             {"thread-1": (binding,)},
-            {"thread-1": binding},
         )
 
         controller.handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
 
         self.assertEqual(note_events, [binding])
         self.assertEqual(finalizations, [("ou_user", "chat-1", "thread-1", "turn-1")])
+
+    def test_handle_turn_completed_finalizes_each_subscriber(self) -> None:
+        binding_a = ("ou_user", "chat-a")
+        binding_b = ("ou_user", "chat-b")
+        state_a = self._make_state()
+        state_b = self._make_state()
+        for state in (state_a, state_b):
+            state["current_thread_id"] = "thread-1"
+            state["current_turn_id"] = "turn-1"
+            state["running"] = True
+
+        controller, note_events, _, _, _, _, _, _, _, finalizations, _ = self._make_controller(
+            {binding_a: state_a, binding_b: state_b},
+            {"thread-1": (binding_a, binding_b)},
+        )
+
+        controller.handle_turn_completed({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}})
+
+        self.assertEqual(note_events, [binding_a, binding_b])
+        self.assertEqual(
+            finalizations,
+            [
+                ("ou_user", "chat-a", "thread-1", "turn-1"),
+                ("ou_user", "chat-b", "thread-1", "turn-1"),
+            ],
+        )

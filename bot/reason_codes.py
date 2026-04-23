@@ -17,7 +17,6 @@ PROMPT_DENIED_BY_RUNNING_TURN = "prompt_denied_by_running_turn"
 PROMPT_DENIED_BY_GROUP_ALL_MODE_SHARING = "prompt_denied_by_group_all_mode_sharing"
 PROMPT_DENIED_BY_OTHER_GROUP_ALL_OWNER = "prompt_denied_by_other_group_all_owner"
 PROMPT_DENIED_BY_INTERACTION_OWNER = "prompt_denied_by_interaction_owner"
-PROMPT_DENIED_BY_FEISHU_WRITE_OWNER = "prompt_denied_by_feishu_write_owner"
 
 
 @dataclass(frozen=True, slots=True)

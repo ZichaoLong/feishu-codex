@@ -84,72 +84,30 @@
 
 它回答的是“当前 backend 上这个 thread 是否正在跑 turn”，并不等于“当前飞书会话是否是这次执行的 owner”。
 
-### 2.5 `Feishu 写入 owner`
+### 2.5 `交互 owner`
 
-这是 `feishu-codex` 服务内部为多飞书订阅者维护的单写租约。
-
-- 它只在 Feishu 服务内部存在
-- 它不描述 `fcodex` 或其他外部前端
-- 它的作用是：同一个 thread 在多个飞书会话同时绑定时，仍只允许一个飞书会话发起写入
-
-因此，这是“Feishu 内部单写 owner”，不是“全系统全前端唯一写 owner”。
-
-### 2.6 `交互 owner`
-
-这是跨前端共享的交互租约；在本仓库当前产品合同里，它会在 Feishu 与 `fcodex` 之间共享。
+这是同实例内、跨前端共享的 turn / interaction 租约；在当前合同中，它是 Feishu 与 `fcodex` 的唯一同实例前端 owner。
 
 它回答的问题是：
 
+- 当前哪个前端可以向该 thread 发起下一轮 turn
 - 当前谁可以处理中断、审批、用户输入等交互控制
 
 典型持有者：
 
 - 某个 Feishu binding
-- 某个 `fcodex` 本地终端
-- `none`
+- 某个 `fcodex` TUI proxy holder
 
-### 2.7 `re-profile possible`
+普通回复流不是交互请求：同一个 backend 的回复流会广播给同实例 Feishu subscribers 和 `fcodex` subscribers。审批、补充输入、中断等交互请求只路由给当前 `交互 owner`。
 
-这是一个派生判断，不是持久化状态。
+旧的 `Feishu 写入 owner` 不再是独立产品概念；Feishu prompt 准入也不再额外维护一层 Feishu-only 写入租约。
 
-当前合同下：
-
-- 当 `backend thread status == notLoaded` 时，值为 `yes`
-- 否则为 `no`
-
-它的含义是：
-
-- 这个 thread 现在是否处于“下一次 `resume` / 自动重载有机会重新解析 profile / provider”的状态
-
-不要再用“线程原始 profile”作为合同术语。
-更准确的说法是：
-
-- 当前实例 / 所选实例本地默认 profile 恢复
-- 显式 profile 恢复
-- 当前 live runtime 无法借 `resume` 改 provider
-
-## 3. Runtime 持有、Owner 租约与状态迁移
-
-### 3.1 `attached/released` 不是 owner lease
-
-`feishu runtime` 只回答一件事：
-
-- 当前运行中的 `feishu-codex` 服务，是否仍对该 thread 保持 runtime residency
-
-它不回答：
-
-- 当前哪个 Feishu binding 可以发起下一轮 turn
-- 当前哪个前端可以处理审批 / 补充输入 / 中断
-
-这两类问题属于独立的 lease 事实。
-
-### 3.2 三种事实的对照
+### 3.2 两类事实的对照
 
 | 事实 | 作用范围 | 它回答的问题 | 在 `feishu runtime == released` 时还能存在吗？ |
 | --- | --- | --- | --- |
 | `feishu runtime` = `attached/released` | Feishu 服务连接 | 当前运行中的 Feishu 服务是否仍附着该 thread？ | 这是它本身的状态轴 |
-| `Feishu 写入 owner` | 仅 Feishu 内部 | 当前哪个 Feishu binding 可以向共享 thread 写入？ | 不应再保留有意义的 Feishu 写入 owner |
-| `交互 owner` | 跨前端（`feishu-codex` + `fcodex`） | 当前谁可以处理中断、审批、补充输入？ | 可以。外部 owner（如 `fcodex`）仍可能存在 |
+| `交互 owner` | 跨前端（`feishu-codex` + `fcodex`） | 当前谁可以发起 turn，并处理中断、审批、补充输入？ | 可以。外部 owner（如 `fcodex`）仍可能存在 |
 
 直接后果是：
 
@@ -165,7 +123,7 @@
 
 ### `bound + attached + active + 当前 binding 是 owner`
 
-表示当前 binding 既持有 Feishu 写入租约，也持有跨前端交互租约，正在执行这一轮 turn。
+表示当前 binding 持有跨前端交互租约，正在执行这一轮 turn。
 
 ### `bound + released + notLoaded`
 
@@ -195,8 +153,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `unbound` | `not-applicable` | `not-applicable` | 普通 prompt 或 `/new` | 被接受 | `bound` | `attached` | `idle` 或 `active` | 先建新 thread，再启动或准备 turn |
 | `unbound` | `not-applicable` | 任意 | `/resume <thread>` | 目标解析成功且允许恢复 | `bound` | `attached` | 通常为 `idle` | 当前 chat 绑定切到目标 thread |
-| `bound` | `attached` | `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 获取 Feishu 写入 owner 和交互 owner |
-| `bound` | `attached` | `active` | turn 终态事件 | 无 | `bound` | `attached` | 通常为 `idle` | 清理 owner lease；binding 与附着保持不变 |
+| `bound` | `attached` | `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 获取交互 owner |
+| `bound` | `attached` | `active` | turn 终态事件 | 无 | `bound` | `attached` | 通常为 `idle` | 清理交互 owner；binding 与附着保持不变 |
 | `bound` | `attached` | `idle` 或 `active` | `/release-feishu-runtime` | 当前没有 Feishu 侧运行中的 turn，且没有待处理审批 / 输入 | `bound` | `released` | `notLoaded`、`idle` 或 `active` | release 释放的是整个运行中 Feishu 服务对该 thread 的 runtime 持有 |
 | `bound` | `released` | `notLoaded` 或 `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 先重新附着 / resume，再启动 turn |
 | `bound` | `released` | 任意 | 普通 prompt | prompt preflight 被拒绝 | 不变 | 不变 | 不变 | 纯拒绝：不得 resume，不得新增 subscriber，不得把 `released` 改成 `attached` |
@@ -209,7 +167,7 @@
 - 被拒绝的 prompt 必须是 pure reject。
   它不能调用 `thread/resume`，不能新增 Feishu subscriber，也不能把
   `feishu runtime` 从 `released` 改成 `attached`。
-- `release-feishu-runtime` 释放的是 Feishu 的 runtime residency 和 Feishu 本地 owner lease；
+- `release-feishu-runtime` 释放的是 Feishu 的 runtime residency，并在当前 owner 是 Feishu 时清除交互 owner；
   它不会抹掉 chat 仍指向哪个 thread 的 binding bookmark。
 
 ## 4. `/status` 合同
@@ -224,7 +182,6 @@
 - 当前这个聊天绑定的 `binding`
 - 当前这个绑定所指 thread 的 `feishu runtime`
 - 当前 shared backend 中该 thread 的 `backend thread status`
-- 当前 `Feishu 写入 owner`
 - 当前 `交互 owner`
 - 当前是否 `re-profile possible`
 - 当前是否允许执行 `/release-feishu-runtime`
@@ -279,7 +236,6 @@
 当该命令成功时：
 
 - 保留所有指向该 thread 的 Feishu `binding`
-- 清除该 thread 的 Feishu 写入 owner
 - 清除该 thread 的 Feishu 交互 owner（如果当前 owner 是 Feishu）
 - 把所有当前仍 `attached` 的相关 Feishu binding 统一切到 `released`
 - 让 `feishu-codex` 服务自己的 app-server 连接对该 thread 执行 `thread/unsubscribe`
@@ -517,7 +473,7 @@
 - 不排队，不隐式强抢，不靠“最后一个 binding”猜测 owner
 
 这里的 `ThreadRuntimeLease` 是机器级 live runtime 事实。
-它不是飞书 chat binding，也不是 Feishu 写入 owner / interaction owner 的替代物。
+它不是飞书 chat binding，也不是 interaction owner 的替代物。
 
 ## 7. 共享词汇，而不是强求命令同名
 

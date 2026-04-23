@@ -244,7 +244,7 @@ Concurrency ownership should also remain explicit:
 - binding resolution and runtime-state hydrate/create should go through a
   single resolver path, rather than open-coding "pick a binding key, then
   maybe create state" in multiple call sites
-- objects such as `ThreadLeaseRegistry` should currently be treated as
+- objects such as `ThreadSubscriptionRegistry` should currently be treated as
   runtime-owned internal state, not as general-purpose thread-safe components
 - `CodexHandler._lock` still acts as a broad shared-state fallback lock, but the
   long-term goal should be reducing the amount of state that must be shared at
@@ -257,7 +257,7 @@ historical plan has now largely landed:
 - `BindingRuntimeManager` now owns Feishu runtime management for `binding` /
   `subscribe` / `attach` / `released`
 - `ThreadAccessPolicy` and the lease stores now own the admission rules for
-  Feishu write owner and interaction owner
+  interaction owner
 - `TurnExecutionCoordinator`, `ExecutionOutputController`,
   `ExecutionRecoveryController`, `InteractionRequestController`, and
   `AdapterNotificationController` now own the turn / execution / request-bridge
@@ -336,12 +336,12 @@ So:
 - those reset actions belong to the `feishu-codexctl` binding-management surface
 - they should no longer be treated as a separate architectural concept of
   directly deleting `chat_bindings.json`
-- the persisted binding schema should also fail closed rather than carrying
-  legacy half-states forward
+- the persisted binding schema should fail closed; the retired v4
+  `current_thread_write_owner_thread_id` field is only accepted as explicit
+  migration input and is not written back
 - whenever `current_thread_id` is non-empty, `feishu_runtime_state`
   must be explicitly present
 - `feishu_runtime_state` may only be `attached` or `released`
-- a `released` binding must not carry a residual `write_owner`
 - violations should be treated as storage corruption and fail fast instead of
   being silently normalized during load
 
@@ -425,7 +425,7 @@ full-tree dump.
   - runtime state, execution flow, and coordination:
     `runtime_loop.py`, `runtime_state.py`, `runtime_view.py`,
     `binding_runtime_manager.py`, `thread_access_policy.py`,
-    `thread_lease_registry.py`, `thread_runtime_coordination.py`,
+    `thread_subscription_registry.py`, `thread_runtime_coordination.py`,
     `turn_execution_coordinator.py`, `execution_output_controller.py`,
     `execution_recovery_controller.py`, `execution_transcript.py`,
     `interaction_request_controller.py`, `adapter_notification_controller.py`,

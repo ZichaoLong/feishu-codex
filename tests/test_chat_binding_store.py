@@ -46,18 +46,11 @@ class ChatBindingStoreTests(unittest.TestCase):
         raw = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(raw["schema_version"], CHAT_BINDING_STORE_SCHEMA_VERSION)
         self.assertEqual(raw["p2p_bindings"]["oc_p2p"]["ou_user"]["current_thread_id"], "thread-p2p")
-        self.assertEqual(
-            raw["p2p_bindings"]["oc_p2p"]["ou_user"]["current_thread_write_owner_thread_id"],
-            "thread-p2p",
-        )
+        self.assertNotIn("current_thread_write_owner_thread_id", raw["p2p_bindings"]["oc_p2p"]["ou_user"])
         self.assertEqual(raw["group_bindings"]["oc_group"]["current_thread_id"], "thread-group")
 
         self.assertEqual(store.load(("ou_user", "oc_p2p"))["current_thread_title"], "p2p title")
         self.assertEqual(store.load(("__group__", "oc_group"))["collaboration_mode"], "plan")
-        self.assertEqual(
-            store.load(("ou_user", "oc_p2p"))["current_thread_write_owner_thread_id"],
-            "thread-p2p",
-        )
 
     def test_load_all_returns_all_normalized_bindings(self) -> None:
         _, store, _ = self._make_store()
@@ -91,10 +84,7 @@ class ChatBindingStoreTests(unittest.TestCase):
 
         loaded = store.load_all()
 
-        self.assertEqual(
-            loaded[("ou_user", "oc_p2p")]["current_thread_write_owner_thread_id"],
-            "thread-p2p",
-        )
+        self.assertNotIn("current_thread_write_owner_thread_id", loaded[("ou_user", "oc_p2p")])
         self.assertEqual(loaded[("__group__", "oc_group")]["current_thread_title"], "group title")
 
     def test_clear_all_removes_state_file(self) -> None:
@@ -140,7 +130,7 @@ class ChatBindingStoreTests(unittest.TestCase):
         state_path.write_text(
             json.dumps(
                 {
-                    "schema_version": CHAT_BINDING_STORE_SCHEMA_VERSION - 1,
+                    "schema_version": 3,
                     "p2p_bindings": {},
                     "group_bindings": {},
                 },
@@ -151,7 +141,7 @@ class ChatBindingStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            f"schema_version must be {CHAT_BINDING_STORE_SCHEMA_VERSION}",
+            "schema_version must be one of",
         ):
             store.load(("ou_user", "oc_p2p"))
 
@@ -185,12 +175,12 @@ class ChatBindingStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "feishu_runtime_state must be attached or released"):
             store.load(("ou_user", "oc_p2p"))
 
-    def test_store_rejects_released_binding_with_write_owner(self) -> None:
+    def test_store_ignores_legacy_write_owner_field(self) -> None:
         _, store, state_path = self._make_store()
         state_path.write_text(
             json.dumps(
                 {
-                    "schema_version": CHAT_BINDING_STORE_SCHEMA_VERSION,
+                    "schema_version": 4,
                     "p2p_bindings": {
                         "oc_p2p": {
                             "ou_user": {
@@ -212,8 +202,11 @@ class ChatBindingStoreTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with self.assertRaisesRegex(ValueError, "released binding must not carry"):
-            store.load(("ou_user", "oc_p2p"))
+        loaded = store.load(("ou_user", "oc_p2p"))
+
+        assert loaded is not None
+        self.assertEqual(loaded["feishu_runtime_state"], "released")
+        self.assertNotIn("current_thread_write_owner_thread_id", loaded)
 
     def test_store_rejects_runtime_state_without_thread_id(self) -> None:
         _, store, state_path = self._make_store()

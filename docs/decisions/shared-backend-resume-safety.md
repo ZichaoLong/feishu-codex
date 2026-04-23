@@ -253,9 +253,7 @@ The more accurate description now is:
 
 Concretely:
 
-- Feishu-internal write admission is controlled by the `Feishu write owner`
-- cross-frontend approvals, user-input requests, and interrupts are controlled
-  by the `interaction owner`
+- Same-instance Feishu / `fcodex` write admission, approvals, user-input requests, and interrupts are controlled by the `interaction owner`
 - when a thread has no explicit owner but exactly one Feishu subscriber, the
   runtime may fall back to that sole subscriber for routing; once multiple
   subscribers exist, routing must depend on explicit owner state rather than
@@ -263,40 +261,16 @@ Concretely:
 
 The user-visible consequence is:
 
-- non-owner Feishu chats may still keep their binding and observe shared thread
-  facts
-- non-owner chats may not write or handle the current turn's approvals / input
-  requests
-- the system still does not promise a fully mirrored interactive live UI across
-  multiple Feishu chats; execution cards, approval cards, and request-driving
-  events route by the effective owner path rather than broadcasting every
-  interactive surface to every subscriber
+- non-owner Feishu chats may still keep their binding and observe shared thread facts
+- subscribed Feishu chats receive ordinary execution streams, terminal execution cards, and terminal result carriers
+- non-owner chats may not write or handle the current turn's approvals / input / interrupt requests
+- the system still does not promise a fully mirrored interactive live UI across multiple Feishu chats; approval cards and request-driving interactive events route only to the current `interaction owner`
 
 So the decision at this layer is:
 
 - Feishu allows multiple subscribers on one backend thread
-- writability and interactivity are determined by owner leases
-- "one primary notification binding" is no longer the current model
-
-### 8.3 Cross-instance boundary
-
-Multi-instance support does not change the "multiple subscribers within one
-instance" conclusion above, but it adds two more boundaries:
-
-- different instances do not share one live backend
-- if the same thread should continue on another instance, it must first pass:
-  - admission (is the thread visible to the target instance's Feishu surface?)
-  - thread runtime lease (may the target instance take live runtime now?)
-
-So:
-
-- instances share the persisted thread namespace
-- they do not share live thread memory state, bindings, ACL, owners, or
-  control planes
-
-For the exact state vocabulary and state-transition contract, see
-`docs/contracts/runtime-control-surface.md` and
-`docs/contracts/feishu-thread-lifecycle.md`.
+- writability and interactivity are decided by the owner lease
+- ordinary replies and terminal output broadcast by subscriber; interactive requests route by owner
 
 ## 9. Related Documents
 

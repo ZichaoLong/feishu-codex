@@ -101,7 +101,7 @@ from bot.stores.service_instance_lease import (
     ServiceInstanceLeaseError,
 )
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
-from bot.thread_lease_registry import ThreadLeaseRegistry
+from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 from bot.thread_runtime_coordination import acquire_thread_runtime_holder_or_raise
 from bot.thread_access_policy import ThreadAccessPolicy
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
@@ -166,7 +166,7 @@ class CodexHandler(BotHandler):
         self._instance_name = current_instance_name(config_dir=self._config_dir, data_dir=self._data_dir)
         self._global_data_dir = global_data_dir()
         self._lock = threading.RLock()
-        self._thread_lease_registry = ThreadLeaseRegistry()
+        self._thread_subscription_registry = ThreadSubscriptionRegistry()
         self._interaction_lease_store = InteractionLeaseStore(self._data_dir)
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
         self._service_instance_lease = ServiceInstanceLease(self._data_dir)
@@ -216,7 +216,7 @@ class CodexHandler(BotHandler):
             default_model=self._adapter_config.model,
             default_reasoning_effort=self._adapter_config.reasoning_effort,
             chat_binding_store=self._chat_binding_store,
-            thread_lease_registry=self._thread_lease_registry,
+            thread_subscription_registry=self._thread_subscription_registry,
             interaction_lease_store=self._interaction_lease_store,
             is_group_chat=self._is_group_chat,
         )
@@ -287,12 +287,7 @@ class CodexHandler(BotHandler):
         self._adapter_notifications = AdapterNotificationController(
             lock=self._lock,
             turn_execution=self._turn_execution,
-            execution_binding_for_thread=lambda thread_id, adopt_sole_subscriber: self._execution_binding_for_thread(
-                thread_id,
-                adopt_sole_subscriber=adopt_sole_subscriber,
-            ),
             thread_subscribers=self._thread_subscribers,
-            thread_write_owner=self._thread_write_owner,
             get_runtime_state=lambda sender_id, chat_id: self._get_runtime_state(sender_id, chat_id),
             note_runtime_event=self._note_runtime_event,
             apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
@@ -399,7 +394,6 @@ class CodexHandler(BotHandler):
             thread_subscribers_locked=self._binding_runtime.thread_subscribers,
             current_interaction_lease_locked=self._current_interaction_lease_locked,
             feishu_interaction_holder=self._feishu_interaction_holder,
-            thread_write_owner_locked=self._binding_runtime.thread_write_owner,
         )
         self._runtime_admin = RuntimeAdminController(
             lock=self._lock,
@@ -464,7 +458,6 @@ class CodexHandler(BotHandler):
                 access_policy=self._thread_access_policy,
                 acquire_interaction_lease_for_binding=self._acquire_interaction_lease_for_binding,
                 release_interaction_lease_for_binding=self._release_interaction_lease_for_binding,
-                acquire_thread_write_lease_locked=self._acquire_thread_write_lease_locked,
                 sync_stored_binding_locked=self._sync_stored_binding_locked,
                 clear_plan_state=self._clear_plan_state,
                 apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
@@ -881,12 +874,6 @@ class CodexHandler(BotHandler):
     def _hydrate_stored_bindings(self) -> None:
         self._binding_runtime.hydrate_stored_bindings()
 
-    def _acquire_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str):
-        return self._binding_runtime.acquire_thread_write_lease_locked(binding, thread_id)
-
-    def _release_thread_write_lease_locked(self, binding: ChatBindingKey, thread_id: str) -> bool:
-        return self._binding_runtime.release_thread_write_lease_locked(binding, thread_id)
-
     def _feishu_interaction_holder(self, binding: ChatBindingKey):
         return self._binding_runtime.feishu_interaction_holder(binding)
 
@@ -930,36 +917,9 @@ class CodexHandler(BotHandler):
                 adopt_sole_subscriber=adopt_sole_subscriber,
             )
 
-    def _execution_binding_for_thread_locked(
-        self,
-        thread_id: str,
-        *,
-        adopt_sole_subscriber: bool = False,
-    ) -> ChatBindingKey | None:
-        return self._binding_runtime.execution_binding_for_thread_locked(
-            thread_id,
-            adopt_sole_subscriber=adopt_sole_subscriber,
-        )
-
-    def _execution_binding_for_thread(
-        self,
-        thread_id: str,
-        *,
-        adopt_sole_subscriber: bool = False,
-    ) -> ChatBindingKey | None:
-        with self._lock:
-            return self._execution_binding_for_thread_locked(
-                thread_id,
-                adopt_sole_subscriber=adopt_sole_subscriber,
-            )
-
     def _thread_subscribers(self, thread_id: str) -> tuple[ChatBindingKey, ...]:
         with self._lock:
             return self._binding_runtime.thread_subscribers(thread_id)
-
-    def _thread_write_owner(self, thread_id: str) -> ChatBindingKey | None:
-        with self._lock:
-            return self._binding_runtime.thread_write_owner(thread_id)
 
     def _sync_stored_binding_locked(self, binding: ChatBindingKey, state: RuntimeStateDict) -> None:
         self._binding_runtime.sync_stored_binding_locked(binding, state)
@@ -1066,7 +1026,6 @@ class CodexHandler(BotHandler):
         resolved = self._resolve_runtime_binding(sender_id, chat_id)
         state = resolved.state
         with self._lock:
-            self._release_thread_write_lease_locked(resolved.binding, state["current_thread_id"])
             self._release_interaction_lease_for_binding(resolved.binding, state["current_thread_id"])
             self._turn_execution.retire_execution_locked(state)
             self._sync_stored_binding_locked(resolved.binding, state)
@@ -1614,32 +1573,8 @@ class CodexHandler(BotHandler):
         )
         finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
         if finalized:
-            self._notify_non_owner_turn_finished(
-                self._chat_binding_key(sender_id, chat_id),
-                thread_id=thread_id,
-            )
             self._schedule_terminal_execution_reconcile(target)
         return finalized
-
-    def _notify_non_owner_turn_finished(
-        self,
-        owner_binding: ChatBindingKey,
-        *,
-        thread_id: str,
-    ) -> None:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return
-        with self._lock:
-            notifications = self._binding_runtime.active_chat_ids_for_thread_locked(
-                normalized_thread_id,
-                exclude_binding=owner_binding,
-            )
-        if not notifications:
-            return
-        message = f"线程 `{normalized_thread_id[:8]}…` 的上一轮执行已结束；本会话现在可继续提问。"
-        for chat_id in notifications:
-            self.bot.reply(chat_id, message)
 
     def _reconcile_execution_snapshot(
         self,

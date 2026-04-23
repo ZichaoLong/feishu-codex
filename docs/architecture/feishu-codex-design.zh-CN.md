@@ -115,7 +115,7 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/instance_layout.py` 与 `bot/instance_resolution.py`：多实例目录布局、当前/目标实例解析
 - `bot/binding_identity.py`：admin-facing binding 标识规范
 - `bot/binding_runtime_manager.py`：binding / subscribe / attach / released 与本地 runtime snapshot 的 owner
-- `bot/thread_access_policy.py`：线程共享、Feishu 写入 owner、interaction owner 的准入 policy 边界
+- `bot/thread_access_policy.py`：线程共享与 interaction owner 的准入 policy 边界
 - `bot/thread_runtime_coordination.py`：跨实例 live runtime lease 获取、自动转移与拒绝
 - `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、终态结果载体发送、watchdog / reconcile / degrade 处理
 - `bot/runtime_admin_controller.py`：`/status`、`/release-feishu-runtime` 与 control-plane 查询/管理
@@ -157,8 +157,8 @@ shared backend 与 wrapper 的具体机制，见
 - session UI 发起的 resume 目标解析与后续恢复切换，也应通过 `RuntimeLoop` 进入统一串行化边界，而不是额外起裸后台线程侧向触碰共享 adapter/runtime 边界
 - binding 解析与 runtime state 的 hydrate/create 应走单一 resolver 入口，
   不应在多个调用点里继续手写“先挑 binding key，再决定是否建 state”的两段式流程
-- `ThreadLeaseRegistry` 这类对象当前应视为 runtime-owned 内部状态，而不是通用线程安全组件
-- 线程共享、Feishu 写入 owner、interaction owner 这组准入规则，应集中在单一 policy 边界；
+- `ThreadSubscriptionRegistry` 这类对象当前应视为 runtime-owned 内部状态，而不是通用线程安全组件
+- 线程共享与 interaction owner 这组准入规则，应集中在单一 policy 边界；
   目前对应为 `ThreadAccessPolicy`，而不是继续散落在 handler / prompt / group 入口里
 - `BindingRuntimeManager` 对其他组件应优先暴露 snapshot / inventory / iteration 这类显式读取接口，
   而不是再把整份可变 runtime-state map 直接交给外层持有
@@ -175,7 +175,7 @@ shared backend 与 wrapper 的具体机制，见
 当前这一层拆分已经不只是“把 help/settings/group/session/file 等领域从单体逻辑里抽出去”。历史计划里提出的 ownership 拆分主线，目前已经大体落地：
 
 - `BindingRuntimeManager` 已持有 `binding` / `subscribe` / `attach` / `released` 这一组 Feishu runtime 管理
-- `ThreadAccessPolicy` 与 lease store 已持有 Feishu 写入 owner / interaction owner 的准入规则
+- `ThreadAccessPolicy` 与 lease store 已持有 interaction owner 的准入规则
 - `TurnExecutionCoordinator`、`ExecutionOutputController`、`ExecutionRecoveryController`、`InteractionRequestController`、`AdapterNotificationController` 已共同持有 turn / execution / request bridge 这一组生命周期状态机
 - `RuntimeAdminController` 已持有 runtime admin / control-plane 查询与管理面
 - `InboundSurfaceController` 与 `PromptTurnEntryController` 已把入站 surface 和 prompt 进入编排从总 handler 中拆开
@@ -243,10 +243,9 @@ shared backend 与 wrapper 的具体机制，见
 - 显式清空一个或全部 binding 也是合理的本地管理需求
 - 这类清理动作应归入 `feishu-codexctl` 的 binding 管理面
 - 它不应继续以“单独删除 `chat_bindings.json` 文件”的方式被定义为一个独立架构概念
-- 持久化 binding schema 也应 fail-closed：不再为旧半状态做隐式兼容
+- 持久化 binding schema 也应 fail-closed；已废弃的 v4 `current_thread_write_owner_thread_id` 字段只作为显式迁移输入被忽略，不再写回
 - 只要 `current_thread_id` 非空，就必须显式写出 `feishu_runtime_state`
 - `feishu_runtime_state` 只能是 `attached` 或 `released`
-- `released` 状态不得携带残留 `write_owner`
 - 这类约束若不满足，应直接视为存储损坏并报错，而不是在 load 时静默补成 `attached` 或静默清理
 
 `system.yaml.admin_open_ids` 也遵守单一事实源原则：
@@ -313,7 +312,7 @@ shared backend 与 wrapper 的具体机制，见
   - 运行时状态、执行流与协调：
     `runtime_loop.py`、`runtime_state.py`、`runtime_view.py`、
     `binding_runtime_manager.py`、`thread_access_policy.py`、
-    `thread_lease_registry.py`、`thread_runtime_coordination.py`、
+    `thread_subscription_registry.py`、`thread_runtime_coordination.py`、
     `turn_execution_coordinator.py`、`execution_output_controller.py`、
     `execution_recovery_controller.py`、`execution_transcript.py`、
     `interaction_request_controller.py`、`adapter_notification_controller.py`、

@@ -46,13 +46,9 @@ connection is still attached to that thread” as `feishu runtime`:
 This is only a stricter name for the `subscription` fact. It does not change
 the requirement to keep it distinct from `binding` and `loaded runtime`.
 
-For operational control, also keep these separate from:
+For operational control, keep `interaction owner` separate from the binding/runtime state axes.
 
-- `Feishu write owner`
-- `interaction owner`
-
-Those are temporary leases, not binding/runtime state axes.
-The exact contract is defined in `docs/contracts/runtime-control-surface.md`.
+`interaction owner` is a temporary lease. It controls same-instance Feishu / `fcodex` turn admission and routes approvals, user-input requests, and interrupts. The exact contract is defined in `docs/contracts/runtime-control-surface.md`.
 
 ## 3. Why Feishu Cannot Copy `fcodex` Literally
 
