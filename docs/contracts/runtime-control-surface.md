@@ -135,7 +135,7 @@ The binding is attached and currently owns the cross-frontend interaction lease 
 The binding remains, Feishu has released runtime residency, and the backend has
 also unloaded the thread.
 
-This is the clearest “re-profile is possible” state.
+This is the clearest state in which thread-wise profile writes are allowed.
 
 #### `bound + released + idle/active`
 
@@ -190,6 +190,11 @@ It answers, for the current chat binding:
 - `interaction owner`
 - `re-profile possible`
 - whether `/unsubscribe` is currently allowed
+
+Here, `re-profile possible` means thread-wise profile writes are currently
+allowed because the thread is verifiably globally unloaded. Backend-unavailable,
+`unknown`, or otherwise unreadable states must resolve to `no`, not a permissive
+maybe.
 
 When `/status` or local admin surfaces need to explain a deny / blocked result,
 they may expose both:

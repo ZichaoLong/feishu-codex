@@ -37,15 +37,18 @@ If older docs still describe `fcodex` shell slash self-commands, this document w
 ### `/new`
 
 - immediately creates a new thread and switches the chat binding to it
-- uses the current default profile as a one-time seed for that new thread
+- uses the current instance's effective new-thread default profile as a one-time
+  seed for that new thread
 - once the thread is really created, the seed is persisted by `thread_id` as thread-wise resume profile state
 
 ### `/profile [name]`
 
 - target: the currently bound thread
 - if no thread is bound, reject directly
-- writes are allowed only when the target thread is globally unloaded
-- loaded threads are rejected directly; no hot-switch and no deferred hidden bookkeeping
+- writes are allowed only when the target thread is verifiably globally
+  unloaded
+- loaded threads, or threads whose loaded/unloaded state cannot be verified,
+  are rejected directly; no hot-switch and no deferred hidden bookkeeping
 
 ### `/unsubscribe`
 
@@ -91,18 +94,20 @@ That means shell-level support is removed for:
 
 ### `fcodex -p <profile> resume <thread>`
 
-- if the target thread is globally unloaded:
+- if the target thread is verifiably globally unloaded:
   - write the thread-wise resume profile for that thread
   - then resume it
-- if the target thread is still loaded:
+- otherwise:
   - reject directly
   - tell the user to `unsubscribe` and close any other open `fcodex` TUIs on that thread
 
 ### `fcodex resume <thread>` without explicit `-p`
 
 - if the thread already has saved thread-wise profile state, inject it automatically
-- if it does not, do not fall back to an instance-level resume default profile anymore
-- the instance default profile now seeds new threads only; it does not override old-thread resume
+- if it does not, do not fall back to the instance's current new-thread default
+  profile
+- the instance's new-thread default profile now seeds new threads only; it does
+  not override old-thread resume
 
 ### `feishu-codexctl`
 
@@ -136,14 +141,16 @@ Therefore:
 
 ## 4. Profile Summary
 
-The system no longer treats “instance-level default profile” as the primary resume model.
+The system no longer treats the instance's new-thread default profile as the
+primary resume model.
 
 The active model is:
 
 - Feishu `/profile` changes the next-resume config of the currently bound thread
 - `fcodex -p <profile>` on a new session only seeds the first new thread created by that launch
 - `fcodex -p <profile> resume <thread>` changes that thread's persisted resume config
-- future resume reads the thread's own thread-wise config, not the instance's current default profile
+- future resume reads the thread's own thread-wise config, not the instance's
+  current new-thread default profile
 
 ## 5. Multi-Instance Visibility
 

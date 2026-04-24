@@ -37,15 +37,15 @@
 ### `/new`
 
 - 立即创建新 thread，并把当前 chat binding 切到这个 thread
-- 会把当前 default profile 作为这个 thread 的一次性 seed
+- 会把当前实例当前生效的新线程默认 profile 作为这个 thread 的一次性 seed
 - thread 真正创建成功后，seed 会按 `thread_id` 持久化为 thread-wise resume profile
 
 ### `/profile [name]`
 
 - 作用对象：当前绑定 thread
 - 没有绑定 thread 时直接拒绝
-- 只有目标 thread globally unloaded 时才允许修改
-- 对 loaded thread 会直接拒绝，不做热切，也不会偷偷记账等下次生效
+- 只有目标 thread verifiably globally unloaded 时才允许修改
+- 对 loaded thread，或 loaded / unloaded 事实无法验证的 thread，会直接拒绝；不做热切，也不会偷偷记账等下次生效
 
 ### `/unsubscribe`
 
@@ -91,18 +91,18 @@
 
 ### `fcodex -p <profile> resume <thread>`
 
-- 若目标 thread globally unloaded：
+- 若目标 thread verifiably globally unloaded：
   - 允许写入该 thread 的 thread-wise resume profile
   - 然后再恢复该 thread
-- 若目标 thread 仍 loaded：
+- 否则：
   - 直接拒绝
   - 提示先 `unsubscribe`，并关闭其他打开该 thread 的 `fcodex` TUI
 
 ### `fcodex resume <thread>`（未显式 `-p`）
 
 - 如果 thread 已保存 thread-wise profile，则自动注入该 profile
-- 如果没有保存记录，则不再回退到“实例级 resume 默认 profile”
-- 实例 default profile 现在只负责 seed 新 thread，不负责覆盖旧 thread 的 resume
+- 如果没有保存记录，则不再回退到“当前实例的新线程默认 profile”
+- 当前实例的新线程默认 profile 现在只负责 seed 新 thread，不负责覆盖旧 thread 的 resume
 
 ### `feishu-codexctl`
 
@@ -136,14 +136,14 @@
 
 ## 4. Profile 语义总结
 
-当前已经不再把“实例级默认 profile”当作主要 resume 模型。
+当前已经不再把“当前实例的新线程默认 profile”当作主要 resume 模型。
 
 应按下面理解：
 
 - 飞书 `/profile` 改的是当前绑定 thread 的下次 resume 配置
 - `fcodex -p <profile>` 新开会话时，只 seed 本次启动创建的第一个新 thread
 - `fcodex -p <profile> resume <thread>` 改的是该 thread 的持久化 resume 配置
-- 旧 thread 后续 resume 读的是它自己的 thread-wise 配置，而不是实例当前 default profile
+- 旧 thread 后续 resume 读的是它自己的 thread-wise 配置，而不是实例当前的新线程默认 profile
 
 ## 5. 多实例与可见性
 

@@ -9,13 +9,13 @@
 - `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`
 - `docs/decisions/shared-backend-resume-safety.zh-CN.md`
 
-本文收敛当前已讨论并接受的命令面与 profile/provider 设计方向。
+本文记录当前已经讨论并接受、且已进入实现的命令面与 profile/provider 正式合同。
 
 它回答 5 件事：
 
 - 飞书侧为何统一使用 `unsubscribe`
-- `fcodex` 应收缩成什么样的 thin wrapper
-- `feishu-codexctl` 与 `fcodex` 如何重新分工
+- `fcodex` 作为 thin wrapper 的当前正式形状是什么
+- `feishu-codexctl` 与 `fcodex` 当前如何分工
 - thread-wise `profile/provider` 的正式状态与拒绝规则是什么
 - 飞书侧与 `fcodex` 的 `sandbox/approval` 设置边界应如何划分
 
@@ -27,7 +27,7 @@
 
 - 本地 `fcodex` / `feishu-codexctl` 命令面重划
 - 飞书侧 `unsubscribe` 的命名与语义
-- thread-wise `profile/provider` 的目标合同
+- thread-wise `profile/provider` 的当前正式合同
 - 飞书侧与 `fcodex` 的 `sandbox/approval` 设置边界
 
 对这些主题，若本文与下列文档中的旧表述冲突，以本文为准：
@@ -46,7 +46,7 @@
 - 飞书命令：`/unsubscribe`
 - 本地管理 CLI：`feishu-codexctl thread unsubscribe`
 
-此前旧名为 `/release-feishu-runtime`；当前合同统一收敛为 `unsubscribe`。
+此前旧名为 `/release-feishu-runtime`；当前正式合同统一使用 `unsubscribe`。
 
 ### 2.2 语义
 
@@ -73,11 +73,11 @@
 - `unsubscribe` 成功后，thread 仍可能保持 loaded
 - 最常见原因是本地 `fcodex` 仍在订阅这个 thread
 
-## 3. `fcodex` 的目标形状
+## 3. `fcodex` 的当前正式形状
 
 ### 3.1 总体定位
 
-`fcodex` 的目标是尽量接近裸 `codex`：
+`fcodex` 当前尽量保持接近裸 `codex`：
 
 - 它本质上是 stock `codex` 前面的一个 thin wrapper
 - 它负责 shared-backend 路由、实例选择、cwd 修正代理，以及少量与 thread-wise 设置相关的启动前逻辑
@@ -86,7 +86,7 @@
 换句话说：
 
 - `fcodex` 应尽量“像 `codex` 一样用”
-- 本仓库附加的认知负担，应尽量收敛到 wrapper 必须承担的最小集合
+- 本仓库附加的认知负担，应尽量限制在 wrapper 必须承担的最小集合
 
 ### 3.2 命令面
 
@@ -117,7 +117,7 @@
 
 都属于 upstream 行为，不再由本仓库额外制造平行命令语义。
 
-## 4. `feishu-codexctl` 的目标形状
+## 4. `feishu-codexctl` 的当前正式形状
 
 ### 4.1 总体定位
 
@@ -148,7 +148,7 @@
 
 `profile/provider` 不再以“实例级默认值”作为主要产品模型。
 
-目标模型改为：
+当前正式模型是：
 
 - 每个 thread 持有自己的 thread-wise 恢复设置
 - 这份设置在后续 resume 时继续生效
@@ -210,16 +210,17 @@ thread-wise store 至少应保存：
 
 ## 5.5 允许修改的条件
 
-只有当 thread **全局上已 unload** 时，才允许修改其 thread-wise `profile/provider`。
+只有当 thread **可验证地处于全局 unloaded** 状态时，才允许修改其 thread-wise `profile/provider`。
 
 更准确地说：
 
 - 不仅要看当前实例 backend 是否 `notLoaded`
 - 还要确认 machine-global 上不存在该 thread 的 live runtime owner
+- 如果当前 loaded / unloaded 事实无法验证，也必须拒绝写入
 
 因此，允许修改的真实条件是：
 
-- globally unloaded
+- verifiably globally unloaded
 
 而不是仅仅：
 
@@ -227,7 +228,7 @@ thread-wise store 至少应保存：
 
 ## 5.6 loaded 时的行为
 
-若目标 thread 当前仍 loaded，则修改请求必须被直接拒绝。
+若目标 thread 当前仍 loaded，或 loaded / unloaded 事实无法验证，则修改请求必须被直接拒绝。
 
 不允许：
 
@@ -249,14 +250,14 @@ thread-wise store 至少应保存：
 当飞书 chat 当前已绑定某个 thread 时：
 
 - `/profile <name>` 应作用于该 **当前绑定 thread**
-- 若该 thread globally unloaded，则写入 thread-wise desired resume config
-- 若该 thread 仍 loaded，则拒绝并提示
+- 若该 thread verifiably globally unloaded，则写入 thread-wise desired resume config
+- 否则拒绝并提示
 
 当飞书 chat 当前没有绑定 thread 时：
 
 - `/profile` 应直接拒绝
 - 提示用户先执行 `/new`，或先发送第一条普通消息创建 thread
-- 它不应再退回“改实例级默认值”
+- 它不应再退回“改当前实例的新线程默认 profile”
 
 这条拒绝规则适用于：
 
@@ -273,8 +274,8 @@ thread-wise store 至少应保存：
 
 都应遵守同一条 seed 合同：
 
-- 创建 thread 时，仍可带当前实例 effective default profile 作为创建实参
-- 一旦成功拿到真实 `thread_id`，就立刻把这个 default profile 解析并写入 thread-wise store
+- 创建 thread 时，仍可带当前实例当前生效的新线程默认 profile 作为创建实参
+- 一旦成功拿到真实 `thread_id`，就立刻把这个默认 profile 解析并写入 thread-wise store
 - 这份写入只作用于这个新 thread，不回写到 binding 级或实例级临时状态
 
 因此：
@@ -286,11 +287,11 @@ thread-wise store 至少应保存：
 
 当 `fcodex resume <thread>` 显式带 `-p/--profile` 时：
 
-- 若目标 thread globally unloaded：
+- 若目标 thread verifiably globally unloaded：
   - 先把该 `profile` 解析成 `model/model_provider`
   - 写入 thread-wise desired resume config
   - 再按该配置恢复 thread
-- 若目标 thread 仍 loaded：
+- 否则：
   - 直接拒绝
   - 提示用户先释放 Feishu 订阅，并关闭所有仍打开该 thread 的 `fcodex` TUI
 

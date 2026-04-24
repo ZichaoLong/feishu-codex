@@ -211,6 +211,7 @@ feishu-codex purge
 - 当前没有绑定线程时，会在当前目录创建新线程
 - 当前已经绑定线程时，会继续写入该线程
 - 附件会先下载到当前工作目录的 `_feishu_attachments/`
+- `folder`、`sticker`、`merge_forward` 的子附件、`interactive` 卡片内资源，当前会直接拒绝为附件输入
 - 附件消息本身不会直接启动 turn；通常要再发一条文字说明来消费这些 pending 附件
 
 常用命令：
@@ -261,7 +262,7 @@ feishu-codex purge
 
 #### `fcodex`
 
-`fcodex` 的目标是尽量接近裸 `codex`：它负责 shared-backend 路由、实例选择、cwd 代理，以及少量 thread-wise profile 逻辑；它不再保留 shell 层 slash 自命令。
+`fcodex` 现在尽量接近裸 `codex`：它负责 shared-backend 路由、实例选择、cwd 代理，以及少量 thread-wise profile 逻辑；它不再保留 shell 层 slash 自命令。
 
 最常用的入口：
 
@@ -353,21 +354,21 @@ feishu-codexctl thread revoke --thread-id <id>
 
 ### Thread-wise `profile/provider`
 
-当前合同已经收敛为 thread-wise，而不是实例级 resume 默认值。
+当前正式合同已经是 thread-wise，而不是实例级 resume 默认值。
 
 请直接记住：
 
 - 飞书 `/profile <name>` 作用于**当前绑定 thread**，不是实例级全局默认值
 - 当前 chat 还没绑定 thread 时，`/profile` 会直接拒绝；先 `/new`，或先发第一条普通消息创建 thread
-- `/new` 与未绑定 chat 的第一条普通消息，都会把当前 default profile 作为这个新 thread 的一次性 seed
-- 新 thread 真正创建成功后，这个 seed 会按 `thread_id` 持久化成 thread-wise resume 设置
-- 后续 resume 读的是 thread 自己保存的 profile，而不是“当前实例此刻的默认 profile”
-- 对 loaded thread 改 profile 会直接拒绝；不会热切，也不会记一笔等下次偷偷生效
+- `/new` 与未绑定 chat 的第一条普通消息，都会把当前实例当前生效的“新线程默认 profile”作为这个新 thread 的一次性 seed
+- 新 thread 真正创建成功、拿到真实 `thread_id` 后，这个 seed 才会按 `thread_id` 持久化成 thread-wise resume 设置
+- 后续 resume 读的是 thread 自己保存的 profile，而不是实例此刻的“新线程默认 profile”
+- 只有目标 thread **可验证地 globally unloaded** 时才允许改 profile；loaded 或状态不可验证时都会直接拒绝，不会热切，也不会偷偷记账
 
 本地侧对应规则：
 
 - `fcodex -p <profile>`：给这次启动将创建的**第一个新 thread**做一次性 seed
-- `fcodex -p <profile> resume <thread>`：只有 thread 处于 globally unloaded 时才允许；成功后会写入该 thread 的持久化 resume profile
+- `fcodex -p <profile> resume <thread>`：只有 thread **可验证地 globally unloaded** 时才允许；成功后会写入该 thread 的持久化 resume profile
 - 如果目标 thread 仍 loaded，会直接拒绝，并提示先 `unsubscribe`、再关闭其他打开该 thread 的 `fcodex` TUI
 
 ### Sandbox / approval / permissions
@@ -382,14 +383,16 @@ feishu-codexctl thread revoke --thread-id <id>
 
 - 飞书侧设置是 binding 级的，并会随 binding 持久化
 - `fcodex` 侧仍主要按显式参数和 upstream Codex 配置生效
-- 谁实际发起下一轮 turn，谁带入自己的设置
-- TUI 内设置与飞书侧设置不是一个“即时同步的共享控制面”
+- 当前没有跨前端即时同步、统一持久化的设置面
+- 某一轮 turn 实际采用的是发起该轮的那个前端设置
 
 ### 避坑速记
 
 - `/new` 会立即创建新线程并切换当前 binding
 - `/rm` 实际调用的是 Codex archive，不是硬删除
 - `unsubscribe` 释放的是 Feishu runtime residency，不会清 binding，也不会删线程
+- `/profile` 改不了时，通常先 `/unsubscribe`，再关闭其他打开同一 thread 的 `fcodex` TUI
+- `folder`、`sticker`、`merge_forward` 子附件、`interactive` 卡片资源，当前不作为附件输入
 - `fcodex resume <name>` 与 TUI 内 `/resume` 不是一回事
 - 本地查线程请用 `feishu-codexctl thread list`，不要再找 `fcodex /session`
 - 本地切换 profile 请用 `-p/--profile`；不要再找 `fcodex /profile`

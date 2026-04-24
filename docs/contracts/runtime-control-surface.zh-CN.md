@@ -135,7 +135,7 @@
 - Feishu 服务已不再持有该 thread 的 runtime
 - 当前 backend 里 thread 也已 unload
 
-这是最典型的“可以重新切 profile 再恢复”的状态。
+这是最典型的“thread-wise profile 可写再恢复”的状态。
 
 #### `bound + released + idle/active`
 
@@ -184,9 +184,12 @@
 - 当前这个聊天绑定的 `binding`
 - 当前这个绑定所指 thread 的 `feishu runtime`
 - 当前 shared backend 中该 thread 的 `backend thread status`
+- 当前该 thread 是否有 `backend running turn`
 - 当前 `交互 owner`
 - 当前是否 `re-profile possible`
 - 当前是否允许执行 `/unsubscribe`
+
+其中，`re-profile possible` 的含义是：当前 thread-wise profile 写入是允许的，也就是该 thread **可验证地 globally unloaded**。如果 backend 不可达、状态读不到、或 loaded / unloaded 事实无法验证，就必须显示为 `no`，而不是模糊地放行。
 
 当 `/status` 或本地管理面需要解释某个 deny / blocked 结果时，可以同时暴露：
 
