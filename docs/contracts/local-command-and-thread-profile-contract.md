@@ -1,0 +1,412 @@
+# Local Command Surface And Thread-Wise Profile Contract
+
+Chinese original: `docs/contracts/local-command-and-thread-profile-contract.zh-CN.md`
+
+See also:
+
+- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/runtime-control-surface.md`
+- `docs/architecture/fcodex-shared-backend-runtime.md`
+- `docs/decisions/shared-backend-resume-safety.md`
+
+This document captures the command-surface and profile/provider direction that
+has already been discussed and accepted.
+
+It answers five questions:
+
+- why Feishu uses `unsubscribe` as the unified term
+- what shape `fcodex` should converge to as a thin wrapper
+- how `feishu-codexctl` and `fcodex` should be re-split
+- what the formal thread-wise `profile/provider` contract is
+- how Feishu and `fcodex` should divide `sandbox/approval` settings
+
+If the current implementation diverges from this document, treat that as a
+contract gap and tighten the code, the docs, or both.
+
+## 1. Scope And Priority
+
+This document only covers:
+
+- the local `fcodex` / `feishu-codexctl` command-surface split
+- the Feishu-side `unsubscribe` naming and semantics
+- the target contract for thread-wise `profile/provider`
+- the Feishu-vs-`fcodex` boundary for `sandbox/approval`
+
+For these topics, if this document conflicts with older wording in:
+
+- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/runtime-control-surface.md`
+
+this document wins.
+
+Those older docs should later be merged forward so the repository does not keep
+conflicting active contracts indefinitely.
+
+## 2. Feishu `unsubscribe`
+
+### 2.1 Naming
+
+The Feishu-side surface uses:
+
+- Feishu command: `/unsubscribe`
+- local admin CLI: `feishu-codexctl thread unsubscribe`
+
+The previous name was `/release-feishu-runtime`. The active contract now
+converges on `unsubscribe` because it matches the underlying action.
+
+### 2.2 Semantics
+
+`unsubscribe` means:
+
+- target: the thread currently bound by the chat
+- actual action: release `feishu-codex`'s Feishu-side runtime residency on that
+  thread and call `thread/unsubscribe`
+- keep the binding
+- if Feishu currently owns the interaction lease, clear that owner
+- move every still-`attached` related Feishu binding to `released`
+
+### 2.3 What It Does Not Do
+
+`unsubscribe` does not:
+
+- delete the thread
+- archive the thread
+- clear the current chat binding
+- force-close any `fcodex` TUI
+- force the backend to unload immediately
+
+Therefore:
+
+- a successful `unsubscribe` may still leave the thread loaded
+- the most common reason is that local `fcodex` is still subscribed
+
+## 3. Target Shape Of `fcodex`
+
+### 3.1 Overall Positioning
+
+`fcodex` should converge toward bare `codex`:
+
+- it is fundamentally a thin wrapper in front of stock `codex`
+- it is responsible for shared-backend routing, instance selection, cwd-fixing
+  proxying, and a small amount of startup-time thread-wise settings logic
+- it should no longer carry a broad local admin command surface
+
+In other words:
+
+- `fcodex` should feel as close to `codex` as practical
+- repository-specific mental overhead should stay limited to the minimum set
+  that the wrapper must own
+
+### 3.2 Command Surface
+
+`fcodex` should no longer keep slash self-commands such as `/help`, `/session`,
+`/rm`, or `/profile`.
+
+It should retain only two repository-specific capabilities:
+
+1. wrapper-level enhancement around `resume`
+2. thread-wise integration for `-p/--profile`
+
+Everything else should be passed through to upstream `codex` whenever possible.
+
+### 3.3 `resume`
+
+`fcodex resume` remains a command surface that this repository should own
+explicitly.
+
+Reason:
+
+- it must reuse shared backend / instance routing
+- it must support cross-provider thread discovery and exact resume
+- it must integrate with the thread-wise `profile/provider` contract
+
+But once the user is inside the running TUI:
+
+- TUI `/resume`
+- TUI `/new`
+- all other upstream commands
+
+belong to upstream behavior and should not be redefined into a parallel local
+product contract.
+
+## 4. Target Shape Of `feishu-codexctl`
+
+### 4.1 Overall Positioning
+
+`feishu-codexctl` is the local discovery / inspection / admin surface.
+
+It is not a second Codex frontend and should not be responsible for entering a
+TUI or continuing a live thread interactively.
+
+### 4.2 Responsibility
+
+Capabilities that should primarily live in `feishu-codexctl` include:
+
+- thread and binding inspection
+- local discovery and diagnosis
+- `unsubscribe`
+- admission management
+- other thread-scoped or binding-scoped admin actions
+
+This means:
+
+- `fcodex` owns attach / resume / entering Codex
+- `feishu-codexctl` owns inspection / diagnosis / management
+
+These are different responsibilities and should no longer be blurred into one
+entrypoint that both inspects, enters TUI sessions, and manages runtime state.
+
+## 5. Thread-Wise `profile/provider`
+
+### 5.1 Goal
+
+`profile/provider` should no longer use “instance-local default profile” as the
+primary product model.
+
+The target model is:
+
+- each thread carries its own thread-wise resume settings
+- those settings persist across future resumes
+- they are readable by both Feishu and `fcodex`
+- they are shared across instances rather than scoped to one instance-local
+  default
+
+### 5.2 What The Setting Means
+
+The thread-wise setting represents:
+
+- the expected configuration that should be used the next time this thread is
+  resumed from an unloaded state
+
+It is not:
+
+- the authoritative fact about the currently loaded live runtime
+- a guarantee that the provider/model is already in effect on a loaded thread
+
+So the correct mental model here is:
+
+- desired resume config
+
+not:
+
+- current runtime config
+
+### 5.3 Storage Scope
+
+Thread-wise `profile/provider` should be keyed by `thread_id` and stored in the
+machine-global shared layer.
+
+It should not belong to:
+
+- an instance-local default-profile store
+- a Feishu binding store
+- an `fcodex` process-local state bucket
+
+Reason:
+
+- thread ids already live in a cross-instance shared namespace
+- if settings remain instance-local or binding-local, operators will have to
+  remember which instance or chat “really” owns a thread's intended resume
+  config
+
+### 5.4 Stored Fields
+
+The thread-wise store should at least persist:
+
+- `profile`
+- `model`
+- `model_provider`
+- `updated_at`
+
+Where:
+
+- `profile` is the main user-facing control
+- `model` and `model_provider` are the resolved resume arguments derived from
+  that profile
+
+The primary write surface should be `profile`.
+
+`provider` should not become an independent parallel user-level write knob. It
+mainly exists as resolved data and resume inputs.
+
+### 5.5 When Writes Are Allowed
+
+Thread-wise `profile/provider` may only be changed when the thread is
+**globally unloaded**.
+
+More precisely:
+
+- it is not enough for the current instance backend to report `notLoaded`
+- the machine-global runtime layer must also show no live runtime owner for the
+  thread
+
+So the real condition is:
+
+- globally unloaded
+
+not merely:
+
+- current backend notLoaded
+
+### 5.6 Behavior While Loaded
+
+If the target thread is still loaded, the write must be rejected directly.
+
+The system must not:
+
+- hot-switch the provider on a loaded thread
+- silently record a future change to take effect later
+- perform a best-effort live rewrite of the current runtime
+
+Rejections should be direct and actionable.
+
+Recommended guidance:
+
+- Feishu side: run `unsubscribe`
+- local side: close every `fcodex` TUI still attached to that thread
+
+This contract intentionally prefers “explicit reject + clear operator guidance”
+over a long README explanation.
+
+### 5.7 Feishu Write Surface
+
+When a Feishu chat is currently bound to a thread:
+
+- `/profile <name>` should target that currently bound thread
+- if the thread is globally unloaded, it writes the thread-wise desired resume
+  config
+- if the thread is still loaded, it rejects with guidance
+
+When a Feishu chat has no bound thread:
+
+- `/profile` should reject directly
+- it should tell the user to run `/new` first, or send the first normal prompt to
+  create a thread
+- it must not silently fall back to “instance default profile”
+
+That rejection rule applies to:
+
+- `/profile`
+- `/profile <name>`
+- profile card button actions
+
+### 5.7.1 Feishu `/new` And First-Prompt Seeding
+
+Feishu has two entry points that create a new thread:
+
+- `/new`
+- the first normal prompt in an unbound chat
+
+Both must follow the same seed contract:
+
+- thread creation may still use the current instance effective default profile
+  as the creation-time argument
+- once the real `thread_id` is known, that default profile must immediately be
+  resolved and persisted into the thread-wise store
+- that write belongs only to the new thread; it must not be staged in some
+  binding-level or instance-level temporary state
+
+Therefore:
+
+- `/new` and “send the first prompt directly” must not create two different new
+  thread profile semantics
+- if the user later wants to switch that thread's profile, they should still go
+  through `unsubscribe` / `/profile <name>` / `resume`
+
+### 5.8 `fcodex resume -p <profile>`
+
+When `fcodex resume <thread>` is given an explicit `-p/--profile`:
+
+- if the target thread is globally unloaded:
+  - resolve the profile to `model/model_provider`
+  - write the thread-wise desired resume config
+  - then resume the thread using that config
+- if the target thread is still loaded:
+  - reject directly
+  - tell the user to release Feishu subscriptions and close every still-open
+    `fcodex` TUI attached to the thread
+
+This contract intentionally forbids hidden “record now, maybe apply later”
+behavior for loaded threads.
+
+### 5.9 `fcodex -p <profile>` Starting A New Session
+
+When the user runs:
+
+- `fcodex -p <profile>`
+
+and this launch creates a new thread rather than resuming an existing one:
+
+- that `-p/--profile` acts only as a one-time seed
+- it affects only the **first new thread created by this launch**
+
+Once that first new thread has been created successfully and the thread-wise
+store has been updated:
+
+- the seed is considered consumed
+- it must not keep affecting later upstream `/new` actions inside the same TUI
+
+This document intentionally avoids trying to redefine the entire later TUI
+lifecycle under repository-local semantics.
+
+### 5.10 When The Seed Is Written
+
+The `fcodex -p <profile>` seed should not be written into some binding-level or
+instance-level temporary state before a thread id exists.
+
+The correct write point is:
+
+- the first `thread/start` succeeds
+- the new thread id is known
+- then the seed is resolved and persisted into the thread-wise store
+
+This contract intentionally avoids ambiguous “pending placeholder” designs that
+guess later which thread they were supposed to belong to.
+
+### 5.11 What If The Write Fails
+
+If:
+
+- `thread/start` already succeeded
+- but the thread-wise store write failed
+
+then:
+
+- the new thread itself remains valid
+- but the system must explicitly surface that the thread was created while the
+  thread-wise setting was not successfully persisted
+- it must not silently pretend that the seed was stored
+
+This contract does not require rolling back the already-created thread.
+
+## 6. `sandbox/approval` Boundary
+
+This design round confirms:
+
+- Feishu-side per-binding `sandbox/approval` settings should remain
+  binding-scoped and persisted across restarts
+- `fcodex` should not introduce an owner-wise cross-frontend shared persistent
+  settings plane
+
+`fcodex` should continue to behave as:
+
+- defaulting to `CODEX_HOME/config.toml`
+- explicit flags overriding defaults
+- no shared persistent settings plane with Feishu
+
+Therefore:
+
+- Feishu-side `sandbox/approval` and `fcodex` defaults are intentionally
+  separate
+- whichever frontend actually starts a turn is the frontend whose settings are
+  carried into that turn
+
+## 7. Questions Intentionally Deferred
+
+This document intentionally does **not** finalize:
+
+- whether a dedicated read-only thread-wise profile inspection command is
+  needed
+
+These topics should be tightened separately rather than being filled in by
+implicit guesswork.

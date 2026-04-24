@@ -56,6 +56,8 @@ _HISTORY_TEXT_MAX = 300
 _PLAN_CONTENT_MAX = 4000
 _SHARED_HELP_COMMAND = get_shared_command("help")
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
+_LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
+_LOCAL_RESUME_COMMAND = "fcodex resume <thread_id|thread_name>"
 
 
 def _card_config() -> dict:
@@ -95,8 +97,9 @@ def build_profile_card(
     content: str,
     profile_names: list[str],
     current_profile: str,
+    title: str = "Codex Thread Profile",
 ) -> dict:
-    """构造默认 profile 选择卡片。"""
+    """构造 profile 选择卡片。"""
     elements: list[dict] = [
         {"tag": "markdown", "content": content},
     ]
@@ -124,7 +127,7 @@ def build_profile_card(
     return {
         "config": _card_config(),
         "header": {
-            "title": {"tag": "plain_text", "content": "Codex 默认 Profile"},
+            "title": {"tag": "plain_text", "content": title},
             "template": "blue",
         },
         "elements": elements,
@@ -1089,7 +1092,8 @@ def build_sessions_card(
                 "已按当前目录跨 provider 汇总显示线程。\n"
                 f"按最近更新时间排序，共 {total_count} 个线程。\n"
                 f"想恢复其他目录的线程，或按名字做全局精确查找，请用 `{_SHARED_RESUME_COMMAND.feishu_usage}`。\n"
-                f"如需在本地继续同一线程，请使用 `fcodex`；本地 wrapper 命令请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`。"
+                f"如需在本地继续同一线程，请用 `{_LOCAL_RESUME_COMMAND}`；"
+                f"本地查看线程请用 `{_LOCAL_THREAD_LIST_CWD}`。"
             ),
         },
         {"tag": "hr"},

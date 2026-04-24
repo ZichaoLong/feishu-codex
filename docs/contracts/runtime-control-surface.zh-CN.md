@@ -7,7 +7,7 @@
 
 - `/status` 到底在描述哪些状态
 - `/preflight` 可以 dry-run 什么，不可以改变什么
-- `/release-feishu-runtime` 具体释放什么，不释放什么
+- `/unsubscribe` 具体释放什么，不释放什么
 - 为什么本地管理 CLI 必须通过正在运行的 `feishu-codex` 服务，而不能自己直连 app-server 做释放
 
 另见：
@@ -102,7 +102,9 @@
 
 旧的 `Feishu 写入 owner` 不再是独立产品概念；Feishu prompt 准入也不再额外维护一层 Feishu-only 写入租约。
 
-### 3.2 两类事实的对照
+## 3. 状态组合与转移
+
+### 3.1 两类事实的对照
 
 | 事实 | 作用范围 | 它回答的问题 | 在 `feishu runtime == released` 时还能存在吗？ |
 | --- | --- | --- | --- |
@@ -114,18 +116,18 @@
 - `attached + 无 owner` 是完全合法的 idle 稳态
 - `released + 外部交互 owner` 也完全合法，表示别的前端仍在持有 live thread
 
-### 3.3 几个必须明确接受的有效组合
+### 3.2 几个必须明确接受的有效组合
 
-### `bound + attached + idle + 无 owner`
+#### `bound + attached + idle + 无 owner`
 
 表示当前 chat 仍指向该 thread，Feishu 仍附着，但没有正在运行的 turn owner。
 这是 turn 结束后的正常 idle 稳态。
 
-### `bound + attached + active + 当前 binding 是 owner`
+#### `bound + attached + active + 当前 binding 是 owner`
 
 表示当前 binding 持有跨前端交互租约，正在执行这一轮 turn。
 
-### `bound + released + notLoaded`
+#### `bound + released + notLoaded`
 
 表示：
 
@@ -135,7 +137,7 @@
 
 这是最典型的“可以重新切 profile 再恢复”的状态。
 
-### `bound + released + idle/active`
+#### `bound + released + idle/active`
 
 表示：
 
@@ -145,7 +147,7 @@
 
 因此，`released` 不保证 backend 一定 `notLoaded`。
 
-### 3.4 正式状态转移表
+### 3.3 正式状态转移表
 
 下表是 Feishu 侧状态迁移的权威合同。
 
@@ -155,19 +157,19 @@
 | `unbound` | `not-applicable` | 任意 | `/resume <thread>` | 目标解析成功且允许恢复 | `bound` | `attached` | 通常为 `idle` | 当前 chat 绑定切到目标 thread |
 | `bound` | `attached` | `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 获取交互 owner |
 | `bound` | `attached` | `active` | turn 终态事件 | 无 | `bound` | `attached` | 通常为 `idle` | 清理交互 owner；binding 与附着保持不变 |
-| `bound` | `attached` | `idle` 或 `active` | `/release-feishu-runtime` | 当前没有 Feishu 侧运行中的 turn，且没有待处理审批 / 输入 | `bound` | `released` | `notLoaded`、`idle` 或 `active` | release 释放的是整个运行中 Feishu 服务对该 thread 的 runtime 持有 |
+| `bound` | `attached` | `idle` 或 `active` | `/unsubscribe` | 当前没有 Feishu 侧运行中的 turn，且没有待处理审批 / 输入 | `bound` | `released` | `notLoaded`、`idle` 或 `active` | unsubscribe 释放的是整个运行中 Feishu 服务对该 thread 的 runtime 持有 |
 | `bound` | `released` | `notLoaded` 或 `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 先重新附着 / resume，再启动 turn |
 | `bound` | `released` | 任意 | 普通 prompt | prompt preflight 被拒绝 | 不变 | 不变 | 不变 | 纯拒绝：不得 resume，不得新增 subscriber，不得把 `released` 改成 `attached` |
 | `bound` | `attached` 或 `released` | 任意 | `/new` 或 `/resume <other>` | 被接受 | 绑定到另一 thread | `attached` | 通常为 `idle` | 当前 binding 切换到新目标 |
 | `bound` | `attached` 或 `released` | 任意 | 显式清空 / 归档当前 binding / chat unavailable 清理 | 被接受 | `unbound` | `not-applicable` | 对该 Feishu binding 来说为 `not-applicable` | 清理 Feishu 侧 binding 以及本地执行锚点 |
 
-### 3.5 不允许含糊的规则
+### 3.4 不允许含糊的规则
 
 - `all` 模式独占是按“当前 thread 上的 Feishu runtime 占用”判断，不按一个仅被记住的 `bound + released` bookmark 判断。
 - 被拒绝的 prompt 必须是 pure reject。
   它不能调用 `thread/resume`，不能新增 Feishu subscriber，也不能把
   `feishu runtime` 从 `released` 改成 `attached`。
-- `release-feishu-runtime` 释放的是 Feishu 的 runtime residency，并在当前 owner 是 Feishu 时清除交互 owner；
+- `unsubscribe` 释放的是 Feishu 的 runtime residency，并在当前 owner 是 Feishu 时清除交互 owner；
   它不会抹掉 chat 仍指向哪个 thread 的 binding bookmark。
 
 ## 4. `/status` 合同
@@ -184,7 +186,7 @@
 - 当前 shared backend 中该 thread 的 `backend thread status`
 - 当前 `交互 owner`
 - 当前是否 `re-profile possible`
-- 当前是否允许执行 `/release-feishu-runtime`
+- 当前是否允许执行 `/unsubscribe`
 
 当 `/status` 或本地管理面需要解释某个 deny / blocked 结果时，可以同时暴露：
 
@@ -209,17 +211,17 @@
 - 清理或写入本地 profile 状态
 
 它复用与普通 prompt 相同的 prompt preflight 检查，并复用
-`/release-feishu-runtime` 的 availability 检查；展示结果时可以暴露同一套
+`/unsubscribe` 的 availability 检查；展示结果时可以暴露同一套
 `reason_code` 与人类可读说明。
 
 如果当前 binding 是 `bound + released`，`/preflight` 只能说明下一条普通消息是否会被接受。
 它本身不能把 `released` 改成 `attached`。
 
-## 5. `/release-feishu-runtime` 精确合同
+## 5. `/unsubscribe` 精确合同
 
 ### 5.1 作用对象
 
-飞书 `/release-feishu-runtime`：
+飞书 `/unsubscribe`：
 
 - 不带参数
 - 作用于“当前 chat 绑定的 thread”
@@ -326,7 +328,7 @@
 - `feishu-codexctl binding clear-all`
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
-- `feishu-codexctl thread release-feishu-runtime (--thread-id <id> | --thread-name <name>)`
+- `feishu-codexctl thread unsubscribe (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread admissions`
 - `feishu-codexctl thread import (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread revoke (--thread-id <id> | --thread-name <name>)`
@@ -349,7 +351,7 @@
 这类动作的正式合同是：
 
 - 它属于 `binding` 层，不属于 `thread runtime` 层
-- 它不等于 `/release-feishu-runtime`
+- 它不等于 `/unsubscribe`
 - 它的正式入口应属于本地管理面 `feishu-codexctl`
 
 因此，正式控制面收敛为：
@@ -367,12 +369,12 @@
 
 - 删除 Codex thread
 - archive thread
-- 替代 `/release-feishu-runtime`
+- 替代 `/unsubscribe`
 - 替代 thread 级管理命令
 
 明确区分：
 
-- `/release-feishu-runtime`
+- `/unsubscribe`
   - 释放的是 Feishu 对某个 thread 的 runtime 持有
   - 不清空 binding
 - `binding clear/clear-all`

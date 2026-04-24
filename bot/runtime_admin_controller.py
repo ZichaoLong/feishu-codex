@@ -14,18 +14,17 @@ from bot.reason_codes import (
     BINDING_CLEAR_BLOCKED_BY_INFLIGHT_TURN,
     BINDING_CLEAR_BLOCKED_BY_PENDING_REQUEST,
     PROMPT_DENIED_BY_RUNNING_TURN,
-    RELEASE_BLOCKED_BY_INFLIGHT_TURN,
-    RELEASE_BLOCKED_BY_PENDING_REQUEST,
-    RELEASE_NOT_APPLICABLE_NO_BINDING,
-    RELEASE_NOT_APPLICABLE_ALREADY_RELEASED,
-    RELEASE_NOT_APPLICABLE_NO_THREAD,
+    UNSUBSCRIBE_BLOCKED_BY_INFLIGHT_TURN,
+    UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST,
+    UNSUBSCRIBE_NOT_APPLICABLE_NO_BINDING,
+    UNSUBSCRIBE_NOT_APPLICABLE_ALREADY_RELEASED,
+    UNSUBSCRIBE_NOT_APPLICABLE_NO_THREAD,
     ReasonedCheck,
 )
 from bot.runtime_state import (
     BACKEND_THREAD_STATUS_ACTIVE,
     BACKEND_THREAD_LOOKUP_ERROR,
     BACKEND_THREAD_LOOKUP_MISSING,
-    BACKEND_THREAD_STATUS_NOT_LOADED,
     BACKEND_THREAD_STATUS_UNKNOWN,
     FEISHU_RUNTIME_ATTACHED,
     FEISHU_RUNTIME_RELEASED,
@@ -66,6 +65,7 @@ class RuntimeAdminController:
         cancel_patch_timer_locked: Callable[[RuntimeState], None],
         cancel_mirror_watchdog_locked: Callable[[RuntimeState], None],
         is_thread_not_found_error: Callable[[Exception], bool],
+        reprofile_possible_check: Callable[[str], tuple[bool, str]],
     ) -> None:
         self._lock = lock
         self._binding_runtime = binding_runtime
@@ -90,6 +90,7 @@ class RuntimeAdminController:
         self._cancel_patch_timer_locked = cancel_patch_timer_locked
         self._cancel_mirror_watchdog_locked = cancel_mirror_watchdog_locked
         self._is_thread_not_found_error = is_thread_not_found_error
+        self._reprofile_possible_check = reprofile_possible_check
 
     @staticmethod
     def binding_has_inflight_turn_locked(state: RuntimeState) -> bool:
@@ -128,17 +129,17 @@ class RuntimeAdminController:
             return None, BACKEND_THREAD_LOOKUP_ERROR
         return summary, str(summary.status or BACKEND_THREAD_STATUS_UNKNOWN).strip() or BACKEND_THREAD_STATUS_UNKNOWN
 
-    def release_feishu_runtime_check_locked(self, thread_id: str) -> ReasonedCheck:
+    def unsubscribe_check_locked(self, thread_id: str) -> ReasonedCheck:
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
             return ReasonedCheck.deny(
-                RELEASE_NOT_APPLICABLE_NO_THREAD,
+                UNSUBSCRIBE_NOT_APPLICABLE_NO_THREAD,
                 "当前没有绑定线程。",
             )
         attached_bindings = self.attached_bindings_for_thread_locked(normalized_thread_id)
         if not attached_bindings:
             return ReasonedCheck.deny(
-                RELEASE_NOT_APPLICABLE_ALREADY_RELEASED,
+                UNSUBSCRIBE_NOT_APPLICABLE_ALREADY_RELEASED,
                 "当前 thread 的 Feishu runtime 已经是 `released`。",
             )
         for binding in attached_bindings:
@@ -147,18 +148,18 @@ class RuntimeAdminController:
                 continue
             if snapshot.has_inflight_turn:
                 return ReasonedCheck.deny(
-                    RELEASE_BLOCKED_BY_INFLIGHT_TURN,
+                    UNSUBSCRIBE_BLOCKED_BY_INFLIGHT_TURN,
                     "当前有飞书侧 turn 正在运行，不能释放 runtime。",
                 )
         if self._interaction_requests.thread_has_pending_request_locked(normalized_thread_id):
             return ReasonedCheck.deny(
-                RELEASE_BLOCKED_BY_PENDING_REQUEST,
+                UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST,
                 "当前还有飞书侧审批或输入请求未处理，不能释放 runtime。",
             )
         return ReasonedCheck.allow()
 
-    def release_feishu_runtime_availability_locked(self, thread_id: str) -> tuple[bool, str]:
-        check = self.release_feishu_runtime_check_locked(thread_id)
+    def unsubscribe_availability_locked(self, thread_id: str) -> tuple[bool, str]:
+        check = self.unsubscribe_check_locked(thread_id)
         return check.allowed, check.reason_text
 
     def binding_has_pending_request_locked(self, binding: ChatBindingKey) -> bool:
@@ -268,7 +269,7 @@ class RuntimeAdminController:
     def binding_status_snapshot(self, binding: ChatBindingKey) -> dict[str, Any]:
         with self._lock:
             snapshot = self._binding_runtime.binding_status_state_snapshot_locked(binding)
-            release_check = self.release_feishu_runtime_check_locked(str(snapshot["thread_id"] or "").strip())
+            unsubscribe_check = self.unsubscribe_check_locked(str(snapshot["thread_id"] or "").strip())
             prompt_check = self.binding_prompt_check_locked(binding)
         thread_id = str(snapshot["thread_id"] or "").strip()
         summary, backend_thread_status = self.read_thread_summary_for_status(thread_id)
@@ -277,12 +278,10 @@ class RuntimeAdminController:
             snapshot["working_dir"] = summary.cwd or str(snapshot["working_dir"] or "").strip()
         snapshot["backend_thread_status"] = backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN
         snapshot["backend_running_turn"] = backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE
-        snapshot["reprofile_possible"] = bool(
-            thread_id and backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED
-        )
-        snapshot["release_feishu_runtime_available"] = bool(thread_id and release_check.allowed)
-        snapshot["release_feishu_runtime_reason_code"] = release_check.reason_code
-        snapshot["release_feishu_runtime_reason"] = release_check.reason_text
+        snapshot["reprofile_possible"] = bool(thread_id and self._reprofile_possible_check(thread_id)[0])
+        snapshot["unsubscribe_available"] = bool(thread_id and unsubscribe_check.allowed)
+        snapshot["unsubscribe_reason_code"] = unsubscribe_check.reason_code
+        snapshot["unsubscribe_reason"] = unsubscribe_check.reason_text
         snapshot["next_prompt_allowed"] = prompt_check.allowed
         snapshot["next_prompt_reason_code"] = prompt_check.reason_code
         snapshot["next_prompt_reason"] = prompt_check.reason_text
@@ -310,14 +309,14 @@ class RuntimeAdminController:
             f"交互 owner：`{snapshot['interaction_owner']['label']}`",
             f"re-profile possible：`{'yes' if snapshot['reprofile_possible'] else 'no'}`",
             (
-                "release-feishu-runtime：`available`"
-                if snapshot["release_feishu_runtime_available"]
+                "unsubscribe：`available`"
+                if snapshot["unsubscribe_available"]
                 else (
-                    "release-feishu-runtime："
-                    f"`blocked` (`{snapshot['release_feishu_runtime_reason_code']}`) {snapshot['release_feishu_runtime_reason']}"
+                    "unsubscribe："
+                    f"`blocked` (`{snapshot['unsubscribe_reason_code']}`) {snapshot['unsubscribe_reason']}"
                 )
                 if thread_id
-                else "release-feishu-runtime：`not-applicable`"
+                else "unsubscribe：`not-applicable`"
             ),
             (
                 "当前直接提问：`accepted`"
@@ -337,7 +336,7 @@ class RuntimeAdminController:
             local_profile = profile_resolution.effective_profile
             lines.extend(
                 [
-                    f"默认 profile：`{local_profile or '（未设置）'}`",
+                    f"新 thread seed profile：`{local_profile or '（未设置）'}`",
                     (
                         f"当前 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
                         if runtime_config
@@ -351,14 +350,14 @@ class RuntimeAdminController:
             )
             if profile_resolution.stale_profile:
                 lines.append(
-                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。"
+                    f"注意：之前保存的新 thread seed profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。"
                 )
         if snapshot["running_turn"]:
             next_step = "如需停止当前执行，可点当前执行卡片上的停止按钮。"
         elif binding_state == "unbound":
             next_step = "直接发送普通文本，会在当前目录自动新建线程。"
         else:
-            next_step = "发送 `/help session` 查看线程恢复、释放 runtime 与本地继续规则。"
+            next_step = "发送 `/help session` 查看线程恢复、unsubscribe 与本地继续规则。"
         lines.extend(["", next_step])
         template = "turquoise" if snapshot["running_turn"] else "blue"
         return "\n".join(lines), template
@@ -384,13 +383,13 @@ class RuntimeAdminController:
     @staticmethod
     def _release_preflight_line(snapshot: dict[str, Any]) -> str:
         if not snapshot["thread_id"]:
-            return "release-feishu-runtime：`not-applicable`，当前没有绑定 thread。"
-        if snapshot["release_feishu_runtime_available"]:
-            return "release-feishu-runtime：`available`"
+            return "unsubscribe：`not-applicable`，当前没有绑定 thread。"
+        if snapshot["unsubscribe_available"]:
+            return "unsubscribe：`available`"
         return (
-            "release-feishu-runtime："
-            f"`blocked` (`{snapshot['release_feishu_runtime_reason_code']}`) "
-            f"{snapshot['release_feishu_runtime_reason']}"
+            "unsubscribe："
+            f"`blocked` (`{snapshot['unsubscribe_reason_code']}`) "
+            f"{snapshot['unsubscribe_reason']}"
         )
 
     def render_binding_preflight_markdown(
@@ -422,7 +421,7 @@ class RuntimeAdminController:
             lines.extend(
                 [
                     "",
-                    f"默认 profile：`{local_profile or '（未设置）'}`",
+                    f"新 thread seed profile：`{local_profile or '（未设置）'}`",
                     f"权限预设：`{self._permissions_summary(snapshot['approval_policy'], snapshot['sandbox'])}`",
                     f"审批策略：`{snapshot['approval_policy']}`",
                     f"沙箱策略：`{snapshot['sandbox']}`",
@@ -431,7 +430,7 @@ class RuntimeAdminController:
             )
             if profile_resolution.stale_profile:
                 lines.append(
-                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，实际执行会回退到 Codex 原生默认。"
+                    f"注意：之前保存的新 thread seed profile `{profile_resolution.stale_profile}` 已不存在，实际执行会回退到 Codex 原生默认。"
                 )
         if thread_id and snapshot["feishu_runtime_state"] == FEISHU_RUNTIME_RELEASED:
             lines.extend(
@@ -450,15 +449,15 @@ class RuntimeAdminController:
         content, template = self.render_binding_preflight_markdown(snapshot, include_profile_lines=True)
         return CommandResult(card=build_markdown_card("Codex Preflight", content, template=template))
 
-    def handle_release_feishu_runtime_command(self, binding: ChatBindingKey, arg: str) -> CommandResult:
+    def handle_unsubscribe_command(self, binding: ChatBindingKey, arg: str) -> CommandResult:
         if str(arg or "").strip():
-            return CommandResult(text="用法：`/release-feishu-runtime`")
+            return CommandResult(text="用法：`/unsubscribe`")
         snapshot = self.binding_status_snapshot(binding)
         thread_id = str(snapshot["thread_id"] or "").strip()
         if not thread_id:
             return CommandResult(text="当前没有绑定线程，无需释放 Feishu runtime。")
         try:
-            result = self.release_feishu_runtime_by_thread_id(thread_id)
+            result = self.unsubscribe_feishu_runtime_by_thread_id(thread_id)
         except ValueError as exc:
             return CommandResult(text=str(exc))
         body = [
@@ -476,7 +475,7 @@ class RuntimeAdminController:
             body.append("说明：Feishu 已释放自己对该 thread 的 runtime 持有；绑定关系仍保留，之后可继续 resume。")
         return CommandResult(
             card=build_markdown_card(
-                "Codex Feishu Runtime 已释放",
+                "Codex 已取消 Feishu 订阅",
                 "\n".join(body),
                 template="green" if result["changed"] else "blue",
             )
@@ -486,12 +485,12 @@ class RuntimeAdminController:
         self._cancel_patch_timer_locked(state)
         self._cancel_mirror_watchdog_locked(state)
 
-    def release_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
+    def unsubscribe_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
         normalized_thread_id = str(thread_id or "").strip()
         with self._lock:
-            result = self._binding_runtime.release_feishu_runtime_by_thread_id_locked(
+            result = self._binding_runtime.unsubscribe_feishu_runtime_by_thread_id_locked(
                 normalized_thread_id,
-                release_feishu_runtime_availability=self.release_feishu_runtime_availability_locked,
+                unsubscribe_availability=self.unsubscribe_availability_locked,
                 on_release_binding_state=self._release_binding_runtime_state_locked,
             )
         if result.unsubscribe_thread_id:
@@ -503,7 +502,7 @@ class RuntimeAdminController:
         if resolved_summary is not None:
             thread_title = resolved_summary.title or thread_title
             working_dir = resolved_summary.cwd or working_dir
-        release_check = self.release_feishu_runtime_check_locked(normalized_thread_id)
+        unsubscribe_check = self.unsubscribe_check_locked(normalized_thread_id)
         return {
             "thread_id": result.thread_id,
             "thread_title": thread_title,
@@ -514,8 +513,8 @@ class RuntimeAdminController:
             "already_released": result.already_released,
             "backend_thread_status": backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN,
             "backend_still_loaded": backend_thread_status in LOADED_BACKEND_THREAD_STATUSES,
-            "reprofile_possible": backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED,
-            "release_feishu_runtime_reason_code": "" if result.changed else release_check.reason_code,
+            "reprofile_possible": self._reprofile_possible_check(normalized_thread_id)[0],
+            "unsubscribe_reason_code": "" if result.changed else unsubscribe_check.reason_code,
         }
 
     def thread_status_snapshot(
@@ -528,13 +527,13 @@ class RuntimeAdminController:
         with self._lock:
             snapshot = self._binding_runtime.thread_binding_snapshot_locked(
                 normalized_thread_id,
-                release_feishu_runtime_availability=self.release_feishu_runtime_availability_locked,
+                unsubscribe_availability=self.unsubscribe_availability_locked,
             )
         resolved_summary, backend_thread_status = self.read_thread_summary_for_status(normalized_thread_id)
         effective_summary = resolved_summary or summary
-        release_reason_code = self.release_feishu_runtime_check_locked(normalized_thread_id).reason_code
+        unsubscribe_reason_code = self.unsubscribe_check_locked(normalized_thread_id).reason_code
         if not snapshot["bound_binding_ids"]:
-            release_reason_code = RELEASE_NOT_APPLICABLE_NO_BINDING
+            unsubscribe_reason_code = UNSUBSCRIBE_NOT_APPLICABLE_NO_BINDING
         return {
             "thread_id": snapshot["thread_id"],
             "thread_title": effective_summary.title if effective_summary is not None else "",
@@ -545,10 +544,10 @@ class RuntimeAdminController:
             "attached_binding_ids": snapshot["attached_binding_ids"],
             "released_binding_ids": snapshot["released_binding_ids"],
             "interaction_owner": snapshot["interaction_owner"],
-            "reprofile_possible": backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED,
-            "release_feishu_runtime_available": snapshot["release_feishu_runtime_available"],
-            "release_feishu_runtime_reason_code": release_reason_code,
-            "release_feishu_runtime_reason": snapshot["release_feishu_runtime_reason"],
+            "reprofile_possible": self._reprofile_possible_check(normalized_thread_id)[0],
+            "unsubscribe_available": snapshot["unsubscribe_available"],
+            "unsubscribe_reason_code": unsubscribe_reason_code,
+            "unsubscribe_reason": snapshot["unsubscribe_reason"],
         }
 
     def handle_service_control_request(self, method: str, params: dict[str, Any]) -> Any:
@@ -598,7 +597,7 @@ class RuntimeAdminController:
             return self.clear_binding_for_control(binding)
         if method == "binding/clear-all":
             return self.clear_all_bindings_for_control()
-        if method in {"thread/status", "thread/bindings", "thread/release-feishu-runtime"}:
+        if method in {"thread/status", "thread/bindings", "thread/unsubscribe"}:
             thread = self._resolve_thread_target_for_control_params(params)
             if method == "thread/status":
                 return self.thread_status_snapshot(thread.thread_id, summary=thread)
@@ -620,7 +619,7 @@ class RuntimeAdminController:
                         for binding_id in snapshot["bound_binding_ids"]
                     ],
                 }
-            return self.release_feishu_runtime_by_thread_id(thread.thread_id)
+            return self.unsubscribe_feishu_runtime_by_thread_id(thread.thread_id)
         if method == "thread/admissions":
             return {"instance_name": self._instance_name(), "thread_ids": list(self._admitted_thread_ids())}
         if method == "thread/import":

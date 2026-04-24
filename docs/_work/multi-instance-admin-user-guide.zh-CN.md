@@ -119,7 +119,7 @@ feishu-codexctl --instance corp-b thread revoke --thread-id <thread_id>
 
 - `import`
   - 让某个共享 thread 进入该实例的 admitted 范围
-  - 不等于立即获取写入租约
+  - 不等于立即获取 live runtime lease
   - 不等于立即把该 thread load 进该实例 backend
 - `revoke`
   - 让该 thread 不再对这个实例的 Feishu 命令面默认可见
@@ -152,7 +152,7 @@ feishu-codexctl --instance corp-b thread revoke --thread-id <thread_id>
 - **看见同一个 thread，可以接受**
 - **同时把它变成两个 live backend runtime，不可以接受**
 
-### 3.6 写入租约如何流转
+### 3.6 live runtime lease 如何流转
 
 建议采用下面这条尽量顺手、但仍保持 fail-closed 的工作流：
 
@@ -265,7 +265,7 @@ feishu-codexctl --instance corp-b thread revoke --thread-id <thread_id>
 ```bash
 fcodex
 fcodex resume <thread_id>
-fcodex /resume <thread_name>
+fcodex resume <thread_name>
 fcodex --instance corp-a
 fcodex --instance corp-b resume <thread_id>
 ```

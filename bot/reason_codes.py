@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-RELEASE_NOT_APPLICABLE_NO_THREAD = "release_not_applicable_no_thread"
-RELEASE_NOT_APPLICABLE_NO_BINDING = "release_not_applicable_no_binding"
-RELEASE_NOT_APPLICABLE_ALREADY_RELEASED = "release_not_applicable_already_released"
-RELEASE_BLOCKED_BY_INFLIGHT_TURN = "release_blocked_by_inflight_turn"
-RELEASE_BLOCKED_BY_PENDING_REQUEST = "release_blocked_by_pending_request"
+UNSUBSCRIBE_NOT_APPLICABLE_NO_THREAD = "unsubscribe_not_applicable_no_thread"
+UNSUBSCRIBE_NOT_APPLICABLE_NO_BINDING = "unsubscribe_not_applicable_no_binding"
+UNSUBSCRIBE_NOT_APPLICABLE_ALREADY_RELEASED = "unsubscribe_not_applicable_already_released"
+UNSUBSCRIBE_BLOCKED_BY_INFLIGHT_TURN = "unsubscribe_blocked_by_inflight_turn"
+UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST = "unsubscribe_blocked_by_pending_request"
 
 BINDING_CLEAR_BLOCKED_BINDING_NOT_FOUND = "binding_clear_blocked_binding_not_found"
 BINDING_CLEAR_BLOCKED_BY_INFLIGHT_TURN = "binding_clear_blocked_by_inflight_turn"

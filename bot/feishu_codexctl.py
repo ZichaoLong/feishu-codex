@@ -6,15 +6,19 @@ import argparse
 import os
 import pathlib
 import sys
+from dataclasses import replace
 from typing import Any
 
+from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
+from bot.config import load_config_file
 from bot.constants import display_path
 from bot.env_file import load_env_file
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, resolve_instance_paths, validate_instance_name
 from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
 from bot.platform_paths import default_data_root
+from bot.session_resolution import list_current_dir_threads, list_global_threads
 from bot.service_control_plane import ServiceControlError, control_request
-from bot.stores.app_server_runtime_store import AppServerRuntimeStore
+from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.service_instance_lease import ServiceInstanceLease
 
 
@@ -48,6 +52,18 @@ def _resolve_target_data_dir(explicit_instance: str | None) -> pathlib.Path:
 
 def _request(data_dir: pathlib.Path, method: str, params: dict[str, Any] | None = None) -> Any:
     return control_request(data_dir, method, params)
+
+
+def _remote_adapter(data_dir: pathlib.Path) -> tuple[CodexAppServerAdapter, dict[str, Any], str]:
+    cfg = load_config_file("codex")
+    configured_url = str(cfg.get("app_server_url", "ws://127.0.0.1:8765")).strip() or "ws://127.0.0.1:8765"
+    app_server_url = resolve_effective_app_server_url(configured_url, data_dir=data_dir)
+    config = replace(
+        CodexAppServerConfig.from_dict(cfg),
+        app_server_mode="remote",
+        app_server_url=app_server_url,
+    )
+    return CodexAppServerAdapter(config), cfg, app_server_url
 
 
 def _thread_target_params(args: argparse.Namespace) -> dict[str, str]:
@@ -133,12 +149,12 @@ def _print_binding_status(data_dir: pathlib.Path, binding_id: str) -> int:
         print(f"next prompt reason: {snapshot['next_prompt_reason']}")
     print(f"re-profile possible: {'yes' if snapshot['reprofile_possible'] else 'no'}")
     if snapshot["thread_id"]:
-        availability = "available" if snapshot["release_feishu_runtime_available"] else "blocked"
-        print(f"release-feishu-runtime: {availability}")
-        if snapshot["release_feishu_runtime_reason_code"]:
-            print(f"release reason code: {snapshot['release_feishu_runtime_reason_code']}")
-        if snapshot["release_feishu_runtime_reason"]:
-            print(f"release reason: {snapshot['release_feishu_runtime_reason']}")
+        availability = "available" if snapshot["unsubscribe_available"] else "blocked"
+        print(f"unsubscribe: {availability}")
+        if snapshot["unsubscribe_reason_code"]:
+            print(f"unsubscribe reason code: {snapshot['unsubscribe_reason_code']}")
+        if snapshot["unsubscribe_reason"]:
+            print(f"unsubscribe reason: {snapshot['unsubscribe_reason']}")
     print(f"approval_policy: {snapshot['approval_policy']}")
     print(f"sandbox: {snapshot['sandbox']}")
     print(f"collaboration_mode: {snapshot['collaboration_mode']}")
@@ -173,12 +189,12 @@ def _print_thread_status(data_dir: pathlib.Path, target_params: dict[str, str]) 
     print(f"released bindings: {', '.join(snapshot['released_binding_ids']) or '（无）'}")
     print(f"interaction owner: {snapshot['interaction_owner']['label']}")
     print(f"re-profile possible: {'yes' if snapshot['reprofile_possible'] else 'no'}")
-    availability = "available" if snapshot["release_feishu_runtime_available"] else "blocked"
-    print(f"release-feishu-runtime: {availability}")
-    if snapshot["release_feishu_runtime_reason_code"]:
-        print(f"release reason code: {snapshot['release_feishu_runtime_reason_code']}")
-    if snapshot["release_feishu_runtime_reason"]:
-        print(f"release reason: {snapshot['release_feishu_runtime_reason']}")
+    availability = "available" if snapshot["unsubscribe_available"] else "blocked"
+    print(f"unsubscribe: {availability}")
+    if snapshot["unsubscribe_reason_code"]:
+        print(f"unsubscribe reason code: {snapshot['unsubscribe_reason_code']}")
+    if snapshot["unsubscribe_reason"]:
+        print(f"unsubscribe reason: {snapshot['unsubscribe_reason']}")
     return 0
 
 
@@ -196,14 +212,44 @@ def _print_thread_bindings(data_dir: pathlib.Path, target_params: dict[str, str]
     return 0
 
 
-def _release_thread_runtime(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
-    result = _request(data_dir, "thread/release-feishu-runtime", target_params)
+def _print_thread_list(data_dir: pathlib.Path, *, scope: str, cwd: str) -> int:
+    adapter, cfg, app_server_url = _remote_adapter(data_dir)
+    del app_server_url
+    try:
+        limit = int(cfg.get("thread_list_query_limit", 100))
+        threads = (
+            list_current_dir_threads(adapter, cwd=cwd, limit=limit)
+            if scope == "cwd"
+            else list_global_threads(adapter, limit=limit)
+        )
+    finally:
+        adapter.stop()
+    if not threads:
+        print("当前没有可见线程。")
+        return 0
+    print("THREAD_ID\tPROVIDER\tCWD\tTITLE")
+    for item in threads:
+        print(
+            "\t".join(
+                [
+                    item.thread_id,
+                    str(item.model_provider or "-"),
+                    display_path(item.cwd),
+                    item.title,
+                ]
+            )
+        )
+    return 0
+
+
+def _unsubscribe_thread(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
+    result = _request(data_dir, "thread/unsubscribe", target_params)
     print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
     print(f"released bindings: {', '.join(result['released_binding_ids']) or '（无）'}")
     print(f"backend thread status: {result['backend_thread_status']}")
     print(f"re-profile possible: {'yes' if result['reprofile_possible'] else 'no'}")
-    if result.get("release_feishu_runtime_reason_code"):
-        print(f"release reason code: {result['release_feishu_runtime_reason_code']}")
+    if result.get("unsubscribe_reason_code"):
+        print(f"unsubscribe reason code: {result['unsubscribe_reason_code']}")
     if result["already_released"]:
         print("note: Feishu runtime was already released.")
     elif result["backend_still_loaded"]:
@@ -277,6 +323,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     thread = subparsers.add_parser("thread")
     thread_sub = thread.add_subparsers(dest="action", required=True)
+    thread_list = thread_sub.add_parser("list")
+    thread_list.add_argument("--scope", choices=("cwd", "global"), default="cwd")
+    thread_list.add_argument("--cwd", default="")
     thread_status = thread_sub.add_parser("status")
     thread_status_target = thread_status.add_mutually_exclusive_group(required=True)
     thread_status_target.add_argument("--thread-id")
@@ -285,10 +334,10 @@ def _build_parser() -> argparse.ArgumentParser:
     thread_bindings_target = thread_bindings.add_mutually_exclusive_group(required=True)
     thread_bindings_target.add_argument("--thread-id")
     thread_bindings_target.add_argument("--thread-name")
-    thread_release = thread_sub.add_parser("release-feishu-runtime")
-    thread_release_target = thread_release.add_mutually_exclusive_group(required=True)
-    thread_release_target.add_argument("--thread-id")
-    thread_release_target.add_argument("--thread-name")
+    thread_unsubscribe = thread_sub.add_parser("unsubscribe")
+    thread_unsubscribe_target = thread_unsubscribe.add_mutually_exclusive_group(required=True)
+    thread_unsubscribe_target.add_argument("--thread-id")
+    thread_unsubscribe_target.add_argument("--thread-name")
     thread_admissions = thread_sub.add_parser("admissions")
     thread_import = thread_sub.add_parser("import")
     thread_import_target = thread_import.add_mutually_exclusive_group(required=True)
@@ -319,12 +368,15 @@ def main() -> None:
             raise SystemExit(_clear_binding(data_dir, args.binding_id))
         if args.resource == "binding" and args.action == "clear-all":
             raise SystemExit(_clear_all_bindings(data_dir))
+        if args.resource == "thread" and args.action == "list":
+            cwd = str(args.cwd or "").strip() or os.getcwd()
+            raise SystemExit(_print_thread_list(data_dir, scope=args.scope, cwd=cwd))
         if args.resource == "thread" and args.action == "status":
             raise SystemExit(_print_thread_status(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "bindings":
             raise SystemExit(_print_thread_bindings(data_dir, _thread_target_params(args)))
-        if args.resource == "thread" and args.action == "release-feishu-runtime":
-            raise SystemExit(_release_thread_runtime(data_dir, _thread_target_params(args)))
+        if args.resource == "thread" and args.action == "unsubscribe":
+            raise SystemExit(_unsubscribe_thread(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "admissions":
             raise SystemExit(_list_thread_admissions(data_dir))
         if args.resource == "thread" and args.action == "import":

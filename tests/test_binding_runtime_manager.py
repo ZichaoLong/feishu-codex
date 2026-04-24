@@ -128,7 +128,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
                 SimpleNamespace(title="Backend title", cwd="/srv/project", status="notLoaded"),
                 "notLoaded",
             ),
-            release_feishu_runtime_availability=lambda thread_id: (True, ""),
+            unsubscribe_availability=lambda thread_id: (True, ""),
         )
 
         self.assertEqual(snapshot["binding_id"], "p2p:ou-user:chat-1")
@@ -137,7 +137,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(snapshot["feishu_runtime_state"], "attached")
         self.assertEqual(snapshot["interaction_owner"]["relation"], "current")
         self.assertTrue(snapshot["running_turn"])
-        self.assertTrue(snapshot["release_feishu_runtime_available"])
+        self.assertTrue(snapshot["unsubscribe_available"])
         self.assertTrue(snapshot["reprofile_possible"])
 
     def test_interactive_binding_can_adopt_sole_subscriber(self) -> None:
@@ -202,7 +202,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
             )
             snapshot = manager.thread_binding_snapshot_locked(
                 "thread-1",
-                release_feishu_runtime_availability=lambda thread_id: (True, ""),
+                unsubscribe_availability=lambda thread_id: (True, ""),
             )
 
         self.assertEqual(snapshot["thread_id"], "thread-1")
@@ -210,7 +210,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(snapshot["attached_binding_ids"], ["p2p:ou-user-a:chat-a"])
         self.assertEqual(snapshot["released_binding_ids"], ["p2p:ou-user-b:chat-b"])
         self.assertEqual(snapshot["interaction_owner"]["binding_id"], "p2p:ou-user-a:chat-a")
-        self.assertTrue(snapshot["release_feishu_runtime_available"])
+        self.assertTrue(snapshot["unsubscribe_available"])
 
     def test_deactivate_binding_locked_clears_runtime_store_and_leases(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -307,7 +307,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(stored["feishu_runtime_state"], "")
         self.assertEqual(stored["working_dir"], "/tmp/project")
 
-    def test_release_feishu_runtime_by_thread_id_locked_marks_bindings_released(self) -> None:
+    def test_unsubscribe_by_thread_id_locked_marks_bindings_released(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
@@ -324,9 +324,9 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         state_b["current_message_id"] = "card-b"
 
         with manager._lock:
-            result = manager.release_feishu_runtime_by_thread_id_locked(
+            result = manager.unsubscribe_feishu_runtime_by_thread_id_locked(
                 "thread-1",
-                release_feishu_runtime_availability=lambda thread_id: (True, ""),
+                unsubscribe_availability=lambda thread_id: (True, ""),
                 on_release_binding_state=lambda current_state: current_state.__setitem__("current_message_id", ""),
             )
 
@@ -353,7 +353,7 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(stored_a["feishu_runtime_state"], "released")
         self.assertEqual(stored_b["feishu_runtime_state"], "released")
 
-    def test_release_feishu_runtime_by_thread_id_locked_respects_external_availability_gate(self) -> None:
+    def test_unsubscribe_by_thread_id_locked_respects_external_availability_gate(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
@@ -363,9 +363,9 @@ class BindingRuntimeManagerTests(unittest.TestCase):
 
         with manager._lock:
             with self.assertRaisesRegex(ValueError, "blocked by controller"):
-                manager.release_feishu_runtime_by_thread_id_locked(
+                manager.unsubscribe_feishu_runtime_by_thread_id_locked(
                     "thread-1",
-                    release_feishu_runtime_availability=lambda thread_id: (False, "blocked by controller"),
+                    unsubscribe_availability=lambda thread_id: (False, "blocked by controller"),
                 )
 
         stored = ChatBindingStore(data_dir).load(binding)

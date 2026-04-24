@@ -25,8 +25,10 @@ from bot.cards import (
     make_card_response,
 )
 from bot.config import ensure_init_token, load_system_config_raw, save_system_config
+from bot.codex_config_reader import ResolvedProfileConfig
 from bot.profile_resolution import DefaultProfileResolution
 from bot.runtime_view import RuntimeView
+from bot.stores.thread_resume_profile_store import ThreadResumeProfileRecord
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,10 @@ class SettingsDomainPorts:
     add_admin_open_id: Callable[[str], None]
     set_configured_bot_open_id: Callable[[str], None]
     save_default_profile: Callable[[str], None]
+    load_thread_resume_profile: Callable[[str], ThreadResumeProfileRecord | None]
+    save_thread_resume_profile: Callable[[str, str, str, str], ThreadResumeProfileRecord]
+    check_thread_resume_profile_mutable: Callable[[str], tuple[bool, str]]
+    resolve_profile_resume_config: Callable[[str], ResolvedProfileConfig]
     adapter_model_provider: str
     get_runtime_view: Callable[[str, str, str], RuntimeView]
     update_runtime_settings: Callable[..., None]
@@ -284,32 +290,42 @@ class CodexSettingsDomain:
 
     def handle_profile_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         ports = self._ports
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        thread_id = str(runtime.current_thread_id or "").strip()
+        if not thread_id:
+            return CommandResult(
+                text="当前还没有绑定 thread；先执行 `/new`，或直接发送第一条普通消息创建线程。"
+            )
         runtime_config = ports.safe_read_runtime_config()
         if runtime_config is None:
             return CommandResult(text="读取 Codex 运行时配置失败，无法查看或切换 profile。")
-        profile_resolution = ports.current_default_profile_resolution(runtime_config)
-        local_profile = profile_resolution.effective_profile
         profiles = {profile.name: profile for profile in runtime_config.profiles}
         profile_names = [profile.name for profile in runtime_config.profiles if profile.name]
+        current_record = ports.load_thread_resume_profile(thread_id)
+        current_profile = current_record.profile if current_record is not None else ""
 
         def _profile_provider_text(profile_name: str) -> str:
             if not profile_name:
-                return "跟随 Codex 原生默认"
+                return "未设置 thread-wise profile"
+            if current_record is not None and profile_name == current_profile and current_record.model_provider:
+                return f"`{current_record.model_provider}`"
             profile = profiles.get(profile_name)
             if profile and profile.model_provider:
                 return f"`{profile.model_provider}`"
-            return "未显式设置，实际以新线程解析结果为准"
+            return "未显式设置，实际以恢复时解析结果为准"
 
         def _build_profile_summary_card(
             *,
             leading_lines: list[str] | None = None,
             current_profile: str,
         ) -> dict:
+            can_write, deny_reason = ports.check_thread_resume_profile_mutable(thread_id)
             lines = list(leading_lines or [])
             lines.extend(
                 [
-                    f"当前默认 profile：`{current_profile or '（未设置）'}`",
-                    f"默认 profile 对应 provider：{_profile_provider_text(current_profile)}",
+                    f"当前 thread：`{thread_id[:8]}…`",
+                    f"当前 thread-wise profile：`{current_profile or '（未设置）'}`",
+                    f"当前 thread-wise provider：{_profile_provider_text(current_profile)}",
                 ]
             )
             if profile_names:
@@ -322,7 +338,7 @@ class CodexSettingsDomain:
                 )
                 for profile_name in profile_names:
                     provider = _profile_provider_text(profile_name)
-                    marker = " <- 默认" if profile_name == current_profile else ""
+                    marker = " <- 当前 thread" if profile_name == current_profile else ""
                     lines.append(f"- `{profile_name}` -> {provider}{marker}")
             else:
                 lines.append("未在当前 Codex 配置中发现可用 profile。")
@@ -330,28 +346,23 @@ class CodexSettingsDomain:
                 [
                     "",
                     "**说明**",
-                    "作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。",
-                    "已打开的 `fcodex` TUI 不会热切换。",
-                    "如用 `fcodex -p <profile>`，以显式 profile 为准。",
+                    "作用范围：只影响当前绑定 thread 的下次 resume 配置。",
+                    "当前 thread 仍 loaded 时不会热切换；必须先让它全局 unload。",
                 ]
             )
-            if profile_resolution.stale_profile:
-                lines.append(
-                    f"注意：之前保存的默认 profile `{profile_resolution.stale_profile}` 已不存在，现已自动清空并回退到 Codex 原生默认。"
-                )
-            if ports.adapter_model_provider:
-                lines.append(
-                    "注意：当前 feishu-codex 配置写死了 "
-                    f"`model_provider: {ports.adapter_model_provider}`，新建线程时可能仍以它为准。"
-                )
+            if can_write:
+                lines.append("当前已满足切换条件：thread globally unloaded。")
+            else:
+                lines.append(f"当前不可切换：{deny_reason}")
             return build_profile_card(
                 content="\n".join(lines),
                 profile_names=profile_names,
                 current_profile=current_profile,
+                title="Codex Thread Profile",
             )
 
         if not arg:
-            return CommandResult(card=_build_profile_summary_card(current_profile=local_profile))
+            return CommandResult(card=_build_profile_summary_card(current_profile=current_profile))
 
         target_profile = arg.strip()
         if target_profile not in profiles:
@@ -359,16 +370,23 @@ class CodexSettingsDomain:
                 text=f"未找到 profile：`{target_profile}`\n用法：`/profile <name>`\n先发 `/profile` 查看可用 profile。"
             )
 
+        can_write, deny_reason = ports.check_thread_resume_profile_mutable(thread_id)
+        if not can_write:
+            return CommandResult(text=deny_reason)
+
+        resolved = ports.resolve_profile_resume_config(target_profile)
         try:
-            ports.save_default_profile(target_profile)
+            ports.save_thread_resume_profile(
+                thread_id,
+                target_profile,
+                resolved.model,
+                resolved.model_provider,
+            )
         except Exception as exc:
-            logger.exception("保存 feishu-codex 默认 profile 失败")
+            logger.exception("保存 thread-wise profile 失败")
             return CommandResult(text=f"切换 profile 失败：{exc}")
 
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
-        lines = [f"已切换默认 profile：`{target_profile}`"]
-        if runtime.running:
-            lines.append("如果当前正在执行，新 profile 从下一轮生效。")
+        lines = [f"已切换当前 thread 的 profile：`{target_profile}`"]
         return CommandResult(card=_build_profile_summary_card(
             leading_lines=lines + [""],
             current_profile=target_profile,
@@ -620,7 +638,7 @@ class CodexSettingsDomain:
         result = self.handle_profile_command(sender_id, chat_id, target_profile, message_id=message_id)
         if result.card is None:
             return make_card_response(toast=result.text or "切换 profile 失败", toast_type="warning")
-        toast = f"已切换默认 profile：{target_profile}"
+        toast = f"已切换当前 thread 的 profile：{target_profile}"
         runtime = self._runtime_view(sender_id, chat_id, message_id)
         if runtime.running:
             toast += "；下一轮生效"

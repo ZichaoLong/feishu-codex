@@ -86,13 +86,13 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 
 - `/status`
 - `/preflight`
-- `/release-feishu-runtime`
+- `/unsubscribe`
 - 当前线程的 `/rename <title>`，通过表单
 - 当前线程的 `/rm`
 
 这里的“当前线程”页，仍然是**当前 chat binding** 的操作入口，不是全局 thread 管理页。
 
-- `/status`、`/preflight` 与 `/release-feishu-runtime` 即使在群里触发，仍按 chat-scoped 命令解释
+- `/status`、`/preflight` 与 `/unsubscribe` 即使在群里触发，仍按 chat-scoped 命令解释
 - 如果需要按任意 thread 做 thread-scoped 管理，正式入口属于本地 `feishu-codexctl`
 
 Help 面不需要再做一个“全局线程浏览器”或“全局归档表单”。
@@ -101,7 +101,7 @@ Help 面不需要再做一个“全局线程浏览器”或“全局归档表单
 
 ## 6. Settings 面
 
-`/help` 下的 `settings` 分支负责默认 profile 与当前 binding 的运行时设置。
+`/help` 下的 `settings` 分支负责当前绑定 thread 的 profile 与当前 binding 的运行时设置。
 
 它必须让下列能力可达：
 
@@ -133,7 +133,7 @@ Help 面不需要再做一个“全局线程浏览器”或“全局归档表单
 - 一次操作可能涉及多个用户
 - 直接使用 slash 语法比硬塞进不完整表单更清楚
 
-群里触发的 `/status`、`/preflight`、`/release-feishu-runtime`、`/profile` 等通用 Feishu 命令，不属于 `group` 分支。
+群里触发的 `/status`、`/preflight`、`/unsubscribe`、`/profile` 等通用 Feishu 命令，不属于 `group` 分支。
 它们仍分别归属 `session` 或 `settings` 分支；只是当执行上下文在群里时，仍需服从群命令触发规则。
 
 ## 8. 明确不纳入 `/help` 导航的命令

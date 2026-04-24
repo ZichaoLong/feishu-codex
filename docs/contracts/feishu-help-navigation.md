@@ -84,14 +84,14 @@ The current-thread page should cover:
 
 - `/status`
 - `/preflight`
-- `/release-feishu-runtime`
+- `/unsubscribe`
 - `/rename <title>` for the currently bound thread, via a form
 - `/rm` for the currently bound thread
 
 That current-thread page is still an entry for the **current chat binding**,
 not a global thread-admin surface.
 
-- `/status`, `/preflight`, and `/release-feishu-runtime` remain chat-scoped
+- `/status`, `/preflight`, and `/unsubscribe` remain chat-scoped
   even when they are triggered from inside a group chat
 - thread-scoped management for an arbitrary thread belongs to local
   `feishu-codexctl`
@@ -102,7 +102,7 @@ The existing `/session` card remains the current-directory thread browser and ar
 
 ## 6. Settings Surface
 
-The `settings` branch of `/help` should cover default profile and per-binding runtime settings.
+The `settings` branch of `/help` should cover the current bound thread's profile and per-binding runtime settings.
 
 It must make the following capabilities reachable:
 
@@ -135,7 +135,7 @@ Reason:
 - slash syntax is clearer than forcing an incomplete form model
 
 Generic Feishu commands triggered in groups, such as `/status`, `/preflight`,
-`/release-feishu-runtime`, and `/profile`, do not belong to the `group`
+`/unsubscribe`, and `/profile`, do not belong to the `group`
 branch. They still belong to the `session` or `settings` branches, while group
 execution continues to obey the group-command trigger rules.
 

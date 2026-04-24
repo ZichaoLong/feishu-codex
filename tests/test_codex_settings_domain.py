@@ -3,8 +3,10 @@ from types import SimpleNamespace
 from typing import Any
 
 from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary
+from bot.codex_config_reader import ResolvedProfileConfig
 from bot.codex_settings_domain import CodexSettingsDomain, SettingsDomainPorts
 from bot.profile_resolution import DefaultProfileResolution
+from bot.stores.thread_resume_profile_store import ThreadResumeProfileRecord
 
 
 _APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
@@ -39,6 +41,7 @@ class _SettingsPortsStub:
             approval_policy="on-request",
             sandbox="workspace-write",
             collaboration_mode="default",
+            current_thread_id="thread-1",
         )
         self.runtime_config = RuntimeConfigSummary(
             profiles=[
@@ -51,6 +54,9 @@ class _SettingsPortsStub:
             available_profiles=("default", "work"),
         )
         self.saved_profiles: list[str] = []
+        self.saved_thread_profiles: list[tuple[str, str, str, str]] = []
+        self.current_thread_profile: ThreadResumeProfileRecord | None = None
+        self.thread_profile_mutable = (True, "")
         self.runtime_view_calls: list[tuple[str, str, str]] = []
         self.update_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.resolution_calls: list[RuntimeConfigSummary | None] = []
@@ -100,6 +106,40 @@ class _SettingsPortsStub:
     def save_default_profile(self, profile: str) -> None:
         self.saved_profiles.append(profile)
 
+    def load_thread_resume_profile(self, thread_id: str) -> ThreadResumeProfileRecord | None:
+        if self.current_thread_profile is None:
+            return None
+        if self.current_thread_profile.thread_id != thread_id:
+            return None
+        return self.current_thread_profile
+
+    def save_thread_resume_profile(
+        self,
+        thread_id: str,
+        profile: str,
+        model: str,
+        model_provider: str,
+    ) -> ThreadResumeProfileRecord:
+        self.saved_thread_profiles.append((thread_id, profile, model, model_provider))
+        self.current_thread_profile = ThreadResumeProfileRecord(
+            thread_id=thread_id,
+            profile=profile,
+            model=model,
+            model_provider=model_provider,
+            updated_at=1.0,
+        )
+        return self.current_thread_profile
+
+    def check_thread_resume_profile_mutable(self, thread_id: str) -> tuple[bool, str]:
+        del thread_id
+        return self.thread_profile_mutable
+
+    def resolve_profile_resume_config(self, profile: str) -> ResolvedProfileConfig:
+        return ResolvedProfileConfig(
+            model=f"{profile}-model",
+            model_provider=f"{profile}-provider",
+        )
+
     def get_runtime_view(self, sender_id: str, chat_id: str, message_id: str):
         self.runtime_view_calls.append((sender_id, chat_id, message_id))
         return self.runtime
@@ -128,6 +168,10 @@ def _make_domain(stub: _SettingsPortsStub) -> CodexSettingsDomain:
             add_admin_open_id=stub.add_admin_open_id,
             set_configured_bot_open_id=stub.set_configured_bot_open_id,
             save_default_profile=stub.save_default_profile,
+            load_thread_resume_profile=stub.load_thread_resume_profile,
+            save_thread_resume_profile=stub.save_thread_resume_profile,
+            check_thread_resume_profile_mutable=stub.check_thread_resume_profile_mutable,
+            resolve_profile_resume_config=stub.resolve_profile_resume_config,
             adapter_model_provider="",
             get_runtime_view=stub.get_runtime_view,
             update_runtime_settings=stub.update_runtime_settings,
@@ -172,21 +216,34 @@ class CodexSettingsDomainTests(unittest.TestCase):
 
         self.assertIn("/debug-contact <open_id>", result.text)
 
-    def test_profile_command_saves_profile_via_port_and_returns_card(self) -> None:
+    def test_profile_command_saves_bound_thread_profile_via_port_and_returns_card(self) -> None:
         stub = _SettingsPortsStub()
         domain = _make_domain(stub)
 
         result = domain.handle_profile_command("ou_user", "chat-a", "work", message_id="msg-1")
 
-        self.assertEqual(stub.saved_profiles, ["work"])
+        self.assertEqual(
+            stub.saved_thread_profiles,
+            [("thread-1", "work", "work-model", "work-provider")],
+        )
         self.assertEqual(stub.runtime_view_calls, [("ou_user", "chat-a", "msg-1")])
-        self.assertEqual(stub.resolution_calls, [stub.runtime_config])
         self.assertIsNotNone(result.card)
+        self.assertEqual(result.card["header"]["title"]["content"], "Codex Thread Profile")
         content = result.card["elements"][0]["content"]
-        self.assertIn("已切换默认 profile：`work`", content)
+        self.assertIn("已切换当前 thread 的 profile：`work`", content)
         action_buttons = result.card["elements"][2]["actions"]
         buttons_by_profile = {button["text"]["content"]: button for button in action_buttons}
         self.assertEqual(buttons_by_profile["work"]["type"], "primary")
+
+    def test_profile_command_rejects_when_unbound(self) -> None:
+        stub = _SettingsPortsStub()
+        stub.runtime.current_thread_id = ""
+        domain = _make_domain(stub)
+
+        result = domain.handle_profile_command("ou_user", "chat-a", "work", message_id="msg-1")
+
+        self.assertIn("当前还没有绑定 thread", result.text)
+        self.assertEqual(stub.saved_thread_profiles, [])
 
     def test_approval_command_updates_only_approval_policy(self) -> None:
         stub = _SettingsPortsStub()

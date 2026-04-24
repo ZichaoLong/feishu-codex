@@ -26,7 +26,7 @@ This document only defines the group-chat contract.
 It does not redefine:
 
 - p2p thread lifecycle
-- the shared state vocabulary for `/status`, `/release-feishu-runtime`, and the
+- the shared state vocabulary for `/status`, `/unsubscribe`, and the
   local admin surface
 - `fcodex` wrapper semantics
 
@@ -104,7 +104,7 @@ Those remain owned by their dedicated documents.
 - in group `all`, admins can send group commands directly
 - "group commands" here includes both group-specific commands such as
   `/groupmode` and `/acl`, and generic Feishu commands triggered from a group
-  context such as `/status` and `/release-feishu-runtime`
+  context such as `/status` and `/unsubscribe`
 - this section only defines whether those commands may be triggered in a group;
   the runtime/session semantics of each command still belong to their dedicated
   contracts

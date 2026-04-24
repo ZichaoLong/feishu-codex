@@ -53,6 +53,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         create_thread_calls: list[dict] = []
         resume_calls: list[dict] = []
         start_turn_calls: list[dict] = []
+        seed_calls: list[tuple[str, str]] = []
         interrupt_calls: list[dict] = []
         sent_execution_cards: list[tuple[str, str, bool]] = []
         flushed: list[tuple[str, str, bool]] = []
@@ -91,6 +92,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         }
         start_turn_behavior = {"value": {"turnId": "turn-1"}}
         interrupt_behavior = {"exc": None}
+        thread_profiles: dict[str, str] = {}
         access_policy = ThreadAccessPolicy(
             lock=lock,
             is_group_chat=lambda chat_id, message_id: False,
@@ -153,6 +155,12 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             create_thread_calls.append(dict(kwargs))
             return create_thread_result
 
+        def _persist_new_thread_profile_seed(thread_id: str, profile: str) -> str:
+            seed_calls.append((thread_id, profile))
+            if profile:
+                thread_profiles[thread_id] = profile
+            return ""
+
         def _start_turn(**kwargs):
             snapshot = dict(kwargs)
             input_items = [dict(item) for item in snapshot.get("input_items", [])]
@@ -187,6 +195,8 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
                 resume_snapshot_by_id=_resume_snapshot_by_id,
                 create_thread=_create_thread,
                 effective_default_profile=lambda: "",
+                persist_new_thread_profile_seed=_persist_new_thread_profile_seed,
+                thread_profile_for_thread=lambda thread_id: thread_profiles.get(thread_id, ""),
                 message_reply_in_thread=lambda message_id: message_id.startswith("thread-"),
                 group_actor_open_id=lambda message_id: "ou_actor" if message_id else "",
                 access_policy=access_policy,
@@ -256,6 +266,8 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             "create_thread_calls": create_thread_calls,
             "resume_calls": resume_calls,
             "start_turn_calls": start_turn_calls,
+            "seed_calls": seed_calls,
+            "thread_profiles": thread_profiles,
             "interrupt_calls": interrupt_calls,
             "sent_execution_cards": sent_execution_cards,
             "flushed": flushed,
@@ -345,6 +357,18 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         self.assertEqual([call["thread_id"] for call in env["start_turn_calls"]], ["thread-1", "thread-1"])
         self.assertEqual(env["state"]["current_turn_id"], "turn-1")
         self.assertEqual(env["scheduled_watchdogs"], [("ou_user", "c1")])
+
+    def test_start_prompt_turn_seeds_new_thread_profile_and_uses_it_for_turn(self) -> None:
+        env = self._make_controller()
+        controller = env["controller"]
+        controller._effective_default_profile = lambda: "work"
+
+        started = controller.start_prompt_turn("ou_user", "c1", "hello", message_id="msg-1")
+
+        self.assertTrue(started)
+        self.assertEqual(env["seed_calls"], [("thread-created", "work")])
+        self.assertEqual(env["thread_profiles"], {"thread-created": "work"})
+        self.assertEqual(env["start_turn_calls"][-1]["profile"], "work")
 
     def test_start_prompt_turn_fails_closed_when_execution_card_cannot_be_sent(self) -> None:
         env = self._make_controller()

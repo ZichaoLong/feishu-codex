@@ -4,6 +4,8 @@
 
 本文是实施计划，不是运行时语义合同。
 
+说明：本文成文时部分术语尚未收口；文中的管理面释放动作统一按当前命名读作 `unsubscribe`。
+
 它回答的问题是：
 
 - 为什么下一步不该继续做零散修补
@@ -95,8 +97,8 @@
   - `AdapterNotificationController` 负责 adapter notification 的语义解释与事件分发
 - 第三阶段已完成：`RuntimeAdminController`
   - 负责 runtime admin / control-plane 状态查询
-  - 负责 `/status` 与 `/release-feishu-runtime`
-  - 负责 binding clear / clear-all 与 thread status / bindings / release-feishu-runtime
+  - 负责 `/status` 与 `unsubscribe`
+  - 负责 binding clear / clear-all 与 thread status / bindings / unsubscribe
 - 第四阶段已完成：`InboundSurfaceController`
   - 负责入站消息命令解析与分发
   - 负责卡片 action 路由与帮助卡片命令复用
@@ -138,7 +140,7 @@
 - thread write lease
 - binding status snapshot
 - binding clear / clear-all 的底层执行
-- `/release-feishu-runtime` 的底层执行
+- `unsubscribe` 的底层执行
 
 ### 7.3 不负责的内容
 
@@ -281,7 +283,7 @@
 - binding inventory / status snapshot 读取
 - thread status / bindings snapshot 读取
 - `/status` 渲染
-- `/release-feishu-runtime` 执行与结果渲染
+- `unsubscribe` 执行与结果渲染
 - binding clear / clear-all 的管理面拒绝条件与执行
 - `service/status`
 - control-plane 的 `binding/*` 与 `thread/*` 管理请求
@@ -315,9 +317,9 @@
 
 ### 9.5 验收标准
 
-- 现有 `/status`、`/release-feishu-runtime`、binding clear、thread status/bindings、service control 相关测试继续通过
+- 现有 `/status`、`unsubscribe`、binding clear、thread status/bindings、service control 相关测试继续通过
 - 新增 controller 级测试，覆盖：
-  - release-feishu-runtime 的阻塞条件
+  - unsubscribe 的阻塞条件
   - clear-all 的 fail-closed 行为
   - `service/status` 聚合视图
   - attached / released binding 在 thread/bindings 下的呈现

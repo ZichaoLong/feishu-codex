@@ -5,7 +5,7 @@
 另见：
 
 - `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`：当前 shared backend 与 wrapper 的运行时模型
-- `docs/contracts/runtime-control-surface.zh-CN.md`：`/status`、`/release-feishu-runtime` 与本地管理面的共享状态词汇
+- `docs/contracts/runtime-control-surface.zh-CN.md`：`/status`、`/unsubscribe` 与本地管理面的共享状态词汇
 - `docs/contracts/session-profile-semantics.zh-CN.md`：精确的命令与 wrapper 语义
 - `docs/architecture/feishu-codex-design.zh-CN.md`：架构与仓库边界
 
@@ -85,7 +85,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 多个实例共享 persisted thread namespace
 - 但每个实例有自己独立的 live backend
 - 同一 thread 的 live residency 由机器级 `ThreadRuntimeLease` 协调
-- 若 owner 实例当前 idle，且其 `release_feishu_runtime_available` 为真，则允许自动转移
+- 若 owner 实例当前 idle，且其 `unsubscribe_available` 为真，则允许自动转移
 - 若 owner 实例当前仍在执行，或仍有待处理审批 / 输入，则必须明确拒绝
 
 因此，这不是“共享 backend”，也不是“可以并发双写的两个 backend”。
@@ -137,7 +137,8 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 若当前 thread 已被另一实例 backend live attach，则真正的恢复仍要服从机器级 `ThreadRuntimeLease`：
   - owner 可立即 release 时，允许自动转移
   - owner 仍 busy / pending 时，必须明确拒绝
-- 如果这次恢复没有显式指定 profile，则飞书与 `fcodex` 的有效行为一致：都使用当前实例 / 所选实例的本地默认 profile
+- 如果该 thread 已保存 thread-wise profile，则飞书与 `fcodex` 都应使用这份 thread-wise 恢复配置
+- 如果该 thread 没有保存 thread-wise profile，则两端都不再额外回退到“实例级 resume 默认 profile”
 
 这条路径的前提是：
 
@@ -146,10 +147,10 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 这里需要刻意记住一件事：两端的执行路径并不相同。
 
-- 飞书侧会在请求 `thread/resume` 前解析并显式传入 profile / model / model_provider
-- `fcodex` 则是在 wrapper 启动阶段注入默认 profile，再进入 upstream `codex resume`
+- 飞书侧会在请求 `thread/resume` 前读取 thread-wise 记录，并显式传入 profile / model / model_provider
+- `fcodex` 则是在 wrapper 启动阶段读取同一份 thread-wise 记录，必要时再把 profile 注入到 upstream `codex resume`
 
-这个差异不应被理解为两端语义不一致；它们的目标语义是同一个：对 unloaded 线程，在没有显式 profile 时，都以当前实例 / 所选实例的本地默认 profile 恢复。
+这个差异不应被理解为两端语义不一致；它们的目标语义是同一个：对 unloaded 线程，优先使用 thread-wise 恢复配置；若没有记录，就保持“不额外覆盖”的恢复语义。
 
 本仓库的取舍是**不再**通过预览/确认卡片拦截这类 resume。
 因此，对“可能同时被另一个 isolated backend 写入”的线程，避免双 backend 写入的责任在操作侧，而不是由 UI 强制保护。
@@ -157,7 +158,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 对命名实例还要再补一条可见性边界：
 
 - 飞书 `/session`、飞书 `/resume` 受当前实例的 `admission + binding` 可见面约束
-- `fcodex /session`、`fcodex /resume <name>` 则是本地操作者视角，不读取该 admission 过滤
+- `feishu-codexctl thread list`、`fcodex resume <thread_name>` 则是本地操作者视角，不读取该 admission 过滤
 - 但一旦真的要 live attach，所有路径仍统一服从 `ThreadRuntimeLease`
 
 ## 7. 来源展示与对称风险

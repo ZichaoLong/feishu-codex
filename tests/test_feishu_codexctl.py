@@ -59,17 +59,35 @@ class FeishuCodexCtlTests(unittest.TestCase):
 
         self.assertEqual(_thread_target_params(args), {"thread_name": "demo"})
 
-    def test_thread_release_accepts_explicit_thread_id(self) -> None:
+    def test_thread_list_defaults_to_cwd_scope(self) -> None:
         parser = _build_parser()
 
-        args = parser.parse_args(["thread", "release-feishu-runtime", "--thread-id", "thread-1"])
+        args = parser.parse_args(["thread", "list"])
+
+        self.assertEqual(args.resource, "thread")
+        self.assertEqual(args.action, "list")
+        self.assertEqual(args.scope, "cwd")
+        self.assertEqual(args.cwd, "")
+
+    def test_thread_list_accepts_global_scope_and_explicit_cwd(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["thread", "list", "--scope", "global", "--cwd", "/tmp/project"])
+
+        self.assertEqual(args.scope, "global")
+        self.assertEqual(args.cwd, "/tmp/project")
+
+    def test_thread_unsubscribe_accepts_explicit_thread_id(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["thread", "unsubscribe", "--thread-id", "thread-1"])
 
         self.assertEqual(_thread_target_params(args), {"thread_id": "thread-1"})
 
-    def test_thread_release_accepts_explicit_thread_name(self) -> None:
+    def test_thread_unsubscribe_accepts_explicit_thread_name(self) -> None:
         parser = _build_parser()
 
-        args = parser.parse_args(["thread", "release-feishu-runtime", "--thread-name", "demo"])
+        args = parser.parse_args(["thread", "unsubscribe", "--thread-name", "demo"])
 
         self.assertEqual(_thread_target_params(args), {"thread_name": "demo"})
 

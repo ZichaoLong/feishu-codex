@@ -1,3 +1,11 @@
+# README 草案
+
+此文件与 `README.md` 同步，作为 README 的工作草案版本保留。
+
+`README.md` 当前正文如下。
+
+---
+
 # feishu-codex
 
 `feishu-codex` 通过飞书机器人，把消息、卡片、审批、群聊管理接到同一个 `codex app-server`。

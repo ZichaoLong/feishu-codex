@@ -53,7 +53,7 @@
 - `codex.yaml`
 - chat binding store
 - group chat store
-- profile state store（本仓库自己的本地默认 profile 状态）
+- profile state store（实例级的新 thread seed profile 状态；不承载 machine-global 的 thread-wise resume profile）
 - service instance lease
 - control plane socket
 - managed app-server runtime discovery
@@ -282,7 +282,7 @@
 - `fcodex [--instance <name>]`
 - `fcodex [--instance <name>] <prompt>`
 - `fcodex [--instance <name>] resume <thread_id>`
-- `fcodex [--instance <name>] /resume <thread_id|thread_name>`
+- `fcodex [--instance <name>] resume <thread_id|thread_name>`
 
 自动路由建议顺序：
 

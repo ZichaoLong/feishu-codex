@@ -41,7 +41,7 @@ instance A / default
 
 fcodex shell wrapper
   -> select target instance backend
-  -> local thin proxy
+  -> local owner-filtering proxy
      -> selected instance-local shared codex app-server
         -> upstream Codex TUI
 ```
@@ -59,8 +59,8 @@ fcodex shell wrapper
 `fcodex` 存在的目的，是提供：
 
 - 与所选飞书实例共享的单一 backend
-- 由所选实例 `feishu-codex` 持有的本地默认 profile
-- `/session`、`/resume <name>` 这类 wrapper 命令
+- 新 thread 启动时由所选实例提供的 default profile seed
+- `resume <thread_name>` 这类 wrapper 级名字解析
 - 一个用于修正 remote 模式工作目录行为的兼容层
 
 ## 4. 安装后的 Wrapper 环境
@@ -157,10 +157,10 @@ fcodex shell wrapper
 - 直接运行 `fcodex`
 - `fcodex <prompt>`
 - `fcodex resume <thread_id>`
-- `fcodex /resume <name>` 在 wrapper 侧解析完成之后
+- `fcodex resume <thread_name>` 在 wrapper 侧解析完成之后
 
 这里的“shared backend”都指所选实例 backend。
-像 `fcodex /session` 这样的 wrapper 命令虽然不会启动 TUI，但它们查询的仍然是所选实例 backend 和同一份 persisted 线程元数据。
+当前 shell 层已不再提供 `fcodex /session` 这类 wrapper slash 自命令；本地线程发现改由 `feishu-codexctl thread list` 负责。
 
 ## 9. 显式 `--remote` 是特例
 
@@ -179,13 +179,8 @@ fcodex shell wrapper
 相较于裸 Codex TUI，`fcodex` 增加了这些语义：
 
 - 默认与所选飞书实例共享 backend
-- 当缺少 `-p/--profile` 时注入本地默认 profile
-- wrapper 命令：
-  - `/help`
-  - `/profile`
-  - `/rm`
-  - `/session`
-  - `/resume`
+- 对新 thread 启动，缺少 `-p/--profile` 时注入本地 default profile seed
+- 对 `resume`，支持 thread-name 解析与 thread-wise profile 注入 / 持久化
 - 通过一个轻量本地代理修补 cwd
 
 但一旦进入运行中的 TUI，命令语义就回到 upstream Codex 的默认行为。
@@ -211,8 +206,8 @@ wrapper 可能需要跟着调整。相关上游实现与变更历史，应以 [`
 在 TUI 里，`/resume` 的 picker 行为仍然由 upstream 决定，它可能不同于：
 
 - 飞书 `/session`
-- `fcodex /session`
-- `fcodex /resume <name>`
+- `feishu-codexctl thread list`
+- `fcodex resume <thread_name>`
 
 ### Shared backend 可用性是前提
 

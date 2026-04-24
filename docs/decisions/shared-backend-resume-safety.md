@@ -5,7 +5,7 @@ See also:
 - `docs/architecture/fcodex-shared-backend-runtime.md` for the current shared-backend and
   wrapper runtime model
 - `docs/contracts/runtime-control-surface.md` for the shared state vocabulary used by
-  `/status`, `/release-feishu-runtime`, and the local admin surface
+  `/status`, `/unsubscribe`, and the local admin surface
 - `docs/contracts/session-profile-semantics.md` for exact command and wrapper semantics
 - `docs/architecture/feishu-codex-design.md` for architecture and repository boundaries
 
@@ -102,7 +102,7 @@ Properties:
 - each instance has its own live backend
 - live residency of one thread is coordinated by the machine-level
   `ThreadRuntimeLease`
-- if the owner instance is idle and reports `release_feishu_runtime_available`,
+- if the owner instance is idle and reports `unsubscribe_available`,
   automatic transfer is allowed
 - if the owner instance is still executing or still has pending approval /
   input, the write attempt must reject clearly
@@ -165,9 +165,10 @@ Behavior:
   actual resume still has to obey the machine-level `ThreadRuntimeLease`:
   - automatic transfer is allowed only when the owner can release immediately
   - busy / pending owner state must reject clearly
-- if this resume does not specify an explicit profile, Feishu and `fcodex`
-  have the same effective behavior: they both use the current-instance /
-  selected-instance local default profile
+- if the thread already has a saved thread-wise profile, Feishu and `fcodex`
+  both use that thread-wise resume config
+- if the thread has no saved thread-wise profile, neither side adds an extra
+  instance-level resume-profile fallback
 
 This path assumes:
 
@@ -177,15 +178,14 @@ This path assumes:
 One detail should be recorded explicitly: the two clients do not reach that
 behavior through the same execution path.
 
-- Feishu resolves and sends profile / model / model_provider before
-  `thread/resume`
-- `fcodex` injects the default profile in the wrapper layer before entering the
-  upstream `codex resume` path
+- Feishu reads the thread-wise record and sends profile / model /
+  model_provider before `thread/resume`
+- `fcodex` reads the same thread-wise record in the wrapper layer and injects
+  profile only when that record exists
 
 That difference should not be interpreted as a semantic mismatch. The intended
-semantics are the same on both sides: for an unloaded thread, absent an
-explicit profile, resume uses the current-instance / selected-instance local
-default profile.
+semantics are the same on both sides: resume of an unloaded thread prefers
+thread-wise config, and otherwise does not add an extra override.
 
 The repository decision is to no longer block this path with a preview/confirm
 card. Avoiding dual-backend writes for such threads is an operational rule, not
@@ -195,8 +195,8 @@ Named instances add one more visibility boundary:
 
 - Feishu `/session` and Feishu `/resume` obey the current instance's
   `admission + binding` visible surface
-- `fcodex /session` and `fcodex /resume <name>` are operator-local and do not
-  read that admission filter
+- `feishu-codexctl thread list` and `fcodex resume <thread_name>` are
+  operator-local and do not read that admission filter
 - once a path actually wants live runtime residency, all of them still obey
   the same `ThreadRuntimeLease`
 

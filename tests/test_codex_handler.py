@@ -467,6 +467,7 @@ class CodexHandlerTests(unittest.TestCase):
         cfg: dict | None = None,
         *,
         data_dir: pathlib.Path | None = None,
+        instance_name: str = "default",
     ) -> tuple[CodexHandler, _FakeBot]:
         if data_dir is None:
             tempdir = tempfile.TemporaryDirectory()
@@ -476,10 +477,20 @@ class CodexHandlerTests(unittest.TestCase):
         effective_cfg.update(dict(cfg or {}))
         config_patch = patch("bot.codex_handler.load_config_file", return_value=effective_cfg)
         adapter_patch = patch("bot.codex_handler.CodexAppServerAdapter", _FakeAdapter)
+        env_patch = patch.dict(
+            os.environ,
+            {
+                "FC_GLOBAL_DATA_DIR": str(data_dir / "_global"),
+                "FC_INSTANCE": instance_name,
+            },
+            clear=False,
+        )
         config_patch.start()
         adapter_patch.start()
+        env_patch.start()
         self.addCleanup(config_patch.stop)
         self.addCleanup(adapter_patch.stop)
+        self.addCleanup(env_patch.stop)
         handler = CodexHandler(data_dir=data_dir)
         self.addCleanup(handler.shutdown)
         bot = _FakeBot(data_dir)
@@ -2503,7 +2514,7 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 当前状态")
         content = card["elements"][0]["content"]
-        self.assertIn("默认 profile：`（未设置）`", content)
+        self.assertIn("新 thread seed profile：`（未设置）`", content)
         self.assertIn("当前 provider：`provider1_api`", content)
         self.assertIn("权限预设：`Default`", content)
         self.assertIn("审批策略：`on-request`", content)
@@ -2533,9 +2544,9 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("feishu runtime：`attached`", content)
         self.assertIn("backend thread status：`idle`", content)
         self.assertIn("re-profile possible：`no`", content)
-        self.assertIn("release-feishu-runtime：`available`", content)
+        self.assertIn("unsubscribe：`available`", content)
 
-    def test_release_feishu_runtime_command_releases_all_bound_bindings_but_keeps_binding(self) -> None:
+    def test_unsubscribe_command_releases_all_bound_bindings_but_keeps_binding(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -2567,7 +2578,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.unsubscribe_thread = _unsubscribe
 
-        handler.handle_message("ou_user", "chat-a", "/release-feishu-runtime")
+        handler.handle_message("ou_user", "chat-a", "/unsubscribe")
 
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
         self.assertEqual(handler._get_runtime_state("ou_user", "chat-a")["current_thread_id"], "thread-1")
@@ -2611,7 +2622,7 @@ class CodexHandlerTests(unittest.TestCase):
             handler._adapter.thread_snapshots[(thread_id, None)] = ThreadSnapshot(summary=unloaded)
 
         handler._adapter.unsubscribe_thread = _unsubscribe
-        handler._release_feishu_runtime_by_thread_id("thread-1")
+        handler._unsubscribe_feishu_runtime_by_thread_id("thread-1")
 
         handler2, _ = self._make_handler(data_dir=data_dir)
         state2 = handler2._get_runtime_state("ou_user", "c1")
@@ -2641,7 +2652,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
 
         handler._bind_thread("ou_user", "chat-a", thread)
-        handler._release_feishu_runtime_by_thread_id("thread-1")
+        handler._unsubscribe_feishu_runtime_by_thread_id("thread-1")
         handler._bind_thread("ou_user2", "chat-b", thread)
 
         handler.handle_message("ou_user", "chat-a", "hello again")
@@ -2672,7 +2683,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
 
         handler._bind_thread("ou_user", "c1", thread)
-        handler._release_feishu_runtime_by_thread_id("thread-1")
+        handler._unsubscribe_feishu_runtime_by_thread_id("thread-1")
         InteractionLeaseStore(data_dir).force_acquire(
             "thread-1",
             make_fcodex_interaction_holder("fcodex:other", owner_pid=os.getpid()),
@@ -2723,7 +2734,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._adapter.unsubscribe_thread = _unsubscribe
 
         status = control_request(data_dir, "service/status")
-        result = control_request(data_dir, "thread/release-feishu-runtime", {"thread_id": "thread-1"})
+        result = control_request(data_dir, "thread/unsubscribe", {"thread_id": "thread-1"})
 
         self.assertEqual(status["binding_count"], 1)
         self.assertTrue(status["control_endpoint"].startswith("tcp://127.0.0.1:"))
@@ -2925,7 +2936,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.unsubscribe_thread = _unsubscribe
 
-        result = control_request(data_dir, "thread/release-feishu-runtime", {"thread_name": "demo"})
+        result = control_request(data_dir, "thread/unsubscribe", {"thread_name": "demo"})
 
         self.assertTrue(result["changed"])
         self.assertEqual(result["thread_id"], "thread-1")
@@ -2994,23 +3005,33 @@ class CodexHandlerTests(unittest.TestCase):
                 {"thread_id": "thread-1", "thread_name": "demo"},
             )
 
-    def test_profile_command_without_arg_shows_runtime_profiles(self) -> None:
+    def test_profile_command_without_arg_shows_bound_thread_profiles(self) -> None:
         handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
 
         handler.handle_message("ou_user", "c1", "/profile")
 
         _, card = bot.cards[-1]
-        self.assertEqual(card["header"]["title"]["content"], "Codex 默认 Profile")
+        self.assertEqual(card["header"]["title"]["content"], "Codex Thread Profile")
         content = card["elements"][0]["content"]
-        self.assertIn("当前默认 profile：`（未设置）`", content)
-        self.assertIn("默认 profile 对应 provider：跟随 Codex 原生默认", content)
+        self.assertIn("当前 thread：`thread-1", content)
+        self.assertIn("当前 thread-wise profile：`（未设置）`", content)
+        self.assertIn("当前 thread-wise provider：未设置 thread-wise profile", content)
         self.assertIn("切换方式：发送 `/profile <name>`，或直接点下面按钮。", content)
         self.assertIn("**可用 profile**", content)
         self.assertIn("`provider1` -> `provider1_api`", content)
         self.assertIn("`provider2` -> `provider2_api`", content)
-        self.assertIn("**说明**", content)
-        self.assertIn("作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。", content)
-        self.assertIn("已打开的 `fcodex` TUI 不会热切换。", content)
+        self.assertIn("当前不可切换：当前 thread 仍处于 loaded 状态", content)
         action = self._action_elements(card)[0]
         self.assertNotIn("layout", action)
         self.assertEqual(
@@ -3022,31 +3043,59 @@ class CodexHandlerTests(unittest.TestCase):
             ["default", "default"],
         )
 
-    def test_profile_command_switches_local_default_profile(self) -> None:
+    def test_profile_command_switches_bound_thread_profile(self) -> None:
         handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler.handle_message("ou_user", "c1", "/unsubscribe")
 
         handler.handle_message("ou_user", "c1", "/profile provider2")
 
         self.assertEqual(handler._adapter.set_active_profile_calls, [])
         _, card = bot.cards[-1]
-        self.assertEqual(card["header"]["title"]["content"], "Codex 默认 Profile")
+        self.assertEqual(card["header"]["title"]["content"], "Codex Thread Profile")
         content = card["elements"][0]["content"]
-        self.assertIn("已切换默认 profile：`provider2`", content)
-        self.assertIn("默认 profile 对应 provider：`provider2_api`", content)
-        self.assertIn("切换方式：发送 `/profile <name>`，或直接点下面按钮。", content)
-        self.assertIn("**说明**", content)
-        self.assertIn("作用范围：只影响 feishu-codex 与新的默认 `fcodex` 启动；不改裸 `codex`。", content)
-        self.assertIn("已打开的 `fcodex` TUI 不会热切换。", content)
+        self.assertIn("已切换当前 thread 的 profile：`provider2`", content)
+        self.assertIn("当前 thread-wise provider：`provider2_api`", content)
+        self.assertIn("当前已满足切换条件：thread globally unloaded。", content)
         action = self._action_elements(card)[0]
         self.assertEqual(
             [item["type"] for item in action["actions"]],
             ["default", "primary"],
         )
-        self.assertEqual(handler._profile_state.load_default_profile(), "provider2")
+        saved = handler._thread_resume_profile_store.load("thread-1")
+        assert saved is not None
+        self.assertEqual(saved.profile, "provider2")
+        self.assertEqual(saved.model_provider, "provider2_api")
 
-    def test_profile_command_prefers_profile_mapping_for_default_provider(self) -> None:
+    def test_profile_command_prefers_profile_mapping_for_thread_provider(self) -> None:
         handler, bot = self._make_handler()
-        handler._profile_state.save_default_profile("provider2")
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._thread_resume_profile_store.save(
+            "thread-1",
+            profile="provider2",
+            model="provider2-model",
+            model_provider="",
+        )
         handler._adapter.read_runtime_config = lambda **kwargs: RuntimeConfigSummary(
             current_profile="provider1",
             current_model_provider=None,
@@ -3060,12 +3109,23 @@ class CodexHandlerTests(unittest.TestCase):
 
         _, card = bot.cards[-1]
         content = card["elements"][0]["content"]
-        self.assertIn("当前默认 profile：`provider2`", content)
-        self.assertIn("默认 profile 对应 provider：`provider2_api`", content)
-        self.assertNotIn("当前运行时 provider", content)
+        self.assertIn("当前 thread-wise profile：`provider2`", content)
+        self.assertIn("当前 thread-wise provider：`provider2_api`", content)
 
-    def test_profile_card_action_updates_state(self) -> None:
+    def test_profile_card_action_updates_thread_profile(self) -> None:
         handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler.handle_message("ou_user", "c1", "/unsubscribe")
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
@@ -3074,10 +3134,12 @@ class CodexHandlerTests(unittest.TestCase):
             {"action": "set_profile", "profile": "provider2"},
         ))
 
-        self.assertEqual(handler._profile_state.load_default_profile(), "provider2")
+        saved = handler._thread_resume_profile_store.load("thread-1")
+        assert saved is not None
+        self.assertEqual(saved.profile, "provider2")
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("provider2", response["toast"])
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 默认 Profile")
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex Thread Profile")
         action = self._action_elements(response["card"])[0]
         self.assertNotIn("layout", action)
         self.assertEqual(
@@ -3087,6 +3149,17 @@ class CodexHandlerTests(unittest.TestCase):
 
     def test_profile_command_with_unknown_name_shows_usage(self) -> None:
         handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
 
         handler.handle_message("ou_user", "c1", "/profile provider9")
 
@@ -3115,15 +3188,12 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_id"], "")
         self.assertIn("不是硬删除", bot.replies[-1][1])
 
-    def test_profile_command_clears_stale_local_default_profile(self) -> None:
+    def test_profile_command_rejects_when_unbound(self) -> None:
         handler, bot = self._make_handler()
-        handler._profile_state.save_default_profile("provider9")
 
         handler.handle_message("ou_user", "c1", "/profile")
 
-        _, card = bot.cards[-1]
-        self.assertIn("已不存在，现已自动清空并回退到 Codex 原生默认", card["elements"][0]["content"])
-        self.assertEqual(handler._profile_state.load_default_profile(), "")
+        self.assertIn("当前还没有绑定 thread", bot.replies[-1][1])
 
     def test_status_mentions_stale_local_default_profile_cleanup(self) -> None:
         handler, bot = self._make_handler()
@@ -3142,6 +3212,9 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("ou_user", "c1", "/new")
 
         self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
+        saved = handler._thread_resume_profile_store.load("thread-created")
+        assert saved is not None
+        self.assertEqual(saved.profile, "provider2")
 
     def test_prompt_uses_local_default_profile(self) -> None:
         handler, _ = self._make_handler()
@@ -3150,6 +3223,38 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("ou_user", "c1", "hello")
 
         self.assertEqual(handler._adapter.create_thread_calls[-1]["profile"], "provider2")
+        self.assertEqual(handler._adapter.start_turn_calls[-1]["profile"], "provider2")
+        saved = handler._thread_resume_profile_store.load("thread-created")
+        assert saved is not None
+        self.assertEqual(saved.profile, "provider2")
+
+    def test_released_thread_resume_uses_thread_wise_profile(self) -> None:
+        handler, _ = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler.handle_message("ou_user", "c1", "/unsubscribe")
+        handler._thread_resume_profile_store.save(
+            "thread-1",
+            profile="provider2",
+            model="provider2-model",
+            model_provider="provider2_api",
+        )
+        handler._profile_state.save_default_profile("provider1")
+
+        handler.handle_message("ou_user", "c1", "hello")
+
+        self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
+        self.assertEqual(handler._adapter.resume_thread_calls[-1]["profile"], "provider2")
+        self.assertEqual(handler._adapter.resume_thread_calls[-1]["model_provider"], "provider2_api")
         self.assertEqual(handler._adapter.start_turn_calls[-1]["profile"], "provider2")
 
     def test_prompt_keeps_last_known_profile_when_runtime_config_read_temporarily_fails(self) -> None:
@@ -3574,7 +3679,8 @@ class CodexHandlerTests(unittest.TestCase):
         content = card["elements"][0]["content"]
         self.assertIn("跨 provider 汇总", content)
         self.assertIn("`/resume <thread_id|thread_name>`", content)
-        self.assertIn("`fcodex /help`", content)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
+        self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
 
     def test_session_card_uses_trisection_layout_for_row_actions(self) -> None:
         handler, bot = self._make_handler()
@@ -3641,8 +3747,7 @@ class CodexHandlerTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        with patch.dict(os.environ, {"FC_INSTANCE": "corp-b", "FC_GLOBAL_DATA_DIR": str(data_dir / "_global")}):
-            handler, bot = self._make_handler(data_dir=data_dir)
+        handler, bot = self._make_handler(data_dir=data_dir, instance_name="corp-b")
         runtime = handler._get_runtime_view("ou_user", "c1")
         thread_1 = ThreadSummary(
             thread_id="thread-1",
@@ -3682,8 +3787,7 @@ class CodexHandlerTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        with patch.dict(os.environ, {"FC_INSTANCE": "corp-b", "FC_GLOBAL_DATA_DIR": str(data_dir / "_global")}):
-            handler, bot = self._make_handler(data_dir=data_dir)
+        handler, bot = self._make_handler(data_dir=data_dir, instance_name="corp-b")
         runtime = handler._get_runtime_view("ou_user", "c1")
         admitted = ThreadSummary(
             thread_id="thread-1",
@@ -3717,8 +3821,7 @@ class CodexHandlerTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        with patch.dict(os.environ, {"FC_INSTANCE": "corp-b", "FC_GLOBAL_DATA_DIR": str(data_dir / "_global")}):
-            handler, _ = self._make_handler(data_dir=data_dir)
+        handler, _ = self._make_handler(data_dir=data_dir, instance_name="corp-b")
         thread_id = "019d2e94-a475-7bc1-b2f7-a3ce37628ede"
 
         with self.assertRaisesRegex(ValueError, "未导入到本实例"):
@@ -3728,9 +3831,8 @@ class CodexHandlerTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
-        with patch.dict(os.environ, {"FC_INSTANCE": "corp-b", "FC_GLOBAL_DATA_DIR": str(data_dir / "_global")}):
-            handler, bot = self._make_handler(data_dir=data_dir)
-            handler.on_register(bot)
+        handler, bot = self._make_handler(data_dir=data_dir, instance_name="corp-b")
+        handler.on_register(bot)
         handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(
             summary=ThreadSummary(
                 thread_id="thread-1",
@@ -4124,7 +4226,8 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`session`", content)
         self.assertIn("`settings`", content)
         self.assertIn("`group`", content)
-        self.assertIn("`fcodex /help`", content)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
+        self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
         self.assertNotIn("/help local", content)
         self.assertIn("同一线程允许多端订阅观察", content)
         self.assertIn("同一 live turn 只有一个交互 owner", content)
@@ -4145,7 +4248,8 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`/resume <thread_id|thread_name>`", content)
         self.assertIn("`/new`", content)
         self.assertIn("`/cd <path>`", content)
-        self.assertIn("`fcodex /help`", content)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
+        self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
         action_elements = self._action_elements(card)
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
@@ -4207,7 +4311,8 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：本地命令")
-        self.assertIn("`fcodex /help`", card["elements"][0]["content"])
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", card["elements"][0]["content"])
+        self.assertIn("`feishu-codexctl thread list --scope cwd`", card["elements"][0]["content"])
 
     def test_help_page_action_returns_settings_card(self) -> None:
         handler, _ = self._make_handler()
@@ -4304,7 +4409,7 @@ class CodexHandlerTests(unittest.TestCase):
         action_elements = self._action_elements(response["card"])
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/status", "/preflight", "释放 runtime"],
+            ["/status", "/preflight", "unsubscribe"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],

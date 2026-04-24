@@ -70,7 +70,6 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         self.assertTrue(handler._inbound_surface.has_command_route("/preflight"))
 
     def test_help_and_session_cards_reuse_shared_command_specs(self) -> None:
-        help_command = get_shared_command("help")
         resume_command = get_shared_command("resume")
         help_domain = CodexHelpDomain(local_thread_safety_rule="测试规则")
 
@@ -100,12 +99,14 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         sessions_markdown = sessions_card["elements"][0]["content"]
         execution_markdown = execution_card["body"]["elements"][0]["content"]
 
-        self.assertIn(f"`{help_command.wrapper_usage}`", overview_markdown)
-        self.assertIn(f"`{help_command.wrapper_usage}`", session_markdown)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", overview_markdown)
+        self.assertIn("`feishu-codexctl thread list --scope cwd`", overview_markdown)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", session_markdown)
         self.assertIn(f"`{resume_command.feishu_usage}`", session_markdown)
-        self.assertIn(f"`{help_command.wrapper_usage}`", sessions_markdown)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", sessions_markdown)
+        self.assertIn("`feishu-codexctl thread list --scope cwd`", sessions_markdown)
         self.assertIn(f"`{resume_command.feishu_usage}`", sessions_markdown)
-        self.assertIn(f"`{help_command.slash_name}`", execution_markdown)
+        self.assertIn("`/help`", execution_markdown)
 
     def test_generated_cards_do_not_emit_plugin_payload_keys(self) -> None:
         help_domain = CodexHelpDomain(local_thread_safety_rule="测试规则")

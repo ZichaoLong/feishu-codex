@@ -62,8 +62,9 @@ bridge:
   scraping or reconstructed state
 - Single source of truth: thread id, cwd, title, preview, source, and runtime
   config come from Codex
-- Feishu-specific state stays local: per-instance local default profile and
-  thread/UI binding state remain in `feishu-codex`
+- Feishu-specific state stays local: per-instance new-thread seed profile and
+  thread/UI binding state remain in `feishu-codex`, while thread-wise resume
+  profile is machine-global shared state
 - Shared-backend behavior is explicit: continuing the same live thread with
   Feishu should go through the same instance backend
 - `CODEX_HOME` and Feishu runtime boundaries stay separate: the former is
@@ -132,7 +133,8 @@ Current module split:
   strong-contract / best-effort text extraction
 - `bot/adapters/codex_app_server.py`: Codex adapter boundary
 - `bot/codex_protocol/client.py`: websocket JSON-RPC client for `codex app-server`
-- `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and thin proxy
+- `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and
+  owner-filtering proxy
 - `bot/feishu_codexctl.py` and `bot/service_control_plane.py`: local service-admin
   CLI and the in-process control plane for the running service
 - `bot/instance_layout.py` and `bot/instance_resolution.py`: multi-instance
@@ -140,8 +142,8 @@ Current module split:
 - `bot/binding_identity.py`: stable admin-facing binding identifiers
 - `bot/binding_runtime_manager.py`: owner of `binding` / `subscribe` /
   `attach` / `released` runtime state and local runtime snapshots
-- `bot/thread_access_policy.py`: policy boundary for thread sharing, Feishu
-  write-owner, and interaction-owner admission
+- `bot/thread_access_policy.py`: policy boundary for thread sharing and
+  interaction-owner admission
 - `bot/thread_runtime_coordination.py`: cross-instance live-runtime lease
   acquisition, automatic transfer, and reject flow
 - `bot/turn_execution_coordinator.py`,
@@ -150,7 +152,7 @@ Current module split:
   execution-card publishing, terminal-result delivery, and watchdog /
   reconcile / degraded-channel handling
 - `bot/runtime_admin_controller.py`: `/status`,
-  `/release-feishu-runtime`, and control-plane status/admin management
+  `/unsubscribe`, and control-plane status/admin management
 - `bot/inbound_surface_controller.py`: inbound command surface, card-action
   routing, and help-card command reuse
 - `bot/forward_aggregator.py`: merged-forward buffering, timeout dispatch, and
@@ -183,8 +185,9 @@ Current module split:
 - `bot/stores/instance_registry_store.py`: machine-global running-instance registry
 - `bot/stores/thread_runtime_lease_store.py`: machine-global thread
   live-runtime lease
-- `bot/stores/*.py`: per-instance local default profile, runtime backend
-  discovery state, and group-chat state
+- `bot/stores/*.py`: per-instance new-thread seed profile, runtime backend
+  discovery state, group-chat state, and machine-global thread-wise resume
+  profile / lease / registry state
 
 One maintenance rule should also stay explicit for the Feishu transport layer:
 
@@ -208,9 +211,9 @@ narrower than the real call surface.
 This first ownership-tightening pass has already landed. The boundaries that
 still need to stay explicit as the code evolves are:
 
-- thread sharing, Feishu write-owner, and interaction-owner admission rules
-  should stay behind one policy boundary; that boundary is now
-  `ThreadAccessPolicy`, not scattered handler/prompt/group entry logic
+- thread sharing and interaction-owner admission rules should stay behind one
+  policy boundary; that boundary is now `ThreadAccessPolicy`, not scattered
+  handler/prompt/group entry logic
 - `BindingRuntimeManager` should expose snapshot / inventory / iteration style
   read APIs to the rest of the system, rather than leaking the whole mutable
   runtime-state map
@@ -306,8 +309,9 @@ Codex remains the authority for:
 
 `feishu-codex` keeps only data that is Feishu- or integration-specific:
 
-- per-instance local default profile used by Feishu and `fcodex` launches
-  routed to that same instance
+- per-instance local default-profile seed used when Feishu or `fcodex`
+  creates a new thread on that same instance
+- machine-global thread-wise resume profile
 - per-instance runtime shared-backend discovery state
 - p2p thread bindings and group-shared thread bindings keyed by `chat_id`
 - group-chat mode, group ACL, group context logs, and boundary state

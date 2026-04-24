@@ -44,7 +44,7 @@ instance A / default
 
 fcodex shell wrapper
   -> select target instance backend
-  -> local thin proxy
+  -> local owner-filtering proxy
      -> selected instance-local shared codex app-server
         -> upstream Codex TUI
 ```
@@ -66,8 +66,8 @@ operate on the same live thread.
 `fcodex` exists to provide:
 
 - one shared backend with the selected Feishu instance
-- a local default profile owned by the selected `feishu-codex` instance
-- wrapper commands such as `/session` and `/resume <name>`
+- a default-profile seed for new threads started through that selected instance
+- `resume <thread_name>` resolution on top of the shared backend
 - a compatibility patch for remote-mode working-directory behavior
 
 ## 4. Installed Wrapper Environment
@@ -178,11 +178,12 @@ By default:
 - plain `fcodex`
 - `fcodex <prompt>`
 - `fcodex resume <thread_id>`
-- `fcodex /resume <name>` after wrapper-side resolution
+- `fcodex resume <thread_name>` after wrapper-side resolution
 
 Here "shared backend" always means the selected instance backend.
-Wrapper commands such as `fcodex /session` do not start a TUI, but they still
-query that selected backend and the same persisted thread metadata.
+The shell layer no longer exposes wrapper slash commands such as
+`fcodex /session`; local thread discovery now belongs to
+`feishu-codexctl thread list`.
 
 ## 9. Explicit `--remote` Is a Special Case
 
@@ -202,13 +203,8 @@ This is intentional. Explicit `--remote` means "use the target I asked for."
 Compared with bare Codex TUI, `fcodex` adds these semantics:
 
 - shared backend with the selected Feishu instance by default
-- local default-profile injection when `-p/--profile` is absent
-- wrapper commands:
-  - `/help`
-  - `/profile`
-  - `/rm`
-  - `/session`
-  - `/resume`
+- new-thread default-profile seeding when `-p/--profile` is absent
+- thread-name resume resolution plus thread-wise profile injection / persistence
 - cwd patching through a thin local proxy
 
 Inside the running TUI, however, command semantics return to upstream Codex
@@ -239,8 +235,8 @@ safe.
 Inside the TUI, `/resume` picker behavior remains upstream and may differ from:
 
 - Feishu `/session`
-- `fcodex /session`
-- `fcodex /resume <name>`
+- `feishu-codexctl thread list`
+- `fcodex resume <thread_name>`
 
 ### Shared backend availability matters
 

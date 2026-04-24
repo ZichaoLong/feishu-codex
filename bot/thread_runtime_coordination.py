@@ -60,16 +60,16 @@ def acquire_thread_runtime_holder_or_raise(
         raise RuntimeError(build_runtime_lease_conflict_message(current))
 
     status = _remote_thread_status(owner_entry, thread_id)
-    release_available = bool(status.get("release_feishu_runtime_available"))
-    if not release_available:
+    unsubscribe_available = bool(status.get("unsubscribe_available"))
+    if not unsubscribe_available:
         raise RuntimeError(
             build_runtime_lease_conflict_message(
                 current,
-                reason=str(status.get("release_feishu_runtime_reason", "") or "").strip(),
+                reason=str(status.get("unsubscribe_reason", "") or "").strip(),
             )
         )
 
-    _remote_release_runtime(owner_entry, thread_id)
+    _remote_unsubscribe_thread(owner_entry, thread_id)
     retry = lease_store.acquire(thread_id, holder)
     if retry.granted:
         return ThreadRuntimeAcquireOutcome(result=retry, transferred_from=owner_entry.instance_name)
@@ -107,11 +107,11 @@ def _remote_thread_status(owner: InstanceRegistryEntry, thread_id: str) -> dict:
         raise RuntimeError(f"无法查询 owner 实例 `{owner.instance_name}` 的线程状态：{exc}") from exc
 
 
-def _remote_release_runtime(owner: InstanceRegistryEntry, thread_id: str) -> dict:
+def _remote_unsubscribe_thread(owner: InstanceRegistryEntry, thread_id: str) -> dict:
     try:
         return control_request(
             pathlib.Path(owner.data_dir),
-            "thread/release-feishu-runtime",
+            "thread/unsubscribe",
             {"thread_id": thread_id},
         )
     except ServiceControlError as exc:

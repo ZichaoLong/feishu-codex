@@ -51,7 +51,7 @@
 
 - 原生协议优先：优先使用 `codex app-server` 行为和 API，而不是本地抓取或重建状态
 - 单一事实来源：thread id、cwd、title、preview、source、runtime config 来自 Codex
-- 飞书本地状态留在本地：每实例本地默认 profile、线程/UI 绑定状态由 `feishu-codex` 管理
+- 飞书本地状态留在本地：每实例新 thread seed profile、线程/UI 绑定状态由 `feishu-codex` 管理；thread-wise resume profile 走机器级共享存储
 - shared-backend 路径显式存在：如果要和飞书继续同一个 live thread，应明确走同一个**实例 backend**
 - `CODEX_HOME` 与 Feishu 运行时边界分离：前者共享，后者按实例隔离
 - 运行时假设要文档化：wrapper 与 shared-backend 行为不能只隐含在代码里
@@ -110,7 +110,7 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/card_text_projection.py`：卡片文本投影边界；负责终态 `final_reply_text` 结果载体约定，以及入站 `interactive` 的强合同 / best-effort 文本提取
 - `bot/adapters/codex_app_server.py`：Codex adapter 边界
 - `bot/codex_protocol/client.py`：`codex app-server` 的 websocket JSON-RPC client
-- `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与轻量代理
+- `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与带 owner 过滤的代理
 - `bot/feishu_codexctl.py` 与 `bot/service_control_plane.py`：本地服务管理 CLI 与运行中服务控制面
 - `bot/instance_layout.py` 与 `bot/instance_resolution.py`：多实例目录布局、当前/目标实例解析
 - `bot/binding_identity.py`：admin-facing binding 标识规范
@@ -118,11 +118,11 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/thread_access_policy.py`：线程共享与 interaction owner 的准入 policy 边界
 - `bot/thread_runtime_coordination.py`：跨实例 live runtime lease 获取、自动转移与拒绝
 - `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、终态结果载体发送、watchdog / reconcile / degrade 处理
-- `bot/runtime_admin_controller.py`：`/status`、`/release-feishu-runtime` 与 control-plane 查询/管理
+- `bot/runtime_admin_controller.py`：`/status`、`/unsubscribe` 与 control-plane 查询/管理
 - `bot/inbound_surface_controller.py`：入站命令面、卡片 action 路由、help 卡片命令复用
 - `bot/forward_aggregator.py`：合并转发缓冲、超时分发与转发树文本化；它只持有这组 transport 内部状态机，不再把这部分状态散落在 `FeishuBot` 主体里
 - `bot/group_history_recovery.py`：`assistant` 群模式的历史回捞、实时日志合并、上下文格式化与边界 `message_id` 推导；它不直接依赖飞书 SDK，请求构造与 API 调用仍留在 `FeishuBot` 这一 transport 边界，并通过显式 ports 传入分页结果
-- `bot/prompt_turn_entry_controller.py`：prompt 进入、lease 抢占、released -> attached 恢复编排
+- `bot/prompt_turn_entry_controller.py`：prompt 进入、lease 准入、released -> attached 恢复编排
 - `bot/adapter_notification_controller.py`：adapter notification 的 method 路由、语义解释与下游分发
 - `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
 - `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态，以及通过 `RuntimeLoop` 串行化的 resume 目标解析
@@ -131,7 +131,7 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/stores/thread_admission_store.py`：每实例 Feishu 可见线程的 admission
 - `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
 - `bot/stores/thread_runtime_lease_store.py`：机器级 thread live runtime lease
-- `bot/stores/*.py`：每实例本地默认 profile、shared backend 运行时发现状态、群聊状态
+- `bot/stores/*.py`：每实例新 thread seed profile、shared backend 运行时发现状态、群聊状态；以及机器级 thread-wise resume profile / lease / registry
 
 对飞书传输层还应补一条维护性约束：
 
@@ -215,7 +215,8 @@ shared backend 与 wrapper 的具体机制，见
 
 `feishu-codex` 只保存飞书或集成侧专属的数据：
 
-- 每实例飞书与该实例 `fcodex` 启动共用的本地默认 profile
+- 每实例飞书与该实例 `fcodex` 新建 thread 时共用的本地 default-profile seed
+- 机器级共享的 thread-wise resume profile
 - 每实例 shared backend 的运行时地址发现状态
 - 私聊当前绑定到哪个 thread，以及群聊按 `chat_id` 共享绑定到哪个 thread
 - 群聊工作态、群 ACL、群上下文日志与上下文边界状态

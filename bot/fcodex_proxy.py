@@ -16,11 +16,13 @@ import argparse
 import json
 import os
 import pathlib
+import sys
 import threading
 import time
 from collections.abc import Callable
 from typing import Any
 
+from bot.codex_config_reader import resolve_profile_from_codex_config
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 from websockets.sync.server import serve
@@ -32,6 +34,7 @@ from bot.stores.interaction_lease_store import (
     make_fcodex_interaction_holder,
 )
 from bot.runtime_state import BACKEND_THREAD_STATUS_IDLE, BACKEND_THREAD_STATUS_NOT_LOADED
+from bot.stores.thread_resume_profile_store import ThreadResumeProfileStore
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
 from bot.thread_runtime_coordination import acquire_thread_runtime_holder_or_raise
 
@@ -178,6 +181,7 @@ class _ProxyInteractionGate:
         instance_name: str = "",
         service_token: str = "",
         holder_pid: int,
+        thread_profile_seed: str = "",
     ) -> None:
         self._cwd = cwd
         self._holder = make_fcodex_interaction_holder(
@@ -188,8 +192,11 @@ class _ProxyInteractionGate:
         self._service_token = str(service_token or "").strip()
         self._lease_store = InteractionLeaseStore(data_dir)
         normalized_global_data_dir = pathlib.Path(global_data_dir or ".")
+        self._global_data_dir = normalized_global_data_dir
         self._runtime_lease_store = ThreadRuntimeLeaseStore(normalized_global_data_dir)
         self._instance_registry = InstanceRegistryStore(normalized_global_data_dir)
+        self._thread_profile_seed = str(thread_profile_seed or "").strip()
+        self._thread_profile_seed_consumed = not self._thread_profile_seed
         self._lock = threading.Lock()
         self._pending_server_request_thread_by_id: dict[str, str] = {}
         self._pending_client_request_by_id: dict[str, tuple[str, str, bool]] = {}
@@ -262,6 +269,32 @@ class _ProxyInteractionGate:
         self._runtime_lease_store.release(thread_id, self._holder.holder_id)
         self._forget_owned_thread(thread_id)
 
+    def _persist_thread_profile_seed_once(self, thread_id: str) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        with self._lock:
+            if self._thread_profile_seed_consumed or not self._thread_profile_seed:
+                return
+            profile = self._thread_profile_seed
+            self._thread_profile_seed_consumed = True
+        try:
+            resolved = resolve_profile_from_codex_config(profile)
+            ThreadResumeProfileStore(self._global_data_dir).save(
+                normalized_thread_id,
+                profile=profile,
+                model=resolved.model,
+                model_provider=resolved.model_provider,
+            )
+        except Exception as exc:
+            with self._lock:
+                if self._thread_profile_seed == profile:
+                    self._thread_profile_seed_consumed = False
+            print(
+                f"warning: failed to persist initial thread profile seed for `{normalized_thread_id}`: {exc}",
+                file=sys.stderr,
+            )
+
     def handle_client_message(self, message: str | bytes, *, client_ws: Any, backend_ws: Any) -> None:
         rewritten = _rewrite_thread_start_cwd(message, self._cwd)
         parsed = _parse_jsonrpc_message(rewritten)
@@ -322,19 +355,6 @@ class _ProxyInteractionGate:
         if response_id not in (None, ""):
             request_key = _jsonrpc_id_key(response_id)
             with self._lock:
-                thread_request = self._pending_thread_request_by_id.pop(request_key, None)
-            if thread_request is not None:
-                request_method, thread_id = thread_request
-                if request_method == "thread/resume" and "error" in payload:
-                    self._release_runtime_lease(thread_id)
-                elif request_method == "thread/start" and "error" not in payload:
-                    started_thread_id = _response_thread_id(payload)
-                    if started_thread_id:
-                        self._acquire_runtime_lease(started_thread_id)
-                elif request_method == "thread/unsubscribe" and "error" not in payload:
-                    self._release_runtime_lease(thread_id)
-            request_key = _jsonrpc_id_key(response_id)
-            with self._lock:
                 thread_id = self._pending_server_request_thread_by_id.pop(request_key, "")
             if thread_id:
                 lease = self._lease_store.load(thread_id)
@@ -385,6 +405,19 @@ class _ProxyInteractionGate:
         response_id = payload.get("id")
         if response_id not in (None, ""):
             with self._lock:
+                thread_request = self._pending_thread_request_by_id.pop(_jsonrpc_id_key(response_id), None)
+            if thread_request is not None:
+                request_method, thread_id = thread_request
+                if request_method == "thread/resume" and "error" in payload:
+                    self._release_runtime_lease(thread_id)
+                elif request_method == "thread/start" and "error" not in payload:
+                    started_thread_id = _response_thread_id(payload)
+                    if started_thread_id:
+                        self._acquire_runtime_lease(started_thread_id)
+                        self._persist_thread_profile_seed_once(started_thread_id)
+                elif request_method == "thread/unsubscribe" and "error" not in payload:
+                    self._release_runtime_lease(thread_id)
+            with self._lock:
                 request_context = self._pending_client_request_by_id.pop(_jsonrpc_id_key(response_id), None)
             if request_context is not None:
                 request_method, thread_id, acquired = request_context
@@ -426,6 +459,7 @@ def run_proxy(
     global_data_dir: str | pathlib.Path | None = None,
     instance_name: str = "",
     service_token: str = "",
+    thread_profile_seed: str = "",
     listen_host: str = "127.0.0.1",
     listen_port: int = 0,
     idle_timeout_seconds: float = _DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -497,6 +531,7 @@ def run_proxy(
                     instance_name=instance_name or os.environ.get("FC_INSTANCE", ""),
                     service_token=service_token,
                     holder_pid=holder_pid,
+                    thread_profile_seed=thread_profile_seed,
                 )
 
                 def _backend_to_client() -> None:
@@ -556,6 +591,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--global-data-dir", default="")
     parser.add_argument("--instance", default="")
     parser.add_argument("--service-token", default="")
+    parser.add_argument("--thread-profile-seed", default="")
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, default=0)
     parser.add_argument("--parent-pid", type=int, default=0)
@@ -567,6 +603,7 @@ def main(argv: list[str] | None = None) -> None:
         global_data_dir=args.global_data_dir or None,
         instance_name=args.instance,
         service_token=args.service_token,
+        thread_profile_seed=args.thread_profile_seed,
         listen_host=args.listen_host,
         listen_port=args.listen_port,
         parent_pid=args.parent_pid or None,

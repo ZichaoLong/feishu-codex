@@ -4,6 +4,10 @@ Chinese version: `docs/archive/codex-handler-decomposition-plan.zh-CN.md`
 
 This document is an implementation plan, not a runtime contract.
 
+Note: some terms in the original plan predate the later command-surface
+tightening; read the runtime-release admin action here as the current
+`unsubscribe` operation.
+
 It answers:
 
 - why the next step should not be more scattered fixes
@@ -105,9 +109,9 @@ Current progress:
     and dispatch
 - Phase 3 is complete: `RuntimeAdminController`
   - owns runtime-admin and control-plane status queries
-  - owns `/status` and `/release-feishu-runtime`
+  - owns `/status` and `unsubscribe`
   - owns binding clear / clear-all and thread status / bindings /
-    release-feishu-runtime
+    unsubscribe
 - Phase 4 is complete: `InboundSurfaceController`
   - owns inbound message-command parsing and dispatch
   - owns card-action routing and help-card command reuse
@@ -155,7 +159,7 @@ The new component should own:
 - thread write lease
 - binding status snapshot
 - low-level execution of binding clear / clear-all
-- low-level execution of `/release-feishu-runtime`
+- low-level execution of `unsubscribe`
 
 ### 7.3 Out Of Scope For Phase 1
 
@@ -308,7 +312,7 @@ This component owns:
 - binding inventory and binding-status snapshot reads
 - thread status / bindings snapshot reads
 - `/status` rendering
-- `/release-feishu-runtime` execution and result rendering
+- `unsubscribe` execution and result rendering
 - admin-side rejection checks and execution for binding clear / clear-all
 - `service/status`
 - control-plane `binding/*` and `thread/*` admin requests
@@ -345,10 +349,10 @@ Those stay in a thinner orchestration entry layer.
 
 ### 9.5 Exit Criteria
 
-- existing `/status`, `/release-feishu-runtime`, binding clear, thread
+- existing `/status`, `unsubscribe`, binding clear, thread
   status/bindings, and service-control tests still pass
 - new controller-level tests cover:
-  - release-feishu-runtime blockers
+  - unsubscribe blockers
   - clear-all fail-closed behavior
   - `service/status` aggregate view
   - attached vs released binding rendering under `thread/bindings`

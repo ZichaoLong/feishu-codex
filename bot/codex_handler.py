@@ -43,7 +43,7 @@ from bot.constants import (
 )
 from bot.handler import BotHandler
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, current_instance_name, global_data_dir
-from bot.codex_config_reader import ResolvedProfileConfig, resolve_profile_from_codex_config
+from bot.codex_config_reader import resolve_profile_from_codex_config
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
 from bot.codex_protocol.client import CodexRpcError
 from bot.codex_group_domain import CodexGroupDomain, GroupDomainPorts
@@ -96,6 +96,7 @@ from bot.stores.interaction_lease_store import (
     InteractionLeaseStore,
 )
 from bot.stores.profile_state_store import ProfileStateStore
+from bot.stores.thread_resume_profile_store import ThreadResumeProfileRecord, ThreadResumeProfileStore
 from bot.stores.service_instance_lease import (
     ServiceInstanceLease,
     ServiceInstanceLeaseError,
@@ -120,7 +121,6 @@ _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _LOCAL_THREAD_SAFETY_RULE = (
     "同一线程允许多端订阅观察，但同一 live turn 只有一个交互 owner；非 owner 只能看，不能写或处理审批。"
 )
-_EMPTY_RESOLVED_PROFILE = ResolvedProfileConfig()
 ChatBindingKey: TypeAlias = tuple[str, str]
 _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
     "read-only": {
@@ -313,6 +313,7 @@ class CodexHandler(BotHandler):
                 ),
             )
         self._profile_state = ProfileStateStore(self._data_dir)
+        self._thread_resume_profile_store = ThreadResumeProfileStore(self._global_data_dir)
         self._adapter = CodexAppServerAdapter(
             self._adapter_config,
             on_notification=self._handle_adapter_notification,
@@ -328,6 +329,10 @@ class CodexHandler(BotHandler):
                 add_admin_open_id=lambda open_id: self.bot.add_admin_open_id(open_id),
                 set_configured_bot_open_id=lambda open_id: self.bot.set_configured_bot_open_id(open_id),
                 save_default_profile=self._profile_state.save_default_profile,
+                load_thread_resume_profile=self._thread_resume_profile_store.load,
+                save_thread_resume_profile=self._save_thread_resume_profile_record,
+                check_thread_resume_profile_mutable=self._thread_resume_profile_write_check,
+                resolve_profile_resume_config=resolve_profile_from_codex_config,
                 adapter_model_provider=str(self._adapter_config.model_provider or "").strip(),
                 get_runtime_view=self._get_runtime_view,
                 update_runtime_settings=self._update_runtime_settings,
@@ -419,6 +424,7 @@ class CodexHandler(BotHandler):
             cancel_patch_timer_locked=self._cancel_patch_timer_locked,
             cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
             is_thread_not_found_error=self._is_thread_not_found_error,
+            reprofile_possible_check=self._thread_resume_profile_write_check,
         )
         self._prompt_turn_entry = PromptTurnEntryController(
             lock=self._lock,
@@ -453,6 +459,8 @@ class CodexHandler(BotHandler):
                 resume_snapshot_by_id=self._resume_snapshot_by_id,
                 create_thread=lambda **kwargs: self._adapter.create_thread(**kwargs),
                 effective_default_profile=self._effective_default_profile,
+                persist_new_thread_profile_seed=self._persist_new_thread_profile_seed,
+                thread_profile_for_thread=self._thread_profile_for_thread,
                 message_reply_in_thread=self._message_reply_in_thread,
                 group_actor_open_id=self._group_actor_open_id,
                 access_policy=self._thread_access_policy,
@@ -643,7 +651,7 @@ class CodexHandler(BotHandler):
             except Exception:
                 logger.exception("恢复 service thread runtime lease 失败: thread=%s", thread_id[:12])
                 try:
-                    self._runtime_admin.release_feishu_runtime_by_thread_id(thread_id)
+                    self._runtime_admin.unsubscribe_feishu_runtime_by_thread_id(thread_id)
                 except Exception:
                     logger.exception("将冲突线程 fail-closed 为 released 失败: thread=%s", thread_id[:12])
 
@@ -1287,8 +1295,8 @@ class CodexHandler(BotHandler):
                     message_id=message_id,
                 ),
             ),
-            "/release-feishu-runtime": CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_release_feishu_runtime_command(
+            "/unsubscribe": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_unsubscribe_command(
                     sender_id,
                     chat_id,
                     arg,
@@ -1679,24 +1687,29 @@ class CodexHandler(BotHandler):
         runtime = self._get_runtime_view(sender_id, chat_id, message_id)
         if runtime.running:
             return CommandResult(text="执行中不能新建线程，请等待结束或先执行 `/cancel`。")
+        seed_profile = self._effective_default_profile().strip()
         try:
             snapshot = self._adapter.create_thread(
                 cwd=runtime.working_dir,
-                profile=self._effective_default_profile() or None,
+                profile=seed_profile or None,
                 approval_policy=runtime.approval_policy or None,
                 sandbox=runtime.sandbox or None,
             )
         except Exception as exc:
             logger.exception("新建线程失败")
             return CommandResult(text=f"新建线程失败：{exc}")
+        seed_warning = self._persist_new_thread_profile_seed(snapshot.summary.thread_id, seed_profile)
         self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
+        content = (
+            f"线程：`{snapshot.summary.thread_id[:8]}…`\n"
+            f"目录：`{display_path(snapshot.summary.cwd)}`\n"
+            "直接发送普通文本开始第一轮对话。"
+        )
+        if seed_warning:
+            content += f"\n\n{seed_warning}"
         return CommandResult(card=build_markdown_card(
             "Codex 线程已新建",
-            (
-                f"线程：`{snapshot.summary.thread_id[:8]}…`\n"
-                f"目录：`{display_path(snapshot.summary.cwd)}`\n"
-                "直接发送普通文本开始第一轮对话。"
-            ),
+            content,
             template="green",
         ))
 
@@ -1724,7 +1737,7 @@ class CodexHandler(BotHandler):
         binding = self._chat_binding_key(sender_id, chat_id, message_id)
         return self._runtime_admin.handle_preflight_command(binding, arg)
 
-    def _handle_release_feishu_runtime_command(
+    def _handle_unsubscribe_command(
         self,
         sender_id: str,
         chat_id: str,
@@ -1733,10 +1746,10 @@ class CodexHandler(BotHandler):
         message_id: str = "",
     ) -> CommandResult:
         binding = self._chat_binding_key(sender_id, chat_id, message_id)
-        return self._runtime_admin.handle_release_feishu_runtime_command(binding, arg)
+        return self._runtime_admin.handle_unsubscribe_command(binding, arg)
 
-    def _release_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
-        return self._runtime_admin.release_feishu_runtime_by_thread_id(thread_id)
+    def _unsubscribe_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
+        return self._runtime_admin.unsubscribe_feishu_runtime_by_thread_id(thread_id)
 
     def _handle_service_control_request(self, method: str, params: dict[str, Any]) -> Any:
         return self._runtime_call(self._handle_service_control_request_impl, method, params)
@@ -1921,15 +1934,17 @@ class CodexHandler(BotHandler):
         summary: ThreadSummary | None = None,
     ) -> ThreadSnapshot:
         thread = summary or self._lookup_thread_summary_in_bounded_list(thread_id)
-        profile = self._effective_default_profile()
-        resolved = resolve_profile_from_codex_config(profile) if profile else _EMPTY_RESOLVED_PROFILE
+        profile_record = self._thread_resume_profile(thread_id)
+        profile = profile_record.profile if profile_record is not None else ""
+        model = profile_record.model if profile_record is not None else ""
+        model_provider = profile_record.model_provider if profile_record is not None else ""
         self._ensure_service_thread_runtime_lease(thread_id)
         try:
             return self._adapter.resume_thread(
                 thread_id,
                 profile=profile or None,
-                model=resolved.model or None,
-                model_provider=resolved.model_provider or None,
+                model=model or None,
+                model_provider=model_provider or None,
             )
         except Exception as exc:
             self._release_service_thread_runtime_lease(thread_id)
@@ -2045,6 +2060,83 @@ class CodexHandler(BotHandler):
             return self._last_runtime_config
         self._last_runtime_config = runtime_config
         return runtime_config
+
+    def _thread_resume_profile(self, thread_id: str) -> ThreadResumeProfileRecord | None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return None
+        return self._thread_resume_profile_store.load(normalized_thread_id)
+
+    def _thread_profile_for_thread(self, thread_id: str) -> str:
+        record = self._thread_resume_profile(thread_id)
+        return record.profile if record is not None else ""
+
+    def _thread_resume_profile_write_check(self, thread_id: str) -> tuple[bool, str]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return False, "当前还没有绑定 thread；先执行 `/new`，或直接发送第一条普通消息创建线程。"
+        with self._lock:
+            if self._binding_runtime.attached_bindings_for_thread_locked(normalized_thread_id):
+                return False, "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。"
+        lease = self._thread_runtime_lease_store.load(normalized_thread_id)
+        if lease is not None:
+            return False, "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。"
+        try:
+            loaded_thread_ids = set(self._adapter.list_loaded_thread_ids())
+        except Exception:
+            loaded_thread_ids = set()
+        if normalized_thread_id in loaded_thread_ids:
+            return False, "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。"
+        return True, ""
+
+    def _persist_thread_resume_profile(self, thread_id: str, profile: str) -> ThreadResumeProfileRecord:
+        normalized_profile = str(profile or "").strip()
+        if not normalized_profile:
+            raise ValueError("profile 不能为空。")
+        resolved = resolve_profile_from_codex_config(normalized_profile)
+        return self._save_thread_resume_profile_record(
+            thread_id,
+            normalized_profile,
+            resolved.model,
+            resolved.model_provider,
+        )
+
+    def _save_thread_resume_profile_record(
+        self,
+        thread_id: str,
+        profile: str,
+        model: str,
+        model_provider: str,
+    ) -> ThreadResumeProfileRecord:
+        normalized_profile = str(profile or "").strip()
+        normalized_model_provider = str(model_provider or "").strip()
+        runtime_config = self._safe_read_runtime_config()
+        runtime_provider = ""
+        if runtime_config is not None:
+            for item in runtime_config.profiles:
+                if item.name == normalized_profile:
+                    runtime_provider = str(item.model_provider or "").strip()
+                    break
+        return self._thread_resume_profile_store.save(
+            thread_id,
+            profile=normalized_profile,
+            model=str(model or "").strip(),
+            model_provider=normalized_model_provider or runtime_provider,
+        )
+
+    def _persist_new_thread_profile_seed(self, thread_id: str, profile: str) -> str:
+        normalized_profile = str(profile or "").strip()
+        if not normalized_profile:
+            return ""
+        try:
+            self._persist_thread_resume_profile(thread_id, normalized_profile)
+        except Exception as exc:
+            logger.exception("持久化新 thread 的默认 profile seed 失败: thread=%s", str(thread_id or "")[:12])
+            return (
+                "警告：thread 已创建，但默认 profile 未成功持久化；"
+                f"后续 resume 可能不会沿用这次 profile（{exc}）。"
+            )
+        return ""
 
     def _effective_default_profile(self) -> str:
         resolution = self._current_default_profile_resolution(self._safe_read_runtime_config())

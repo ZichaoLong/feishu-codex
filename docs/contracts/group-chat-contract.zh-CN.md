@@ -25,7 +25,7 @@
 它不重新定义：
 
 - 单聊线程生命周期
-- `/status`、`/release-feishu-runtime` 与本地管理面词汇
+- `/status`、`/unsubscribe` 与本地管理面词汇
 - `fcodex` wrapper 语义
 
 这些分别以各自专题文档为准。
@@ -85,7 +85,7 @@
 - 群里的所有 `/` 命令都只给管理员
 - 群聊 `assistant` 和 `mention-only` 工作态下，管理员群命令本身也必须先显式 mention 触发对象
 - 群聊 `all` 工作态下，管理员可直接发送群命令
-- 这里的“群命令”既包括群聊专属命令（如 `/groupmode`、`/acl`），也包括在群上下文里触发的通用 Feishu 命令（如 `/status`、`/release-feishu-runtime`）
+- 这里的“群命令”既包括群聊专属命令（如 `/groupmode`、`/acl`），也包括在群上下文里触发的通用 Feishu 命令（如 `/status`、`/unsubscribe`）
 - 本节只定义“群里是否允许触发这些命令”；命令本身的 runtime / session 语义仍分别以专题合同为准
 - 群命令不会写入 `assistant` 上下文日志，也不会推进上下文边界
 

@@ -8,7 +8,7 @@ from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummar
 from bot.binding_runtime_manager import BindingRuntimeManager
 from bot.reason_codes import (
     PROMPT_DENIED_BY_INTERACTION_OWNER,
-    RELEASE_BLOCKED_BY_PENDING_REQUEST,
+    UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST,
     ReasonedCheck,
 )
 from bot.runtime_admin_controller import RuntimeAdminController
@@ -104,6 +104,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             cancel_patch_timer_locked=lambda state: state.update({"patch_timer": None}),
             cancel_mirror_watchdog_locked=lambda state: state.update({"mirror_watchdog_timer": None}),
             is_thread_not_found_error=lambda exc: False,
+            reprofile_possible_check=lambda thread_id: (thread_id not in loaded_thread_ids, ""),
         )
         return (
             lock,
@@ -130,7 +131,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             )
         return state
 
-    def test_release_feishu_runtime_availability_locked_blocks_on_pending_request(self) -> None:
+    def test_unsubscribe_availability_locked_blocks_on_pending_request(self) -> None:
         (
             lock,
             binding_runtime,
@@ -157,14 +158,14 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         )
         pending_by_thread.add("thread-1")
 
-        allowed, reason = controller.release_feishu_runtime_availability_locked("thread-1")
+        allowed, reason = controller.unsubscribe_availability_locked("thread-1")
 
         self.assertFalse(allowed)
         self.assertIn("审批或输入请求未处理", reason)
-        check = controller.release_feishu_runtime_check_locked("thread-1")
-        self.assertEqual(check.reason_code, RELEASE_BLOCKED_BY_PENDING_REQUEST)
+        check = controller.unsubscribe_check_locked("thread-1")
+        self.assertEqual(check.reason_code, UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST)
 
-    def test_release_feishu_runtime_by_thread_id_marks_binding_released_and_unsubscribes(self) -> None:
+    def test_unsubscribe_by_thread_id_marks_binding_released_and_unsubscribes(self) -> None:
         (
             lock,
             binding_runtime,
@@ -190,7 +191,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             status="notLoaded",
         )
 
-        result = controller.release_feishu_runtime_by_thread_id("thread-1")
+        result = controller.unsubscribe_feishu_runtime_by_thread_id("thread-1")
 
         self.assertTrue(result["changed"])
         self.assertEqual(result["released_binding_ids"], ["p2p:ou_user:c1"])
@@ -362,7 +363,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         )
         self.assertEqual(admitted_thread_ids, {"thread-1"})
 
-    def test_binding_status_snapshot_includes_prompt_and_release_reason_codes(self) -> None:
+    def test_binding_status_snapshot_includes_prompt_and_unsubscribe_reason_codes(self) -> None:
         (
             lock,
             binding_runtime,
@@ -397,10 +398,10 @@ class RuntimeAdminControllerTests(unittest.TestCase):
 
         self.assertFalse(snapshot["next_prompt_allowed"])
         self.assertEqual(snapshot["next_prompt_reason_code"], PROMPT_DENIED_BY_INTERACTION_OWNER)
-        self.assertFalse(snapshot["release_feishu_runtime_available"])
-        self.assertEqual(snapshot["release_feishu_runtime_reason_code"], RELEASE_BLOCKED_BY_PENDING_REQUEST)
+        self.assertFalse(snapshot["unsubscribe_available"])
+        self.assertEqual(snapshot["unsubscribe_reason_code"], UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST)
 
-    def test_handle_preflight_command_renders_next_prompt_and_release_checks(self) -> None:
+    def test_handle_preflight_command_renders_next_prompt_and_unsubscribe_checks(self) -> None:
         (
             lock,
             binding_runtime,
@@ -438,7 +439,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         content = card["elements"][0]["content"]
         self.assertIn("作用对象：当前 chat binding；这是 dry-run", content)
         self.assertIn("下一条普通消息：`blocked` (`prompt_denied_by_interaction_owner`)", content)
-        self.assertIn("release-feishu-runtime：`blocked` (`release_blocked_by_pending_request`)", content)
+        self.assertIn("unsubscribe：`blocked` (`unsubscribe_blocked_by_pending_request`)", content)
 
     def test_handle_service_control_request_thread_revoke_removes_admission(self) -> None:
         (

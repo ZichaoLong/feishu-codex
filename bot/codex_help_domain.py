@@ -15,11 +15,14 @@ from bot.cards import CommandResult, make_card_response
 from bot.shared_command_surface import get_shared_command
 
 
-_SHARED_HELP_COMMAND = get_shared_command("help")
 _SHARED_PROFILE_COMMAND = get_shared_command("profile")
 _SHARED_RM_COMMAND = get_shared_command("rm")
 _SHARED_SESSION_COMMAND = get_shared_command("session")
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
+
+_LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
+_LOCAL_THREAD_LIST_GLOBAL = "feishu-codexctl thread list --scope global"
+_LOCAL_RESUME_COMMAND = "fcodex resume <thread_id|thread_name>"
 
 
 @dataclass(frozen=True)
@@ -83,8 +86,10 @@ class CodexHelpDomain:
                     "- `settings`：profile、权限预设、审批、沙箱、协作模式、身份初始化\n"
                     "- `group`：群聊工作态、ACL 使用规则、群内触发约束\n\n"
                     f"{self._local_thread_safety_rule}\n\n"
-                    f"本地 `fcodex` wrapper 用法不放在飞书 `{_SHARED_HELP_COMMAND.slash_name}`；"
-                    f"请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`。"
+                    "本地继续同一线程请用 "
+                    f"`{_LOCAL_RESUME_COMMAND}`；"
+                    "本地查看/管理请用 "
+                    f"`{_LOCAL_THREAD_LIST_CWD}`。"
                 ),
                 action_rows=(
                     _HelpActionRowSpec(
@@ -107,8 +112,9 @@ class CodexHelpDomain:
                     "- `/cd <path>`：切换目录并清空当前线程绑定\n"
                     "- “当前线程”页：查看 `/status`、`/preflight`、释放 runtime、重命名、归档当前绑定线程\n\n"
                     "**本地继续**\n"
-                    "- 需要在本地继续同一 live thread 时，使用 `fcodex`\n"
-                    f"- 本地 wrapper 命令请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`\n\n"
+                    f"- 需要在本地继续同一 live thread 时，使用 `{_LOCAL_RESUME_COMMAND}`\n"
+                    f"- 本地查看当前目录线程请用 `{_LOCAL_THREAD_LIST_CWD}`\n"
+                    f"- 本地全局找线程请用 `{_LOCAL_THREAD_LIST_GLOBAL}`\n\n"
                     f"{self._local_thread_safety_rule}"
                 ),
                 action_rows=(
@@ -141,7 +147,7 @@ class CodexHelpDomain:
                     "这些操作都以**当前绑定线程**为目标。\n\n"
                     "- `/status`：查看当前 binding、feishu runtime、backend thread status、profile 相关信息\n"
                     "- `/preflight`：dry-run 当前 chat 下一条普通消息与 release 操作，不启动 turn、不改 binding\n"
-                    "- `/release-feishu-runtime`：释放 Feishu 对当前线程的 runtime 持有，但不解绑 thread\n"
+                    "- `/unsubscribe`：让 Feishu 释放自己对当前线程的 runtime 持有，但不解绑 thread\n"
                     "- `/rename <title>`：重命名当前线程\n"
                     f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
                     "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。"
@@ -156,9 +162,9 @@ class CodexHelpDomain:
                                 title="Codex Preflight",
                             ),
                             _HelpCommandButtonSpec(
-                                label="释放 runtime",
-                                command="/release-feishu-runtime",
-                                title="Codex 释放 Feishu Runtime",
+                                label="unsubscribe",
+                                command="/unsubscribe",
+                                title="Codex 取消 Feishu 订阅",
                             ),
                         ),
                         layout="trisection",
@@ -242,8 +248,8 @@ class CodexHelpDomain:
             "settings": _HelpPageSpec(
                 title="Codex 帮助：设置",
                 markdown=(
-                    "**默认 profile 与当前会话设置**\n"
-                    f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换默认 profile\n"
+                    "**当前 thread profile 与当前会话设置**\n"
+                    f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前绑定 thread 的 resume profile\n"
                     "- 推荐先用 `/permissions`；它会同时设置审批策略与沙箱\n"
                     "- `/approval`、`/sandbox`：单独调整审批或沙箱\n"
                     "- `/mode`：切换当前飞书会话后续 turn 的协作模式\n"
@@ -254,7 +260,7 @@ class CodexHelpDomain:
                 action_rows=(
                     _HelpActionRowSpec(
                         buttons=(
-                            _HelpCommandButtonSpec(label="/profile", command="/profile", title="Codex 默认 Profile"),
+                            _HelpCommandButtonSpec(label="/profile", command="/profile", title="Codex Thread Profile"),
                             _HelpCommandButtonSpec(
                                 label="/permissions",
                                 command="/permissions",
@@ -356,8 +362,12 @@ class CodexHelpDomain:
             "local-wrapper-redirect": _HelpPageSpec(
                 title="Codex 帮助：本地命令",
                 markdown=(
-                    f"本地 `fcodex` wrapper 命令不再放在飞书 `{_SHARED_HELP_COMMAND.slash_name}`。"
-                    f"请在终端执行 `{_SHARED_HELP_COMMAND.wrapper_usage}`。"
+                    f"本地继续同一线程请用 `{_LOCAL_RESUME_COMMAND}`。\n\n"
+                    "本地查看/管理请用：\n"
+                    f"- `{_LOCAL_THREAD_LIST_CWD}`\n"
+                    f"- `{_LOCAL_THREAD_LIST_GLOBAL}`\n"
+                    "- `feishu-codexctl thread status --thread-id <thread_id>`\n"
+                    "- `feishu-codexctl thread bindings --thread-id <thread_id>`"
                 ),
                 action_rows=(
                     _HelpActionRowSpec(
