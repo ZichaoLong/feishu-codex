@@ -18,8 +18,8 @@ from bot.codex_config_reader import resolve_profile_from_codex_config
 from bot.config import load_config_file
 from bot.constants import DEFAULT_APP_SERVER_URL
 from bot.env_file import load_env_file
-from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, resolve_instance_paths, validate_instance_name
-from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
+from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, validate_instance_name
+from bot.instance_resolution import current_cli_instance_name, load_running_instance, resolve_cli_instance_target
 from bot.platform_paths import default_data_root, is_windows
 from bot.profile_resolution import resolve_local_default_profile_via_remote_backend
 from bot.session_resolution import (
@@ -31,6 +31,7 @@ from bot.stores.instance_registry_store import InstanceRegistryEntry
 from bot.stores.profile_state_store import ProfileStateStore
 from bot.stores.thread_resume_profile_store import ThreadResumeProfileStore
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseStore
+from bot.thread_profile_mutability import check_thread_resume_profile_mutable
 
 _OPTIONS_WITH_VALUE = {
     "-C",
@@ -161,13 +162,8 @@ def _removed_wrapper_command_error(user_args: list[str]) -> int | None:
     return 2
 
 
-def _running_instance_entries() -> list[InstanceRegistryEntry]:
-    return list_running_instances()
-
-
 def _running_instance_by_name(instance_name: str) -> InstanceRegistryEntry | None:
-    normalized = validate_instance_name(instance_name)
-    return next((item for item in _running_instance_entries() if item.instance_name == normalized), None)
+    return load_running_instance(instance_name)
 
 
 def _lease_owner_instance(thread_id: str) -> str:
@@ -185,19 +181,20 @@ def _resolve_instance_target(
 ) -> _ResolvedInstanceTarget:
     configured_url = str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL
     if explicit_instance:
-        paths = resolve_instance_paths(explicit_instance)
-        running = _running_instance_by_name(explicit_instance)
-        if running is not None:
+        resolved = resolve_cli_instance_target(explicit_instance)
+        if resolved.running_entry is not None:
+            running = resolved.running_entry
             return _ResolvedInstanceTarget(
                 instance_name=running.instance_name,
                 data_dir=pathlib.Path(running.data_dir),
-                app_server_url=running.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=paths.data_dir),
+                app_server_url=running.app_server_url
+                or resolve_effective_app_server_url(configured_url, data_dir=resolved.data_dir),
                 service_token=running.service_token,
             )
         return _ResolvedInstanceTarget(
-            instance_name=paths.instance_name,
-            data_dir=paths.data_dir,
-            app_server_url=resolve_effective_app_server_url(configured_url, data_dir=paths.data_dir),
+            instance_name=resolved.instance_name,
+            data_dir=resolved.data_dir,
+            app_server_url=resolve_effective_app_server_url(configured_url, data_dir=resolved.data_dir),
         )
 
     owner_instance = _lease_owner_instance(thread_id) if thread_id else ""
@@ -211,47 +208,31 @@ def _resolve_instance_target(
                 service_token=running.service_token,
             )
 
-    unique = unique_running_instance()
-    if unique is not None:
-        return _ResolvedInstanceTarget(
-            instance_name=unique.instance_name,
-            data_dir=pathlib.Path(unique.data_dir),
-            app_server_url=unique.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(unique.data_dir)),
-            service_token=unique.service_token,
-        )
-
-    default = default_running_instance()
-    if default is not None:
-        return _ResolvedInstanceTarget(
-            instance_name=default.instance_name,
-            data_dir=pathlib.Path(default.data_dir),
-            app_server_url=default.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(default.data_dir)),
-            service_token=default.service_token,
-        )
-
-    running = _running_instance_entries()
-    if len(running) > 1:
+    try:
+        resolved = resolve_cli_instance_target()
+    except ValueError as exc:
         print("检测到多个运行中的实例，请显式传 `--instance <name>`。", file=sys.stderr)
         raise SystemExit(2)
-
-    if not running:
-        current_instance = current_cli_instance_name()
-        paths = resolve_instance_paths(current_instance)
+    if resolved.running_entry is not None:
+        running = resolved.running_entry
         return _ResolvedInstanceTarget(
-            instance_name=paths.instance_name,
-            data_dir=paths.data_dir if paths.instance_name != DEFAULT_INSTANCE_NAME else _default_data_dir(),
-            app_server_url=resolve_effective_app_server_url(
-                configured_url,
-                data_dir=paths.data_dir if paths.instance_name != DEFAULT_INSTANCE_NAME else _default_data_dir(),
-            ),
+            instance_name=running.instance_name,
+            data_dir=pathlib.Path(running.data_dir),
+            app_server_url=running.app_server_url
+            or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(running.data_dir)),
+            service_token=running.service_token,
         )
-
-    only = running[0]
     return _ResolvedInstanceTarget(
-        instance_name=only.instance_name,
-        data_dir=pathlib.Path(only.data_dir),
-        app_server_url=only.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(only.data_dir)),
-        service_token=only.service_token,
+        instance_name=resolved.instance_name,
+        data_dir=resolved.data_dir
+        if resolved.instance_name != DEFAULT_INSTANCE_NAME
+        else _default_data_dir(),
+        app_server_url=resolve_effective_app_server_url(
+            configured_url,
+            data_dir=resolved.data_dir
+            if resolved.instance_name != DEFAULT_INSTANCE_NAME
+            else _default_data_dir(),
+        ),
     )
 
 
@@ -327,27 +308,18 @@ def _resolve_resume_target_name(
 
 
 def _thread_resume_profile_mutable(cfg: dict, app_server_url: str, thread_id: str) -> tuple[bool, str]:
-    normalized_thread_id = str(thread_id or "").strip()
-    if not normalized_thread_id:
-        return False, "恢复目标不能为空。"
-    if ThreadRuntimeLeaseStore(global_data_dir()).load(normalized_thread_id) is not None:
-        return (
-            False,
-            "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。",
-        )
     adapter = CodexAppServerAdapter(_remote_adapter_config(cfg, app_server_url))
     try:
-        loaded_thread_ids = set(adapter.list_loaded_thread_ids())
-    except Exception:
-        loaded_thread_ids = set()
+        return check_thread_resume_profile_mutable(
+            thread_id,
+            unbound_reason="恢复目标不能为空。",
+            has_runtime_lease=lambda normalized_thread_id: (
+                ThreadRuntimeLeaseStore(global_data_dir()).load(normalized_thread_id) is not None
+            ),
+            list_loaded_thread_ids=adapter.list_loaded_thread_ids,
+        )
     finally:
         adapter.stop()
-    if normalized_thread_id in loaded_thread_ids:
-        return (
-            False,
-            "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。",
-        )
-    return True, ""
 
 
 def _save_thread_resume_profile_record(cfg: dict, app_server_url: str, thread_id: str, profile: str) -> None:

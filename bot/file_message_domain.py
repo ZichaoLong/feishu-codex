@@ -29,6 +29,8 @@ _DOWNLOADABLE_ATTACHMENT_TYPES = {"image", "file", "audio", "media"}
 _UNSUPPORTED_ATTACHMENT_TYPES = {
     "folder": "文件夹消息当前无法通过飞书 API 下载，暂不支持接入当前工作区。",
     "sticker": "表情包消息当前无法通过飞书 API 下载，暂不支持作为附件输入。",
+    "merge_forward": "合并转发里的子附件当前无法通过飞书 API 下载，暂不支持作为附件输入。",
+    "interactive": "卡片里的资源当前无法通过飞书 API 下载，暂不支持作为附件输入。",
 }
 _ATTACHMENT_TYPE_LABELS = {
     "image": "图片",

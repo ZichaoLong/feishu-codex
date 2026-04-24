@@ -343,7 +343,7 @@ class PromptTurnEntryController:
         )
         if sharing_violation:
             if preattached_interaction_lease is not None and preattached_interaction_lease.acquired:
-                self._release_interaction_lease_for_binding(chat_binding_key, thread_id)
+                self._release_interaction_lease_for_binding(chat_binding_key, released_thread_id)
             self._reply_text(
                 chat_id,
                 sharing_violation,

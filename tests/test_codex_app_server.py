@@ -78,6 +78,11 @@ class _FakeRpc:
 
 
 class CodexAppServerAdapterTests(unittest.TestCase):
+    def test_from_dict_normalizes_deprecated_approval_policy(self) -> None:
+        config = CodexAppServerConfig.from_dict({"approval_policy": "on-failure"})
+
+        self.assertEqual(config.approval_policy, "on-request")
+
     def test_create_thread_can_attach_profile_override(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
         fake_rpc = _FakeRpc()
@@ -785,18 +790,16 @@ class FCodexTests(unittest.TestCase):
             holders=(),
         )
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
-            with patch("bot.fcodex.unique_running_instance", return_value=None):
-                with patch("bot.fcodex.default_running_instance", return_value=None):
-                    with patch("bot.fcodex.list_running_instances", return_value=[corp_a, corp_b]):
-                        with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=lease):
-                            with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
-                                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
-                                    mock_resolve.return_value.effective_profile = ""
-                                    mock_resolve.return_value.stale_profile = ""
-                                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9200", Mock())) as mock_proxy:
-                                        with patch("bot.fcodex.os.execvpe") as mock_exec:
-                                            with patch("sys.argv", ["fcodex", "resume", "thread-1"]):
-                                                fcodex_main()
+            with patch("bot.fcodex.load_running_instance", side_effect=lambda name: {"corp-a": corp_a, "corp-b": corp_b}.get(name)):
+                with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=lease):
+                    with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                        with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                            mock_resolve.return_value.effective_profile = ""
+                            mock_resolve.return_value.stale_profile = ""
+                            with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9200", Mock())) as mock_proxy:
+                                with patch("bot.fcodex.os.execvpe") as mock_exec:
+                                    with patch("sys.argv", ["fcodex", "resume", "thread-1"]):
+                                        fcodex_main()
 
         mock_proxy.assert_called_once_with(
             "ws://127.0.0.1:9102",
@@ -836,14 +839,15 @@ class FCodexTests(unittest.TestCase):
         )
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
-            with patch("bot.fcodex.unique_running_instance", return_value=None):
-                with patch("bot.fcodex.default_running_instance", return_value=None):
-                    with patch("bot.fcodex.list_running_instances", return_value=[corp_a, corp_b]):
-                        with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=None):
-                            with patch("bot.fcodex.sys.stderr", stderr):
-                                with patch("sys.argv", ["fcodex", "resume", "thread-1"]):
-                                    with self.assertRaises(SystemExit) as exc:
-                                        fcodex_main()
+            with patch(
+                "bot.fcodex.resolve_cli_instance_target",
+                side_effect=ValueError("检测到多个运行中的实例，请显式传 `--instance <name>`。"),
+            ):
+                with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=None):
+                    with patch("bot.fcodex.sys.stderr", stderr):
+                        with patch("sys.argv", ["fcodex", "resume", "thread-1"]):
+                            with self.assertRaises(SystemExit) as exc:
+                                fcodex_main()
 
         self.assertEqual(exc.exception.code, 2)
         self.assertIn("请显式传 `--instance <name>`", stderr.getvalue())
@@ -1081,6 +1085,27 @@ class FCodexTests(unittest.TestCase):
                                     fcodex_main()
         self.assertEqual(exc.exception.code, 2)
         self.assertIn("当前 thread 仍处于 loaded 状态", stderr.getvalue())
+
+    def test_fcodex_resume_with_explicit_profile_rejects_when_loaded_state_is_unverifiable(self) -> None:
+        thread_id = "019d2e94-a475-7bc1-b2f7-a3ce37628ede"
+        mock_adapter = Mock()
+        mock_adapter.list_loaded_thread_ids.side_effect = RuntimeError("backend down")
+        mock_adapter.stop.return_value = None
+        stderr = StringIO()
+        with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
+            with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
+                with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
+                    mock_resolve.return_value.effective_profile = ""
+                    mock_resolve.return_value.stale_profile = ""
+                    with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=None):
+                        with patch("bot.fcodex.CodexAppServerAdapter", return_value=mock_adapter):
+                            with patch("bot.fcodex.sys.stderr", stderr):
+                                with patch("sys.argv", ["fcodex", "-p", "provider2", "resume", thread_id]):
+                                    with self.assertRaises(SystemExit) as exc:
+                                        fcodex_main()
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("无法确认该 thread 是否已完全 unloaded", stderr.getvalue())
 
     def test_fcodex_explicit_cd_is_forwarded_to_proxy(self) -> None:
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
@@ -1336,6 +1361,27 @@ class FCodexTests(unittest.TestCase):
         self.assertFalse(proxy_thread.is_alive())
         self.assertEqual(mock_process_exists.call_args_list[0].args, (4321,))
 
+    def test_proxy_parent_pid_mode_still_honors_idle_shutdown(self) -> None:
+        proxy_url_queue: queue.Queue[str] = queue.Queue()
+        with patch("bot.fcodex_proxy.process_exists", return_value=True):
+            proxy_thread = threading.Thread(
+                target=run_proxy,
+                kwargs={
+                    "backend_url": "ws://127.0.0.1:8765",
+                    "cwd": "/tmp/project",
+                    "parent_pid": 4321,
+                    "idle_timeout_seconds": 0.1,
+                    "on_listen": proxy_url_queue.put,
+                },
+                daemon=True,
+            )
+            proxy_thread.start()
+            proxy_url = proxy_url_queue.get(timeout=1)
+            self.assertTrue(proxy_url.startswith("ws://127.0.0.1:"))
+            proxy_thread.join(timeout=1)
+
+        self.assertFalse(proxy_thread.is_alive())
+
 
 class ProxyInteractionGateTests(unittest.TestCase):
     class _FakeWs:
@@ -1384,6 +1430,12 @@ class ProxyInteractionGateTests(unittest.TestCase):
             error = self._decode_payload(client_ws.sent[-1])
             self.assertEqual(error["id"], 1)
             self.assertIn("当前线程正由其他终端执行", error["error"]["message"])
+
+    def test_local_error_response_requires_request_id(self) -> None:
+        from bot.fcodex_proxy import _send_local_error_response
+
+        with self.assertRaisesRegex(ValueError, "requires a request id"):
+            _send_local_error_response(self._FakeWs(), "", "boom")
 
     def test_non_owner_does_not_receive_interactive_server_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

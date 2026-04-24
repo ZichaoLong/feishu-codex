@@ -487,13 +487,11 @@ def build_approval_policy_card(current_policy: str, *, running: bool = False) ->
     """构造原生审批策略选择卡片。"""
     labels = {
         "untrusted": "untrusted",
-        "on-failure": "on-failure",
         "on-request": "on-request",
         "never": "never",
     }
     descs = {
         "untrusted": "偏保守，更多操作会先停下来等你确认。",
-        "on-failure": "受限操作失败后，再请求审批。",
         "on-request": "仅在模型明确请求时，才停下来等你确认。",
         "never": "不请求审批，直接执行。",
     }

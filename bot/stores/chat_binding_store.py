@@ -18,6 +18,7 @@ import pathlib
 import threading
 from typing import Any
 
+from bot.approval_policy import normalize_approval_policy
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.feishu_types import ChatBindingsFileData, StoredChatBinding
 from bot.runtime_state import VALID_FEISHU_RUNTIME_STATES
@@ -184,6 +185,7 @@ class ChatBindingStore:
             if not isinstance(value, str):
                 raise ValueError(f"invalid chat_bindings.json: {key} must be a string")
             normalized[key] = value.strip()
+        normalized["approval_policy"] = normalize_approval_policy(normalized["approval_policy"])
         current_thread_id = normalized["current_thread_id"]
         runtime_state = normalized["feishu_runtime_state"]
         if current_thread_id:

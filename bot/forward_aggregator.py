@@ -72,6 +72,7 @@ class ForwardAggregator:
         self._timer_factory = timer_factory
         self._pending_forwards: dict[tuple[str, str], PendingForward] = {}
         self._pending_forwards_lock = threading.Lock()
+        self._timeout_effects_lock = threading.Lock()
 
     def peek_pending_forward(self, sender_id: str, chat_id: str) -> PendingForward | None:
         key = (sender_id, chat_id)
@@ -141,47 +142,48 @@ class ForwardAggregator:
 
     def on_forward_timeout(self, sender_id: str, chat_id: str) -> None:
         try:
-            pending = self.pop_pending_forward(sender_id, chat_id)
-            if pending is None:
-                return
-            group_mode = self._ports.get_group_mode(chat_id) if pending.chat_type == "group" else ""
-            if pending.chat_type == "group" and group_mode == self._group_mode_assistant:
-                self._ports.append_group_log_entry(
-                    chat_id=chat_id,
-                    message_id=pending.message_id,
-                    created_at=pending.created_at or int(time.time() * 1000),
-                    sender_user_id=pending.sender_user_id,
-                    sender_open_id=pending.sender_open_id,
-                    sender_type=pending.sender_type,
-                    msg_type="merge_forward",
-                    thread_id=pending.thread_id,
-                    text=f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>",
-                )
+            with self._timeout_effects_lock:
+                pending = self.pop_pending_forward(sender_id, chat_id)
+                if pending is None:
+                    return
+                group_mode = self._ports.get_group_mode(chat_id) if pending.chat_type == "group" else ""
+                if pending.chat_type == "group" and group_mode == self._group_mode_assistant:
+                    self._ports.append_group_log_entry(
+                        chat_id=chat_id,
+                        message_id=pending.message_id,
+                        created_at=pending.created_at or int(time.time() * 1000),
+                        sender_user_id=pending.sender_user_id,
+                        sender_open_id=pending.sender_open_id,
+                        sender_type=pending.sender_type,
+                        msg_type="merge_forward",
+                        thread_id=pending.thread_id,
+                        text=f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>",
+                    )
+                    logger.info(
+                        "转发消息聚合超时，已写入助理模式日志: user=%s, chat=%s",
+                        sender_id,
+                        chat_id,
+                    )
+                    return
+                if pending.chat_type == "group" and group_mode != self._group_mode_all:
+                    logger.debug(
+                        "转发消息聚合超时，群聊无@唤醒，丢弃: user=%s, chat=%s",
+                        sender_id,
+                        chat_id,
+                    )
+                    return
+                text = f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>"
                 logger.info(
-                    "转发消息聚合超时，已写入助理模式日志: user=%s, chat=%s",
+                    "转发消息聚合超时，单独处理: user=%s, chat=%s",
                     sender_id,
                     chat_id,
                 )
-                return
-            if pending.chat_type == "group" and group_mode != self._group_mode_all:
-                logger.debug(
-                    "转发消息聚合超时，群聊无@唤醒，丢弃: user=%s, chat=%s",
+                self._ports.handle_forwarded_text(
                     sender_id,
                     chat_id,
+                    text,
+                    pending.message_id,
                 )
-                return
-            text = f"<forwarded_messages>\n{pending.forwarded_text}\n</forwarded_messages>"
-            logger.info(
-                "转发消息聚合超时，单独处理: user=%s, chat=%s",
-                sender_id,
-                chat_id,
-            )
-            self._ports.handle_forwarded_text(
-                sender_id,
-                chat_id,
-                text,
-                pending.message_id,
-            )
         except Exception as exc:
             logger.error("转发消息超时处理异常: %s", exc, exc_info=True)
 

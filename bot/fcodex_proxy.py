@@ -142,9 +142,9 @@ def _jsonrpc_id_key(value: Any) -> str:
     return str(value)
 
 
-def _send_local_error(client_ws: Any, request_id: Any, message: str) -> None:
+def _send_local_error_response(client_ws: Any, request_id: Any, message: str) -> None:
     if request_id in (None, ""):
-        return
+        raise ValueError("local JSON-RPC error response requires a request id")
     client_ws.send(
         json.dumps(
             {
@@ -311,7 +311,7 @@ class _ProxyInteractionGate:
                 try:
                     self._acquire_runtime_lease(thread_id)
                 except Exception as exc:
-                    _send_local_error(client_ws, request_id, str(exc))
+                    _send_local_error_response(client_ws, request_id, str(exc))
                     return
                 with self._lock:
                     self._pending_thread_request_by_id[_jsonrpc_id_key(request_id)] = (method, thread_id)
@@ -325,7 +325,7 @@ class _ProxyInteractionGate:
                 if method == "turn/start":
                     lease = self._lease_store.acquire(thread_id, self._holder)
                     if not lease.granted:
-                        _send_local_error(
+                        _send_local_error_response(
                             client_ws,
                             request_id,
                             "当前线程正由其他终端执行；请等待当前 turn 结束后再试。",
@@ -341,7 +341,7 @@ class _ProxyInteractionGate:
                 elif method == "turn/interrupt":
                     lease = self._lease_store.load(thread_id)
                     if lease is None or not lease.holder.same_holder(self._holder):
-                        _send_local_error(
+                        _send_local_error_response(
                             client_ws,
                             request_id,
                             "当前终端不是该线程的交互 owner，不能取消这次执行。",
@@ -575,10 +575,9 @@ def run_proxy(
             on_listen(listen_url)
         else:
             print(listen_url, flush=True)
-        if parent_pid is None:
-            _arm_idle_shutdown()
-            threading.Thread(target=_wait_until_idle_deadline, daemon=True).start()
-        else:
+        _arm_idle_shutdown()
+        threading.Thread(target=_wait_until_idle_deadline, daemon=True).start()
+        if parent_pid is not None:
             threading.Thread(target=_wait_until_parent_exit, daemon=True).start()
         server.serve_forever()
 

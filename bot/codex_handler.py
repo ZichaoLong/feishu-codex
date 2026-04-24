@@ -19,6 +19,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
+from bot.approval_policy import USER_SELECTABLE_APPROVAL_POLICIES
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummary
 from bot.adapter_notification_controller import AdapterNotificationController
@@ -51,6 +52,7 @@ from bot.codex_help_domain import CodexHelpDomain
 from bot.codex_session_ui_domain import CodexSessionUiDomain, SessionUiRuntimePorts
 from bot.codex_settings_domain import CodexSettingsDomain, SettingsDomainPorts
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
+from bot.thread_profile_mutability import check_thread_resume_profile_mutable
 from bot.execution_transcript import ExecutionTranscript
 from bot.execution_output_controller import ExecutionOutputController
 from bot.execution_recovery_controller import (
@@ -116,7 +118,7 @@ _TERMINAL_RESULT_CARD_LIMIT_DEFAULT = 12000
 _CARD_LOG_LIMIT_DEFAULT = 8000
 _MIRROR_WATCHDOG_SECONDS_DEFAULT = 8.0
 _ATTACHMENT_TTL_SECONDS_DEFAULT = 1800.0
-_APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
+_APPROVAL_POLICIES = set(USER_SELECTABLE_APPROVAL_POLICIES)
 _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _LOCAL_THREAD_SAFETY_RULE = (
     "同一线程允许多端订阅观察，但同一 live turn 只有一个交互 owner；非 owner 只能看，不能写或处理审批。"
@@ -2072,22 +2074,21 @@ class CodexHandler(BotHandler):
         return record.profile if record is not None else ""
 
     def _thread_resume_profile_write_check(self, thread_id: str) -> tuple[bool, str]:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return False, "当前还没有绑定 thread；先执行 `/new`，或直接发送第一条普通消息创建线程。"
-        with self._lock:
-            if self._binding_runtime.attached_bindings_for_thread_locked(normalized_thread_id):
-                return False, "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。"
-        lease = self._thread_runtime_lease_store.load(normalized_thread_id)
-        if lease is not None:
-            return False, "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。"
-        try:
-            loaded_thread_ids = set(self._adapter.list_loaded_thread_ids())
-        except Exception:
-            loaded_thread_ids = set()
-        if normalized_thread_id in loaded_thread_ids:
-            return False, "当前 thread 仍处于 loaded 状态；请先释放飞书侧订阅，并关闭所有打开该 thread 的 `fcodex` TUI。"
-        return True, ""
+        def _has_attached_binding(normalized_thread_id: str) -> bool:
+            with self._lock:
+                return bool(
+                    self._binding_runtime.attached_bindings_for_thread_locked(normalized_thread_id)
+                )
+
+        return check_thread_resume_profile_mutable(
+            thread_id,
+            unbound_reason="当前还没有绑定 thread；先执行 `/new`，或直接发送第一条普通消息创建线程。",
+            has_attached_binding=_has_attached_binding,
+            has_runtime_lease=lambda normalized_thread_id: (
+                self._thread_runtime_lease_store.load(normalized_thread_id) is not None
+            ),
+            list_loaded_thread_ids=self._adapter.list_loaded_thread_ids,
+        )
 
     def _persist_thread_resume_profile(self, thread_id: str, profile: str) -> ThreadResumeProfileRecord:
         normalized_profile = str(profile or "").strip()

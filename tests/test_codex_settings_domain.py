@@ -9,7 +9,7 @@ from bot.profile_resolution import DefaultProfileResolution
 from bot.stores.thread_resume_profile_store import ThreadResumeProfileRecord
 
 
-_APPROVAL_POLICIES = {"untrusted", "on-failure", "on-request", "never"}
+_APPROVAL_POLICIES = {"untrusted", "on-request", "never"}
 _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _PERMISSIONS_PRESETS = {
     "read-only": {

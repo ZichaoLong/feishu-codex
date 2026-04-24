@@ -34,8 +34,8 @@
 
 # 默认审批策略；默认值：on-request
 # 说明：这是“审批边界”，决定什么时候需要先经过审批才能继续。
-# 可选值：untrusted、on-request、never、on-failure
-# 说明：上游已将 on-failure 标记为 deprecated，交互式场景建议优先使用 on-request。
+# 可选值：untrusted、on-request、never
+# 说明：仓库不再暴露 deprecated 的 on-failure；如旧配置里仍写了它，会自动按 on-request 处理。
 # approval_policy: on-request
 
 # 审批审阅者；默认值：user

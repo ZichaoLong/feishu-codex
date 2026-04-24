@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from bot.approval_policy import normalize_approval_policy
 from bot.adapters.base import (
     AgentAdapter,
     RuntimeConfigSummary,
@@ -65,7 +66,9 @@ class CodexAppServerConfig:
             request_timeout_seconds=float(config.get("request_timeout_seconds", 30)),
             service_name=str(config.get("service_name", "feishu-codex")),
             sandbox=str(config.get("sandbox", "workspace-write")),
-            approval_policy=str(config.get("approval_policy", "on-request")),
+            approval_policy=normalize_approval_policy(
+                str(config.get("approval_policy", "on-request")),
+            ),
             approvals_reviewer=str(config.get("approvals_reviewer", "user")),
             personality=str(config.get("personality", "pragmatic")),
             model=str(config.get("model", "")),

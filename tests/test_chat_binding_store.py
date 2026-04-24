@@ -237,3 +237,34 @@ class ChatBindingStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "must be empty when current_thread_id is empty"):
             store.load(("ou_user", "oc_p2p"))
+
+    def test_store_normalizes_deprecated_approval_policy_on_load(self) -> None:
+        _, store, state_path = self._make_store()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": CHAT_BINDING_STORE_SCHEMA_VERSION,
+                    "p2p_bindings": {
+                        "oc_p2p": {
+                            "ou_user": {
+                                "working_dir": "/tmp/p2p",
+                                "current_thread_id": "",
+                                "current_thread_title": "",
+                                "feishu_runtime_state": "",
+                                "approval_policy": "on-failure",
+                                "sandbox": "workspace-write",
+                                "collaboration_mode": "default",
+                            }
+                        }
+                    },
+                    "group_bindings": {},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        loaded = store.load(("ou_user", "oc_p2p"))
+
+        assert loaded is not None
+        self.assertEqual(loaded["approval_policy"], "on-request")

@@ -91,6 +91,10 @@ Upstream `AskForApproval` currently includes:
 - `on-failure`
   - deprecated upstream
 
+This repository no longer exposes `on-failure` on the user-facing Feishu
+surface. If an old local config still contains it, the config layer normalizes
+it to `on-request`.
+
 Relevant upstream references:
 
 - [`protocol.rs:627`](/home/zlong/llm/codex/codex-rs/protocol/src/protocol.rs)

@@ -307,6 +307,42 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(stored["feishu_runtime_state"], "")
         self.assertEqual(stored["working_dir"], "/tmp/project")
 
+    def test_sync_stored_binding_locked_clears_fresh_default_binding(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        manager = self._make_manager(data_dir=data_dir)
+        binding = ("ou-user", "chat-1")
+        state = manager.resolve_runtime_binding(*binding).state
+
+        with manager._lock:
+            manager.sync_stored_binding_locked(binding, state)
+
+        self.assertIsNone(ChatBindingStore(data_dir).load(binding))
+
+    def test_hydrate_stored_binding_locked_uses_runtime_defaults_for_empty_overrides(self) -> None:
+        manager = self._make_manager()
+        state = manager.build_default_runtime_state()
+
+        with manager._lock:
+            manager.hydrate_stored_binding_locked(
+                state,
+                {
+                    "working_dir": "",
+                    "current_thread_id": "",
+                    "current_thread_title": "",
+                    "feishu_runtime_state": "",
+                    "approval_policy": "",
+                    "sandbox": "",
+                    "collaboration_mode": "",
+                },
+            )
+
+        self.assertEqual(state["working_dir"], "/tmp/default")
+        self.assertEqual(state["approval_policy"], "on-request")
+        self.assertEqual(state["sandbox"], "workspace-write")
+        self.assertEqual(state["collaboration_mode"], "default")
+
     def test_unsubscribe_by_thread_id_locked_marks_bindings_released(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)

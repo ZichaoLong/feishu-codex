@@ -13,8 +13,7 @@ from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerC
 from bot.config import load_config_file
 from bot.constants import display_path
 from bot.env_file import load_env_file
-from bot.instance_layout import DEFAULT_INSTANCE_NAME, resolve_instance_paths, validate_instance_name
-from bot.instance_resolution import current_cli_instance_name, default_running_instance, list_running_instances, unique_running_instance
+from bot.instance_resolution import list_running_instances, resolve_cli_instance_target
 from bot.platform_paths import default_data_root
 from bot.session_resolution import list_current_dir_threads, list_global_threads
 from bot.service_control_plane import ServiceControlError, control_request
@@ -30,24 +29,7 @@ def _data_dir() -> pathlib.Path:
 
 
 def _resolve_target_data_dir(explicit_instance: str | None) -> pathlib.Path:
-    normalized_instance = str(explicit_instance or "").strip()
-    if normalized_instance:
-        return resolve_instance_paths(validate_instance_name(normalized_instance)).data_dir
-    env_instance = str(os.environ.get("FC_INSTANCE", "") or "").strip()
-    if env_instance:
-        return resolve_instance_paths(validate_instance_name(env_instance)).data_dir
-    running = unique_running_instance()
-    if running is not None:
-        return pathlib.Path(running.data_dir)
-    default_running = default_running_instance()
-    if default_running is not None:
-        return pathlib.Path(default_running.data_dir)
-    running_instances = list_running_instances()
-    if len(running_instances) > 1:
-        raise ValueError("检测到多个运行中的实例，请显式传 `--instance <name>`。")
-    if not running_instances:
-        return resolve_instance_paths(current_cli_instance_name()).data_dir
-    return pathlib.Path(running_instances[0].data_dir)
+    return resolve_cli_instance_target(explicit_instance).data_dir
 
 
 def _request(data_dir: pathlib.Path, method: str, params: dict[str, Any] | None = None) -> Any:

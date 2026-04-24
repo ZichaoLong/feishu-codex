@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, TypeAlias
 
+from bot.approval_policy import normalize_approval_policy
 from bot.binding_identity import binding_kind, format_binding_id
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.execution_transcript import ExecutionTranscript
@@ -110,23 +111,22 @@ class BindingRuntimeManager:
 
     def build_default_stored_binding(self) -> dict[str, str]:
         return {
+            "working_dir": "",
+            "current_thread_id": "",
+            "current_thread_title": "",
+            "feishu_runtime_state": "",
+            "approval_policy": "",
+            "sandbox": "",
+            "collaboration_mode": "",
+        }
+
+    def build_default_runtime_state(self) -> RuntimeStateDict:
+        return {
+            "active": False,
             "working_dir": self._default_working_dir,
             "current_thread_id": "",
             "current_thread_title": "",
             "feishu_runtime_state": "",
-            "approval_policy": self._default_approval_policy,
-            "sandbox": self._default_sandbox,
-            "collaboration_mode": self._default_collaboration_mode,
-        }
-
-    def build_default_runtime_state(self) -> RuntimeStateDict:
-        stored_binding = self.build_default_stored_binding()
-        return {
-            "active": False,
-            "working_dir": stored_binding["working_dir"],
-            "current_thread_id": stored_binding["current_thread_id"],
-            "current_thread_title": stored_binding["current_thread_title"],
-            "feishu_runtime_state": stored_binding["feishu_runtime_state"],
             "current_turn_id": "",
             "running": False,
             "cancelled": False,
@@ -148,9 +148,9 @@ class BindingRuntimeManager:
             "followup_text": "",
             "terminal_result_text": "",
             "awaiting_local_turn_started": False,
-            "approval_policy": stored_binding["approval_policy"],
-            "sandbox": stored_binding["sandbox"],
-            "collaboration_mode": stored_binding["collaboration_mode"],
+            "approval_policy": self._default_approval_policy,
+            "sandbox": self._default_sandbox,
+            "collaboration_mode": self._default_collaboration_mode,
             "model": self._default_model,
             "reasoning_effort": self._default_reasoning_effort,
             "plan_message_id": "",
@@ -160,18 +160,19 @@ class BindingRuntimeManager:
             "plan_text": "",
         }
 
-    @staticmethod
-    def apply_stored_binding(state: RuntimeStateDict, stored_binding: dict[str, str]) -> None:
+    def hydrate_stored_binding_locked(self, state: RuntimeStateDict, stored_binding: dict[str, str]) -> None:
         apply_runtime_state_message(
             state,
             StoredBindingHydrated(
-                working_dir=stored_binding["working_dir"],
+                working_dir=stored_binding["working_dir"] or self._default_working_dir,
                 current_thread_id=stored_binding["current_thread_id"],
                 current_thread_title=stored_binding["current_thread_title"],
                 feishu_runtime_state=stored_binding["feishu_runtime_state"],
-                approval_policy=stored_binding["approval_policy"],
-                sandbox=stored_binding["sandbox"],
-                collaboration_mode=stored_binding["collaboration_mode"],
+                approval_policy=normalize_approval_policy(
+                    stored_binding["approval_policy"] or self._default_approval_policy,
+                ),
+                sandbox=stored_binding["sandbox"] or self._default_sandbox,
+                collaboration_mode=stored_binding["collaboration_mode"] or self._default_collaboration_mode,
             ),
         )
 
@@ -262,7 +263,7 @@ class BindingRuntimeManager:
         state = self.build_default_runtime_state()
         stored_binding = self._chat_binding_store.load(binding)
         if stored_binding is not None:
-            self.apply_stored_binding(state, stored_binding)
+            self.hydrate_stored_binding_locked(state, stored_binding)
             current_thread_id = str(state["current_thread_id"] or "").strip()
             if state["feishu_runtime_state"] == FEISHU_RUNTIME_ATTACHED:
                 self.subscribe_thread_locked(binding, current_thread_id)
@@ -297,23 +298,32 @@ class BindingRuntimeManager:
             return build_runtime_view(state)
 
     def stored_binding_from_runtime(self, binding: ChatBindingKey, state: RuntimeStateDict) -> dict[str, str]:
+        del binding
         current_thread_id = str(state["current_thread_id"]).strip()
         feishu_runtime_state = str(state["feishu_runtime_state"]).strip()
         if not current_thread_id:
             feishu_runtime_state = ""
+        working_dir = str(state["working_dir"]).strip()
+        approval_policy = normalize_approval_policy(str(state["approval_policy"]).strip())
+        sandbox = str(state["sandbox"]).strip()
+        collaboration_mode = str(state["collaboration_mode"]).strip()
         return {
-            "working_dir": str(state["working_dir"]).strip(),
+            "working_dir": "" if working_dir == self._default_working_dir else working_dir,
             "current_thread_id": current_thread_id,
             "current_thread_title": str(state["current_thread_title"]).strip(),
             "feishu_runtime_state": feishu_runtime_state,
-            "approval_policy": str(state["approval_policy"]).strip(),
-            "sandbox": str(state["sandbox"]).strip(),
-            "collaboration_mode": str(state["collaboration_mode"]).strip(),
+            "approval_policy": "" if approval_policy == self._default_approval_policy else approval_policy,
+            "sandbox": "" if sandbox == self._default_sandbox else sandbox,
+            "collaboration_mode": (
+                ""
+                if collaboration_mode == self._default_collaboration_mode
+                else collaboration_mode
+            ),
         }
 
     def sync_stored_binding_locked(self, binding: ChatBindingKey, state: RuntimeStateDict) -> None:
         stored_binding = self.stored_binding_from_runtime(binding, state)
-        if stored_binding == self.build_default_stored_binding():
+        if all(not str(value or "").strip() for value in stored_binding.values()):
             self._chat_binding_store.clear(binding)
             return
         self._chat_binding_store.save(binding, stored_binding)
@@ -332,7 +342,7 @@ class BindingRuntimeManager:
                 if binding in self._runtime_state_by_binding:
                     continue
                 state = self.build_default_runtime_state()
-                self.apply_stored_binding(state, stored_binding)
+                self.hydrate_stored_binding_locked(state, stored_binding)
                 self._runtime_state_by_binding[binding] = state
             for binding, stored_binding in sorted(stored_bindings.items()):
                 state = self._runtime_state_by_binding[binding]

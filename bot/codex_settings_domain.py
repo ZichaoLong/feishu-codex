@@ -397,7 +397,7 @@ class CodexSettingsDomain:
         if arg:
             policy = arg.strip().lower()
             if policy not in self._approval_policies:
-                return CommandResult(text="审批策略仅支持：`untrusted`、`on-failure`、`on-request`、`never`")
+                return CommandResult(text="审批策略仅支持：`untrusted`、`on-request`、`never`")
             self._update_runtime_settings(
                 sender_id,
                 chat_id,

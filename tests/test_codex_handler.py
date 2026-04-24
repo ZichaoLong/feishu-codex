@@ -3496,6 +3496,35 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertIn("文件夹消息当前无法通过飞书 API 下载", bot.replies[-1][1])
 
+    def test_merge_forward_attachment_type_is_rejected_with_specific_reason(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-forward"] = {"chat_type": "p2p", "message_type": "merge_forward"}
+
+        handler.handle_attachment_message("ou_user", "c1", "m-forward", "merge_forward", "forward-key", "转发记录")
+
+        self.assertIn("合并转发里的子附件当前无法通过飞书 API 下载", bot.replies[-1][1])
+
+    def test_interactive_attachment_type_is_rejected_with_specific_reason(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-card"] = {"chat_type": "p2p", "message_type": "interactive"}
+
+        handler.handle_attachment_message("ou_user", "c1", "m-card", "interactive", "card-key", "卡片资源")
+
+        self.assertIn("卡片里的资源当前无法通过飞书 API 下载", bot.replies[-1][1])
+
+    def test_profile_command_fails_closed_when_loaded_state_cannot_be_verified(self) -> None:
+        handler, bot = self._make_handler()
+        state = handler._get_runtime_state("ou_user", "c1")
+        with handler._lock:
+            state["current_thread_id"] = "thread-1"
+            state["current_thread_title"] = "demo"
+            state["feishu_runtime_state"] = "released"
+        handler._adapter.list_loaded_thread_ids = lambda: (_ for _ in ()).throw(RuntimeError("backend down"))
+
+        handler.handle_message("ou_user", "c1", "/profile provider2")
+
+        self.assertIn("无法确认该 thread 是否已完全 unloaded", bot.replies[-1][1])
+
     def test_prompt_after_switching_back_to_default_uses_default_collaboration_mode(self) -> None:
         handler, _ = self._make_handler()
 
