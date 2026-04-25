@@ -88,6 +88,9 @@
   - 同时作为**本次启动创建的第一个新 thread**的一次性 seed
 - 这个 seed 只在第一次 `thread/start` 成功后写入 thread-wise store
 - 如果这次启动根本没创建 thread，就不会落任何 thread-wise 记录
+- 职责边界是显式的：
+  - wrapper 决定这次启动是否携带 seed
+  - proxy 只在拿到真实 `thread_id` 后负责把这个 seed 落盘
 
 ### `fcodex -p <profile> resume <thread>`
 
@@ -144,6 +147,9 @@
 - `fcodex -p <profile>` 新开会话时，只 seed 本次启动创建的第一个新 thread
 - `fcodex -p <profile> resume <thread>` 改的是该 thread 的持久化 resume 配置
 - 旧 thread 后续 resume 读的是它自己的 thread-wise 配置，而不是实例当前的新线程默认 profile
+- wrapper 与 proxy 不共同持有同一条写路径：
+  - wrapper 负责已有 thread 的读取 / 改写
+  - proxy 只负责第一个新 thread seed 的一次性持久化
 
 ## 5. 多实例与可见性
 

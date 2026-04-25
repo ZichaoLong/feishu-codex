@@ -91,6 +91,9 @@ That means shell-level support is removed for:
   - it also becomes a one-time seed for the first new thread created by this launch
 - that seed is written only after the first successful `thread/start`
 - if no thread is ever created, no thread-wise record is persisted
+- ownership is explicit:
+  - wrapper chooses whether this launch carries a seed
+  - proxy persists that seed only after a real `thread_id` is returned
 
 ### `fcodex -p <profile> resume <thread>`
 
@@ -151,6 +154,9 @@ The active model is:
 - `fcodex -p <profile> resume <thread>` changes that thread's persisted resume config
 - future resume reads the thread's own thread-wise config, not the instance's
   current new-thread default profile
+- wrapper and proxy do not co-own the same write path:
+  - wrapper owns existing-thread read/write behavior
+  - proxy owns one-time persistence of the first new-thread seed
 
 ## 5. Multi-Instance Visibility
 

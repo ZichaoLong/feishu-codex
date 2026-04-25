@@ -195,8 +195,8 @@ class _ProxyInteractionGate:
         self._global_data_dir = normalized_global_data_dir
         self._runtime_lease_store = ThreadRuntimeLeaseStore(normalized_global_data_dir)
         self._instance_registry = InstanceRegistryStore(normalized_global_data_dir)
-        self._thread_profile_seed = str(thread_profile_seed or "").strip()
-        self._thread_profile_seed_consumed = not self._thread_profile_seed
+        self._initial_thread_profile_seed = str(thread_profile_seed or "").strip()
+        self._initial_thread_profile_seed_consumed = not self._initial_thread_profile_seed
         self._lock = threading.Lock()
         self._pending_server_request_thread_by_id: dict[str, str] = {}
         self._pending_client_request_by_id: dict[str, tuple[str, str, bool]] = {}
@@ -269,15 +269,18 @@ class _ProxyInteractionGate:
         self._runtime_lease_store.release(thread_id, self._holder.holder_id)
         self._forget_owned_thread(thread_id)
 
-    def _persist_thread_profile_seed_once(self, thread_id: str) -> None:
+    def _persist_initial_thread_profile_seed_once(self, thread_id: str) -> None:
+        # The wrapper decides whether this launch should seed the first new
+        # thread. The proxy owns only the second half: once a real `thread_id`
+        # exists, persist that one-time seed exactly once.
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
             return
         with self._lock:
-            if self._thread_profile_seed_consumed or not self._thread_profile_seed:
+            if self._initial_thread_profile_seed_consumed or not self._initial_thread_profile_seed:
                 return
-            profile = self._thread_profile_seed
-            self._thread_profile_seed_consumed = True
+            profile = self._initial_thread_profile_seed
+            self._initial_thread_profile_seed_consumed = True
         try:
             resolved = resolve_profile_from_codex_config(profile)
             ThreadResumeProfileStore(self._global_data_dir).save(
@@ -288,8 +291,8 @@ class _ProxyInteractionGate:
             )
         except Exception as exc:
             with self._lock:
-                if self._thread_profile_seed == profile:
-                    self._thread_profile_seed_consumed = False
+                if self._initial_thread_profile_seed == profile:
+                    self._initial_thread_profile_seed_consumed = False
             print(
                 f"warning: failed to persist initial thread profile seed for `{normalized_thread_id}`: {exc}",
                 file=sys.stderr,
@@ -414,7 +417,7 @@ class _ProxyInteractionGate:
                     started_thread_id = _response_thread_id(payload)
                     if started_thread_id:
                         self._acquire_runtime_lease(started_thread_id)
-                        self._persist_thread_profile_seed_once(started_thread_id)
+                        self._persist_initial_thread_profile_seed_once(started_thread_id)
                 elif request_method == "thread/unsubscribe" and "error" not in payload:
                     self._release_runtime_lease(thread_id)
             with self._lock:

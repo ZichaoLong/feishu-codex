@@ -19,15 +19,13 @@ from bot.config import load_config_file
 from bot.constants import DEFAULT_APP_SERVER_URL
 from bot.env_file import load_env_file
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, validate_instance_name
-from bot.instance_resolution import current_cli_instance_name, load_running_instance, resolve_cli_instance_target
+from bot.instance_resolution import CliRuntimeTarget, current_cli_instance_name, resolve_cli_runtime_target
 from bot.platform_paths import default_data_root, is_windows
 from bot.profile_resolution import resolve_local_default_profile_via_remote_backend
 from bot.session_resolution import (
     looks_like_thread_id,
     resolve_resume_name_via_remote_backend,
 )
-from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
-from bot.stores.instance_registry_store import InstanceRegistryEntry
 from bot.stores.profile_state_store import ProfileStateStore
 from bot.stores.thread_resume_profile_store import ThreadResumeProfileStore
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseStore
@@ -63,14 +61,6 @@ _REMOVED_WRAPPER_COMMAND_HINTS = {
     "/profile": "请改用启动时显式传 `fcodex -p <profile>`。",
     "/rm": "请在飞书侧用 `/rm`，或进入 Codex TUI 后使用 upstream `/rm`。",
 }
-
-
-@dataclass(frozen=True, slots=True)
-class _ResolvedInstanceTarget:
-    instance_name: str
-    data_dir: pathlib.Path
-    app_server_url: str
-    service_token: str = ""
 
 
 def _has_option(user_args: list[str], names: tuple[str, ...]) -> bool:
@@ -162,10 +152,6 @@ def _removed_wrapper_command_error(user_args: list[str]) -> int | None:
     return 2
 
 
-def _running_instance_by_name(instance_name: str) -> InstanceRegistryEntry | None:
-    return load_running_instance(instance_name)
-
-
 def _lease_owner_instance(thread_id: str) -> str:
     lease = ThreadRuntimeLeaseStore(global_data_dir()).load(thread_id)
     if lease is None:
@@ -173,67 +159,25 @@ def _lease_owner_instance(thread_id: str) -> str:
     return lease.owner_instance
 
 
-def _resolve_instance_target(
+def _resolve_runtime_target_for_wrapper(
     *,
     cfg: dict,
     explicit_instance: str,
     thread_id: str = "",
-) -> _ResolvedInstanceTarget:
+) -> CliRuntimeTarget:
+    """Resolve the one shared-backend runtime target for this wrapper launch."""
     configured_url = str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL
-    if explicit_instance:
-        resolved = resolve_cli_instance_target(explicit_instance)
-        if resolved.running_entry is not None:
-            running = resolved.running_entry
-            return _ResolvedInstanceTarget(
-                instance_name=running.instance_name,
-                data_dir=pathlib.Path(running.data_dir),
-                app_server_url=running.app_server_url
-                or resolve_effective_app_server_url(configured_url, data_dir=resolved.data_dir),
-                service_token=running.service_token,
-            )
-        return _ResolvedInstanceTarget(
-            instance_name=resolved.instance_name,
-            data_dir=resolved.data_dir,
-            app_server_url=resolve_effective_app_server_url(configured_url, data_dir=resolved.data_dir),
-        )
-
-    owner_instance = _lease_owner_instance(thread_id) if thread_id else ""
-    if owner_instance:
-        running = _running_instance_by_name(owner_instance)
-        if running is not None:
-            return _ResolvedInstanceTarget(
-                instance_name=running.instance_name,
-                data_dir=pathlib.Path(running.data_dir),
-                app_server_url=running.app_server_url or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(running.data_dir)),
-                service_token=running.service_token,
-            )
-
+    preferred_running_instance = _lease_owner_instance(thread_id) if thread_id else ""
     try:
-        resolved = resolve_cli_instance_target()
-    except ValueError as exc:
+        return resolve_cli_runtime_target(
+            configured_app_server_url=configured_url,
+            explicit_instance=explicit_instance or None,
+            preferred_running_instance=preferred_running_instance,
+            default_instance_data_dir=_default_data_dir(),
+        )
+    except ValueError:
         print("检测到多个运行中的实例，请显式传 `--instance <name>`。", file=sys.stderr)
         raise SystemExit(2)
-    if resolved.running_entry is not None:
-        running = resolved.running_entry
-        return _ResolvedInstanceTarget(
-            instance_name=running.instance_name,
-            data_dir=pathlib.Path(running.data_dir),
-            app_server_url=running.app_server_url
-            or resolve_effective_app_server_url(configured_url, data_dir=pathlib.Path(running.data_dir)),
-            service_token=running.service_token,
-        )
-    return _ResolvedInstanceTarget(
-        instance_name=resolved.instance_name,
-        data_dir=resolved.data_dir
-        if resolved.instance_name != DEFAULT_INSTANCE_NAME
-        else _default_data_dir(),
-        app_server_url=resolve_effective_app_server_url(
-            configured_url,
-            data_dir=resolved.data_dir
-            if resolved.instance_name != DEFAULT_INSTANCE_NAME
-            else _default_data_dir(),
-        ),
-    )
 
 
 def _inject_default_profile(user_args: list[str], profile: str) -> list[str]:
@@ -295,7 +239,7 @@ def _resolve_resume_target_name(
         return list(user_args)
     if _lease_owner_instance(target):
         return list(user_args)
-    lookup_target = _resolve_instance_target(cfg=cfg, explicit_instance=explicit_instance)
+    lookup_target = _resolve_runtime_target_for_wrapper(cfg=cfg, explicit_instance=explicit_instance)
     thread = resolve_resume_name_via_remote_backend(
         base_config=_remote_adapter_config(cfg, lookup_target.app_server_url),
         app_server_url=lookup_target.app_server_url,
@@ -322,7 +266,12 @@ def _thread_resume_profile_mutable(cfg: dict, app_server_url: str, thread_id: st
         adapter.stop()
 
 
-def _save_thread_resume_profile_record(cfg: dict, app_server_url: str, thread_id: str, profile: str) -> None:
+def _persist_thread_resume_profile_for_resume(
+    cfg: dict,
+    app_server_url: str,
+    thread_id: str,
+    profile: str,
+) -> None:
     normalized_profile = str(profile or "").strip()
     if not normalized_profile:
         return
@@ -347,13 +296,65 @@ def _save_thread_resume_profile_record(cfg: dict, app_server_url: str, thread_id
     )
 
 
-def _inject_resume_profile_if_needed(user_args: list[str], thread_id: str) -> list[str]:
+def _inject_saved_thread_resume_profile_if_needed(user_args: list[str], thread_id: str) -> list[str]:
     if _has_explicit_profile(user_args):
         return list(user_args)
     record = ThreadResumeProfileStore(global_data_dir()).load(thread_id)
     if record is None or not record.profile:
         return list(user_args)
     return _inject_default_profile(user_args, record.profile)
+
+
+@dataclass(frozen=True, slots=True)
+class _WrapperProfileLaunchPlan:
+    user_args: list[str]
+    thread_profile_seed: str = ""
+
+
+def _build_wrapper_profile_launch_plan(
+    *,
+    cfg: dict,
+    app_server_url: str,
+    user_args: list[str],
+    default_profile: str,
+) -> _WrapperProfileLaunchPlan:
+    """Plan wrapper-side profile behavior before launching upstream Codex.
+
+    Wrapper responsibilities stop at:
+
+    - existing-thread resume profile read/write
+    - deciding whether this launch carries a one-time new-thread seed
+
+    The proxy later owns persisting that seed once the first real `thread_id`
+    is returned by `thread/start`.
+    """
+    planned_args = list(user_args)
+    resume_thread_id = _thread_target_hint(planned_args)
+    explicit_profile = _extract_option_value(planned_args, ("-p", "--profile")).strip()
+    if resume_thread_id:
+        if explicit_profile:
+            can_write, deny_reason = _thread_resume_profile_mutable(cfg, app_server_url, resume_thread_id)
+            if not can_write:
+                print(deny_reason, file=sys.stderr)
+                raise SystemExit(2)
+            _persist_thread_resume_profile_for_resume(
+                cfg,
+                app_server_url,
+                resume_thread_id,
+                explicit_profile,
+            )
+            return _WrapperProfileLaunchPlan(user_args=planned_args)
+        return _WrapperProfileLaunchPlan(
+            user_args=_inject_saved_thread_resume_profile_if_needed(planned_args, resume_thread_id),
+        )
+    if explicit_profile:
+        return _WrapperProfileLaunchPlan(
+            user_args=planned_args,
+            thread_profile_seed=explicit_profile,
+        )
+    return _WrapperProfileLaunchPlan(
+        user_args=_inject_default_profile(planned_args, default_profile),
+    )
 
 
 def _extract_option_value(user_args: list[str], names: tuple[str, ...]) -> str:
@@ -528,14 +529,14 @@ def main() -> None:
     if _has_explicit_remote(preprocessed_args):
         data_dir = _default_data_dir()
         app_server_url = str(cfg.get("app_server_url", DEFAULT_APP_SERVER_URL)).strip() or DEFAULT_APP_SERVER_URL
-        resolved_target = _ResolvedInstanceTarget(
+        resolved_target = CliRuntimeTarget(
             instance_name=current_cli_instance_name(),
             data_dir=data_dir,
             app_server_url=app_server_url,
         )
     else:
         thread_target = _thread_target_hint(preprocessed_args)
-        resolved_target = _resolve_instance_target(
+        resolved_target = _resolve_runtime_target_for_wrapper(
             cfg=cfg,
             explicit_instance=explicit_instance,
             thread_id=thread_target,
@@ -558,26 +559,16 @@ def main() -> None:
 
     argv = [*shlex.split(codex_command)]
     effective_cwd = _resolve_effective_cwd(user_args)
-    resume_thread_id = ""
-    explicit_profile = ""
     thread_profile_seed = ""
     if not _has_explicit_remote(user_args):
-        resume_thread_id = _thread_target_hint(user_args)
-        explicit_profile = _extract_option_value(user_args, ("-p", "--profile")).strip()
-        if resume_thread_id:
-            if explicit_profile:
-                can_write, deny_reason = _thread_resume_profile_mutable(cfg, app_server_url, resume_thread_id)
-                if not can_write:
-                    print(deny_reason, file=sys.stderr)
-                    raise SystemExit(2)
-                _save_thread_resume_profile_record(cfg, app_server_url, resume_thread_id, explicit_profile)
-            else:
-                user_args = _inject_resume_profile_if_needed(user_args, resume_thread_id)
-        else:
-            if explicit_profile:
-                thread_profile_seed = explicit_profile
-            else:
-                user_args = _inject_default_profile(user_args, default_profile)
+        profile_launch_plan = _build_wrapper_profile_launch_plan(
+            cfg=cfg,
+            app_server_url=app_server_url,
+            user_args=user_args,
+            default_profile=default_profile,
+        )
+        user_args = list(profile_launch_plan.user_args)
+        thread_profile_seed = profile_launch_plan.thread_profile_seed
     user_args = _inject_default_cwd(user_args)
     proxy_process: subprocess.Popen[str] | None = None
     if not _has_explicit_remote(user_args):

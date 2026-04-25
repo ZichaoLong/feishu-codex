@@ -23,6 +23,7 @@ from bot.fcodex import (
     main as fcodex_main,
 )
 from bot.fcodex_proxy import _ProxyInteractionGate, _relay_messages, _rewrite_thread_start_cwd, run_proxy
+from bot.instance_resolution import CliRuntimeTarget
 from bot.profile_resolution import resolve_local_default_profile
 from bot.stores.instance_registry_store import InstanceRegistryEntry
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
@@ -607,7 +608,7 @@ class FCodexTests(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
         patcher = patch(
-            "bot.fcodex.resolve_effective_app_server_url",
+            "bot.instance_resolution.resolve_effective_app_server_url",
             side_effect=lambda configured_url, *, data_dir: configured_url,
         )
         patcher.start()
@@ -645,7 +646,7 @@ class FCodexTests(unittest.TestCase):
 
     def test_fcodex_uses_runtime_resolved_backend_url(self) -> None:
         fallback_url = "ws://127.0.0.1:43210"
-        with patch("bot.fcodex.resolve_effective_app_server_url", return_value=fallback_url):
+        with patch("bot.instance_resolution.resolve_effective_app_server_url", return_value=fallback_url):
             with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
                 with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
                     with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_profile_resolve:
@@ -698,11 +699,13 @@ class FCodexTests(unittest.TestCase):
                 with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
                     mock_resolve.return_value.effective_profile = "provider2"
                     mock_resolve.return_value.stale_profile = ""
-                    with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())) as mock_proxy:
-                        with patch("bot.fcodex.os.execvpe") as mock_exec:
-                            with patch("sys.argv", ["fcodex", "-p", "provider1"]):
-                                fcodex_main()
+                    with patch("bot.fcodex.ThreadResumeProfileStore.save") as mock_save:
+                        with patch("bot.fcodex._launch_local_cwd_proxy", return_value=("ws://127.0.0.1:9100", Mock())) as mock_proxy:
+                            with patch("bot.fcodex.os.execvpe") as mock_exec:
+                                with patch("sys.argv", ["fcodex", "-p", "provider1"]):
+                                    fcodex_main()
 
+        mock_save.assert_not_called()
         mock_proxy.assert_called_once_with(
             "ws://127.0.0.1:8765",
             os.getcwd(),
@@ -758,28 +761,6 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("不能与显式 `--remote` 同时使用", stderr.getvalue())
 
     def test_fcodex_routes_resume_to_owner_instance(self) -> None:
-        corp_a = InstanceRegistryEntry(
-            instance_name="corp-a",
-            owner_pid=111,
-            service_token="token-a",
-            control_endpoint="tcp://127.0.0.1:9101",
-            app_server_url="ws://127.0.0.1:9101",
-            config_dir="/tmp/config-a",
-            data_dir="/tmp/data-a",
-            started_at=1.0,
-            updated_at=1.0,
-        )
-        corp_b = InstanceRegistryEntry(
-            instance_name="corp-b",
-            owner_pid=222,
-            service_token="token-b",
-            control_endpoint="tcp://127.0.0.1:9102",
-            app_server_url="ws://127.0.0.1:9102",
-            config_dir="/tmp/config-b",
-            data_dir="/tmp/data-b",
-            started_at=1.0,
-            updated_at=1.0,
-        )
         lease = ThreadRuntimeLease(
             thread_id="thread-1",
             owner_instance="corp-b",
@@ -789,9 +770,26 @@ class FCodexTests(unittest.TestCase):
             attached_at=1.0,
             holders=(),
         )
+        resolved_target = CliRuntimeTarget(
+            instance_name="corp-b",
+            data_dir=Path("/tmp/data-b"),
+            app_server_url="ws://127.0.0.1:9102",
+            service_token="token-b",
+            running_entry=InstanceRegistryEntry(
+                instance_name="corp-b",
+                owner_pid=222,
+                service_token="token-b",
+                control_endpoint="tcp://127.0.0.1:9102",
+                app_server_url="ws://127.0.0.1:9102",
+                config_dir="/tmp/config-b",
+                data_dir="/tmp/data-b",
+                started_at=1.0,
+                updated_at=1.0,
+            ),
+        )
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
-            with patch("bot.fcodex.load_running_instance", side_effect=lambda name: {"corp-a": corp_a, "corp-b": corp_b}.get(name)):
-                with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=lease):
+            with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=lease):
+                with patch("bot.fcodex.resolve_cli_runtime_target", return_value=resolved_target) as mock_resolve_target:
                     with patch("bot.fcodex.ProfileStateStore.load_default_profile", return_value=""):
                         with patch("bot.fcodex.resolve_local_default_profile_via_remote_backend") as mock_resolve:
                             mock_resolve.return_value.effective_profile = ""
@@ -801,6 +799,7 @@ class FCodexTests(unittest.TestCase):
                                     with patch("sys.argv", ["fcodex", "resume", "thread-1"]):
                                         fcodex_main()
 
+        self.assertEqual(mock_resolve_target.call_args.kwargs["preferred_running_instance"], "corp-b")
         mock_proxy.assert_called_once_with(
             "ws://127.0.0.1:9102",
             os.getcwd(),
@@ -815,32 +814,10 @@ class FCodexTests(unittest.TestCase):
         )
 
     def test_fcodex_requires_explicit_instance_when_multiple_instances_are_running(self) -> None:
-        corp_a = InstanceRegistryEntry(
-            instance_name="corp-a",
-            owner_pid=111,
-            service_token="token-a",
-            control_endpoint="tcp://127.0.0.1:9101",
-            app_server_url="ws://127.0.0.1:9101",
-            config_dir="/tmp/config-a",
-            data_dir="/tmp/data-a",
-            started_at=1.0,
-            updated_at=1.0,
-        )
-        corp_b = InstanceRegistryEntry(
-            instance_name="corp-b",
-            owner_pid=222,
-            service_token="token-b",
-            control_endpoint="tcp://127.0.0.1:9102",
-            app_server_url="ws://127.0.0.1:9102",
-            config_dir="/tmp/config-b",
-            data_dir="/tmp/data-b",
-            started_at=1.0,
-            updated_at=1.0,
-        )
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch(
-                "bot.fcodex.resolve_cli_instance_target",
+                "bot.fcodex.resolve_cli_runtime_target",
                 side_effect=ValueError("检测到多个运行中的实例，请显式传 `--instance <name>`。"),
             ):
                 with patch("bot.fcodex.ThreadRuntimeLeaseStore.load", return_value=None):

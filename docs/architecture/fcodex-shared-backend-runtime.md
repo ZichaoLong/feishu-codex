@@ -93,6 +93,13 @@ off to the Python wrapper for actual instance selection. That layer:
 3. resolves `--instance`, the instance registry, and the runtime lease to pick
    the target instance for this launch
 
+For code ownership, the launch path is intentionally split:
+
+- the wrapper owns selected-instance resolution and launch-time profile
+  decisions
+- the proxy owns only transport fixes plus one-time persistence of the initial
+  new-thread profile seed after a real `thread_id` exists
+
 So "wrapper and service share local state" should now be read as:
 
 - the wrapper and service of the same instance share that instance's config,
@@ -206,6 +213,13 @@ Compared with bare Codex TUI, `fcodex` adds these semantics:
 - new-thread default-profile seeding when `-p/--profile` is absent
 - thread-name resume resolution plus thread-wise profile injection / persistence
 - cwd patching through a thin local proxy
+
+The profile split is explicit:
+
+- wrapper: read/write thread-wise resume profile state for existing threads,
+  and decide whether this launch carries an initial new-thread seed
+- proxy: persist that initial seed exactly once, only after the first
+  successful `thread/start` returns a concrete `thread_id`
 
 Inside the running TUI, however, command semantics return to upstream Codex
 behavior.

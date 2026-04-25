@@ -9,6 +9,7 @@ import pathlib
 from dataclasses import dataclass
 
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, current_instance_name, resolve_instance_paths, validate_instance_name
+from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
 from bot.stores.instance_registry_store import InstanceRegistryEntry, InstanceRegistryStore
 
 
@@ -47,6 +48,15 @@ def current_cli_instance_paths():
 class CliInstanceTarget:
     instance_name: str
     data_dir: pathlib.Path
+    running_entry: InstanceRegistryEntry | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CliRuntimeTarget:
+    instance_name: str
+    data_dir: pathlib.Path
+    app_server_url: str
+    service_token: str = ""
     running_entry: InstanceRegistryEntry | None = None
 
 
@@ -95,3 +105,69 @@ def resolve_cli_instance_target(explicit_instance: str | None = None) -> CliInst
         data_dir=pathlib.Path(only.data_dir),
         running_entry=only,
     )
+
+
+def resolve_cli_runtime_target(
+    *,
+    configured_app_server_url: str,
+    explicit_instance: str | None = None,
+    preferred_running_instance: str = "",
+    default_instance_data_dir: pathlib.Path | None = None,
+) -> CliRuntimeTarget:
+    """Resolve one runtime target for local CLI entrypoints.
+
+    This is the shared instance-selection fact source for CLI wrappers:
+
+    - explicit `--instance` wins
+    - otherwise a preferred running owner instance may win
+    - otherwise normal CLI instance resolution applies
+
+    Wrapper-specific logic such as thread-lease owner discovery stays outside
+    this module. Once the caller chooses a preferred owner instance, this helper
+    resolves the resulting instance's data dir, runtime-discovered backend URL,
+    and service token in one place.
+    """
+
+    preferred_instance = str(preferred_running_instance or "").strip().lower()
+    resolved = _resolve_cli_runtime_base_target(
+        explicit_instance=explicit_instance,
+        preferred_running_instance=preferred_instance,
+    )
+    running_entry = resolved.running_entry
+    data_dir = pathlib.Path(running_entry.data_dir) if running_entry is not None else resolved.data_dir
+    if resolved.instance_name == DEFAULT_INSTANCE_NAME and default_instance_data_dir is not None:
+        data_dir = pathlib.Path(default_instance_data_dir)
+    if running_entry is not None:
+        app_server_url = str(running_entry.app_server_url or "").strip() or resolve_effective_app_server_url(
+            configured_app_server_url,
+            data_dir=data_dir,
+        )
+        service_token = running_entry.service_token
+    else:
+        app_server_url = resolve_effective_app_server_url(configured_app_server_url, data_dir=data_dir)
+        service_token = ""
+    return CliRuntimeTarget(
+        instance_name=resolved.instance_name,
+        data_dir=data_dir,
+        app_server_url=app_server_url,
+        service_token=service_token,
+        running_entry=running_entry,
+    )
+
+
+def _resolve_cli_runtime_base_target(
+    *,
+    explicit_instance: str | None,
+    preferred_running_instance: str,
+) -> CliInstanceTarget:
+    if explicit_instance:
+        return resolve_cli_instance_target(explicit_instance)
+    if preferred_running_instance:
+        running = load_running_instance(preferred_running_instance)
+        if running is not None:
+            return CliInstanceTarget(
+                instance_name=running.instance_name,
+                data_dir=pathlib.Path(running.data_dir),
+                running_entry=running,
+            )
+    return resolve_cli_instance_target()

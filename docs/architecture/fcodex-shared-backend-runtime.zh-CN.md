@@ -84,6 +84,11 @@ fcodex shell wrapper
 2. 准备默认实例的 `FC_CONFIG_DIR` / `FC_DATA_DIR` 根信息
 3. 再由 Python wrapper 解析 `--instance`、实例注册表、runtime lease，为本次启动选出目标实例
 
+从代码职责看，这条启动链路也被有意拆成两段：
+
+- wrapper 负责选定目标实例，以及启动前的 profile 决策
+- proxy 只负责传输层修补，以及在拿到真实 `thread_id` 之后把“首次新 thread profile seed”一次性落盘
+
 因此，“wrapper 与 service 共享的本地状态”应理解为：
 
 - **同一实例**共享自己的配置目录、profile-state、runtime backend 发现状态
@@ -182,6 +187,11 @@ fcodex shell wrapper
 - 对新 thread 启动，缺少 `-p/--profile` 时注入本地 default profile seed
 - 对 `resume`，支持 thread-name 解析与 thread-wise profile 注入 / 持久化
 - 通过一个轻量本地代理修补 cwd
+
+其中 profile 职责边界是显式的：
+
+- wrapper：对已有 thread 读写 thread-wise resume profile，并决定本次启动是否携带一次性的“新 thread seed”
+- proxy：只在第一次 `thread/start` 成功且返回具体 `thread_id` 后，把这个 seed 精确持久化一次
 
 但一旦进入运行中的 TUI，命令语义就回到 upstream Codex 的默认行为。
 
