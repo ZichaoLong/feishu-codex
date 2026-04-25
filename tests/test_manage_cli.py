@@ -20,6 +20,7 @@ from bot.manage_cli import (
     _handle_service_action,
     _write_wrapper,
 )
+from bot.service_manager import AutostartStatus
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
 from bot.stores.service_instance_lease import ServiceInstanceLease
 
@@ -317,6 +318,41 @@ class ManageCliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(manager.enabled, ["corp-a"])
             self.assertIn("autostart enabled: feishu-codex-corp-a", stdout.getvalue())
+
+    def test_handle_autostart_status_uses_platform_specific_source_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+
+            class _DummyManager:
+                def autostart_status(self, definition) -> AutostartStatus:
+                    return AutostartStatus(
+                        enabled=True,
+                        source="systemctl --user is-enabled feishu-codex@corp-a",
+                        detail="enabled",
+                    )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                _ensure_instance_scaffold("corp-a")
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    with patch("bot.manage_cli.current_service_manager", return_value=_DummyManager()):
+                        result = _handle_autostart_action("corp-a", "status")
+
+            self.assertEqual(result, 0)
+            rendered = stdout.getvalue()
+            self.assertIn("autostart: enabled", rendered)
+            self.assertIn("systemctl --user is-enabled feishu-codex@corp-a: enabled", rendered)
 
     def test_handle_service_action_uses_manager_display_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

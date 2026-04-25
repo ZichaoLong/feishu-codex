@@ -46,6 +46,7 @@ class ServiceStatus:
 @dataclass(frozen=True, slots=True)
 class AutostartStatus:
     enabled: bool
+    source: str = ""
     detail: str = ""
 
 
@@ -130,6 +131,9 @@ class SystemdUserServiceManager(ServiceManager):
 
     def display_name(self, definition: ServiceDefinition) -> str:
         return self._unit_name(definition)
+
+    def _autostart_status_source(self, definition: ServiceDefinition) -> str:
+        return f"systemctl --user is-enabled {self._unit_name(definition)}"
 
     def _template_unit_path(self) -> pathlib.Path:
         return default_systemd_user_dir() / "feishu-codex@.service"
@@ -251,10 +255,18 @@ class SystemdUserServiceManager(ServiceManager):
 
     def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
         if not self._unit_path(definition).exists():
-            return AutostartStatus(enabled=False, detail="unit file missing")
+            return AutostartStatus(
+                enabled=False,
+                source=self._autostart_status_source(definition),
+                detail="unit file missing",
+            )
         result = self._run("systemctl", "--user", "is-enabled", self._unit_name(definition), check=False)
         detail = result.stdout.strip() or result.stderr.strip()
-        return AutostartStatus(enabled=result.returncode == 0, detail=detail)
+        return AutostartStatus(
+            enabled=result.returncode == 0,
+            source=self._autostart_status_source(definition),
+            detail=detail,
+        )
 
     def start(self, definition: ServiceDefinition) -> None:
         self._require_installed(definition)
@@ -304,6 +316,9 @@ class LaunchdUserServiceManager(ServiceManager):
 
     def _label(self, definition: ServiceDefinition) -> str:
         return f"io.feishu-codex.{definition.instance_name}"
+
+    def _autostart_status_source(self, definition: ServiceDefinition) -> str:
+        return f"LaunchAgent {self._label(definition)}"
 
     def _definition_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return definition.paths.data_dir / "service.plist"
@@ -402,10 +417,18 @@ class LaunchdUserServiceManager(ServiceManager):
     def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
         autostart_path = self._plist_path(definition)
         if autostart_path.is_symlink() and not autostart_path.exists():
-            return AutostartStatus(enabled=False, detail="launch agent symlink is dangling")
+            return AutostartStatus(
+                enabled=False,
+                source=self._autostart_status_source(definition),
+                detail="launch agent symlink is dangling",
+            )
         enabled = autostart_path.exists()
         detail = str(autostart_path) if enabled else "launch agent disabled"
-        return AutostartStatus(enabled=enabled, detail=detail)
+        return AutostartStatus(
+            enabled=enabled,
+            source=self._autostart_status_source(definition),
+            detail=detail,
+        )
 
 
 class WindowsTaskSchedulerServiceManager(ServiceManager):
@@ -413,6 +436,9 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
 
     def _task_name(self, definition: ServiceDefinition) -> str:
         return definition.identifier
+
+    def _autostart_status_source(self, definition: ServiceDefinition) -> str:
+        return f"schtasks /Query /TN {self._task_name(definition)} /XML"
 
     def _launcher_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return definition.paths.data_dir / "service-launch.cmd"
@@ -562,10 +588,18 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
 
     def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
         if self._query_task_xml(definition) is None:
-            return AutostartStatus(enabled=False, detail="scheduled task missing")
+            return AutostartStatus(
+                enabled=False,
+                source=self._autostart_status_source(definition),
+                detail="scheduled task missing",
+            )
         enabled = self._task_autostart_enabled(definition)
         detail = "logon trigger enabled" if enabled else "logon trigger disabled"
-        return AutostartStatus(enabled=enabled, detail=detail)
+        return AutostartStatus(
+            enabled=enabled,
+            source=self._autostart_status_source(definition),
+            detail=detail,
+        )
 
 
 def current_service_manager() -> ServiceManager:

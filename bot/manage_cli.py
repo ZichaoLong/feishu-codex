@@ -454,16 +454,18 @@ def _handle_service_action(instance_name: str, action: str) -> int:
     normalized = _prepare_cli_instance(instance_name)
     definition = _service_definition(normalized)
     manager = current_service_manager()
-    display_name = manager.display_name(definition)
     if action == "start":
+        display_name = manager.display_name(definition)
         manager.start(definition)
         print(f"started service: {display_name}")
         return 0
     if action == "stop":
+        display_name = manager.display_name(definition)
         manager.stop(definition)
         print(f"stopped service: {display_name}")
         return 0
     if action == "restart":
+        display_name = manager.display_name(definition)
         manager.restart(definition)
         print(f"restarted service: {display_name}")
         return 0
@@ -481,19 +483,22 @@ def _handle_autostart_action(instance_name: str, action: str) -> int:
     normalized = _prepare_cli_instance(instance_name)
     definition = _service_definition(normalized)
     manager = current_service_manager()
-    display_name = manager.display_name(definition)
     if action == "enable":
+        display_name = manager.display_name(definition)
         manager.autostart_enable(definition)
         print(f"autostart enabled: {display_name}")
         return 0
     if action == "disable":
+        display_name = manager.display_name(definition)
         manager.autostart_disable(definition)
         print(f"autostart disabled: {display_name}")
         return 0
     if action == "status":
         status = manager.autostart_status(definition)
         print(f"autostart: {'enabled' if status.enabled else 'disabled'}")
-        if status.detail:
+        if status.source and status.detail:
+            print(f"{status.source}: {status.detail}")
+        elif status.detail:
             print(f"detail: {status.detail}")
         return 0 if status.enabled else 3
     raise ValueError(f"unknown autostart action: {action}")

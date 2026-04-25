@@ -143,6 +143,7 @@ class ServiceManagerTests(unittest.TestCase):
                     manager.autostart_disable(definition)
 
             self.assertTrue(status.enabled)
+            self.assertEqual(status.source, "systemctl --user is-enabled feishu-codex@corp-a")
             self.assertEqual(status.detail, "enabled")
             self.assertEqual(calls[1][0], ("systemctl", "--user", "enable", "feishu-codex@corp-a"))
             self.assertEqual(calls[2][0], ("systemctl", "--user", "is-enabled", "feishu-codex@corp-a"))
@@ -190,6 +191,7 @@ class ServiceManagerTests(unittest.TestCase):
                 manager.autostart_disable(definition)
 
             self.assertTrue(status.enabled)
+            self.assertEqual(status.source, "LaunchAgent io.feishu-codex.corp-a")
             self.assertEqual(status.detail, str(root / "LaunchAgents" / "io.feishu-codex.corp-a.plist"))
             self.assertFalse((root / "LaunchAgents" / "io.feishu-codex.corp-a.plist").exists())
 
@@ -205,6 +207,7 @@ class ServiceManagerTests(unittest.TestCase):
                 status = manager.autostart_status(definition)
 
             self.assertFalse(status.enabled)
+            self.assertEqual(status.source, "LaunchAgent io.feishu-codex.corp-a")
             self.assertEqual(status.detail, "launch agent symlink is dangling")
 
     def test_windows_manager_lifecycle_actions(self) -> None:
@@ -265,6 +268,7 @@ class ServiceManagerTests(unittest.TestCase):
                 manager.autostart_disable(definition)
 
             self.assertTrue(status.enabled)
+            self.assertEqual(status.source, "schtasks /Query /TN feishu-codex-corp-a /XML")
             self.assertEqual(status.detail, "logon trigger enabled")
             create_calls = [call for call, _ in calls if call[:2] == ("schtasks", "/Create")]
             self.assertGreaterEqual(len(create_calls), 3)
