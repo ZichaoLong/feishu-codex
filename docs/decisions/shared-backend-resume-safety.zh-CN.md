@@ -85,6 +85,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 多个实例共享 persisted thread namespace
 - 但每个实例有自己独立的 live backend
 - 同一 thread 的 live residency 由机器级 `ThreadRuntimeLease` 协调
+- 自动转移会先写入一个短时机器级 transfer reservation，给目标实例预留 live runtime 接管窗口，再要求 owner 实例释放 Feishu runtime，最后由目标实例接管
 - 若 owner 实例当前 idle，且其 `unsubscribe_available` 为真，则允许自动转移
 - 若 owner 实例当前仍在执行，或仍有待处理审批 / 输入，则必须明确拒绝
 

@@ -159,6 +159,47 @@ class ThreadRuntimeLeaseStoreTests(unittest.TestCase):
         assert lease is not None
         self.assertEqual({item.holder_id for item in lease.holders}, expected_holder_ids)
 
+    def test_transfer_reservation_blocks_other_holders_until_target_acquires(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ThreadRuntimeLeaseStore(pathlib.Path(tempdir.name))
+
+        store.acquire("thread-1", _holder(instance_name="corp-a", holder_id="service:one", service_token="token-a"))
+        reservation = store.reserve_transfer(
+            "thread-1",
+            owner_instance="corp-a",
+            owner_service_token="token-a",
+            target_instance="corp-b",
+            target_service_token="token-b",
+            ttl_seconds=30.0,
+        )
+
+        blocked_same_owner = store.acquire(
+            "thread-1",
+            _holder(instance_name="corp-a", holder_id="fcodex:123", service_token="token-a"),
+        )
+        self.assertFalse(blocked_same_owner.granted)
+        self.assertEqual(blocked_same_owner.transfer, reservation)
+
+        self.assertTrue(store.release("thread-1", "service:one"))
+        blocked_after_release = store.acquire(
+            "thread-1",
+            _holder(instance_name="corp-a", holder_id="service:two", service_token="token-a"),
+        )
+        self.assertFalse(blocked_after_release.granted)
+        self.assertIsNone(blocked_after_release.lease)
+        self.assertEqual(blocked_after_release.transfer, reservation)
+
+        acquired = store.acquire(
+            "thread-1",
+            _holder(instance_name="corp-b", holder_id="service:two", service_token="token-b"),
+        )
+        self.assertTrue(acquired.granted)
+        self.assertIsNone(store.load_transfer_reservation("thread-1"))
+        lease = store.load("thread-1")
+        assert lease is not None
+        self.assertEqual(lease.owner_instance, "corp-b")
+
 
 if __name__ == "__main__":
     unittest.main()

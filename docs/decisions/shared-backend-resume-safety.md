@@ -102,6 +102,9 @@ Properties:
 - each instance has its own live backend
 - live residency of one thread is coordinated by the machine-level
   `ThreadRuntimeLease`
+- automatic transfer now first writes a short-lived machine-level transfer
+  reservation for the target instance, then asks the owner instance to release
+  Feishu runtime, and finally lets the target acquire the live runtime
 - if the owner instance is idle and reports `unsubscribe_available`,
   automatic transfer is allowed
 - if the owner instance is still executing or still has pending approval /

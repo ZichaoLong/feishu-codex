@@ -14,6 +14,7 @@ from bot.stores.thread_runtime_lease_store import (
     ThreadRuntimeLeaseAcquireResult,
     ThreadRuntimeLeaseHolder,
     ThreadRuntimeLeaseStore,
+    ThreadRuntimeTransferReservation,
 )
 
 
@@ -26,8 +27,17 @@ class ThreadRuntimeAcquireOutcome:
 def build_runtime_lease_conflict_message(
     lease: ThreadRuntimeLease | None,
     *,
+    transfer: ThreadRuntimeTransferReservation | None = None,
     reason: str = "",
 ) -> str:
+    if transfer is not None and lease is None:
+        base = (
+            "当前线程正处于 live runtime 转移窗口："
+            f"`{transfer.owner_instance}` -> `{transfer.target_instance}`。"
+        )
+        if reason:
+            return f"{base} {reason}"
+        return f"{base} 请稍后重试。"
     if lease is None:
         return "当前无法获取 thread live runtime。"
     base = f"当前线程正由实例 `{lease.owner_instance}` 持有 live runtime。"
@@ -48,6 +58,9 @@ def acquire_thread_runtime_holder_or_raise(
         return ThreadRuntimeAcquireOutcome(result=result)
 
     current = result.lease
+    current_transfer = result.transfer
+    if current is None and current_transfer is not None:
+        raise RuntimeError(build_runtime_lease_conflict_message(None, transfer=current_transfer))
     if current is None:
         raise RuntimeError("当前无法获取 thread live runtime。")
 
@@ -57,24 +70,36 @@ def acquire_thread_runtime_holder_or_raise(
         if retry.granted:
             return ThreadRuntimeAcquireOutcome(result=retry)
         current = retry.lease
-        raise RuntimeError(build_runtime_lease_conflict_message(current))
+        raise RuntimeError(build_runtime_lease_conflict_message(current, transfer=retry.transfer))
 
-    status = _remote_thread_status(owner_entry, thread_id)
-    unsubscribe_available = bool(status.get("unsubscribe_available"))
-    if not unsubscribe_available:
-        raise RuntimeError(
-            build_runtime_lease_conflict_message(
-                current,
-                reason=str(status.get("unsubscribe_reason", "") or "").strip(),
-            )
+    lease_store.reserve_transfer(
+        thread_id,
+        owner_instance=current.owner_instance,
+        owner_service_token=current.owner_service_token,
+        target_instance=holder.instance_name,
+        target_service_token=holder.owner_service_token,
+    )
+    try:
+        _remote_unsubscribe_thread(owner_entry, thread_id)
+    except Exception:
+        lease_store.clear_transfer_reservation(
+            thread_id,
+            target_instance=holder.instance_name,
+            target_service_token=holder.owner_service_token,
         )
+        raise
 
-    _remote_unsubscribe_thread(owner_entry, thread_id)
     retry = lease_store.acquire(thread_id, holder)
     if retry.granted:
         return ThreadRuntimeAcquireOutcome(result=retry, transferred_from=owner_entry.instance_name)
+    lease_store.clear_transfer_reservation(
+        thread_id,
+        target_instance=holder.instance_name,
+        target_service_token=holder.owner_service_token,
+    )
     raise RuntimeError(build_runtime_lease_conflict_message(
         retry.lease,
+        transfer=retry.transfer,
         reason="owner 实例仍有其他 live subscriber，当前不能自动转移。",
     ))
 
@@ -98,14 +123,6 @@ def _active_owner_entry(
         )
         return None
     return owner
-
-
-def _remote_thread_status(owner: InstanceRegistryEntry, thread_id: str) -> dict:
-    try:
-        return control_request(pathlib.Path(owner.data_dir), "thread/status", {"thread_id": thread_id})
-    except ServiceControlError as exc:
-        raise RuntimeError(f"无法查询 owner 实例 `{owner.instance_name}` 的线程状态：{exc}") from exc
-
 
 def _remote_unsubscribe_thread(owner: InstanceRegistryEntry, thread_id: str) -> dict:
     try:
