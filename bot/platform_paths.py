@@ -6,9 +6,6 @@ The repository keeps an explicit separation between:
 - per-machine config root
 - per-machine data root
 - user-facing launcher directory
-
-Development checkouts keep using the repo-local layout so tests and direct
-source execution remain stable.
 """
 
 from __future__ import annotations
@@ -16,8 +13,6 @@ from __future__ import annotations
 import os
 import pathlib
 import sys
-
-from bot.constants import FC_DATA_DIR, PROJECT_ROOT
 
 APP_NAME = "feishu-codex"
 ENV_FILE_NAME = "feishu-codex.env"
@@ -46,16 +41,10 @@ def is_linux() -> bool:
     return current_platform() == "linux"
 
 
-def looks_like_dev_layout() -> bool:
-    return (PROJECT_ROOT / "bot").is_dir() and (PROJECT_ROOT / "config").is_dir()
-
-
 def default_config_root() -> pathlib.Path:
     raw = os.environ.get("FC_CONFIG_ROOT", "").strip()
     if raw:
         return pathlib.Path(raw).expanduser()
-    if looks_like_dev_layout():
-        return PROJECT_ROOT / "config"
     home = pathlib.Path.home()
     if is_windows():
         appdata = pathlib.Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
@@ -69,8 +58,6 @@ def default_data_root() -> pathlib.Path:
     raw = os.environ.get("FC_DATA_ROOT", "").strip()
     if raw:
         return pathlib.Path(raw).expanduser()
-    if looks_like_dev_layout():
-        return FC_DATA_DIR
     home = pathlib.Path.home()
     if is_windows():
         local_appdata = pathlib.Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")

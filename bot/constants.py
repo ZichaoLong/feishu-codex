@@ -11,8 +11,6 @@ KEYWORD = "CODEX"
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
 BOT_DIR = pathlib.Path(__file__).parent
-PROJECT_ROOT = BOT_DIR.parent
-FC_DATA_DIR = PROJECT_ROOT / "data" / "feishu_codex"
 
 DEFAULT_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer"]
 DEFAULT_SESSION_RECENT_LIMIT = 5

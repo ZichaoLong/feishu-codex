@@ -206,7 +206,9 @@ feishu-codex instance remove corp-a
 | Linux | `~/.config/feishu-codex` | `~/.local/share/feishu-codex` |
 | macOS | `~/Library/Application Support/feishu-codex/config` | `~/Library/Application Support/feishu-codex/data` |
 | Windows | `%APPDATA%\\feishu-codex\\config` | `%LOCALAPPDATA%\\feishu-codex\\data` |
-| 源码树直跑 | `./config` | `./data/feishu_codex` |
+
+无论是源码树直跑还是安装后运行，默认都走上面的机器级目录；只有显式设置
+`FC_CONFIG_ROOT` / `FC_DATA_ROOT` 时，才会改用自定义根目录。
 
 逻辑布局可以按下面理解：
 
