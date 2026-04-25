@@ -17,8 +17,7 @@ class GroupChatStoreTests(unittest.TestCase):
         _, store, state_path = self._make_store()
 
         store.set_group_mode("chat-1", "all")
-        store.set_access_policy("chat-1", "allowlist")
-        store.grant_members("chat-1", ["ou_user", "ou_user2"])
+        store.activate_chat("chat-1", activated_by="ou_admin", activated_at=1712476800123)
         store.set_last_boundary(
             "chat-1",
             seq=3,
@@ -30,8 +29,9 @@ class GroupChatStoreTests(unittest.TestCase):
         raw = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(raw["schema_version"], GROUP_CHAT_STORE_SCHEMA_VERSION)
         self.assertEqual(raw["groups"]["chat-1"]["mode"], "all")
-        self.assertEqual(raw["groups"]["chat-1"]["access_policy"], "allowlist")
-        self.assertEqual(raw["groups"]["chat-1"]["allowlist"], ["ou_user", "ou_user2"])
+        self.assertTrue(raw["groups"]["chat-1"]["activated"])
+        self.assertEqual(raw["groups"]["chat-1"]["activated_by"], "ou_admin")
+        self.assertEqual(raw["groups"]["chat-1"]["activated_at"], 1712476800123)
         self.assertEqual(raw["groups"]["chat-1"]["boundaries"]["main"], {
             "seq": 0,
             "created_at": 0,
@@ -45,8 +45,8 @@ class GroupChatStoreTests(unittest.TestCase):
 
         snapshot = store.group_snapshot("chat-1")
         self.assertEqual(snapshot["mode"], "all")
-        self.assertEqual(snapshot["access_policy"], "allowlist")
-        self.assertEqual(snapshot["allowlist"], ["ou_user", "ou_user2"])
+        self.assertTrue(snapshot["activated"])
+        self.assertEqual(snapshot["activated_by"], "ou_admin")
         self.assertEqual(snapshot["boundaries"]["thread:th-1"]["seq"], 3)
 
     def test_store_rejects_missing_schema_version(self) -> None:
@@ -57,8 +57,6 @@ class GroupChatStoreTests(unittest.TestCase):
                     "groups": {
                         "chat-1": {
                             "mode": "assistant",
-                            "access_policy": "admin-only",
-                            "allowlist": [],
                             "boundaries": {
                                 "main": {"seq": 0, "created_at": 0, "message_ids": []}
                             },
@@ -97,3 +95,31 @@ class GroupChatStoreTests(unittest.TestCase):
         self.assertFalse(store.log_path("chat-1").exists())
         raw = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(raw["groups"], {})
+
+    def test_store_migrates_v1_group_state_as_deactivated(self) -> None:
+        _, store, state_path = self._make_store()
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "groups": {
+                        "chat-1": {
+                            "mode": "assistant",
+                            "access_policy": "all-members",
+                            "allowlist": ["ou_user"],
+                            "boundaries": {
+                                "main": {"seq": 0, "created_at": 0, "message_ids": []}
+                            },
+                            "last_log_seq": 0,
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = store.group_snapshot("chat-1")
+        self.assertFalse(snapshot["activated"])
+        self.assertEqual(snapshot["activated_by"], "")
+        self.assertEqual(snapshot["activated_at"], 0)

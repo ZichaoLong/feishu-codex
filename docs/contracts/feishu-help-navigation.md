@@ -124,15 +124,15 @@ The `group` branch of `/help` should cover group-only operating rules.
 
 It must make the following capability reachable:
 
+- `/group`
 - `/groupmode`
 
-`/acl` should be documented there as text guidance, with example slash usage, but it is intentionally not required to be button- or form-driven from `/help`.
+The page text should also cover:
 
-Reason:
-
-- `grant` and `revoke` commonly require mentions
-- one action may target multiple users
-- slash syntax is clearer than forcing an incomplete form model
+- that groups start in a deactivated state
+- what `/group activate` and `/group deactivate` do
+- the permission boundary between daily group usage, shared-state management,
+  and runtime approval handling
 
 Generic Feishu commands triggered in groups, such as `/status`, `/preflight`,
 `/unsubscribe`, and `/profile`, do not belong to the `group`

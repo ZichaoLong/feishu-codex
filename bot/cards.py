@@ -64,6 +64,16 @@ def _card_config() -> dict:
     return {"wide_screen_mode": True, "update_multi": True}
 
 
+def _format_ts_ms(value: int) -> str:
+    try:
+        timestamp = float(value) / 1000.0
+    except (TypeError, ValueError):
+        return "（未知）"
+    if timestamp <= 0:
+        return "（未知）"
+    return format_timestamp(timestamp)
+
+
 def build_markdown_card(title: str, content: str, *, template: str = "blue") -> dict:
     """构造简单说明卡片。"""
     return {
@@ -804,74 +814,81 @@ def build_group_mode_card(current_mode: str, *, can_manage: bool) -> dict:
     }
 
 
-def build_group_acl_card(
-    access_policy: str,
+def build_group_activation_card(
     *,
-    allowlist_members: list[str],
-    viewer_allowed: bool,
+    activated: bool,
+    activated_by: str = "",
+    activated_at: int = 0,
     can_manage: bool,
 ) -> dict:
-    """构造群聊 ACL 状态卡片。"""
-    labels = {
-        "admin-only": "admin-only",
-        "allowlist": "allowlist",
-        "all-members": "all-members",
-    }
-    descs = {
-        "admin-only": "只有管理员具备群聊触发资格。",
-        "allowlist": "管理员和已授权成员具备群聊触发资格。",
-        "all-members": "群内所有成员都具备群聊触发资格。",
-    }
-    current_label = labels.get(access_policy, access_policy)
-    content = (
-        f"当前授权策略：**{current_label}**\n"
-        f"{descs.get(access_policy, access_policy)}\n\n"
-        f"你当前是否可用：**{'是' if viewer_allowed else '否'}**\n\n"
-        "说明：ACL 只决定谁有资格；是否需要显式 mention 仍取决于群聊工作态。"
-    )
-    if allowlist_members:
-        shown_members = "\n".join(f"- {member}" for member in allowlist_members[:20])
-        if len(allowlist_members) > 20:
-            shown_members += f"\n- 其余 {len(allowlist_members) - 20} 人未展开"
-        content += f"\n\n**当前 allowlist 成员**\n{shown_members}"
-    else:
-        content += "\n\n当前 allowlist 为空。"
-    if can_manage:
-        content += (
-            "\n\n管理员可用：`/acl policy admin-only`、`/acl policy allowlist`、"
-            "`/acl policy all-members`、`/acl grant @成员`、`/acl revoke @成员`\n"
-            "若当前群是 `assistant` / `mention-only`，继续发送这些群命令时仍需先显式 mention 触发对象。"
+    """构造 owner-activated 群聊状态卡片。"""
+    state_label = "已激活" if activated else "未激活"
+    template = "green" if activated else "yellow"
+    lines = [f"当前群聊状态：**{state_label}**"]
+    if activated:
+        if activated_by:
+            lines.append(f"激活管理员：`{activated_by}`")
+        if activated_at > 0:
+            lines.append(f"激活时间：`{_format_ts_ms(activated_at)}`")
+        lines.extend(
+            [
+                "",
+                "当前群成员可直接在这里日常对话，并处理自己发起 turn 的审批或补充输入。",
+                "所有会改变共享状态的命令与设置，仍然只允许管理员操作。",
+            ]
         )
     else:
-        content += "\n\n仅管理员可调整授权策略。"
+        lines.extend(
+            [
+                "",
+                "当前群聊还没有被管理员初始化。",
+                "非管理员暂时不能使用机器人；请让管理员执行 `/group activate`。",
+            ]
+        )
+    if can_manage:
+        lines.extend(
+            [
+                "",
+                "管理员可用：`/group activate`、`/group deactivate`。",
+            ]
+        )
+    else:
+        lines.extend(["", "仅管理员可激活或停用当前群聊。"])
 
-    elements = [{"tag": "markdown", "content": content}, {"tag": "hr"}]
-    buttons = []
-    for policy, label in labels.items():
-        elements.append({"tag": "markdown", "content": f"**{label}**\n{descs[policy]}"})
-        if can_manage:
-            buttons.append(
-                {
-                    "tag": "button",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": f"{'✓ ' if policy == access_policy else ''}{label}",
+    elements = [{"tag": "markdown", "content": "\n".join(lines)}, {"tag": "hr"}]
+    if can_manage:
+        elements.append(
+            {
+                "tag": "action",
+                "layout": "bisected",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "激活当前群"},
+                        "type": "primary" if activated else "default",
+                        "value": {
+                            "action": "set_group_activation",
+                            "activated": True,
+                        },
                     },
-                    "type": "primary" if policy == access_policy else "default",
-                    "value": {
-                        "action": "set_group_acl_policy",
-                        "policy": policy,
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "停用当前群"},
+                        "type": "danger" if activated else "default",
+                        "value": {
+                            "action": "set_group_activation",
+                            "activated": False,
+                        },
                     },
-                }
-            )
-    if buttons:
-        elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
+                ],
+            }
+        )
 
     return {
         "config": _card_config(),
         "header": {
             "title": {"tag": "plain_text", "content": "Codex 群聊授权"},
-            "template": "blue",
+            "template": template,
         },
         "elements": elements,
     }

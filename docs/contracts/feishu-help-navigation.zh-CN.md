@@ -123,15 +123,14 @@ Help 面不需要再做一个“全局线程浏览器”或“全局归档表单
 
 它必须让下列能力可达：
 
+- `/group`
 - `/groupmode`
 
-`/acl` 应在该页面中以文字说明和 slash 示例出现，但当前合同刻意不要求把它做成按钮或表单导航。
+`group` 页的文字说明应覆盖：
 
-原因是：
-
-- `grant` / `revoke` 通常需要 mention
-- 一次操作可能涉及多个用户
-- 直接使用 slash 语法比硬塞进不完整表单更清楚
+- 群默认是“未激活”
+- `/group activate` 与 `/group deactivate` 的用途
+- 群成员日常使用、共享状态管理、审批卡片处理三者的权限边界
 
 群里触发的 `/status`、`/preflight`、`/unsubscribe`、`/profile` 等通用 Feishu 命令，不属于 `group` 分支。
 它们仍分别归属 `session` 或 `settings` 分支；只是当执行上下文在群里时，仍需服从群命令触发规则。

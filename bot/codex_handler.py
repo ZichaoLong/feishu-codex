@@ -351,16 +351,13 @@ class CodexHandler(BotHandler):
                 get_message_context=lambda message_id: self.bot.get_message_context(message_id),
                 get_group_mode=lambda chat_id: self.bot.get_group_mode(chat_id),
                 is_group_admin=lambda open_id: self.bot.is_group_admin(open_id=open_id),
-                get_group_acl_snapshot=lambda chat_id: self.bot.get_group_acl_snapshot(chat_id),
-                is_group_user_allowed=lambda chat_id, open_id: self.bot.is_group_user_allowed(
-                    chat_id,
-                    open_id=open_id,
-                ),
+                get_group_activation_snapshot=lambda chat_id: self.bot.get_group_activation_snapshot(chat_id),
                 set_group_mode=lambda chat_id, mode: self.bot.set_group_mode(chat_id, mode),
-                set_group_access_policy=lambda chat_id, policy: self.bot.set_group_access_policy(chat_id, policy),
-                grant_group_members=lambda chat_id, open_ids: self.bot.grant_group_members(chat_id, open_ids),
-                revoke_group_members=lambda chat_id, open_ids: self.bot.revoke_group_members(chat_id, open_ids),
-                extract_non_bot_mentions=lambda message_id: self.bot.extract_non_bot_mentions(message_id),
+                activate_group_chat=lambda chat_id, activated_by: self.bot.activate_group_chat(
+                    chat_id,
+                    activated_by=activated_by,
+                ),
+                deactivate_group_chat=lambda chat_id: self.bot.deactivate_group_chat(chat_id),
                 is_group_chat=lambda chat_id, message_id="": self._is_group_chat(chat_id, message_id),
                 validate_group_mode_change=lambda chat_id, mode, message_id="": self._validate_group_mode_change(
                     chat_id,
@@ -1384,8 +1381,8 @@ class CodexHandler(BotHandler):
                 ),
                 scope="group",
             ),
-            "/acl": CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_acl_command(
+            "/group": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_group_command(
                     chat_id,
                     arg,
                     message_id=message_id,
@@ -1501,8 +1498,8 @@ class CodexHandler(BotHandler):
                 ),
                 group_guard="group_admin",
             ),
-            "set_group_acl_policy": ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_set_group_acl_policy_action(
+            "set_group_activation": ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_set_group_activation_action(
                     chat_id,
                     action_value,
                 ),
@@ -1515,7 +1512,7 @@ class CodexHandler(BotHandler):
             handler=lambda sender_id, chat_id, message_id, action_value: self._handle_approval_card_action(
                 action_value
             ),
-            group_guard="approval_admin",
+            group_guard="request_actor_or_admin",
         )
         return [
             ("command_", approval_route),

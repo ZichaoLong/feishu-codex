@@ -314,7 +314,7 @@ Codex remains the authority for:
 - machine-global thread-wise resume profile
 - per-instance runtime shared-backend discovery state
 - p2p thread bindings and group-shared thread bindings keyed by `chat_id`
-- group-chat mode, group ACL, group context logs, and boundary state
+- group-chat mode, group activation state, group context logs, and boundary state
 - transient approval, rename, and card state
 - the per-instance thread-admission set
 
@@ -397,8 +397,8 @@ At the design level, the important boundaries are:
 - group backend state is shared by `chat_id`, not split by human member
 - `assistant` keeps separate context boundaries for the main chat flow and each
   group thread, while still sharing one backend session
-- ACL answers whether a human member is eligible; whether a mention is still
-  required is decided by the group mode
+- group activation answers whether the chat is open to non-admin members;
+  whether a mention is still required is decided by the group mode
 - other bots do not directly trigger `feishu-codex`; their messages enter
   context only through history recovery
 

@@ -42,9 +42,10 @@ class GroupMessageEntry(TypedDict):
     seq: NotRequired[int]
 
 
-class GroupAclSnapshot(TypedDict):
-    access_policy: str
-    allowlist: list[str]
+class GroupActivationSnapshot(TypedDict):
+    activated: bool
+    activated_by: str
+    activated_at: int
 
 
 class BoundaryState(TypedDict):
@@ -55,8 +56,9 @@ class BoundaryState(TypedDict):
 
 class GroupState(TypedDict):
     mode: str
-    access_policy: str
-    allowlist: list[str]
+    activated: bool
+    activated_by: str
+    activated_at: int
     boundaries: dict[str, BoundaryState]
     last_log_seq: int
 

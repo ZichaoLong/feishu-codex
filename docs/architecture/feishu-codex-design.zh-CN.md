@@ -219,7 +219,7 @@ shared backend 与 wrapper 的具体机制，见
 - 机器级共享的 thread-wise resume profile
 - 每实例 shared backend 的运行时地址发现状态
 - 私聊当前绑定到哪个 thread，以及群聊按 `chat_id` 共享绑定到哪个 thread
-- 群聊工作态、群 ACL、群上下文日志与上下文边界状态
+- 群聊工作态、群激活状态、群上下文日志与上下文边界状态
 - 审批、重命名、卡片等临时 UI 状态
 - 每实例 thread admission 集合
 
@@ -288,7 +288,7 @@ shared backend 与 wrapper 的具体机制，见
 
 - 群底层会话按 `chat_id` 共享，而不是按群成员拆分
 - `assistant` 的主聊天流与群话题分别维护上下文边界，但共享同一个群 backend 会话
-- ACL 只决定人类成员“是否有资格”，是否仍需显式 mention 由群工作态决定
+- 群激活只决定“当前群是否对普通成员开放”；是否仍需显式 mention 由群工作态决定
 - 其他机器人不会直接触发当前机器人；如其消息要进入上下文，依赖历史回捞路径
 
 正式行为合同见：

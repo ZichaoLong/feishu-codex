@@ -9,7 +9,7 @@ from bot.cards import (
     build_collaboration_mode_card,
     build_command_approval_card,
     build_execution_card,
-    build_group_acl_card,
+    build_group_activation_card,
     build_group_mode_card,
     build_permissions_preset_card,
     build_profile_card,
@@ -121,10 +121,10 @@ class SharedCommandSurfaceTests(unittest.TestCase):
             build_permissions_preset_card("on-request", "workspace-write", running=True),
             build_collaboration_mode_card("plan", running=True),
             build_group_mode_card("assistant", can_manage=True),
-            build_group_acl_card(
-                "allowlist",
-                allowlist_members=["ou-1"],
-                viewer_allowed=True,
+            build_group_activation_card(
+                activated=True,
+                activated_by="ou-1",
+                activated_at=1712476800000,
                 can_manage=True,
             ),
             build_ask_user_card(

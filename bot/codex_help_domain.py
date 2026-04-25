@@ -84,7 +84,7 @@ class CodexHelpDomain:
                     "从下面三个入口按场景进入，不需要先记住命令名。\n\n"
                     "- `session`：线程、恢复、当前线程状态、目录切换\n"
                     "- `settings`：profile、权限预设、审批、沙箱、协作模式、身份初始化\n"
-                    "- `group`：群聊工作态、ACL 使用规则、群内触发约束\n\n"
+                    "- `group`：群聊激活、群聊工作态、群内触发与管理边界\n\n"
                     f"{self._local_thread_safety_rule}\n\n"
                     "本地继续同一线程请用 "
                     f"`{_LOCAL_RESUME_COMMAND}`；"
@@ -336,19 +336,26 @@ class CodexHelpDomain:
             "group": _HelpPageSpec(
                 title="Codex 帮助：群聊",
                 markdown=(
+                    "**群授权面**\n"
+                    "- `/group`：查看当前群是否已激活\n"
+                    "- `/group activate`：由管理员激活当前群\n"
+                    "- `/group deactivate`：由管理员停用当前群\n"
+                    "- 未激活群里，非管理员不能使用机器人\n\n"
                     "**群聊工作态**\n"
                     "- `/groupmode`：查看或切换当前群聊工作态\n"
                     "- 这是群聊专属能力；在私聊中触发会按 slash 语义拒绝\n\n"
-                    "**ACL 说明**\n"
-                    "- `/acl`：查看当前群授权\n"
-                    "- `/acl policy <admin-only|allowlist|all-members>`\n"
-                    "- `/acl grant @成员`\n"
-                    "- `/acl revoke @成员`\n\n"
-                    "`/acl` 当前只提供文字导航，不做表单按钮化；因为 `grant` / `revoke` 常需要 mention，直接用 slash 更清楚。"
+                    "**权限边界**\n"
+                    "- 激活后的群成员可日常对话，并处理自己发起 turn 的审批或补充输入\n"
+                    "- 所有会改变共享状态的命令与设置，仍然只允许管理员操作"
                 ),
                 action_rows=(
                     _HelpActionRowSpec(
                         buttons=(
+                            _HelpCommandButtonSpec(
+                                label="/group",
+                                command="/group",
+                                title="Codex 群聊授权",
+                            ),
                             _HelpCommandButtonSpec(
                                 label="/groupmode",
                                 command="/groupmode",

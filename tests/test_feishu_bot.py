@@ -273,18 +273,18 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
         bot._handle_raw_message(
             _attachment_message_event(
                 message_id="card-1",
-                chat_id="ou-user",
+                chat_id="ou-admin",
                 chat_type="p2p",
                 msg_type="interactive",
                 sender_user_id="u-user",
-                sender_open_id="ou-user",
+                sender_open_id="ou-admin",
                 content=build_terminal_result_card("稳定终态"),
             )
         )
 
         self.assertEqual(
             bot.received_messages,
-            [("ou-user", "ou-user", "稳定终态", "card-1")],
+            [("ou-admin", "ou-admin", "稳定终态", "card-1")],
         )
 
     def test_p2p_execution_card_projects_visible_text_best_effort(self) -> None:
@@ -293,11 +293,11 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
         bot._handle_raw_message(
             _attachment_message_event(
                 message_id="card-2",
-                chat_id="ou-user",
+                chat_id="ou-admin",
                 chat_type="p2p",
                 msg_type="interactive",
                 sender_user_id="u-user",
-                sender_open_id="ou-user",
+                sender_open_id="ou-admin",
                 content=build_execution_card(
                     "命令输出",
                     [ExecutionReplySegment("assistant", "阶段回复")],
@@ -338,11 +338,11 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
         bot._handle_raw_message(
             _attachment_message_event(
                 message_id="card-3",
-                chat_id="ou-user",
+                chat_id="ou-admin",
                 chat_type="p2p",
                 msg_type="interactive",
                 sender_user_id="u-user",
-                sender_open_id="ou-user",
+                sender_open_id="ou-admin",
                 content={
                     "header": {
                         "title": {"tag": "plain_text", "content": "示例卡片"},
@@ -374,24 +374,55 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         bot._handle_raw_message(
             _attachment_message_event(
                 message_id="img-1",
-                chat_id="ou-user",
+                chat_id="ou-admin",
                 msg_type="image",
                 sender_user_id="u-user",
-                sender_open_id="ou-user",
+                sender_open_id="ou-admin",
                 content={"image_key": "img-key-1"},
             )
         )
 
         self.assertEqual(
             bot.received_attachments,
-            [("ou-user", "ou-user", "img-1", "image", "img-key-1", "")],
+            [("ou-admin", "ou-admin", "img-1", "image", "img-key-1", "")],
         )
         self.assertEqual(bot.received_messages, [])
+
+    def test_non_admin_p2p_message_is_rejected(self) -> None:
+        bot = self._make_bot()
+
+        bot._handle_raw_message(
+            P2ImMessageReceiveV1(
+                {
+                    "event": {
+                        "sender": {
+                            "sender_id": {"user_id": "u-user", "open_id": "ou-user"},
+                            "sender_type": "user",
+                        },
+                        "message": {
+                            "message_id": "m-p2p",
+                            "chat_id": "ou-user",
+                            "chat_type": "p2p",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "你好"}, ensure_ascii=False),
+                            "mentions": [],
+                            "create_time": 1712476800000,
+                            "thread_id": "",
+                            "root_id": "",
+                            "parent_id": "",
+                        },
+                    }
+                }
+            )
+        )
+
+        self.assertEqual(bot.received_messages, [])
+        self.assertIn("仅支持管理员私聊使用", bot.replies[-1][1])
 
     def test_group_assistant_mode_routes_authorized_attachment_without_logging_text_context(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _attachment_message_event(
@@ -415,6 +446,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_logs_plain_group_message_without_triggering(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -434,7 +466,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_includes_prior_group_messages_on_authorized_mention(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -473,7 +505,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_group_all_mode_passes_text_through_directly(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "all")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -492,7 +524,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_group_mention_only_wraps_current_turn_with_sender_name(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "mention_only")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -521,7 +553,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_keeps_history_recovered_bot_messages_in_context(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
         bot.history_entries = [
             {
                 "message_id": "hist-bot",
@@ -587,13 +619,14 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         )
 
         self.assertEqual(bot.received_messages, [])
-        self.assertIn("仅管理员或已授权成员", bot.replies[-1][1])
+        self.assertIn("尚未由管理员初始化", bot.replies[-1][1])
         self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 0)
+        self.assertEqual(bot._group_store.read_messages_between("chat-1"), [])
 
     def test_assistant_mode_preflight_can_block_history_recovery_before_fetch(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
         bot.allow_group_prompt_result = False
 
         bot._handle_raw_message(
@@ -620,7 +653,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_fetches_history_on_every_authorized_mention(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
         bot.history_entries = [
             {
                 "message_id": "hist-1",
@@ -750,7 +783,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_persists_boundary_message_ids_for_same_timestamp_entries(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
         bot.history_entries = [
             {
                 "message_id": "hist-same-ms",
@@ -950,7 +983,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_can_disable_history_fetch_by_config(self) -> None:
         bot = self._make_bot(system_config={"group_history_fetch_limit": 0})
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
         bot.history_entries = [
             {
                 "message_id": "hist-1",
@@ -988,7 +1021,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_reports_history_fetch_failure_and_stops(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
         bot.history_fetch_error = RuntimeError("code=999, msg=permission denied")
 
         bot._handle_raw_message(
@@ -1018,7 +1051,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_main_flow_ignores_thread_messages_in_context(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -1071,7 +1104,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_assistant_mode_thread_context_is_scoped_to_same_thread(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -1188,7 +1221,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_raw_handler_defensively_ignores_group_app_sender_before_logging(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": ""})
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         # receive_v1 公开协议当前只承诺 sender_type=user；
         # 这里故意注入 app sender，验证 raw handler 在异常输入下仍 fail-close。
@@ -1244,7 +1277,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_group_mention_can_use_configured_bot_open_id(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": "ou-configured"})
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
         bot._fetch_bot_open_id = lambda: (_ for _ in ()).throw(AssertionError("should not fetch"))
 
         bot._handle_raw_message(
@@ -1274,7 +1307,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             }
         )
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -1356,7 +1389,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_group_mention_is_not_matched_without_bot_open_id(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": ""})
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(
@@ -1384,7 +1417,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
     def test_group_trigger_alias_requires_bot_open_id(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": "", "trigger_open_ids": ["ou-user-alias"]})
         bot.set_group_mode("chat-1", "assistant")
-        bot.set_group_access_policy("chat-1", "all-members")
+        bot.activate_group_chat("chat-1", activated_by="ou-admin")
 
         bot._handle_raw_message(
             _message_event(

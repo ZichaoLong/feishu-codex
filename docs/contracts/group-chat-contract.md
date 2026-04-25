@@ -8,8 +8,9 @@ This document defines the formal behavior contract for group-chat features in
 It answers:
 
 - what defaults a new group starts with
-- what ACL, group mode, and admin-command rules each control
+- what group activation, group mode, and admin-command rules each control
 - how `assistant` context, history recovery, and thread boundaries behave
+- who may handle runtime approval and supplemental-input cards in groups
 - which behaviors are guaranteed and which are current limitations
 
 See also:
@@ -26,8 +27,8 @@ This document only defines the group-chat contract.
 It does not redefine:
 
 - p2p thread lifecycle
-- the shared state vocabulary for `/status`, `/unsubscribe`, and the
-  local admin surface
+- the shared state vocabulary for `/status`, `/unsubscribe`, and the local
+  admin surface
 - `fcodex` wrapper semantics
 
 Those remain owned by their dedicated documents.
@@ -35,26 +36,31 @@ Those remain owned by their dedicated documents.
 ## 2. Defaults
 
 - new groups default to `assistant`
-- new groups default to `admin-only`
+- new groups default to a **deactivated** state
 - group administrators come from `system.yaml.admin_open_ids`
 - `system.yaml.admin_open_ids` is authoritative; the runtime admin set is only
   a cache
+- admins may still bootstrap and manage a group before it is activated
 - runtime identity decisions use `open_id` only
 - `user_id` is retained only for logs and `/whoami` diagnostics
 - `contact:user.employee_id:readonly` is required if you want `user_id` to be
   populated reliably
 
-## 3. Human-Member Access
+## 3. Group Activation Boundary
 
-- whether a human member is eligible to trigger the bot in a group is decided
-  by that group's ACL
-- ACL decides who is eligible; whether a mention is still required is decided
-  by the group mode
-- group ACL only manages human members, not other bots
-- supported ACL policies are:
-  - `admin-only`
-  - `allowlist`
-  - `all-members`
+- group activation is a **chat-level** switch, not a member-level ACL
+- while a group is deactivated, non-admin users may not use the bot there
+- once a group is activated, both current members and later-joined members may
+  use the bot normally
+- an activated group stays usable even if the admin later leaves the group; it
+  remains so until an admin comes back and deactivates it, or the group state
+  is explicitly cleared by an admin surface
+- group activation state should persist across service restarts
+- only admins may activate or deactivate a group
+- the current activation-management surface is:
+  - `/group`
+  - `/group activate`
+  - `/group deactivate`
 
 ## 4. Group Modes
 
@@ -65,13 +71,13 @@ Those remain owned by their dedicated documents.
 - if `system.yaml.trigger_open_ids` is configured, mentions that hit those
   `open_id`s are also treated as valid triggers
 - `trigger_open_ids` only extends which mentions count as a trigger; it does
-  not bypass ACL and it does not replace `bot_open_id`
+  not bypass group activation and it does not replace `bot_open_id`
 - p2p backend state stays user-isolated; group backend state is shared by
   `chat_id`
 
 ### 4.1 `assistant`
 
-- receives and caches group messages
+- only logs messages from human users who are currently allowed to use the bot
 - replies only when a valid trigger mention is present
 - includes group context since the last trigger boundary
 - maintains separate context boundaries for the main chat flow and each group
@@ -84,36 +90,60 @@ Those remain owned by their dedicated documents.
 
 - does not cache group context
 - triggers only on valid trigger mentions
-- backend input contains only the current group message, without history context
-- the current group message is sent through a lightweight `group_chat_current_turn`
-  wrapper and should prefer `sender_name`
+- backend input contains only the current group message, without history
+  context
+- the current group message is sent through a lightweight
+  `group_chat_current_turn` wrapper and should prefer `sender_name`
 
 ### 4.3 `all`
 
-- human group messages can trigger directly
+- group messages from users currently allowed to use the bot can trigger
+  directly
 - backend input is passed through like p2p by default: no history context and
   no extra `group turn` wrapper
 - has the highest spam risk
 
-## 5. Group-Command Triggering
+## 5. Group Commands and Shared-State Rules
 
-- p2p commands can be sent directly
 - all group `/` commands are admin-only
 - in group `assistant` and `mention-only`, admin commands themselves must also
   explicitly mention a trigger target first
 - in group `all`, admins can send group commands directly
 - "group commands" here includes both group-specific commands such as
-  `/groupmode` and `/acl`, and generic Feishu commands triggered from a group
+  `/group` and `/groupmode`, and generic Feishu commands triggered from a group
   context such as `/status` and `/unsubscribe`
-- this section only defines whether those commands may be triggered in a group;
-  the runtime/session semantics of each command still belong to their dedicated
-  contracts
 - group commands do not enter the `assistant` context log and do not advance
   the assistant boundary
+- commands and settings that mutate shared state remain strictly admin-only,
+  including:
+  - `/new`
+  - `/session`
+  - `/resume`
+  - `/unsubscribe`
+  - `/profile`
+  - `/approval`
+  - `/sandbox`
+  - `/permissions`
+  - group activation and group-mode management commands
 
-## 6. `assistant` Context Contract
+## 6. Runtime Approval and Supplemental Input
 
-- `assistant` writes group messages into a local log
+- once a group is activated, ordinary members may handle approval cards or
+  supplemental-input cards created by **their own turn**
+- admins may always act as the fallback operator for those cards
+- ordinary non-admin members may not operate pending requests created by
+  someone else's turn
+- both "allow once" and "allow for this session" approval actions remain valid
+  for the current request actor
+- this runtime card ownership only applies to the active turn interaction; it
+  does not grant shared-state management rights
+
+## 7. `assistant` Context Contract
+
+- `assistant` writes group messages from users who are currently allowed to use
+  the bot into a local log
+- when a group is deactivated, ordinary non-admin messages do not enter the
+  assistant-mode context log
 - only effective human mentions can trigger a reply
 - because Feishu does not push other bots' messages to bots in real time,
   `assistant` backfills recent history on every effective mention
@@ -160,20 +190,22 @@ Those remain owned by their dedicated documents.
   - same-millisecond already-consumed messages are not replayed
 - the implementation does not guarantee a fully reconstructed total order for
   different-source messages that share the same millisecond timestamp
-- when the trigger happens inside a group thread, execution cards, ACL denials,
-  and long-text follow-ups should stay in that thread instead of jumping back
-  to the main flow
+- when the trigger happens inside a group thread, execution cards, activation
+  denials, and long-text follow-ups should stay in that thread instead of
+  jumping back to the main flow
 
-## 7. ACL Denial Feedback
+## 8. Denial Feedback
 
-- unauthorized members in `assistant` / `mention-only` receive a denial message
-  only when they explicitly mention the trigger target
-- unauthorized members in `all` are silently ignored for plain messages to
-  avoid noise
-- unauthorized members in `all` still receive a denial message when they
-  explicitly mention the trigger target or send a group command
+- while a group is deactivated, non-admin users in `assistant` /
+  `mention-only` receive a denial message when they explicitly mention the
+  trigger target
+- while a group is deactivated, non-admin users in `all` are silently ignored
+  for plain messages to avoid noise
+- while a group is deactivated, non-admin users in `all` still receive a
+  denial message when they explicitly mention the trigger target or send a
+  group command
 
-## 8. Other Bots and History
+## 9. Other Bots and History
 
 - other bots cannot directly trigger `feishu-codex`
 - if group history is visible to the bot, messages from other bots can still
@@ -181,7 +213,7 @@ Those remain owned by their dedicated documents.
 - if history recovery is disabled, other bots' messages do not automatically
   enter the `assistant` context
 
-## 9. Explicit Limitations
+## 10. Explicit Limitations
 
 - thread history recovery cannot enforce the same strict time-window cutoff as
   the main flow; that is a public Feishu API limitation, not an intentional
@@ -193,3 +225,6 @@ Those remain owned by their dedicated documents.
 - even if file names or file-like placeholder text appear in group context,
   they must not be interpreted as meaning the corresponding attachment is still
   available; attachment availability is outside the history-recovery contract
+- this version intentionally does not implement a fine-grained multi-user
+  permission system; group activation is a chat-level shared authorization
+  model, not member-level shared-state isolation

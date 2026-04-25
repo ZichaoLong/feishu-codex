@@ -237,7 +237,7 @@ class CodexSettingsDomain:
             [
                 "",
                 "排查提示：",
-                "- 如需 `/whoami`、群 ACL 卡片、群上下文显示可读名字，确认已开 `contact:contact.base:readonly`、`contact:user.base:readonly`。",
+                "- 如需 `/whoami`、群授权卡片、群上下文显示可读名字，确认已开 `contact:contact.base:readonly`、`contact:user.base:readonly`。",
                 "- 若这里只能 fallback 到 open_id 前缀，请先检查通讯录权限、应用可用范围，以及目标成员是否仍在可见范围内。",
             ]
         )

@@ -44,7 +44,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 from bot.card_text_projection import project_interactive_card_text
 from bot.feishu_types import (
     BotIdentitySnapshot,
-    GroupAclSnapshot,
+    GroupActivationSnapshot,
     GroupMessageEntry,
     MentionMember,
     MentionPayload,
@@ -359,21 +359,29 @@ class FeishuBot(ABC):
     def set_group_mode(self, chat_id: str, mode: str) -> str:
         return self._group_store.set_group_mode(chat_id, mode)
 
-    def get_group_acl_snapshot(self, chat_id: str) -> GroupAclSnapshot:
-        snapshot = self._group_store.group_snapshot(chat_id)
+    def get_group_activation_snapshot(self, chat_id: str) -> GroupActivationSnapshot:
+        snapshot = self._group_store.activation_snapshot(chat_id)
         return {
-            "access_policy": snapshot["access_policy"],
-            "allowlist": list(snapshot["allowlist"]),
+            "activated": bool(snapshot["activated"]),
+            "activated_by": str(snapshot["activated_by"] or ""),
+            "activated_at": int(snapshot["activated_at"]),
         }
 
-    def set_group_access_policy(self, chat_id: str, policy: str) -> str:
-        return self._group_store.set_access_policy(chat_id, policy)
+    def activate_group_chat(self, chat_id: str, *, activated_by: str) -> GroupActivationSnapshot:
+        snapshot = self._group_store.activate_chat(chat_id, activated_by=activated_by)
+        return {
+            "activated": bool(snapshot["activated"]),
+            "activated_by": str(snapshot["activated_by"] or ""),
+            "activated_at": int(snapshot["activated_at"]),
+        }
 
-    def grant_group_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
-        return self._group_store.grant_members(chat_id, open_ids)
-
-    def revoke_group_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
-        return self._group_store.revoke_members(chat_id, open_ids)
+    def deactivate_group_chat(self, chat_id: str) -> GroupActivationSnapshot:
+        snapshot = self._group_store.deactivate_chat(chat_id)
+        return {
+            "activated": bool(snapshot["activated"]),
+            "activated_by": str(snapshot["activated_by"] or ""),
+            "activated_at": int(snapshot["activated_at"]),
+        }
 
     def is_admin(self, *, open_id: str = "") -> bool:
         return bool(open_id and open_id in self._admin_open_ids)
@@ -400,13 +408,7 @@ class FeishuBot(ABC):
     def is_group_user_allowed(self, chat_id: str, *, open_id: str = "") -> bool:
         if self.is_admin(open_id=open_id):
             return True
-        snapshot = self._group_store.group_snapshot(chat_id)
-        policy = snapshot["access_policy"]
-        if policy == "all-members":
-            return True
-        if policy == "allowlist":
-            return bool(open_id and open_id in set(snapshot["allowlist"]))
-        return False
+        return self._group_store.is_group_activated(chat_id)
 
     def get_message_context(self, message_id: str) -> MessageContextPayload:
         if not message_id:
@@ -1286,19 +1288,26 @@ class FeishuBot(ABC):
         )
 
     @staticmethod
-    def _group_acl_denied_text(group_mode: str) -> str:
+    def _group_activation_denied_text(group_mode: str) -> str:
         normalized_mode = str(group_mode or "").strip().lower()
         if normalized_mode == "all":
             trigger_rule = "当前群工作态是 `all`：已授权成员可直接发消息触发。"
         else:
             trigger_rule = (
                 "当前群工作态是 `assistant` / `mention-only`："
-                "已授权成员仍需先显式 mention 触发对象。"
+                "群成员仍需先显式 mention 触发对象。"
             )
         return (
-            "当前群仅管理员或已授权成员具备触发资格。\n"
+            "当前群聊尚未由管理员初始化，暂时不能使用机器人。\n"
             f"{trigger_rule}\n"
-            "管理员可发送 `/acl` 查看或调整当前群的授权策略。"
+            "请让管理员在群里执行 `/group activate`。"
+        )
+
+    @staticmethod
+    def _p2p_owner_only_denied_text() -> str:
+        return (
+            "当前机器人仅支持管理员私聊使用。\n"
+            "如需协作使用，请让管理员把机器人拉进群，并先在群里执行 `/group activate`。"
         )
 
     def _fetch_merge_forward_items(self, merge_message_id: str) -> list[Any]:
@@ -1483,6 +1492,10 @@ class FeishuBot(ABC):
             logger.debug("忽略群聊机器人消息事件: chat=%s, message_id=%s", chat_id, message_id)
             return
 
+        if chat_type != "group" and not self.is_admin(open_id=sender_open_id):
+            self.reply(chat_id, self._p2p_owner_only_denied_text(), parent_message_id=message_id)
+            return
+
         if chat_type == "group":
             control_text = self._is_group_control_text(text)
             allowed_to_use = self.is_group_user_allowed(chat_id, open_id=sender_open_id)
@@ -1491,6 +1504,14 @@ class FeishuBot(ABC):
                     if not allowed_to_use:
                         return
                 else:
+                    if not allowed_to_use:
+                        if bot_mentioned or control_text:
+                            self.reply(
+                                chat_id,
+                                self._group_activation_denied_text(group_mode),
+                                parent_message_id=message_id,
+                            )
+                        return
                     log_text = text
                     if bot_mentioned and not log_text and not control_text:
                         log_text = "[@触发]"
@@ -1508,13 +1529,6 @@ class FeishuBot(ABC):
                             text=log_text,
                         )
                     if not bot_mentioned:
-                        return
-                    if not allowed_to_use:
-                        self.reply(
-                            chat_id,
-                            self._group_acl_denied_text(group_mode),
-                            parent_message_id=message_id,
-                        )
                         return
                     if control_text:
                         self.on_message(sender_id, chat_id, text, message_id=message_id)
@@ -1570,7 +1584,7 @@ class FeishuBot(ABC):
                 if not is_attachment_message and (bot_mentioned or text.startswith("/")):
                     self.reply(
                         chat_id,
-                        self._group_acl_denied_text(group_mode),
+                        self._group_activation_denied_text(group_mode),
                         parent_message_id=message_id,
                     )
                 return

@@ -6,7 +6,7 @@
 
 - `docs/architecture/feishu-codex-design.zh-CN.md`：当前架构与仓库边界
 - `docs/contracts/codex-permissions-model.zh-CN.md`：`sandbox`、`approval`、writable roots 的语义
-- `docs/contracts/group-chat-contract.zh-CN.md`：群聊工作态、ACL 与触发边界
+- `docs/contracts/group-chat-contract.zh-CN.md`：群激活、群聊工作态与触发边界
 
 ## 1. 问题陈述
 
@@ -53,7 +53,7 @@
 这条边界的核心优点是把责任收紧到清晰的两层：
 
 - `feishu-codex`
-  - 负责消息入口、权限/ACL、下载、暂存、turn 绑定
+  - 负责消息入口、权限/群激活校验、下载、暂存、turn 绑定
 - Codex / MCP / 本地环境
   - 负责“这个文件怎么理解、怎么转换、怎么分析”
 
@@ -132,11 +132,11 @@
 
 - A 发送的附件绝不能被 B 的文本消费
 - pending 附件不能只按 chat 级别共享
-- 群聊附件入口仍要服从现有工作态、ACL 与触发规则
+- 群聊附件入口仍要服从现有工作态、群激活与触发规则
 
 ### 5.4 群聊历史回捞与附件入口的关系
 
-群聊历史回捞与附件入口虽然都运行在群聊工作态、ACL、话题 scope
+群聊历史回捞与附件入口虽然都运行在群聊工作态、群激活、话题 scope
 这些外层规则之下，但它们不是同一条语义路径。
 
 这里的正式边界是：

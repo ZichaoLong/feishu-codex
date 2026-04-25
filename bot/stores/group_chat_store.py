@@ -8,20 +8,20 @@ import json
 import os
 import pathlib
 import threading
+import time
 from typing import Any
 
 from bot.feishu_types import BoundaryState, GroupChatStoreData, GroupMessageEntry, GroupState
 
 DEFAULT_GROUP_MODE = "assistant"
-DEFAULT_ACCESS_POLICY = "admin-only"
 GROUP_MODES = {"mention_only", "assistant", "all"}
-ACCESS_POLICIES = {"admin-only", "allowlist", "all-members"}
 MAIN_SCOPE = "main"
-GROUP_CHAT_STORE_SCHEMA_VERSION = 1
+GROUP_CHAT_STORE_SCHEMA_VERSION = 2
+SUPPORTED_GROUP_CHAT_STORE_SCHEMA_VERSIONS = frozenset({1, GROUP_CHAT_STORE_SCHEMA_VERSION})
 
 
 class GroupChatStore:
-    """管理群聊模式、ACL 与助理模式消息日志。"""
+    """管理群聊工作态、激活状态与助理模式消息日志。"""
 
     def __init__(self, data_dir: pathlib.Path):
         self._data_dir = data_dir
@@ -48,52 +48,57 @@ class GroupChatStore:
             self._write_group_state(data, chat_id, group)
         return normalized
 
-    def get_access_policy(self, chat_id: str) -> str:
+    def is_group_activated(self, chat_id: str) -> bool:
         with self._lock:
             group = self._group_state(chat_id)
-            return group["access_policy"]
+            return bool(group["activated"])
 
-    def set_access_policy(self, chat_id: str, policy: str) -> str:
-        normalized = str(policy or "").strip().lower()
-        if normalized not in ACCESS_POLICIES:
-            raise ValueError(f"invalid access policy: {policy}")
-        with self._lock:
-            data = self._read_all()
-            group = self._group_state(chat_id, data=data)
-            group["access_policy"] = normalized
-            self._write_group_state(data, chat_id, group)
-        return normalized
-
-    def get_allowlist(self, chat_id: str) -> set[str]:
+    def activation_snapshot(self, chat_id: str) -> dict[str, object]:
         with self._lock:
             group = self._group_state(chat_id)
-            return set(group["allowlist"])
+            return {
+                "activated": bool(group["activated"]),
+                "activated_by": str(group["activated_by"] or ""),
+                "activated_at": int(group["activated_at"]),
+            }
 
-    def grant_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
-        granted = sorted({str(item).strip() for item in open_ids if str(item).strip()})
-        if not granted:
-            return []
+    def activate_chat(
+        self,
+        chat_id: str,
+        *,
+        activated_by: str,
+        activated_at: int | None = None,
+    ) -> dict[str, object]:
+        normalized_activated_by = str(activated_by or "").strip()
+        if not normalized_activated_by:
+            raise ValueError("activated_by 不能为空")
+        normalized_activated_at = max(int(activated_at or int(time.time() * 1000)), 0)
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            allowlist = set(group["allowlist"])
-            allowlist.update(granted)
-            group["allowlist"] = sorted(allowlist)
+            group["activated"] = True
+            group["activated_by"] = normalized_activated_by
+            group["activated_at"] = normalized_activated_at
             self._write_group_state(data, chat_id, group)
-            return list(group["allowlist"])
+        return {
+            "activated": True,
+            "activated_by": normalized_activated_by,
+            "activated_at": normalized_activated_at,
+        }
 
-    def revoke_members(self, chat_id: str, open_ids: list[str] | set[str]) -> list[str]:
-        revoked = {str(item).strip() for item in open_ids if str(item).strip()}
-        if not revoked:
-            return sorted(self.get_allowlist(chat_id))
+    def deactivate_chat(self, chat_id: str) -> dict[str, object]:
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            allowlist = set(group["allowlist"])
-            allowlist.difference_update(revoked)
-            group["allowlist"] = sorted(allowlist)
+            group["activated"] = False
+            group["activated_by"] = ""
+            group["activated_at"] = 0
             self._write_group_state(data, chat_id, group)
-            return list(group["allowlist"])
+        return {
+            "activated": False,
+            "activated_by": "",
+            "activated_at": 0,
+        }
 
     def get_last_boundary_seq(self, chat_id: str, *, scope: str = MAIN_SCOPE) -> int:
         with self._lock:
@@ -296,8 +301,9 @@ class GroupChatStore:
     def _default_group_state(cls) -> GroupState:
         return {
             "mode": DEFAULT_GROUP_MODE,
-            "access_policy": DEFAULT_ACCESS_POLICY,
-            "allowlist": [],
+            "activated": False,
+            "activated_by": "",
+            "activated_at": 0,
             "boundaries": {MAIN_SCOPE: cls._default_boundary_state()},
             "last_log_seq": 0,
         }
@@ -338,10 +344,10 @@ class GroupChatStore:
         if not isinstance(raw, dict):
             raise ValueError("invalid group_chat_state.json: root must be an object")
         schema_version = raw.get("schema_version")
-        if schema_version != GROUP_CHAT_STORE_SCHEMA_VERSION:
+        if schema_version not in SUPPORTED_GROUP_CHAT_STORE_SCHEMA_VERSIONS:
             raise ValueError(
                 "invalid group_chat_state.json: "
-                f"schema_version must be {GROUP_CHAT_STORE_SCHEMA_VERSION}"
+                f"schema_version must be one of {sorted(SUPPORTED_GROUP_CHAT_STORE_SCHEMA_VERSIONS)}"
             )
         raw_groups = raw.get("groups")
         if not isinstance(raw_groups, dict):
@@ -350,25 +356,35 @@ class GroupChatStore:
         for chat_id, raw_group in raw_groups.items():
             if not isinstance(chat_id, str) or not chat_id.strip():
                 raise ValueError("invalid group_chat_state.json: group chat_id must be a non-empty string")
-            groups[chat_id] = self._validate_group_state(raw_group, chat_id=chat_id)
+            groups[chat_id] = self._validate_group_state(
+                raw_group,
+                chat_id=chat_id,
+                schema_version=int(schema_version),
+            )
         return {
             "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
             "groups": groups,
         }
 
-    def _validate_group_state(self, raw_group: Any, *, chat_id: str) -> GroupState:
+    def _validate_group_state(self, raw_group: Any, *, chat_id: str, schema_version: int) -> GroupState:
         if not isinstance(raw_group, dict):
             raise ValueError(f"invalid group_chat_state.json: group {chat_id} must be an object")
         mode = str(raw_group.get("mode", "") or "").strip()
         if mode not in GROUP_MODES:
             raise ValueError(f"invalid group_chat_state.json: group {chat_id} has invalid mode")
-        access_policy = str(raw_group.get("access_policy", "") or "").strip()
-        if access_policy not in ACCESS_POLICIES:
-            raise ValueError(f"invalid group_chat_state.json: group {chat_id} has invalid access_policy")
-        try:
-            allowlist = self._normalize_string_list(raw_group.get("allowlist", []))
-        except ValueError as exc:
-            raise ValueError(f"invalid group_chat_state.json: group {chat_id} allowlist must be a string list") from exc
+        if schema_version >= GROUP_CHAT_STORE_SCHEMA_VERSION:
+            activated = bool(raw_group.get("activated", False))
+            activated_by = str(raw_group.get("activated_by", "") or "").strip()
+            try:
+                activated_at = max(int(raw_group.get("activated_at", 0) or 0), 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid group_chat_state.json: group {chat_id} has invalid activated_at"
+                ) from exc
+        else:
+            activated = False
+            activated_by = ""
+            activated_at = 0
         raw_boundaries = raw_group.get("boundaries")
         if not isinstance(raw_boundaries, dict):
             raise ValueError(f"invalid group_chat_state.json: group {chat_id} boundaries must be an object")
@@ -388,8 +404,9 @@ class GroupChatStore:
             raise ValueError(f"invalid group_chat_state.json: group {chat_id} has invalid last_log_seq") from exc
         return {
             "mode": mode,
-            "access_policy": access_policy,
-            "allowlist": allowlist,
+            "activated": activated,
+            "activated_by": activated_by,
+            "activated_at": activated_at,
             "boundaries": boundaries,
             "last_log_seq": last_log_seq,
         }
@@ -443,8 +460,9 @@ class GroupChatStore:
     def _clone_group_state(group: GroupState) -> GroupState:
         return {
             "mode": group["mode"],
-            "access_policy": group["access_policy"],
-            "allowlist": list(group["allowlist"]),
+            "activated": bool(group["activated"]),
+            "activated_by": str(group["activated_by"] or ""),
+            "activated_at": int(group["activated_at"]),
             "boundaries": {
                 scope: {
                     "seq": int(boundary["seq"]),

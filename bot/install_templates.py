@@ -9,7 +9,7 @@ app_secret: "your_cc_bot_app_secret"
 # request_timeout_seconds: 10
 
 # 群聊管理员 open_id 列表；这些人始终具备群聊触发资格，并可使用
-# 所有群里的 `/` 命令（包括 `/groupmode`、`/acl`、`/new`、`/session` 等）。
+# 所有群里的 `/` 命令（包括 `/group`、`/groupmode`、`/new`、`/session` 等）。
 # 若群工作态是 `assistant` 或 `mention-only`，他们仍需先显式 mention
 # 触发对象，才会触发对话或群命令。
 # 也可在服务启动后，私聊机器人执行 `/init <token>` 自动写入。

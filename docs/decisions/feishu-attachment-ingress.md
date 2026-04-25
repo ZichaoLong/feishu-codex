@@ -6,7 +6,7 @@ See also:
   repository boundaries
 - `docs/contracts/codex-permissions-model.md` for `sandbox`, `approval`, and
   writable-root semantics
-- `docs/contracts/group-chat-contract.md` for group-chat modes, ACL, and
+- `docs/contracts/group-chat-contract.md` for group activation, group modes, and
   triggering boundaries
 
 ## 1. Problem Statement
@@ -65,7 +65,8 @@ The first-phase repository decision for Feishu attachment support is:
 This boundary keeps responsibility split across two clear layers:
 
 - `feishu-codex`
-  - owns message ingress, permission / ACL checks, download, staging, and turn
+  - owns message ingress, permission / group-activation checks, download,
+    staging, and turn
     binding
 - Codex / MCP / local environment
   - own the actual interpretation, conversion, and analysis of the file
@@ -156,13 +157,14 @@ In group chats:
 
 - attachments sent by A must never be consumed by B's text
 - pending attachments cannot be shared at chat scope alone
-- group attachment ingress must still obey the existing group mode, ACL, and
+- group attachment ingress must still obey the existing group mode, group
+  activation, and
   trigger rules
 
 ### 5.4 Relationship Between Group History Recovery and Attachment Ingress
 
 Group history recovery and attachment ingress both operate under the same outer
-group rules such as mode, ACL, and thread scope, but they are not the same
+group rules such as mode, activation, and thread scope, but they are not the same
 semantic path.
 
 The formal boundary is:

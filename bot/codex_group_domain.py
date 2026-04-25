@@ -12,9 +12,9 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
-from bot.cards import CommandResult, build_group_acl_card, build_group_mode_card, make_card_response
-from bot.feishu_types import GroupAclSnapshot, MessageContextPayload
-from bot.stores.group_chat_store import ACCESS_POLICIES, GROUP_MODES
+from bot.cards import CommandResult, build_group_activation_card, build_group_mode_card, make_card_response
+from bot.feishu_types import GroupActivationSnapshot, MessageContextPayload
+from bot.stores.group_chat_store import GROUP_MODES
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,13 +23,10 @@ class GroupDomainPorts:
     get_message_context: Callable[[str], MessageContextPayload]
     get_group_mode: Callable[[str], str]
     is_group_admin: Callable[[str], bool]
-    get_group_acl_snapshot: Callable[[str], GroupAclSnapshot]
-    is_group_user_allowed: Callable[[str, str], bool]
+    get_group_activation_snapshot: Callable[[str], GroupActivationSnapshot]
     set_group_mode: Callable[[str, str], None]
-    set_group_access_policy: Callable[[str, str], None]
-    grant_group_members: Callable[[str, list[str]], list[str]]
-    revoke_group_members: Callable[[str, list[str]], list[str]]
-    extract_non_bot_mentions: Callable[[str], list[dict[str, Any]]]
+    activate_group_chat: Callable[[str, str], GroupActivationSnapshot]
+    deactivate_group_chat: Callable[[str], GroupActivationSnapshot]
     is_group_chat: Callable[[str, str], bool]
     validate_group_mode_change: Callable[[str, str, str], str]
 
@@ -75,12 +72,14 @@ class CodexGroupDomain:
             can_manage=self._ports.is_group_admin(open_id),
         )
 
-    def _group_acl_card(self, chat_id: str, *, open_id: str = "") -> dict:
-        snapshot: GroupAclSnapshot = self._ports.get_group_acl_snapshot(chat_id)
-        return build_group_acl_card(
-            snapshot["access_policy"],
-            allowlist_members=self._group_member_labels(snapshot["allowlist"]),
-            viewer_allowed=self._ports.is_group_user_allowed(chat_id, open_id),
+    def _group_activation_card(self, chat_id: str, *, open_id: str = "") -> dict:
+        snapshot: GroupActivationSnapshot = self._ports.get_group_activation_snapshot(chat_id)
+        activated_by_open_id = str(snapshot["activated_by"] or "").strip()
+        activated_by_label = self._group_member_label(activated_by_open_id) if activated_by_open_id else ""
+        return build_group_activation_card(
+            activated=bool(snapshot["activated"]),
+            activated_by=activated_by_label,
+            activated_at=int(snapshot["activated_at"]),
             can_manage=self._ports.is_group_admin(open_id),
         )
 
@@ -108,19 +107,7 @@ class CodexGroupDomain:
         }
         return CommandResult(text=f"已切换群聊工作态：`{labels[mode]}`")
 
-    def _acl_target_open_ids(self, message_id: str, raw_arg: str) -> list[str]:
-        targets = {
-            item["open_id"]
-            for item in self._ports.extract_non_bot_mentions(message_id)
-            if item.get("open_id")
-        }
-        for token in str(raw_arg or "").replace(",", " ").split():
-            token = token.strip()
-            if token and not token.startswith("@"):
-                targets.add(token)
-        return sorted(targets)
-
-    def handle_acl_command(
+    def handle_group_command(
         self,
         chat_id: str,
         arg: str,
@@ -129,41 +116,16 @@ class CodexGroupDomain:
         context = self._group_command_context(message_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
-            return CommandResult(card=self._group_acl_card(chat_id, open_id=sender_open_id))
+            return CommandResult(card=self._group_activation_card(chat_id, open_id=sender_open_id))
 
-        cmd, _, rest = arg.partition(" ")
-        subcommand = cmd.strip().lower()
-        payload = rest.strip()
-        if subcommand in {"admin-only", "allowlist", "all-members"}:
-            payload = subcommand
-            subcommand = "policy"
-
-        if subcommand == "policy":
-            policy = payload.strip().lower()
-            if policy not in ACCESS_POLICIES:
-                return CommandResult(text="用法：`/acl policy <admin-only|allowlist|all-members>`")
-            self._ports.set_group_access_policy(chat_id, policy)
-            return CommandResult(text=f"已切换群聊授权策略：`{policy}`")
-
-        if subcommand in {"grant", "allow"}:
-            targets = self._acl_target_open_ids(message_id, payload)
-            if not targets:
-                return CommandResult(text="用法：`/acl grant @成员` 或 `/acl grant <open_id>`")
-            updated = self._ports.grant_group_members(chat_id, targets)
-            labels = self._group_member_labels(targets)
-            return CommandResult(text=f"已授权：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。")
-
-        if subcommand in {"revoke", "remove"}:
-            targets = self._acl_target_open_ids(message_id, payload)
-            if not targets:
-                return CommandResult(text="用法：`/acl revoke @成员` 或 `/acl revoke <open_id>`")
-            updated = self._ports.revoke_group_members(chat_id, targets)
-            labels = self._group_member_labels(targets)
-            return CommandResult(text=f"已撤销：{', '.join(labels)}\n当前 allowlist 共 {len(updated)} 人。")
-
-        return CommandResult(
-            text="用法：`/acl`、`/acl policy <admin-only|allowlist|all-members>`、`/acl grant @成员`、`/acl revoke @成员`"
-        )
+        subcommand = str(arg or "").strip().lower()
+        if subcommand == "activate":
+            self._ports.activate_group_chat(chat_id, sender_open_id)
+            return CommandResult(text="已激活当前群聊；当前群成员现在可正常对话并处理自己发起 turn 的审批。")
+        if subcommand in {"deactivate", "disable"}:
+            self._ports.deactivate_group_chat(chat_id)
+            return CommandResult(text="已停用当前群聊；非管理员后续将不能继续使用机器人。")
+        return CommandResult(text="用法：`/group`、`/group activate`、`/group deactivate`")
 
     def handle_show_group_mode_card_action(
         self,
@@ -200,20 +162,23 @@ class CodexGroupDomain:
             toast_type="success",
         )
 
-    def handle_set_group_acl_policy_action(
+    def handle_set_group_activation_action(
         self,
         chat_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
         operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
-        policy = str(action_value.get("policy", "")).strip().lower()
-        if policy not in ACCESS_POLICIES:
-            return make_card_response(toast="非法群聊授权策略", toast_type="warning")
+        activated = bool(action_value.get("activated"))
         if not self._ports.is_group_admin(operator_open_id):
-            return make_card_response(toast="仅管理员可调整群聊授权策略。", toast_type="warning")
-        self._ports.set_group_access_policy(chat_id, policy)
+            return make_card_response(toast="仅管理员可调整群聊授权状态。", toast_type="warning")
+        if activated:
+            self._ports.activate_group_chat(chat_id, operator_open_id)
+            toast = "已激活当前群聊"
+        else:
+            self._ports.deactivate_group_chat(chat_id)
+            toast = "已停用当前群聊"
         return make_card_response(
-            card=self._group_acl_card(chat_id, open_id=operator_open_id),
-            toast=f"已切换群聊授权策略：{policy}",
+            card=self._group_activation_card(chat_id, open_id=operator_open_id),
+            toast=toast,
             toast_type="success",
         )

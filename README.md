@@ -103,7 +103,7 @@
 | `im:message:update` | 更新执行中的卡片 |
 | `application:application:self_manage` | `/init`、`/whoareyou` 自动探测机器人身份 |
 | `contact:contact.base:readonly` | 解析用户名 |
-| `contact:user.base:readonly` | `/whoami`、群 ACL、群上下文显示名字 |
+| `contact:user.base:readonly` | `/whoami`、群授权卡片、群上下文显示名字 |
 | `contact:user.employee_id:readonly` | `/whoami` 返回 `user_id` 供排障 |
 
 在「事件与回调」中启用：
@@ -271,7 +271,9 @@ feishu-codex purge
 
 ### 单聊
 
-在私聊里，直接发送普通文本即可提问。
+只有管理员可在私聊里直接发送普通文本提问。
+
+- 非管理员私聊会被拒绝；如需协作使用，请把机器人拉进群并由管理员先执行 `/group activate`
 
 - 当前没有绑定线程时，会在当前目录创建新线程
 - 当前已经绑定线程时，会继续写入该线程
@@ -299,28 +301,27 @@ feishu-codex purge
 新群默认是：
 
 - 工作态：`assistant`
-- ACL：`admin-only`
+- 群状态：`未激活`（管理员仍可先用来初始化和管理）
 
-群里再记住 4 条：
+群里再记住 5 条：
 
-- 群里的所有 `/` 命令都只给管理员
+- 群里的共享状态命令和设置都只给管理员
+- `/group` 查看当前群是否已激活；`/group activate` 激活，`/group deactivate` 停用
+- 群一旦激活，当前成员和后续新加入成员都可正常使用；管理员之后退群也不影响日常对话
 - 在 `assistant` / `mention-only` 下，管理员命令和普通对话都需要先显式 mention 触发对象
-- ACL 只决定“谁有资格”；是否必须 mention 由工作态决定
+- 运行时审批卡片和补充输入卡片默认由当前请求发起者本人处理；管理员仍可兜底处理
 - 如需支持 `trigger_open_ids` 或读取非 `@机器人` 群消息，需要开 `im:message.group_msg`
 
 最常用的群命令：
 
 ```text
+@机器人 /group
+@机器人 /group activate
+@机器人 /group deactivate
 @机器人 /groupmode
 @机器人 /groupmode assistant
 @机器人 /groupmode mention-only
 @机器人 /groupmode all
-@机器人 /acl
-@机器人 /acl policy admin-only
-@机器人 /acl policy allowlist
-@机器人 /acl policy all-members
-@机器人 /acl grant @成员
-@机器人 /acl revoke @成员
 ```
 
 ### 本地继续与本地管理
@@ -470,7 +471,7 @@ feishu-codexctl thread revoke --thread-id <id>
 | 飞书 `/session`、`/resume`、`/profile`，以及 `fcodex` / `feishu-codexctl` 的当前语义 | `docs/contracts/session-profile-semantics.zh-CN.md` |
 | `unsubscribe`、`fcodex` / `feishu-codexctl` 分工、thread-wise profile/provider 的正式合同 | `docs/contracts/local-command-and-thread-profile-contract.zh-CN.md` |
 | `/status`、`/preflight`、`/unsubscribe`、`feishu-codexctl` 的共享状态词汇 | `docs/contracts/runtime-control-surface.zh-CN.md` |
-| 群聊模式、ACL、历史回捞、触发规则 | `docs/contracts/group-chat-contract.zh-CN.md` |
+| 群激活、群聊模式、历史回捞、触发规则 | `docs/contracts/group-chat-contract.zh-CN.md` |
 | `approval`、`sandbox`、`permissions` 的语义 | `docs/contracts/codex-permissions-model.zh-CN.md` |
 | `fcodex`、shared backend、动态端口、cwd 代理 | `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md` |
 | shared backend 与 `/resume` 的安全边界 | `docs/decisions/shared-backend-resume-safety.zh-CN.md` |
