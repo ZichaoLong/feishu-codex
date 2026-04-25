@@ -44,10 +44,22 @@ _SHARED_COMMAND_SPECS = (
         feishu_summary="查看当前目录线程。",
     ),
     SharedCommandSpec(
+        key="preflight",
+        slash_name="/preflight",
+        feishu_usage="/preflight",
+        feishu_summary="预检当前 chat 下一条普通消息与 release 可用性。",
+    ),
+    SharedCommandSpec(
         key="resume",
         slash_name="/resume",
         feishu_usage="/resume <thread_id|thread_name>",
         feishu_summary="恢复指定线程。",
+    ),
+    SharedCommandSpec(
+        key="unsubscribe",
+        slash_name="/unsubscribe",
+        feishu_usage="/unsubscribe",
+        feishu_summary="释放当前绑定 thread 的 Feishu runtime 附着。",
     ),
 )
 

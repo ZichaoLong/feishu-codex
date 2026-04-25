@@ -16,9 +16,11 @@ from bot.shared_command_surface import get_shared_command
 
 
 _SHARED_PROFILE_COMMAND = get_shared_command("profile")
+_SHARED_PREFLIGHT_COMMAND = get_shared_command("preflight")
 _SHARED_RM_COMMAND = get_shared_command("rm")
 _SHARED_SESSION_COMMAND = get_shared_command("session")
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
+_SHARED_UNSUBSCRIBE_COMMAND = get_shared_command("unsubscribe")
 
 _LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
 _LOCAL_THREAD_LIST_GLOBAL = "feishu-codexctl thread list --scope global"
@@ -146,8 +148,8 @@ class CodexHelpDomain:
                 markdown=(
                     "这些操作都以**当前绑定线程**为目标。\n\n"
                     "- `/status`：查看当前 binding、feishu runtime、backend thread status、profile 相关信息\n"
-                    "- `/preflight`：dry-run 当前 chat 下一条普通消息与 release 操作，不启动 turn、不改 binding\n"
-                    "- `/unsubscribe`：让 Feishu 释放自己对当前线程的 runtime 持有，但不解绑 thread\n"
+                    f"- `{_SHARED_PREFLIGHT_COMMAND.feishu_usage}`：dry-run 当前 chat 下一条普通消息与 release 操作，不启动 turn、不改 binding\n"
+                    f"- `{_SHARED_UNSUBSCRIBE_COMMAND.feishu_usage}`：让 Feishu 释放自己对当前线程的 runtime 持有，但不解绑 thread\n"
                     "- `/rename <title>`：重命名当前线程\n"
                     f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
                     "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。"
@@ -157,13 +159,13 @@ class CodexHelpDomain:
                         buttons=(
                             _HelpCommandButtonSpec(label="/status", command="/status", title="Codex 当前状态"),
                             _HelpCommandButtonSpec(
-                                label="/preflight",
-                                command="/preflight",
+                                label=_SHARED_PREFLIGHT_COMMAND.slash_name,
+                                command=_SHARED_PREFLIGHT_COMMAND.slash_name,
                                 title="Codex Preflight",
                             ),
                             _HelpCommandButtonSpec(
                                 label="unsubscribe",
-                                command="/unsubscribe",
+                                command=_SHARED_UNSUBSCRIBE_COMMAND.slash_name,
                                 title="Codex 取消 Feishu 订阅",
                             ),
                         ),
