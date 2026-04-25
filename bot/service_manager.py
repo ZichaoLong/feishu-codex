@@ -91,6 +91,16 @@ class SystemdUserServiceManager(ServiceManager):
     def _unit_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return default_systemd_user_dir() / f"{definition.identifier}.service"
 
+    def _require_installed(self, definition: ServiceDefinition) -> pathlib.Path:
+        unit_path = self._unit_path(definition)
+        if not unit_path.exists():
+            raise ServiceManagerError(
+                f"service definition 缺失：{unit_path}。"
+                " 请先执行 `feishu-codex install`，或对命名实例执行"
+                f" `feishu-codex instance create {definition.instance_name}`。"
+            )
+        return unit_path
+
     @staticmethod
     def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         try:
@@ -142,7 +152,7 @@ class SystemdUserServiceManager(ServiceManager):
         self._run("systemctl", "--user", "daemon-reload")
 
     def start(self, definition: ServiceDefinition) -> None:
-        self.ensure_service(definition)
+        self._require_installed(definition)
         self._run("systemctl", "--user", "enable", definition.identifier)
         self._run("systemctl", "--user", "start", definition.identifier)
 
@@ -150,7 +160,7 @@ class SystemdUserServiceManager(ServiceManager):
         self._run("systemctl", "--user", "stop", definition.identifier, check=False)
 
     def restart(self, definition: ServiceDefinition) -> None:
-        self.ensure_service(definition)
+        self._require_installed(definition)
         self._run("systemctl", "--user", "restart", definition.identifier)
 
     def status(self, definition: ServiceDefinition) -> ServiceStatus:
@@ -183,6 +193,16 @@ class LaunchdUserServiceManager(ServiceManager):
 
     def _plist_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return default_launch_agent_dir() / f"{self._label(definition)}.plist"
+
+    def _require_installed(self, definition: ServiceDefinition) -> pathlib.Path:
+        plist_path = self._plist_path(definition)
+        if not plist_path.exists():
+            raise ServiceManagerError(
+                f"service definition 缺失：{plist_path}。"
+                " 请先执行 `feishu-codex install`，或对命名实例执行"
+                f" `feishu-codex instance create {definition.instance_name}`。"
+            )
+        return plist_path
 
     @staticmethod
     def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -218,10 +238,9 @@ class LaunchdUserServiceManager(ServiceManager):
         plist_path.write_bytes(plistlib.dumps(payload))
 
     def start(self, definition: ServiceDefinition) -> None:
-        self.ensure_service(definition)
+        plist_path = self._require_installed(definition)
         domain = self._uid_domain()
         label = self._label(definition)
-        plist_path = self._plist_path(definition)
         self._run("launchctl", "bootout", domain, label, check=False)
         self._run("launchctl", "bootstrap", domain, str(plist_path))
         self._run("launchctl", "kickstart", "-k", f"{domain}/{label}", check=False)
@@ -259,6 +278,16 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
 
     def _launcher_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return definition.paths.data_dir / "service-launch.cmd"
+
+    def _require_installed(self, definition: ServiceDefinition) -> pathlib.Path:
+        launcher_path = self._launcher_path(definition)
+        if not launcher_path.exists():
+            raise ServiceManagerError(
+                f"service definition 缺失：{launcher_path}。"
+                " 请先执行 `feishu-codex install`，或对命名实例执行"
+                f" `feishu-codex instance create {definition.instance_name}`。"
+            )
+        return launcher_path
 
     @staticmethod
     def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -305,7 +334,7 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
         )
 
     def start(self, definition: ServiceDefinition) -> None:
-        self.ensure_service(definition)
+        self._require_installed(definition)
         self._run("schtasks", "/Run", "/TN", self._task_name(definition))
 
     def stop(self, definition: ServiceDefinition) -> None:

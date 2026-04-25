@@ -25,41 +25,186 @@ from bot.service_manager import ServiceManagerError, build_service_definition, c
 from bot.stores.service_instance_lease import ServiceInstanceLease
 
 
+class _HelpFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
+    pass
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="feishu-codex")
-    parser.add_argument("--instance", default=DEFAULT_INSTANCE_NAME)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="feishu-codex",
+        description=(
+            "跨平台本地管理 CLI：负责安装、service 生命周期、配置入口和实例管理。\n\n"
+            "说明：\n"
+            "- `run` 是跨平台单一 daemon 入口，通常由 service manager 调用\n"
+            "- `start|stop|restart|status` 是跨平台统一前端\n"
+            "- Linux 下也可直接使用 `systemctl --user` / `journalctl --user`\n"
+        ),
+        epilog=(
+            "常见流程:\n"
+            "  首次安装:\n"
+            "    feishu-codex install\n"
+            "    feishu-codex config system --open\n"
+            "    feishu-codex start\n"
+            "\n"
+            "  多实例:\n"
+            "    feishu-codex instance create corp-a\n"
+            "    feishu-codex --instance corp-a config system --open\n"
+            "    feishu-codex --instance corp-a start\n"
+            "\n"
+            "  Linux 原生管理面:\n"
+            "    systemctl --user status feishu-codex\n"
+            "    systemctl --user restart feishu-codex-corp-a\n"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    parser.add_argument(
+        "--instance",
+        default=DEFAULT_INSTANCE_NAME,
+        help="目标实例；默认是 `default`。对 `instance ...` 子命令无效。",
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="command",
+    )
 
-    subparsers.add_parser("install")
-    subparsers.add_parser("bootstrap-install")
-    subparsers.add_parser("start")
-    subparsers.add_parser("stop")
-    subparsers.add_parser("restart")
-    subparsers.add_parser("status")
-    subparsers.add_parser("run")
+    subparsers.add_parser(
+        "install",
+        help="初始化默认实例，并安装 wrapper 与 service definition。",
+        description=(
+            "初始化默认实例。\n"
+            "- 创建默认实例的配置与数据目录\n"
+            "- 创建/更新 `feishu-codex`、`feishu-codexctl`、`fcodex` wrapper\n"
+            "- 安装默认实例对应的 service definition，但不会自动启动"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    subparsers.add_parser(
+        "bootstrap-install",
+        help="内部安装入口；一般不手动调用。",
+        description="内部安装入口；通常由 `install.py` 调用。",
+        formatter_class=_HelpFormatter,
+    )
+    subparsers.add_parser(
+        "start",
+        help="启动目标实例 service，并在托管层启用它。",
+        description="启动目标实例 service。service definition 缺失时会直接报错。",
+        formatter_class=_HelpFormatter,
+    )
+    subparsers.add_parser(
+        "stop",
+        help="停止目标实例 service。",
+        description="停止目标实例 service。",
+        formatter_class=_HelpFormatter,
+    )
+    subparsers.add_parser(
+        "restart",
+        help="重启目标实例 service。",
+        description="重启目标实例 service。service definition 缺失时会直接报错。",
+        formatter_class=_HelpFormatter,
+    )
+    subparsers.add_parser(
+        "status",
+        help="查看目标实例的 service 托管状态。",
+        description=(
+            "查看目标实例的 service 托管状态。\n"
+            "这描述的是托管层 installed/running/detail，而不是 thread 或 binding 业务状态。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    subparsers.add_parser(
+        "run",
+        help="以前台方式运行目标实例 daemon；通常由 service manager 调用。",
+        description="以前台方式运行目标实例 daemon；通常由 systemd/launchd/Task Scheduler 调用。",
+        formatter_class=_HelpFormatter,
+    )
 
-    log_parser = subparsers.add_parser("log")
-    log_parser.add_argument("--lines", type=int, default=40)
+    log_parser = subparsers.add_parser(
+        "log",
+        help="查看目标实例日志文件并持续跟随。",
+        description="查看目标实例日志文件并持续跟随。",
+        formatter_class=_HelpFormatter,
+    )
+    log_parser.add_argument("--lines", type=int, default=40, help="启动时先输出的历史日志行数。")
 
-    config_parser = subparsers.add_parser("config")
-    config_parser.add_argument("target", nargs="?", choices=["system", "codex", "env", "init-token"])
-    config_parser.add_argument("--open", action="store_true")
+    config_parser = subparsers.add_parser(
+        "config",
+        help="查看或打开当前实例相关配置文件。",
+        description=(
+            "查看或打开当前实例相关配置文件。\n"
+            "可用目标：`system`、`codex`、`env`、`init-token`。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    config_parser.add_argument(
+        "target",
+        nargs="?",
+        choices=["system", "codex", "env", "init-token"],
+        help="要查看的配置目标；省略时打印各配置文件路径。",
+    )
+    config_parser.add_argument("--open", action="store_true", help="用本地编辑器打开目标文件。")
 
-    instance_parser = subparsers.add_parser("instance")
-    instance_subparsers = instance_parser.add_subparsers(dest="instance_command", required=True)
-    instance_create_parser = instance_subparsers.add_parser("create")
-    instance_create_parser.add_argument("name")
-    instance_subparsers.add_parser("list")
-    instance_remove_parser = instance_subparsers.add_parser("remove")
-    instance_remove_parser.add_argument("name")
+    instance_parser = subparsers.add_parser(
+        "instance",
+        help="创建、列出、删除命名实例。",
+        description=(
+            "实例管理。\n"
+            "注意：`feishu-codex instance ...` 不接受顶层 `--instance`；目标实例名写在子命令参数里。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    instance_subparsers = instance_parser.add_subparsers(
+        dest="instance_command",
+        required=True,
+        title="instance commands",
+        metavar="instance-command",
+    )
+    instance_create_parser = instance_subparsers.add_parser(
+        "create",
+        help="创建命名实例，并安装对应 service definition。",
+        description="创建命名实例，并安装对应 service definition；不会自动启动。",
+        formatter_class=_HelpFormatter,
+    )
+    instance_create_parser.add_argument("name", help="要创建的实例名，例如 `corp-a`。")
+    instance_subparsers.add_parser(
+        "list",
+        help="列出本机已知实例及其本地目录。",
+        description="列出本机已知实例及其本地目录。",
+        formatter_class=_HelpFormatter,
+    )
+    instance_remove_parser = instance_subparsers.add_parser(
+        "remove",
+        help="删除命名实例及其 service definition。",
+        description="删除命名实例及其 service definition；不会删除 `default` 实例。",
+        formatter_class=_HelpFormatter,
+    )
+    instance_remove_parser.add_argument("name", help="要删除的实例名，例如 `corp-a`。")
 
-    subparsers.add_parser("uninstall")
-    subparsers.add_parser("purge")
+    subparsers.add_parser(
+        "uninstall",
+        help="卸载所有 service definition 和 wrapper，保留配置与数据。",
+        description="卸载所有 service definition 和 wrapper，保留配置与数据。",
+        formatter_class=_HelpFormatter,
+    )
+    subparsers.add_parser(
+        "purge",
+        help="卸载所有 service definition 和 wrapper，并删除配置与数据。",
+        description="卸载所有 service definition 和 wrapper，并删除配置与数据。",
+        formatter_class=_HelpFormatter,
+    )
     return parser
 
 
+def _managed_venv_dir() -> pathlib.Path:
+    return default_data_root() / ".venv"
+
+
 def _venv_python() -> pathlib.Path:
-    return pathlib.Path(sys.executable).resolve()
+    venv_dir = _managed_venv_dir()
+    if is_windows():
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
 
 
 def _repo_root() -> pathlib.Path:
@@ -98,6 +243,22 @@ def _ensure_instance_scaffold(instance_name: str) -> None:
 
 def _module_command(module_name: str, *args: str) -> tuple[str, ...]:
     return (str(_venv_python()), "-m", module_name, *args)
+
+
+def _wrapper_path(command_name: str) -> pathlib.Path:
+    bin_dir = default_user_bin_dir()
+    if is_windows():
+        return bin_dir / f"{command_name}.cmd"
+    return bin_dir / command_name
+
+
+def _service_daemon_command(instance_name: str) -> tuple[str, ...]:
+    return (
+        str(_wrapper_path("feishu-codex")),
+        "--instance",
+        validate_instance_name(instance_name),
+        "run",
+    )
 
 
 def _write_wrapper(path: pathlib.Path, module_name: str) -> None:
@@ -171,7 +332,7 @@ def _service_definition(instance_name: str):
     return build_service_definition(
         instance_name=normalized,
         paths=paths,
-        daemon_command=_module_command("bot.__main__", "--instance", normalized),
+        daemon_command=_service_daemon_command(normalized),
     )
 
 
@@ -202,7 +363,7 @@ def _print_install_summary(bin_dir: pathlib.Path) -> None:
     print("下一步:")
     print(f"  1. 编辑配置: {resolve_instance_paths(DEFAULT_INSTANCE_NAME).config_dir / 'system.yaml'}")
     print(f"  2. 按需写入 provider 环境变量: {default_config_root() / 'feishu-codex.env'}")
-    print("  3. 启动服务: feishu-codex start")
+    print("  3. 服务管理面已安装；启动服务: feishu-codex start")
     print("  4. 查看初始化口令: feishu-codex config init-token")
     print("  5. 新建命名实例: feishu-codex instance create corp-a")
 
@@ -210,6 +371,7 @@ def _print_install_summary(bin_dir: pathlib.Path) -> None:
 def _handle_install() -> int:
     _ensure_instance_scaffold(DEFAULT_INSTANCE_NAME)
     bin_dir = _install_wrappers()
+    current_service_manager().ensure_service(_service_definition(DEFAULT_INSTANCE_NAME))
     _print_install_summary(bin_dir)
     return 0
 
@@ -309,6 +471,8 @@ def _handle_uninstall(*, purge: bool) -> int:
 def _handle_instance_create(instance_name: str) -> int:
     normalized = validate_instance_name(instance_name)
     _ensure_instance_scaffold(normalized)
+    _install_wrappers()
+    current_service_manager().ensure_service(_service_definition(normalized))
     paths = resolve_instance_paths(normalized)
     print(f"已初始化实例: {normalized}")
     print(f"config dir: {paths.config_dir}")

@@ -85,6 +85,7 @@
 - `install.py` 是唯一安装实现
 - `install.sh` 和 `install.ps1` 只是平台包装器
 - 安装后会生成 `feishu-codex`、`feishu-codexd`、`feishu-codexctl`、`fcodex`
+- 安装后也会立即安装默认实例的本地 service definition，但不会自动启动
 
 ### 飞书配置
 
@@ -249,7 +250,7 @@ feishu-codex instance remove corp-a
 feishu-codex instance create corp-a
 ```
 
-它会创建 `corp-a` 这套实例目录与模板文件，但不会自动启动该实例 service。
+它会创建 `corp-a` 这套实例目录、模板文件与对应 service definition，但不会自动启动该实例 service。
 
 ### 服务管理
 
@@ -268,6 +269,30 @@ feishu-codex purge
 ```
 
 多实例时，`start|stop|restart|status|log|run|config` 这组命令在最前面加 `--instance <name>` 即可；`instance create|remove` 则直接把实例名写在子命令参数里，`instance list` 不接受顶层 `--instance`。
+
+其中：
+
+- `run` 是跨平台单一 daemon 入口
+- Linux 的 `systemd --user`
+- macOS 的 `LaunchAgent`
+- Windows 的 `Task Scheduler`
+
+都只是在托管同一个 `feishu-codex --instance <name> run` 入口。
+
+在 Linux 上，安装完成后你也可以直接使用原生管理面：
+
+```bash
+systemctl --user status feishu-codex
+systemctl --user start feishu-codex
+systemctl --user restart feishu-codex
+systemctl --user stop feishu-codex
+```
+
+命名实例对应：
+
+```bash
+systemctl --user status feishu-codex-corp-a
+```
 
 ## 使用
 

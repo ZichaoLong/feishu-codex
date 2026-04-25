@@ -101,6 +101,18 @@ Keep repository facts out of this file.
   can still tell whether it should be kept, split, simplified, or removed.
 - Read those docs only when the task needs them.
 
+## Documentation UX Preference
+
+Prefer progressive disclosure over front-loading explanation.
+
+- Keep `README` focused on the minimum path needed to get started.
+- Do not duplicate too much command detail in `README` when the same detail is
+  better delivered by install-time output, CLI `--help`, or task-specific docs.
+- Let usage guidance unfold along the user's actual path:
+  install first, then command help, then deeper docs only when needed.
+- When in doubt, prefer making in-product help (`--help`, error messages,
+  summaries after install) more usable before expanding `README`.
+
 ## Reference Preference
 
 When Feishu / Lark behavior matters:

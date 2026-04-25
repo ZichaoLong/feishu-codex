@@ -92,6 +92,7 @@ class ServiceManagerTests(unittest.TestCase):
 
             with patch("bot.service_manager.default_systemd_user_dir", return_value=root / "systemd"):
                 with patch.object(manager, "_run", side_effect=_run):
+                    manager.ensure_service(definition)
                     manager.start(definition)
                     status = manager.status(definition)
                     manager.uninstall(definition)
@@ -99,6 +100,7 @@ class ServiceManagerTests(unittest.TestCase):
             self.assertTrue(status.installed)
             self.assertTrue(status.running)
             self.assertEqual(status.detail, "active")
+            self.assertEqual(calls[0][0], ("systemctl", "--user", "daemon-reload"))
             self.assertEqual(calls[1][0], ("systemctl", "--user", "enable", "feishu-codex-corp-a"))
             self.assertEqual(calls[2][0], ("systemctl", "--user", "start", "feishu-codex-corp-a"))
             self.assertEqual(calls[3][0], ("systemctl", "--user", "is-active", "feishu-codex-corp-a"))
@@ -123,6 +125,7 @@ class ServiceManagerTests(unittest.TestCase):
             with patch("bot.service_manager.default_launch_agent_dir", return_value=root / "LaunchAgents"):
                 with patch.object(manager, "_uid_domain", return_value="gui/501"):
                     with patch.object(manager, "_run", side_effect=_run):
+                        manager.ensure_service(definition)
                         manager.start(definition)
                         status = manager.status(definition)
                         manager.uninstall(definition)
@@ -150,6 +153,7 @@ class ServiceManagerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
             with patch.object(manager, "_run", side_effect=_run):
+                manager.ensure_service(definition)
                 manager.start(definition)
                 status = manager.status(definition)
                 manager.uninstall(definition)
@@ -162,6 +166,15 @@ class ServiceManagerTests(unittest.TestCase):
             self.assertEqual(calls[3][0], ("schtasks", "/End", "/TN", "feishu-codex-corp-a"))
             self.assertEqual(calls[4][0], ("schtasks", "/Delete", "/TN", "feishu-codex-corp-a", "/F"))
             self.assertFalse((definition.paths.data_dir / "service-launch.cmd").exists())
+
+    def test_systemd_start_requires_installed_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            definition = _definition(root)
+            manager = SystemdUserServiceManager()
+            with patch("bot.service_manager.default_systemd_user_dir", return_value=root / "systemd"):
+                with self.assertRaisesRegex(ServiceManagerError, "service definition 缺失"):
+                    manager.start(definition)
 
     def test_current_service_manager_factory(self) -> None:
         with patch("bot.service_manager.is_windows", return_value=True):
