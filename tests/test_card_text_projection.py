@@ -88,3 +88,25 @@ class CardTextProjectionTests(unittest.TestCase):
                 char_limit=1000,
             )
         )
+
+    def test_terminal_result_card_without_authoritative_block_fails_closed(self) -> None:
+        projection = project_interactive_card_text(
+            {
+                "header": {
+                    "title": {"tag": "plain_text", "content": "Codex 最终结果"},
+                },
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": "*以下区块是本轮权威 `final_reply_text`，可被其他 Codex 机器人稳定解析。*",
+                    },
+                    {"tag": "hr"},
+                    {"tag": "markdown", "content": "这里只剩普通展示文本"},
+                ],
+            }
+        )
+
+        self.assertFalse(projection.has_authoritative_final_reply)
+        self.assertEqual(projection.final_reply_text, "")
+        self.assertEqual(projection.text, "")
+        self.assertIn("这里只剩普通展示文本", projection.visible_text)

@@ -68,19 +68,26 @@ def can_render_terminal_result_card(final_reply_text: str, *, char_limit: int) -
 
 
 def project_interactive_card_text(content_dict: dict[str, Any]) -> CardTextProjection:
+    terminal_projection = _project_terminal_result_card_text(content_dict)
+    if terminal_projection is not None:
+        return terminal_projection
     visible_text = _extract_visible_card_text(content_dict)
-    final_reply_text = ""
-    if _matches_terminal_result_card_contract(content_dict):
-        final_reply_text = _extract_authoritative_final_reply_text(visible_text)
-    if final_reply_text:
-        return CardTextProjection(
-            text=final_reply_text,
-            visible_text=visible_text,
-            final_reply_text=final_reply_text,
-        )
+    return CardTextProjection(text=visible_text, visible_text=visible_text)
+
+
+def _project_terminal_result_card_text(
+    content_dict: dict[str, Any],
+) -> CardTextProjection | None:
+    if not _matches_terminal_result_card_contract(content_dict):
+        return None
+    visible_text = _extract_visible_card_text(content_dict)
+    final_reply_text = _extract_terminal_result_card_final_reply_text(content_dict)
+    if not final_reply_text:
+        return CardTextProjection(text="", visible_text=visible_text)
     return CardTextProjection(
-        text=visible_text,
+        text=final_reply_text,
         visible_text=visible_text,
+        final_reply_text=final_reply_text,
     )
 
 
@@ -106,14 +113,22 @@ def _matches_terminal_result_card_contract(content_dict: dict[str, Any]) -> bool
     return has_contract_hint
 
 
-def _extract_authoritative_final_reply_text(visible_text: str) -> str:
-    normalized_visible = str(visible_text or "").strip()
-    if not normalized_visible:
+def _extract_terminal_result_card_final_reply_text(content_dict: dict[str, Any]) -> str:
+    elements = content_dict.get("elements") or []
+    if not isinstance(elements, list):
         return ""
-    match = _FINAL_REPLY_BLOCK_PATTERN.search(normalized_visible)
-    if not match:
-        return ""
-    return str(match.group(1) or "").strip()
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        if str(element.get("tag", "") or "").strip() != "markdown":
+            continue
+        content = str(element.get("content", "") or "")
+        if content.strip() == TERMINAL_RESULT_CARD_HINT:
+            continue
+        match = _FINAL_REPLY_BLOCK_PATTERN.search(content)
+        if match:
+            return str(match.group(1) or "").strip()
+    return ""
 
 
 def _extract_visible_card_text(content_dict: dict[str, Any]) -> str:
