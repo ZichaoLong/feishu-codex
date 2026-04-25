@@ -123,3 +123,20 @@ class GroupChatStoreTests(unittest.TestCase):
         self.assertFalse(snapshot["activated"])
         self.assertEqual(snapshot["activated_by"], "")
         self.assertEqual(snapshot["activated_at"], 0)
+
+    def test_activated_group_state_survives_store_restart(self) -> None:
+        tempdir, store, _state_path = self._make_store()
+
+        store.set_group_mode("chat-1", "assistant")
+        store.activate_chat("chat-1", activated_by="ou_admin", activated_at=1712476800123)
+        store.set_last_boundary("chat-1", seq=7, created_at=1712476800999, message_ids=["m-7"])
+
+        reloaded = GroupChatStore(pathlib.Path(tempdir.name))
+        snapshot = reloaded.group_snapshot("chat-1")
+
+        self.assertTrue(snapshot["activated"])
+        self.assertEqual(snapshot["activated_by"], "ou_admin")
+        self.assertEqual(snapshot["activated_at"], 1712476800123)
+        self.assertEqual(snapshot["mode"], "assistant")
+        self.assertEqual(snapshot["boundaries"]["main"]["seq"], 7)
+        self.assertEqual(snapshot["boundaries"]["main"]["message_ids"], ["m-7"])

@@ -121,10 +121,17 @@ class CodexGroupDomain:
         subcommand = str(arg or "").strip().lower()
         if subcommand == "activate":
             self._ports.activate_group_chat(chat_id, sender_open_id)
-            return CommandResult(text="已激活当前群聊；当前群成员现在可正常对话并处理自己发起 turn 的审批。")
+            return CommandResult(
+                text=(
+                    "已激活当前群聊；群成员现在可正常对话，并处理自己发起 turn 的审批或补充输入。"
+                    "管理员仍可兜底处理。"
+                )
+            )
         if subcommand in {"deactivate", "disable"}:
             self._ports.deactivate_group_chat(chat_id)
-            return CommandResult(text="已停用当前群聊；非管理员后续将不能继续使用机器人。")
+            return CommandResult(
+                text="已停用当前群聊；非管理员后续将不能继续使用机器人。管理员仍可继续初始化与管理。"
+            )
         return CommandResult(text="用法：`/group`、`/group activate`、`/group deactivate`")
 
     def handle_show_group_mode_card_action(
@@ -173,10 +180,10 @@ class CodexGroupDomain:
             return make_card_response(toast="仅管理员可调整群聊授权状态。", toast_type="warning")
         if activated:
             self._ports.activate_group_chat(chat_id, operator_open_id)
-            toast = "已激活当前群聊"
+            toast = "已激活当前群聊；成员可处理自己发起 turn 的审批或补充输入。"
         else:
             self._ports.deactivate_group_chat(chat_id)
-            toast = "已停用当前群聊"
+            toast = "已停用当前群聊；非管理员后续将不能继续使用机器人。"
         return make_card_response(
             card=self._group_activation_card(chat_id, open_id=operator_open_id),
             toast=toast,

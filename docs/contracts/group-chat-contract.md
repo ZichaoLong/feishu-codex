@@ -56,6 +56,9 @@ Those remain owned by their dedicated documents.
   remains so until an admin comes back and deactivates it, or the group state
   is explicitly cleared by an admin surface
 - group activation state should persist across service restarts
+- activate / deactivate / re-activate only change the authorization state and
+  activation metadata; they do not automatically clear group logs,
+  `assistant` boundaries, the current thread binding, or the group mode
 - only admins may activate or deactivate a group
 - the current activation-management surface is:
   - `/group`
@@ -102,6 +105,11 @@ Those remain owned by their dedicated documents.
 - backend input is passed through like p2p by default: no history context and
   no extra `group turn` wrapper
 - has the highest spam risk
+- `/groupmode all` must reject when the currently bound thread is already
+  shared by other Feishu chats
+- once a group is in `all` mode, that thread must not be shared with other
+  Feishu chats; for the exact runtime vocabulary and rejection rules, see
+  `docs/contracts/runtime-control-surface.md`
 
 ## 5. Group Commands and Shared-State Rules
 

@@ -76,10 +76,13 @@ class GroupChatStore:
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            group["activated"] = True
-            group["activated_by"] = normalized_activated_by
-            group["activated_at"] = normalized_activated_at
-            self._write_group_state(data, chat_id, group)
+            updated_group = self._group_with_activation_state(
+                group,
+                activated=True,
+                activated_by=normalized_activated_by,
+                activated_at=normalized_activated_at,
+            )
+            self._write_group_state(data, chat_id, updated_group)
         return {
             "activated": True,
             "activated_by": normalized_activated_by,
@@ -90,10 +93,13 @@ class GroupChatStore:
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
-            group["activated"] = False
-            group["activated_by"] = ""
-            group["activated_at"] = 0
-            self._write_group_state(data, chat_id, group)
+            updated_group = self._group_with_activation_state(
+                group,
+                activated=False,
+                activated_by="",
+                activated_at=0,
+            )
+            self._write_group_state(data, chat_id, updated_group)
         return {
             "activated": False,
             "activated_by": "",
@@ -314,6 +320,21 @@ class GroupChatStore:
             "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
             "groups": {},
         }
+
+    @classmethod
+    def _group_with_activation_state(
+        cls,
+        group: GroupState,
+        *,
+        activated: bool,
+        activated_by: str,
+        activated_at: int,
+    ) -> GroupState:
+        updated = cls._clone_group_state(group)
+        updated["activated"] = bool(activated)
+        updated["activated_by"] = str(activated_by or "").strip()
+        updated["activated_at"] = max(int(activated_at), 0)
+        return updated
 
     def _boundary_state(self, group: GroupState, scope: str | None) -> BoundaryState:
         normalized_scope = self.normalize_scope(scope)

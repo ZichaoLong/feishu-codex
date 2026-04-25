@@ -368,6 +368,31 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.addCleanup(tempdir.cleanup)
         return _RecordingBot(pathlib.Path(tempdir.name), system_config=system_config)
 
+    def test_activated_group_survives_restart_and_non_admin_can_continue_using_it(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        bot1 = _RecordingBot(data_dir)
+        bot1.set_group_mode("chat-1", "all")
+        bot1.activate_group_chat("chat-1", activated_by="ou-admin")
+
+        bot2 = _RecordingBot(data_dir)
+        self.assertTrue(bot2.get_group_activation_snapshot("chat-1")["activated"])
+        self.assertEqual(bot2.get_group_mode("chat-1"), "all")
+
+        bot2._handle_raw_message(
+            _message_event(
+                message_id="m-1",
+                chat_id="chat-1",
+                text="管理员离场后继续使用",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+            )
+        )
+
+        self.assertEqual(len(bot2.received_messages), 1)
+        self.assertEqual(bot2.received_messages[0][2], "管理员离场后继续使用")
+
     def test_p2p_image_message_routes_to_attachment_handler(self) -> None:
         bot = self._make_bot()
 

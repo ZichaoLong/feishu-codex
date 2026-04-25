@@ -147,7 +147,7 @@ class CodexGroupDomainTests(unittest.TestCase):
         )
 
         self.assertEqual(stub.deactivation_calls, ["chat-group"])
-        self.assertEqual(response["toast"], "已停用当前群聊")
+        self.assertEqual(response["toast"], "已停用当前群聊；非管理员后续将不能继续使用机器人。")
         self.assertEqual(response["toast_type"], "success")
 
 

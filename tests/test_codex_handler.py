@@ -5075,6 +5075,56 @@ class CodexHandlerTests(unittest.TestCase):
             {"answers": {"q1": {"answers": ["创建 c.txt"]}}},
         )
 
+    def test_group_request_actor_can_submit_own_supplemental_input(self) -> None:
+        handler, bot = self._make_handler()
+        responded = {}
+        bot.message_contexts["msg-group-input"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+
+        def fake_respond(request_id, *, result=None, error=None):
+            responded["request_id"] = request_id
+            responded["result"] = result
+            responded["error"] = error
+
+        handler._adapter.respond = fake_respond
+        self._store_pending_request(handler, "req-1", {
+            "rpc_request_id": "rpc-1",
+            "method": "item/tool/requestUserInput",
+            "message_id": "msg-group-input",
+            "questions": [
+                {
+                    "id": "q1",
+                    "header": "步骤确认",
+                    "question": "请选择下一步。",
+                    "options": [{"label": "确认步骤", "description": ""}],
+                    "isOther": False,
+                }
+            ],
+            "answers": {},
+            "chat_id": "chat-group",
+            "sender_id": "__group__",
+            "actor_open_id": "ou_user",
+        })
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "chat-group",
+            "msg-group-input",
+            {
+                "action": "answer_user_input_option",
+                "request_id": "req-1",
+                "question_id": "q1",
+                "answer": "确认步骤",
+            },
+        ))
+
+        self.assertEqual(response["toast_type"], "success")
+        self.assertEqual(response["toast"], "已提交回答。")
+        self.assertEqual(responded["request_id"], "rpc-1")
+        self.assertEqual(
+            responded["result"],
+            {"answers": {"q1": {"answers": ["确认步骤"]}}},
+        )
+
     def test_user_input_action_is_idempotent_while_processing_final_submit(self) -> None:
         handler, _ = self._make_handler()
         responded = []
