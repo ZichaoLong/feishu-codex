@@ -65,6 +65,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  管理后台进程与“登录后自动启动”：Linux=systemd、macOS=LaunchAgent、Windows=Task Scheduler\n"
             "- 安装脚本会重建 shared wrapper，并重建所有已知实例的 service 定义/注册材料\n"
             "- `start|stop|restart|status` 只管理当前运行态；`autostart` 单独管理登录后自动启动\n"
+            "- 命名实例必须先显式 `instance create`；其他命令不会隐式创建命名实例\n"
             "- `run` 是跨平台单一 daemon 入口，通常由底层 service manager 调用\n"
         ),
         epilog=(
@@ -88,7 +89,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--instance",
         default=DEFAULT_INSTANCE_NAME,
-        help="目标实例；默认是 `default`。对 `instance ...` 子命令无效。",
+        help="目标实例；默认是 `default`。命名实例必须先用 `instance create` 创建。对 `instance ...` 子命令无效。",
     )
     subparsers = parser.add_subparsers(
         dest="command",
@@ -388,6 +389,21 @@ def _service_definition(instance_name: str):
     )
 
 
+def _instance_exists(instance_name: str) -> bool:
+    paths = resolve_instance_paths(instance_name)
+    return paths.config_dir.exists() or paths.data_dir.exists()
+
+
+def _prepare_cli_instance(instance_name: str) -> str:
+    normalized = validate_instance_name(instance_name)
+    if normalized == DEFAULT_INSTANCE_NAME:
+        _ensure_instance_scaffold(normalized)
+        return normalized
+    if _instance_exists(normalized):
+        return normalized
+    raise ValueError(f"命名实例 `{normalized}` 尚未创建；请先执行 `feishu-codex instance create {normalized}`。")
+
+
 def _known_instance_names() -> list[str]:
     names = {DEFAULT_INSTANCE_NAME}
     config_root = default_config_root()
@@ -435,8 +451,7 @@ def _handle_bootstrap_install() -> int:
 
 
 def _handle_service_action(instance_name: str, action: str) -> int:
-    normalized = validate_instance_name(instance_name)
-    _ensure_instance_scaffold(normalized)
+    normalized = _prepare_cli_instance(instance_name)
     definition = _service_definition(normalized)
     manager = current_service_manager()
     display_name = manager.display_name(definition)
@@ -463,8 +478,7 @@ def _handle_service_action(instance_name: str, action: str) -> int:
 
 
 def _handle_autostart_action(instance_name: str, action: str) -> int:
-    normalized = validate_instance_name(instance_name)
-    _ensure_instance_scaffold(normalized)
+    normalized = _prepare_cli_instance(instance_name)
     definition = _service_definition(normalized)
     manager = current_service_manager()
     display_name = manager.display_name(definition)
@@ -486,13 +500,16 @@ def _handle_autostart_action(instance_name: str, action: str) -> int:
 
 
 def _handle_run(instance_name: str) -> int:
-    daemon_entry.main(["--instance", validate_instance_name(instance_name)])
+    daemon_entry.main(["--instance", _prepare_cli_instance(instance_name)])
     return 0
 
 
 def _handle_config(instance_name: str, target: str | None, *, open_editor: bool) -> int:
     normalized = validate_instance_name(instance_name)
-    _ensure_instance_scaffold(normalized)
+    if target == "env":
+        ensure_env_template()
+    else:
+        normalized = _prepare_cli_instance(normalized)
     paths = resolve_instance_paths(normalized)
     candidates = {
         "system": paths.config_dir / "system.yaml",

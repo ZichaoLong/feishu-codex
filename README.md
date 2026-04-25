@@ -185,6 +185,7 @@ feishu-codex instance remove corp-a
 
 - `feishu-codex instance create <name>` 只负责创建该实例的 scaffold，不启动 service
 - `feishu-codex instance list` 列出本机已知实例，并标注它们当前是否在运行
+- 除 `instance create` 外，其他 `feishu-codex --instance <name> ...` 命令都不会隐式创建命名实例；实例不存在时会直接报错
 - 重新运行 `install.sh` / `install.ps1` 时，会重建 shared wrapper，并重建所有已知实例的 service 定义 / 注册材料
 - `--instance default` 等价于不写 `--instance`；`default` 实例直接使用配置根 / 数据根本身，不会创建 `instances/default/`
 - 同一 thread 的 live runtime 不能被两个实例 backend 同时持有

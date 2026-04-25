@@ -13,6 +13,7 @@ from bot.manage_cli import (
     _handle_autostart_action,
     _ensure_instance_scaffold,
     _handle_bootstrap_install,
+    _handle_config,
     _handle_instance_create,
     _handle_instance_list,
     _handle_instance_remove,
@@ -307,6 +308,7 @@ class ManageCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
+                _ensure_instance_scaffold("corp-a")
                 stdout = io.StringIO()
                 with redirect_stdout(stdout):
                     with patch("bot.manage_cli.current_service_manager", return_value=manager):
@@ -343,6 +345,7 @@ class ManageCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
+                _ensure_instance_scaffold("corp-a")
                 stdout = io.StringIO()
                 with redirect_stdout(stdout):
                     with patch("bot.manage_cli.current_service_manager", return_value=manager):
@@ -351,6 +354,54 @@ class ManageCliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(manager.started, ["corp-a"])
             self.assertIn("started service: feishu-codex@corp-a", stdout.getvalue())
+
+    def test_named_instance_commands_do_not_implicitly_create_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                with self.assertRaisesRegex(ValueError, "instance create corp-a"):
+                    _handle_service_action("corp-a", "start")
+                with self.assertRaisesRegex(ValueError, "instance create corp-a"):
+                    _handle_config("corp-a", "system", open_editor=False)
+
+            self.assertFalse((config_root / "instances" / "corp-a").exists())
+            self.assertFalse((data_root / "instances" / "corp-a").exists())
+
+    def test_config_env_does_not_require_named_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    result = _handle_config("corp-a", "env", open_editor=False)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(stdout.getvalue().strip(), str(env_file))
+            self.assertTrue(env_file.exists())
+            self.assertFalse((config_root / "instances" / "corp-a").exists())
+            self.assertFalse((data_root / "instances" / "corp-a").exists())
 
     def test_handle_instance_remove_rejects_default_instance(self) -> None:
         with self.assertRaisesRegex(ValueError, "不能删除 `default` 实例"):

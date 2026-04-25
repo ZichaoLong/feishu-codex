@@ -193,6 +193,20 @@ class ServiceManagerTests(unittest.TestCase):
             self.assertEqual(status.detail, str(root / "LaunchAgents" / "io.feishu-codex.corp-a.plist"))
             self.assertFalse((root / "LaunchAgents" / "io.feishu-codex.corp-a.plist").exists())
 
+    def test_launchd_autostart_status_detects_dangling_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            definition = _definition(root)
+            manager = LaunchdUserServiceManager()
+            with patch("bot.service_manager.default_launch_agent_dir", return_value=root / "LaunchAgents"):
+                manager.ensure_service(definition)
+                manager.autostart_enable(definition)
+                (root / "data" / "service.plist").unlink()
+                status = manager.autostart_status(definition)
+
+            self.assertFalse(status.enabled)
+            self.assertEqual(status.detail, "launch agent symlink is dangling")
+
     def test_windows_manager_lifecycle_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)

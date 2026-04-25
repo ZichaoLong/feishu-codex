@@ -401,7 +401,9 @@ class LaunchdUserServiceManager(ServiceManager):
 
     def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
         autostart_path = self._plist_path(definition)
-        enabled = autostart_path.exists() or autostart_path.is_symlink()
+        if autostart_path.is_symlink() and not autostart_path.exists():
+            return AutostartStatus(enabled=False, detail="launch agent symlink is dangling")
+        enabled = autostart_path.exists()
         detail = str(autostart_path) if enabled else "launch agent disabled"
         return AutostartStatus(enabled=enabled, detail=detail)
 
