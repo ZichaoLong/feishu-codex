@@ -19,8 +19,10 @@ from bot.env_file import ensure_env_template
 from bot.file_permissions import ensure_private_file_permissions
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, apply_instance_environment, resolve_instance_paths, validate_instance_name
 from bot.install_templates import CODEX_YAML_TEMPLATE, SYSTEM_YAML_TEMPLATE
+from bot.instance_resolution import list_running_instances
 from bot.platform_paths import default_config_root, default_data_root, default_log_file, default_user_bin_dir, is_windows
 from bot.service_manager import ServiceManagerError, build_service_definition, current_service_manager
+from bot.stores.service_instance_lease import ServiceInstanceLease
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -42,6 +44,14 @@ def _build_parser() -> argparse.ArgumentParser:
     config_parser = subparsers.add_parser("config")
     config_parser.add_argument("target", nargs="?", choices=["system", "codex", "env", "init-token"])
     config_parser.add_argument("--open", action="store_true")
+
+    instance_parser = subparsers.add_parser("instance")
+    instance_subparsers = instance_parser.add_subparsers(dest="instance_command", required=True)
+    instance_create_parser = instance_subparsers.add_parser("create")
+    instance_create_parser.add_argument("name")
+    instance_subparsers.add_parser("list")
+    instance_remove_parser = instance_subparsers.add_parser("remove")
+    instance_remove_parser.add_argument("name")
 
     subparsers.add_parser("uninstall")
     subparsers.add_parser("purge")
@@ -194,6 +204,7 @@ def _print_install_summary(bin_dir: pathlib.Path) -> None:
     print(f"  2. 按需写入 provider 环境变量: {default_config_root() / 'feishu-codex.env'}")
     print("  3. 启动服务: feishu-codex start")
     print("  4. 查看初始化口令: feishu-codex config init-token")
+    print("  5. 新建命名实例: feishu-codex instance create corp-a")
 
 
 def _handle_install() -> int:
@@ -295,6 +306,81 @@ def _handle_uninstall(*, purge: bool) -> int:
     return 0
 
 
+def _handle_instance_create(instance_name: str) -> int:
+    normalized = validate_instance_name(instance_name)
+    _ensure_instance_scaffold(normalized)
+    paths = resolve_instance_paths(normalized)
+    print(f"已初始化实例: {normalized}")
+    print(f"config dir: {paths.config_dir}")
+    print(f"data dir: {paths.data_dir}")
+    print(f"shared env: {default_config_root() / 'feishu-codex.env'}")
+    return 0
+
+
+def _handle_instance_list() -> int:
+    running_entries = {entry.instance_name: entry for entry in list_running_instances()}
+    instance_names = sorted(set(_known_instance_names()) | set(running_entries))
+    print("instance\tstate\tconfig_dir\tdata_dir")
+    for instance_name in instance_names:
+        paths = resolve_instance_paths(instance_name)
+        state = "running" if instance_name in running_entries else "stopped"
+        print(f"{instance_name}\t{state}\t{paths.config_dir}\t{paths.data_dir}")
+    return 0
+
+
+def _remove_empty_parent(path: pathlib.Path, *, stop_at: pathlib.Path) -> None:
+    current = pathlib.Path(path)
+    boundary = pathlib.Path(stop_at)
+    while True:
+        if current == boundary:
+            return
+        try:
+            current.rmdir()
+        except FileNotFoundError:
+            return
+        except OSError:
+            return
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+
+
+def _handle_instance_remove(instance_name: str) -> int:
+    normalized = validate_instance_name(instance_name)
+    if normalized == DEFAULT_INSTANCE_NAME:
+        raise ValueError("不能删除 `default` 实例；如需整体清理，请用 `feishu-codex uninstall` 或 `purge`。")
+
+    paths = resolve_instance_paths(normalized)
+
+    try:
+        manager = current_service_manager()
+    except ServiceManagerError:
+        manager = None
+
+    if manager is not None:
+        try:
+            manager.uninstall(_service_definition(normalized))
+        except ServiceManagerError:
+            pass
+
+    metadata = ServiceInstanceLease(paths.data_dir).load_metadata()
+    if metadata is not None:
+        raise ValueError(
+            "目标实例仍有运行中的 service owner；请先确认该实例已经停止。"
+            f" instance={normalized} owner_pid={metadata.owner_pid or 'unknown'}"
+        )
+
+    shutil.rmtree(paths.config_dir, ignore_errors=True)
+    shutil.rmtree(paths.data_dir, ignore_errors=True)
+    _remove_empty_parent(paths.config_dir.parent, stop_at=default_config_root())
+    _remove_empty_parent(paths.data_dir.parent, stop_at=default_data_root())
+    print(f"已删除实例: {normalized}")
+    print(f"config dir: {paths.config_dir}")
+    print(f"data dir: {paths.data_dir}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     try:
@@ -308,6 +394,15 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_tail_log(default_log_file(resolve_instance_paths(validate_instance_name(args.instance)).data_dir), lines=args.lines))
         if args.command == "config":
             raise SystemExit(_handle_config(args.instance, args.target, open_editor=args.open))
+        if args.command == "instance":
+            if validate_instance_name(args.instance) != DEFAULT_INSTANCE_NAME:
+                raise ValueError("`feishu-codex instance ...` 不接受顶层 `--instance`；请把目标实例写在子命令参数里。")
+            if args.instance_command == "create":
+                raise SystemExit(_handle_instance_create(args.name))
+            if args.instance_command == "list":
+                raise SystemExit(_handle_instance_list())
+            if args.instance_command == "remove":
+                raise SystemExit(_handle_instance_remove(args.name))
         if args.command == "uninstall":
             raise SystemExit(_handle_uninstall(purge=False))
         if args.command == "purge":
