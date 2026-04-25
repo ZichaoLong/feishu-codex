@@ -14,7 +14,7 @@
 
 | 入口 | 作用 | 什么时候用 |
 | --- | --- | --- |
-| `feishu-codex` | 安装、配置、启动、停止、日志 | 管理本地服务 |
+| `feishu-codex` | 配置、运行态、登录后自动启动、本地清理 | 管理本地服务 |
 | 飞书聊天命令 | 当前 chat binding 的使用入口 | 在飞书里提问、切线程、改当前会话设置 |
 | `fcodex` | 接到同一实例 shared backend 的本地 Codex 入口 | 想在本地继续飞书正在操作的同一 live thread |
 | `feishu-codexctl` | 本地查看 / 管理面 | 看 binding / thread 状态，做 thread-scoped 管理 |
@@ -58,34 +58,47 @@
    feishu-codex config env --open
    ```
 
-4. 启动服务。
+4. 如需“登录后自动启动”，开启它。
+
+   ```bash
+   feishu-codex autostart enable
+   ```
+
+5. 启动服务。
 
    ```bash
    feishu-codex start
    ```
 
-5. 获取初始化口令。
+6. 获取初始化口令。
 
    ```bash
    feishu-codex config init-token
    ```
 
-6. 在飞书里私聊机器人执行：
+7. 在飞书里私聊机器人执行：
 
    ```text
    /init <token>
    ```
 
-7. 然后就可以发送 `/help`、普通文本，或开始配置群聊。
+8. 然后就可以发送 `/help`、普通文本，或开始配置群聊。
 
 ## 安装与配置
 
 ### 安装
 
-- `install.py` 是唯一安装实现
-- `install.sh` 和 `install.ps1` 只是平台包装器
+- `install.sh` 和 `install.ps1` 是唯一公开安装 / 修复入口
+- `install.py` 是它们调用的内部实现
 - 安装后会生成 `feishu-codex`、`feishu-codexd`、`feishu-codexctl`、`fcodex`
-- 安装后也会立即安装默认实例的本地 service definition，但不会自动启动
+- 安装脚本会初始化 `default` 实例，并重建所有已知实例的本地 service 定义 / 注册材料
+- 安装脚本不会自动启动 service
+- 安装脚本不会自动开启“登录后自动启动”
+- `feishu-codex` 本身不提供 `install` 子命令
+- `feishu-codex` 是唯一公开管理面；底层会调用原生 service manager 管理后台进程与“登录后自动启动”
+  - Linux：`systemd`
+  - macOS：`LaunchAgent`
+  - Windows：`Task Scheduler`
 
 ### 飞书配置
 
@@ -160,6 +173,7 @@ provider_api_key=...
 feishu-codex instance create corp-a
 feishu-codex instance list
 feishu-codex --instance corp-a config system --open
+feishu-codex --instance corp-a autostart enable
 feishu-codex --instance corp-a start
 fcodex --instance corp-a
 feishu-codexctl instance list
@@ -171,10 +185,11 @@ feishu-codex instance remove corp-a
 
 - `feishu-codex instance create <name>` 只负责创建该实例的 scaffold，不启动 service
 - `feishu-codex instance list` 列出本机已知实例，并标注它们当前是否在运行
+- 重新运行 `install.sh` / `install.ps1` 时，会重建 shared wrapper，并重建所有已知实例的 service 定义 / 注册材料
 - `--instance default` 等价于不写 `--instance`；`default` 实例直接使用配置根 / 数据根本身，不会创建 `instances/default/`
 - 同一 thread 的 live runtime 不能被两个实例 backend 同时持有
 - 飞书侧 `/session`、`/resume` 受当前实例的 admission 可见性约束；本地 `fcodex` / `feishu-codexctl` 更偏操作者视角
-- 删除命名实例请用 `feishu-codex instance remove <name>`；它只删除该命名实例的配置、数据与 service 定义，不会删除 `default`、共享 env 或 `_global`
+- 删除命名实例请用 `feishu-codex instance remove <name>`；它只删除该命名实例的配置、数据与实例级 service 注册材料，不会删除 `default`、共享 env 或 `_global`
 
 多实例的推荐管理面分工：
 
@@ -190,13 +205,14 @@ feishu-codex instance remove corp-a
 
 - 创建虚拟环境并安装依赖
 - 初始化 `default` 实例的配置 / 数据目录
+- 重建 shared wrapper：`feishu-codex`、`feishu-codexd`、`feishu-codexctl`、`fcodex`
+- 重建所有已知实例的本地 service 定义 / 注册材料
 - 生成 `system.yaml.example`、`codex.yaml.example`
 - 生成 `init.token`
 - 生成共享的 `feishu-codex.env`
-- 安装平台对应的用户态 service manager 配置
-  - Linux：`systemd --user`
-  - macOS：`LaunchAgent`
-  - Windows：`Task Scheduler`
+- 安装平台对应的用户态 service manager 配置 / 注册材料
+
+如果当前没有命名实例，“所有已知实例”就只有 `default`；如果你之前创建过 `corp-a` 之类的命名实例，重新运行安装脚本时也会一起重建它们的 service 定义 / 注册材料。
 
 多实例时，命名实例不会写回根目录；它们固定落在 `instances/<name>` 子目录下。
 
@@ -250,13 +266,14 @@ feishu-codex instance remove corp-a
 feishu-codex instance create corp-a
 ```
 
-它会创建 `corp-a` 这套实例目录、模板文件与对应 service definition，但不会自动启动该实例 service。
+它会创建 `corp-a` 这套实例目录、模板文件与对应后台 service 定义 / 注册材料，但不会自动启动该实例 service，也不会自动开启登录后自动启动。
 
 ### 服务管理
 
 统一用 `feishu-codex`：
 
 ```bash
+feishu-codex autostart enable|disable|status
 feishu-codex start|stop|restart|status
 feishu-codex log
 feishu-codex run
@@ -268,31 +285,19 @@ feishu-codex uninstall
 feishu-codex purge
 ```
 
-多实例时，`start|stop|restart|status|log|run|config` 这组命令在最前面加 `--instance <name>` 即可；`instance create|remove` 则直接把实例名写在子命令参数里，`instance list` 不接受顶层 `--instance`。
+多实例时，`autostart|start|stop|restart|status|log|run|config` 这组命令在最前面加 `--instance <name>` 即可；`instance create|remove` 则直接把实例名写在子命令参数里，`instance list` 不接受顶层 `--instance`。
 
 其中：
 
 - `run` 是跨平台单一 daemon 入口
-- Linux 的 `systemd --user`
-- macOS 的 `LaunchAgent`
-- Windows 的 `Task Scheduler`
+- `start|stop|restart|status` 只管理当前运行态
+- `autostart enable|disable|status` 只管理“登录后自动启动”
+- 底层会调用当前平台原生 service manager 托管同一个 `feishu-codex --instance <name> run` 入口
 
-都只是在托管同一个 `feishu-codex --instance <name> run` 入口。
+另外：
 
-在 Linux 上，安装完成后你也可以直接使用原生管理面：
-
-```bash
-systemctl --user status feishu-codex
-systemctl --user start feishu-codex
-systemctl --user restart feishu-codex
-systemctl --user stop feishu-codex
-```
-
-命名实例对应：
-
-```bash
-systemctl --user status feishu-codex-corp-a
-```
+- `uninstall` 会卸载所有已知实例的 service 定义 / 自启动注册与 shared wrapper，但保留配置与数据
+- `purge` 会在 `uninstall` 的基础上，再删除所有实例配置与数据
 
 ## 使用
 

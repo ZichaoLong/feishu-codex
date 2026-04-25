@@ -29,31 +29,59 @@ class _HelpFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHel
     pass
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        if "argument command: invalid choice: 'install'" in message:
+            self.exit(
+                2,
+                (
+                    f"{self.prog}: error: 公开命令中已无 `install`；"
+                    "首次安装或修复请从仓库根目录运行 `bash install.sh`"
+                    " 或 `./install.ps1`。\n"
+                ),
+            )
+        sanitized = message.replace("bootstrap-install, ", "").replace(", bootstrap-install", "")
+        super().error(sanitized)
+
+
+def _hide_subcommand_from_help(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser], name: str
+) -> None:
+    subparsers._choices_actions = [
+        action
+        for action in subparsers._choices_actions
+        if getattr(action, "dest", None) != name
+    ]
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ArgumentParser(
         prog="feishu-codex",
         description=(
             "跨平台本地管理 CLI：负责安装、service 生命周期、配置入口和实例管理。\n\n"
             "说明：\n"
-            "- `run` 是跨平台单一 daemon 入口，通常由 service manager 调用\n"
-            "- `start|stop|restart|status` 是跨平台统一前端\n"
-            "- Linux 下也可直接使用 `systemctl --user` / `journalctl --user`\n"
+            "- 首次安装与修复都请从仓库根目录执行 `bash install.sh` 或 `./install.ps1`\n"
+            "- `feishu-codex` 是唯一公开管理面；底层会调用原生 service manager\n"
+            "  管理后台进程与“登录后自动启动”：Linux=systemd、macOS=LaunchAgent、Windows=Task Scheduler\n"
+            "- 安装脚本会重建 shared wrapper，并重建所有已知实例的 service 定义/注册材料\n"
+            "- `start|stop|restart|status` 只管理当前运行态；`autostart` 单独管理登录后自动启动\n"
+            "- `run` 是跨平台单一 daemon 入口，通常由底层 service manager 调用\n"
         ),
         epilog=(
             "常见流程:\n"
-            "  首次安装:\n"
-            "    feishu-codex install\n"
+            "  首次安装 / 修复:\n"
+            "    bash install.sh\n"
+            "    # Windows PowerShell: .\\install.ps1\n"
+            "\n"
+            "  默认实例启动:\n"
             "    feishu-codex config system --open\n"
             "    feishu-codex start\n"
             "\n"
             "  多实例:\n"
             "    feishu-codex instance create corp-a\n"
             "    feishu-codex --instance corp-a config system --open\n"
+            "    feishu-codex --instance corp-a autostart enable\n"
             "    feishu-codex --instance corp-a start\n"
-            "\n"
-            "  Linux 原生管理面:\n"
-            "    systemctl --user status feishu-codex\n"
-            "    systemctl --user restart feishu-codex-corp-a\n"
         ),
         formatter_class=_HelpFormatter,
     )
@@ -70,47 +98,71 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser(
-        "install",
-        help="初始化默认实例，并安装 wrapper 与 service definition。",
-        description=(
-            "初始化默认实例。\n"
-            "- 创建默认实例的配置与数据目录\n"
-            "- 创建/更新 `feishu-codex`、`feishu-codexctl`、`fcodex` wrapper\n"
-            "- 安装默认实例对应的 service definition，但不会自动启动"
-        ),
-        formatter_class=_HelpFormatter,
-    )
-    subparsers.add_parser(
         "bootstrap-install",
         help="内部安装入口；一般不手动调用。",
         description="内部安装入口；通常由 `install.py` 调用。",
         formatter_class=_HelpFormatter,
     )
+    _hide_subcommand_from_help(subparsers, "bootstrap-install")
     subparsers.add_parser(
         "start",
-        help="启动目标实例 service，并在托管层启用它。",
-        description="启动目标实例 service。service definition 缺失时会直接报错。",
+        help="启动目标实例后台 service。",
+        description="启动目标实例后台 service，不改变登录后自动启动设置。",
         formatter_class=_HelpFormatter,
     )
     subparsers.add_parser(
         "stop",
-        help="停止目标实例 service。",
-        description="停止目标实例 service。",
+        help="停止目标实例后台 service。",
+        description="停止目标实例后台 service，不改变登录后自动启动设置。",
         formatter_class=_HelpFormatter,
     )
     subparsers.add_parser(
         "restart",
-        help="重启目标实例 service。",
-        description="重启目标实例 service。service definition 缺失时会直接报错。",
+        help="重启目标实例后台 service。",
+        description="重启目标实例后台 service，不改变登录后自动启动设置。service 定义缺失时会直接报错。",
         formatter_class=_HelpFormatter,
     )
     subparsers.add_parser(
         "status",
-        help="查看目标实例的 service 托管状态。",
+        help="查看目标实例当前运行态。",
         description=(
-            "查看目标实例的 service 托管状态。\n"
-            "这描述的是托管层 installed/running/detail，而不是 thread 或 binding 业务状态。"
+            "查看目标实例当前运行态。\n"
+            "这描述的是后台进程当前是否在运行，而不是登录后自动启动是否开启。"
         ),
+        formatter_class=_HelpFormatter,
+    )
+
+    autostart_parser = subparsers.add_parser(
+        "autostart",
+        help="管理目标实例“登录后自动启动”设置。",
+        description=(
+            "管理目标实例“登录后自动启动”设置。\n"
+            "底层会调用当前平台原生 service manager 完成设置；不会直接改动当前运行态。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    autostart_subparsers = autostart_parser.add_subparsers(
+        dest="autostart_command",
+        required=True,
+        title="autostart commands",
+        metavar="autostart-command",
+    )
+    autostart_subparsers.add_parser(
+        "enable",
+        help="开启登录后自动启动。",
+        description="开启目标实例登录后自动启动，不会立即启动它。",
+        formatter_class=_HelpFormatter,
+    )
+    autostart_subparsers.add_parser(
+        "disable",
+        help="关闭登录后自动启动。",
+        description="关闭目标实例登录后自动启动，不会立即停止它。",
+        formatter_class=_HelpFormatter,
+    )
+    autostart_subparsers.add_parser(
+        "status",
+        help="查看登录后自动启动是否开启。",
+        description="查看目标实例登录后自动启动是否开启。",
         formatter_class=_HelpFormatter,
     )
     subparsers.add_parser(
@@ -162,8 +214,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     instance_create_parser = instance_subparsers.add_parser(
         "create",
-        help="创建命名实例，并安装对应 service definition。",
-        description="创建命名实例，并安装对应 service definition；不会自动启动。",
+        help="创建命名实例，并准备对应后台 service 定义/注册材料。",
+        description="创建命名实例，并准备对应后台 service 定义/注册材料；不会自动启动，也不会自动开启登录后自动启动。",
         formatter_class=_HelpFormatter,
     )
     instance_create_parser.add_argument("name", help="要创建的实例名，例如 `corp-a`。")
@@ -175,22 +227,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     instance_remove_parser = instance_subparsers.add_parser(
         "remove",
-        help="删除命名实例及其 service definition。",
-        description="删除命名实例及其 service definition；不会删除 `default` 实例。",
+        help="删除命名实例及其实例级 service 注册材料。",
+        description="删除命名实例及其实例级 service 注册材料；不会删除 `default` 实例。",
         formatter_class=_HelpFormatter,
     )
     instance_remove_parser.add_argument("name", help="要删除的实例名，例如 `corp-a`。")
 
     subparsers.add_parser(
         "uninstall",
-        help="卸载所有 service definition 和 wrapper，保留配置与数据。",
-        description="卸载所有 service definition 和 wrapper，保留配置与数据。",
+        help="卸载所有 service 定义 / 自启动注册与 wrapper，保留配置与数据。",
+        description="卸载所有 service 定义 / 自启动注册与 wrapper，保留配置与数据。",
         formatter_class=_HelpFormatter,
     )
     subparsers.add_parser(
         "purge",
-        help="卸载所有 service definition 和 wrapper，并删除配置与数据。",
-        description="卸载所有 service definition 和 wrapper，并删除配置与数据。",
+        help="卸载所有 service 定义 / 自启动注册与 wrapper，并删除配置与数据。",
+        description="卸载所有 service 定义 / 自启动注册与 wrapper，并删除配置与数据。",
         formatter_class=_HelpFormatter,
     )
     return parser
@@ -352,27 +404,33 @@ def _known_instance_names() -> list[str]:
     return sorted(names)
 
 
-def _print_install_summary(bin_dir: pathlib.Path) -> None:
+def _print_install_summary(bin_dir: pathlib.Path, rebuilt_instances: list[str]) -> None:
     print("安装完成。")
     print(f"配置根目录: {default_config_root()}")
     print(f"数据根目录: {default_data_root()}")
     print(f"命令目录: {bin_dir}")
+    print(f"已重建实例: {', '.join(rebuilt_instances)}")
     if not shutil.which("codex"):
         print("警告: 未检测到 `codex` 命令，请先安装 Codex CLI。")
     print("")
     print("下一步:")
     print(f"  1. 编辑配置: {resolve_instance_paths(DEFAULT_INSTANCE_NAME).config_dir / 'system.yaml'}")
     print(f"  2. 按需写入 provider 环境变量: {default_config_root() / 'feishu-codex.env'}")
-    print("  3. 服务管理面已安装；启动服务: feishu-codex start")
-    print("  4. 查看初始化口令: feishu-codex config init-token")
-    print("  5. 新建命名实例: feishu-codex instance create corp-a")
+    print("  3. 按需开启登录后自动启动: feishu-codex autostart enable")
+    print("  4. 启动服务: feishu-codex start")
+    print("  5. 查看初始化口令: feishu-codex config init-token")
+    print("  6. 新建命名实例: feishu-codex instance create corp-a")
 
 
-def _handle_install() -> int:
-    _ensure_instance_scaffold(DEFAULT_INSTANCE_NAME)
+def _handle_bootstrap_install() -> int:
+    instance_names = _known_instance_names()
+    for instance_name in instance_names:
+        _ensure_instance_scaffold(instance_name)
     bin_dir = _install_wrappers()
-    current_service_manager().ensure_service(_service_definition(DEFAULT_INSTANCE_NAME))
-    _print_install_summary(bin_dir)
+    manager = current_service_manager()
+    for instance_name in instance_names:
+        manager.ensure_service(_service_definition(instance_name))
+    _print_install_summary(bin_dir, instance_names)
     return 0
 
 
@@ -381,17 +439,18 @@ def _handle_service_action(instance_name: str, action: str) -> int:
     _ensure_instance_scaffold(normalized)
     definition = _service_definition(normalized)
     manager = current_service_manager()
+    display_name = manager.display_name(definition)
     if action == "start":
         manager.start(definition)
-        print(f"started service: {definition.identifier}")
+        print(f"started service: {display_name}")
         return 0
     if action == "stop":
         manager.stop(definition)
-        print(f"stopped service: {definition.identifier}")
+        print(f"stopped service: {display_name}")
         return 0
     if action == "restart":
         manager.restart(definition)
-        print(f"restarted service: {definition.identifier}")
+        print(f"restarted service: {display_name}")
         return 0
     if action == "status":
         status = manager.status(definition)
@@ -401,6 +460,29 @@ def _handle_service_action(instance_name: str, action: str) -> int:
             print(f"detail: {status.detail}")
         return 0 if status.running else 3
     raise ValueError(f"unknown service action: {action}")
+
+
+def _handle_autostart_action(instance_name: str, action: str) -> int:
+    normalized = validate_instance_name(instance_name)
+    _ensure_instance_scaffold(normalized)
+    definition = _service_definition(normalized)
+    manager = current_service_manager()
+    display_name = manager.display_name(definition)
+    if action == "enable":
+        manager.autostart_enable(definition)
+        print(f"autostart enabled: {display_name}")
+        return 0
+    if action == "disable":
+        manager.autostart_disable(definition)
+        print(f"autostart disabled: {display_name}")
+        return 0
+    if action == "status":
+        status = manager.autostart_status(definition)
+        print(f"autostart: {'enabled' if status.enabled else 'disabled'}")
+        if status.detail:
+            print(f"detail: {status.detail}")
+        return 0 if status.enabled else 3
+    raise ValueError(f"unknown autostart action: {action}")
 
 
 def _handle_run(instance_name: str) -> int:
@@ -458,6 +540,11 @@ def _handle_uninstall(*, purge: bool) -> int:
                 manager.uninstall(definition)
             except ServiceManagerError:
                 pass
+    if manager is not None and hasattr(manager, "uninstall_shared"):
+        try:
+            manager.uninstall_shared()
+        except ServiceManagerError:
+            pass
     _remove_wrappers()
     if purge:
         shutil.rmtree(default_config_root(), ignore_errors=True)
@@ -548,10 +635,12 @@ def _handle_instance_remove(instance_name: str) -> int:
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
     try:
-        if args.command in {"install", "bootstrap-install"}:
-            raise SystemExit(_handle_install())
+        if args.command == "bootstrap-install":
+            raise SystemExit(_handle_bootstrap_install())
         if args.command in {"start", "stop", "restart", "status"}:
             raise SystemExit(_handle_service_action(args.instance, args.command))
+        if args.command == "autostart":
+            raise SystemExit(_handle_autostart_action(args.instance, args.autostart_command))
         if args.command == "run":
             raise SystemExit(_handle_run(args.instance))
         if args.command == "log":

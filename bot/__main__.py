@@ -36,7 +36,8 @@ def main(argv: list[str] | None = None) -> None:
     if not system_path.exists():
         raise FileNotFoundError(
             f"系统配置文件不存在: {system_path}\n"
-            "请先运行 feishu-codex install 或复制 system.yaml.example 并填入飞书应用凭证。"
+            "请重新运行仓库根目录下的 install.sh / install.ps1，"
+            "或复制 system.yaml.example 并填入飞书应用凭证。"
         )
     cfg = yaml.safe_load(system_path.read_text(encoding="utf-8")) or {}
     if not cfg.get("app_id") or not cfg.get("app_secret"):

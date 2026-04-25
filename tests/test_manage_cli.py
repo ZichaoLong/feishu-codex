@@ -4,17 +4,19 @@ import pathlib
 import stat
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from bot.instance_layout import resolve_instance_paths
 from bot.manage_cli import (
     _build_parser,
+    _handle_autostart_action,
     _ensure_instance_scaffold,
-    _handle_install,
+    _handle_bootstrap_install,
     _handle_instance_create,
     _handle_instance_list,
     _handle_instance_remove,
+    _handle_service_action,
     _write_wrapper,
 )
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
@@ -27,11 +29,16 @@ class ManageCliTests(unittest.TestCase):
         rendered = parser.format_help()
 
         self.assertIn("跨平台本地管理 CLI", rendered)
+        self.assertIn("首次安装与修复都请从仓库根目录执行 `bash install.sh`", rendered)
         self.assertIn("常见流程:", rendered)
+        self.assertIn("首次安装 / 修复", rendered)
+        self.assertIn("bash install.sh", rendered)
+        self.assertIn("autostart", rendered)
         self.assertIn("feishu-codex instance create corp-a", rendered)
-        self.assertIn("systemctl --user status feishu-codex", rendered)
         self.assertIn("创建、列出、删除命名实例", rendered)
         self.assertIn("查看或打开当前实例相关配置文件", rendered)
+        self.assertNotIn("    install            ", rendered)
+        self.assertNotIn("bootstrap-install", rendered)
 
     def test_instance_help_includes_subcommand_guidance(self) -> None:
         parser = _build_parser()
@@ -48,7 +55,32 @@ class ManageCliTests(unittest.TestCase):
         self.assertIn("remove", rendered)
         self.assertIn("不接受顶层 `--instance`", rendered)
 
-    def test_handle_install_creates_scaffold_and_wrappers(self) -> None:
+    def test_autostart_help_includes_subcommand_guidance(self) -> None:
+        parser = _build_parser()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as exc:
+                parser.parse_args(["autostart", "--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("登录后自动启动", rendered)
+        self.assertIn("enable", rendered)
+        self.assertIn("disable", rendered)
+        self.assertIn("status", rendered)
+
+    def test_public_install_subcommand_is_not_available(self) -> None:
+        parser = _build_parser()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                parser.parse_args(["install"])
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("公开命令中已无 `install`", stderr.getvalue())
+        self.assertNotIn("bootstrap-install", stderr.getvalue())
+
+    def test_handle_bootstrap_install_rebuilds_wrappers_and_known_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
             config_root = root / "config"
@@ -71,13 +103,17 @@ class ManageCliTests(unittest.TestCase):
                 },
                 clear=False,
             ):
+                _ensure_instance_scaffold("corp-a")
                 with patch("bot.manage_cli.current_service_manager", return_value=_DummyManager()):
-                    result = _handle_install()
+                    result = _handle_bootstrap_install()
 
             self.assertEqual(result, 0)
             self.assertTrue((config_root / "system.yaml").exists())
             self.assertTrue((config_root / "codex.yaml").exists())
             self.assertTrue((config_root / "init.token").exists())
+            self.assertTrue((config_root / "instances" / "corp-a" / "system.yaml").exists())
+            self.assertTrue((config_root / "instances" / "corp-a" / "codex.yaml").exists())
+            self.assertTrue((config_root / "instances" / "corp-a" / "init.token").exists())
             self.assertTrue(env_file.exists())
             self.assertTrue((bin_dir / "feishu-codex").exists())
             self.assertTrue((bin_dir / "feishu-codexd").exists())
@@ -86,10 +122,20 @@ class ManageCliTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((config_root / "system.yaml").stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE((config_root / "init.token").stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
-            self.assertEqual([definition.identifier for definition in ensured_definitions], ["feishu-codex"])
             self.assertEqual(
-                ensured_definitions[0].daemon_command,
+                {definition.identifier for definition in ensured_definitions},
+                {"feishu-codex", "feishu-codex-corp-a"},
+            )
+            commands_by_identifier = {
+                definition.identifier: definition.daemon_command for definition in ensured_definitions
+            }
+            self.assertEqual(
+                commands_by_identifier["feishu-codex"],
                 (str(bin_dir / "feishu-codex"), "--instance", "default", "run"),
+            )
+            self.assertEqual(
+                commands_by_identifier["feishu-codex-corp-a"],
+                (str(bin_dir / "feishu-codex"), "--instance", "corp-a", "run"),
             )
             rendered = (bin_dir / "feishu-codex").read_text(encoding="utf-8")
             self.assertIn(f'exec "{data_root / ".venv" / "bin" / "python"}" -m bot.manage_cli "$@"', rendered)
@@ -233,6 +279,78 @@ class ManageCliTests(unittest.TestCase):
                 ensured_definitions[0].daemon_command,
                 (str(bin_dir / "feishu-codex"), "--instance", "default", "run"),
             )
+
+    def test_handle_autostart_action_uses_manager_display_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+
+            class _DummyManager:
+                def __init__(self) -> None:
+                    self.enabled: list[str] = []
+
+                def display_name(self, definition) -> str:
+                    return definition.identifier
+
+                def autostart_enable(self, definition) -> None:
+                    self.enabled.append(definition.instance_name)
+
+            manager = _DummyManager()
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    with patch("bot.manage_cli.current_service_manager", return_value=manager):
+                        result = _handle_autostart_action("corp-a", "enable")
+
+            self.assertEqual(result, 0)
+            self.assertEqual(manager.enabled, ["corp-a"])
+            self.assertIn("autostart enabled: feishu-codex-corp-a", stdout.getvalue())
+
+    def test_handle_service_action_uses_manager_display_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+
+            class _DummyManager:
+                def __init__(self) -> None:
+                    self.started: list[str] = []
+
+                def display_name(self, definition) -> str:
+                    return f"feishu-codex@{definition.instance_name}"
+
+                def start(self, definition) -> None:
+                    self.started.append(definition.instance_name)
+
+            manager = _DummyManager()
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    with patch("bot.manage_cli.current_service_manager", return_value=manager):
+                        result = _handle_service_action("corp-a", "start")
+
+            self.assertEqual(result, 0)
+            self.assertEqual(manager.started, ["corp-a"])
+            self.assertIn("started service: feishu-codex@corp-a", stdout.getvalue())
 
     def test_handle_instance_remove_rejects_default_instance(self) -> None:
         with self.assertRaisesRegex(ValueError, "不能删除 `default` 实例"):

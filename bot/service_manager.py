@@ -9,6 +9,7 @@ import pathlib
 import plistlib
 import shlex
 import subprocess
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, InstancePaths
@@ -42,6 +43,12 @@ class ServiceStatus:
     detail: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class AutostartStatus:
+    enabled: bool
+    detail: str = ""
+
+
 def service_identifier(instance_name: str) -> str:
     normalized = str(instance_name or "").strip().lower() or DEFAULT_INSTANCE_NAME
     if normalized == DEFAULT_INSTANCE_NAME:
@@ -66,7 +73,32 @@ def build_service_definition(
     )
 
 
+def _missing_service_definition_message(path: pathlib.Path, instance_name: str) -> str:
+    if instance_name == DEFAULT_INSTANCE_NAME:
+        return (
+            f"service definition 缺失：{path}。"
+            " 请重新运行仓库根目录下的 `install.sh` 或 `install.ps1`。"
+        )
+    return (
+        f"service definition 缺失：{path}。"
+        " 请重新运行仓库根目录下的 `install.sh` 或 `install.ps1`；"
+        f" 如果这是一个新实例，先执行 `feishu-codex instance create {instance_name}`。"
+    )
+
+
 class ServiceManager:
+    def display_name(self, definition: ServiceDefinition) -> str:
+        return definition.identifier
+
+    def autostart_enable(self, definition: ServiceDefinition) -> None:
+        raise NotImplementedError
+
+    def autostart_disable(self, definition: ServiceDefinition) -> None:
+        raise NotImplementedError
+
+    def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
+        raise NotImplementedError
+
     def ensure_service(self, definition: ServiceDefinition) -> None:
         raise NotImplementedError
 
@@ -86,19 +118,37 @@ class ServiceManager:
     def uninstall(self, definition: ServiceDefinition) -> None:
         raise NotImplementedError
 
+    def uninstall_shared(self) -> None:
+        return None
+
 
 class SystemdUserServiceManager(ServiceManager):
+    def _unit_name(self, definition: ServiceDefinition) -> str:
+        if definition.instance_name == DEFAULT_INSTANCE_NAME:
+            return "feishu-codex"
+        return f"feishu-codex@{definition.instance_name}"
+
+    def display_name(self, definition: ServiceDefinition) -> str:
+        return self._unit_name(definition)
+
+    def _template_unit_path(self) -> pathlib.Path:
+        return default_systemd_user_dir() / "feishu-codex@.service"
+
     def _unit_path(self, definition: ServiceDefinition) -> pathlib.Path:
-        return default_systemd_user_dir() / f"{definition.identifier}.service"
+        if definition.instance_name == DEFAULT_INSTANCE_NAME:
+            return default_systemd_user_dir() / "feishu-codex.service"
+        return self._template_unit_path()
+
+    def _legacy_named_unit_path(self, instance_name: str) -> pathlib.Path:
+        return default_systemd_user_dir() / f"feishu-codex-{instance_name}.service"
+
+    def _legacy_exact_instance_unit_path(self, instance_name: str) -> pathlib.Path:
+        return default_systemd_user_dir() / f"feishu-codex@{instance_name}.service"
 
     def _require_installed(self, definition: ServiceDefinition) -> pathlib.Path:
         unit_path = self._unit_path(definition)
         if not unit_path.exists():
-            raise ServiceManagerError(
-                f"service definition 缺失：{unit_path}。"
-                " 请先执行 `feishu-codex install`，或对命名实例执行"
-                f" `feishu-codex instance create {definition.instance_name}`。"
-            )
+            raise ServiceManagerError(_missing_service_definition_message(unit_path, definition.instance_name))
         return unit_path
 
     @staticmethod
@@ -121,62 +171,126 @@ class SystemdUserServiceManager(ServiceManager):
         escaped = str(arg).replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
 
+    def _render_unit(self, definition: ServiceDefinition) -> str:
+        if definition.instance_name == DEFAULT_INSTANCE_NAME:
+            working_directory = str(definition.paths.data_dir)
+            exec_start = " ".join(self._quote_unit_arg(item) for item in definition.daemon_command)
+            description = "Feishu Codex (default)"
+        else:
+            working_directory = f"{definition.paths.data_dir.parent}/%i"
+            exec_start = " ".join(
+                self._quote_unit_arg(item)
+                for item in (
+                    definition.daemon_command[0],
+                    "--instance",
+                    "%i",
+                    "run",
+                )
+            )
+            description = "Feishu Codex (%i)"
+        return "\n".join(
+            [
+                "[Unit]",
+                f"Description={description}",
+                "After=network-online.target",
+                "Wants=network-online.target",
+                "",
+                "[Service]",
+                "Type=simple",
+                f"WorkingDirectory={working_directory}",
+                f"ExecStart={exec_start}",
+                "Restart=on-failure",
+                "RestartSec=10",
+                "",
+                "[Install]",
+                "WantedBy=default.target",
+                "",
+            ]
+        )
+
+    def _legacy_named_unit_name(self, instance_name: str) -> str:
+        return f"feishu-codex-{instance_name}"
+
+    def _cleanup_legacy_named_units(self, instance_name: str) -> bool:
+        """Remove pre-template Linux unit names and preserve prior autostart when possible."""
+        preserved_autostart = False
+        legacy_named_unit = self._legacy_named_unit_name(instance_name)
+        legacy_named_path = self._legacy_named_unit_path(instance_name)
+        if legacy_named_path.exists():
+            enabled = self._run("systemctl", "--user", "is-enabled", legacy_named_unit, check=False)
+            preserved_autostart = enabled.returncode == 0
+            self._run("systemctl", "--user", "disable", legacy_named_unit, check=False)
+            self._run("systemctl", "--user", "stop", legacy_named_unit, check=False)
+            legacy_named_path.unlink()
+        legacy_exact_path = self._legacy_exact_instance_unit_path(instance_name)
+        if legacy_exact_path.exists():
+            enabled = self._run("systemctl", "--user", "is-enabled", f"feishu-codex@{instance_name}", check=False)
+            preserved_autostart = preserved_autostart or enabled.returncode == 0
+            legacy_exact_path.unlink()
+        return preserved_autostart
+
     def ensure_service(self, definition: ServiceDefinition) -> None:
         unit_path = self._unit_path(definition)
         unit_path.parent.mkdir(parents=True, exist_ok=True)
         definition.paths.data_dir.mkdir(parents=True, exist_ok=True)
         definition.paths.config_dir.mkdir(parents=True, exist_ok=True)
-        exec_start = " ".join(self._quote_unit_arg(item) for item in definition.daemon_command)
-        unit_path.write_text(
-            "\n".join(
-                [
-                    "[Unit]",
-                    f"Description=Feishu Codex ({definition.instance_name})",
-                    "After=network-online.target",
-                    "Wants=network-online.target",
-                    "",
-                    "[Service]",
-                    "Type=simple",
-                    f"WorkingDirectory={definition.paths.data_dir}",
-                    f"ExecStart={exec_start}",
-                    "Restart=on-failure",
-                    "RestartSec=10",
-                    "",
-                    "[Install]",
-                    "WantedBy=default.target",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
+        preserve_autostart = False
+        if definition.instance_name != DEFAULT_INSTANCE_NAME:
+            preserve_autostart = self._cleanup_legacy_named_units(definition.instance_name)
+        unit_path.write_text(self._render_unit(definition), encoding="utf-8")
         self._run("systemctl", "--user", "daemon-reload")
+        if preserve_autostart:
+            self._run("systemctl", "--user", "enable", self._unit_name(definition), check=False)
+
+    def autostart_enable(self, definition: ServiceDefinition) -> None:
+        self._require_installed(definition)
+        self._run("systemctl", "--user", "enable", self._unit_name(definition))
+
+    def autostart_disable(self, definition: ServiceDefinition) -> None:
+        self._run("systemctl", "--user", "disable", self._unit_name(definition), check=False)
+
+    def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
+        if not self._unit_path(definition).exists():
+            return AutostartStatus(enabled=False, detail="unit file missing")
+        result = self._run("systemctl", "--user", "is-enabled", self._unit_name(definition), check=False)
+        detail = result.stdout.strip() or result.stderr.strip()
+        return AutostartStatus(enabled=result.returncode == 0, detail=detail)
 
     def start(self, definition: ServiceDefinition) -> None:
         self._require_installed(definition)
-        self._run("systemctl", "--user", "enable", definition.identifier)
-        self._run("systemctl", "--user", "start", definition.identifier)
+        self._run("systemctl", "--user", "start", self._unit_name(definition))
 
     def stop(self, definition: ServiceDefinition) -> None:
-        self._run("systemctl", "--user", "stop", definition.identifier, check=False)
+        self._run("systemctl", "--user", "stop", self._unit_name(definition), check=False)
 
     def restart(self, definition: ServiceDefinition) -> None:
         self._require_installed(definition)
-        self._run("systemctl", "--user", "restart", definition.identifier)
+        self._run("systemctl", "--user", "restart", self._unit_name(definition))
 
     def status(self, definition: ServiceDefinition) -> ServiceStatus:
         unit_path = self._unit_path(definition)
         if not unit_path.exists():
             return ServiceStatus(installed=False, running=False, detail="unit file missing")
-        result = self._run("systemctl", "--user", "is-active", definition.identifier, check=False)
+        result = self._run("systemctl", "--user", "is-active", self._unit_name(definition), check=False)
         running = result.returncode == 0 and result.stdout.strip() == "active"
         detail = result.stdout.strip() or result.stderr.strip()
         return ServiceStatus(installed=True, running=running, detail=detail)
 
     def uninstall(self, definition: ServiceDefinition) -> None:
-        self._run("systemctl", "--user", "disable", definition.identifier, check=False)
-        self._run("systemctl", "--user", "stop", definition.identifier, check=False)
+        self.autostart_disable(definition)
+        self._run("systemctl", "--user", "stop", self._unit_name(definition), check=False)
+        if definition.instance_name == DEFAULT_INSTANCE_NAME:
+            try:
+                self._unit_path(definition).unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            self._cleanup_legacy_named_units(definition.instance_name)
+        self._run("systemctl", "--user", "daemon-reload", check=False)
+
+    def uninstall_shared(self) -> None:
         try:
-            self._unit_path(definition).unlink()
+            self._template_unit_path().unlink()
         except FileNotFoundError:
             pass
         self._run("systemctl", "--user", "daemon-reload", check=False)
@@ -191,17 +305,16 @@ class LaunchdUserServiceManager(ServiceManager):
     def _label(self, definition: ServiceDefinition) -> str:
         return f"io.feishu-codex.{definition.instance_name}"
 
+    def _definition_path(self, definition: ServiceDefinition) -> pathlib.Path:
+        return definition.paths.data_dir / "service.plist"
+
     def _plist_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return default_launch_agent_dir() / f"{self._label(definition)}.plist"
 
     def _require_installed(self, definition: ServiceDefinition) -> pathlib.Path:
-        plist_path = self._plist_path(definition)
+        plist_path = self._definition_path(definition)
         if not plist_path.exists():
-            raise ServiceManagerError(
-                f"service definition 缺失：{plist_path}。"
-                " 请先执行 `feishu-codex install`，或对命名实例执行"
-                f" `feishu-codex instance create {definition.instance_name}`。"
-            )
+            raise ServiceManagerError(_missing_service_definition_message(plist_path, definition.instance_name))
         return plist_path
 
     @staticmethod
@@ -220,7 +333,7 @@ class LaunchdUserServiceManager(ServiceManager):
             raise ServiceManagerError(message) from exc
 
     def ensure_service(self, definition: ServiceDefinition) -> None:
-        plist_path = self._plist_path(definition)
+        plist_path = self._definition_path(definition)
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         definition.paths.data_dir.mkdir(parents=True, exist_ok=True)
         definition.paths.config_dir.mkdir(parents=True, exist_ok=True)
@@ -254,7 +367,7 @@ class LaunchdUserServiceManager(ServiceManager):
         self.start(definition)
 
     def status(self, definition: ServiceDefinition) -> ServiceStatus:
-        plist_path = self._plist_path(definition)
+        plist_path = self._definition_path(definition)
         if not plist_path.exists():
             return ServiceStatus(installed=False, running=False, detail="plist missing")
         domain = self._uid_domain()
@@ -266,27 +379,49 @@ class LaunchdUserServiceManager(ServiceManager):
 
     def uninstall(self, definition: ServiceDefinition) -> None:
         self.stop(definition)
+        self.autostart_disable(definition)
+        try:
+            self._definition_path(definition).unlink()
+        except FileNotFoundError:
+            pass
+
+    def autostart_enable(self, definition: ServiceDefinition) -> None:
+        definition_path = self._require_installed(definition)
+        autostart_path = self._plist_path(definition)
+        autostart_path.parent.mkdir(parents=True, exist_ok=True)
+        if autostart_path.exists() or autostart_path.is_symlink():
+            autostart_path.unlink()
+        autostart_path.symlink_to(definition_path)
+
+    def autostart_disable(self, definition: ServiceDefinition) -> None:
         try:
             self._plist_path(definition).unlink()
         except FileNotFoundError:
             pass
 
+    def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
+        autostart_path = self._plist_path(definition)
+        enabled = autostart_path.exists() or autostart_path.is_symlink()
+        detail = str(autostart_path) if enabled else "launch agent disabled"
+        return AutostartStatus(enabled=enabled, detail=detail)
+
 
 class WindowsTaskSchedulerServiceManager(ServiceManager):
+    _TASK_XML_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+
     def _task_name(self, definition: ServiceDefinition) -> str:
         return definition.identifier
 
     def _launcher_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return definition.paths.data_dir / "service-launch.cmd"
 
+    def _task_xml_path(self, definition: ServiceDefinition) -> pathlib.Path:
+        return definition.paths.data_dir / "service-task.xml"
+
     def _require_installed(self, definition: ServiceDefinition) -> pathlib.Path:
         launcher_path = self._launcher_path(definition)
         if not launcher_path.exists():
-            raise ServiceManagerError(
-                f"service definition 缺失：{launcher_path}。"
-                " 请先执行 `feishu-codex install`，或对命名实例执行"
-                f" `feishu-codex instance create {definition.instance_name}`。"
-            )
+            raise ServiceManagerError(_missing_service_definition_message(launcher_path, definition.instance_name))
         return launcher_path
 
     @staticmethod
@@ -304,6 +439,73 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
             message = exc.stderr.strip() or exc.stdout.strip() or str(exc)
             raise ServiceManagerError(message) from exc
 
+    def _query_task_xml(self, definition: ServiceDefinition) -> ET.Element | None:
+        result = self._run("schtasks", "/Query", "/TN", self._task_name(definition), "/XML", check=False)
+        if result.returncode != 0:
+            return None
+        try:
+            return ET.fromstring(result.stdout)
+        except ET.ParseError as exc:
+            raise ServiceManagerError("Task Scheduler 返回了无法解析的 XML。") from exc
+
+    def _task_autostart_enabled(self, definition: ServiceDefinition) -> bool:
+        root = self._query_task_xml(definition)
+        if root is None:
+            return False
+        return root.find(f".//{{{self._TASK_XML_NAMESPACE}}}LogonTrigger") is not None
+
+    def _task_xml_bytes(self, definition: ServiceDefinition, *, autostart_enabled: bool) -> bytes:
+        ET.register_namespace("", self._TASK_XML_NAMESPACE)
+
+        def tag(name: str) -> str:
+            return f"{{{self._TASK_XML_NAMESPACE}}}{name}"
+
+        task = ET.Element(tag("Task"), {"version": "1.3"})
+        registration = ET.SubElement(task, tag("RegistrationInfo"))
+        ET.SubElement(registration, tag("Description")).text = f"Feishu Codex ({definition.instance_name})"
+        if autostart_enabled:
+            triggers = ET.SubElement(task, tag("Triggers"))
+            logon = ET.SubElement(triggers, tag("LogonTrigger"))
+            ET.SubElement(logon, tag("Enabled")).text = "true"
+        principals = ET.SubElement(task, tag("Principals"))
+        principal = ET.SubElement(principals, tag("Principal"), {"id": "Author"})
+        ET.SubElement(principal, tag("LogonType")).text = "InteractiveToken"
+        ET.SubElement(principal, tag("RunLevel")).text = "LeastPrivilege"
+        settings = ET.SubElement(task, tag("Settings"))
+        for key, value in (
+            ("AllowStartOnDemand", "true"),
+            ("MultipleInstancesPolicy", "IgnoreNew"),
+            ("DisallowStartIfOnBatteries", "false"),
+            ("StopIfGoingOnBatteries", "false"),
+            ("AllowHardTerminate", "true"),
+            ("StartWhenAvailable", "false"),
+            ("RunOnlyIfNetworkAvailable", "false"),
+            ("Enabled", "true"),
+            ("Hidden", "false"),
+            ("ExecutionTimeLimit", "PT0S"),
+            ("Priority", "7"),
+            ("RunOnlyIfIdle", "false"),
+            ("WakeToRun", "false"),
+        ):
+            ET.SubElement(settings, tag(key)).text = value
+        actions = ET.SubElement(task, tag("Actions"), {"Context": "Author"})
+        exec_action = ET.SubElement(actions, tag("Exec"))
+        ET.SubElement(exec_action, tag("Command")).text = str(self._launcher_path(definition))
+        return ET.tostring(task, encoding="utf-16", xml_declaration=True)
+
+    def _register_task(self, definition: ServiceDefinition, *, autostart_enabled: bool) -> None:
+        xml_path = self._task_xml_path(definition)
+        xml_path.write_bytes(self._task_xml_bytes(definition, autostart_enabled=autostart_enabled))
+        self._run(
+            "schtasks",
+            "/Create",
+            "/TN",
+            self._task_name(definition),
+            "/XML",
+            str(xml_path),
+            "/F",
+        )
+
     def ensure_service(self, definition: ServiceDefinition) -> None:
         definition.paths.data_dir.mkdir(parents=True, exist_ok=True)
         definition.paths.config_dir.mkdir(parents=True, exist_ok=True)
@@ -319,19 +521,7 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
             ),
             encoding="utf-8",
         )
-        self._run(
-            "schtasks",
-            "/Create",
-            "/TN",
-            self._task_name(definition),
-            "/SC",
-            "ONLOGON",
-            "/RL",
-            "LIMITED",
-            "/TR",
-            str(launcher_path),
-            "/F",
-        )
+        self._register_task(definition, autostart_enabled=self._task_autostart_enabled(definition))
 
     def start(self, definition: ServiceDefinition) -> None:
         self._require_installed(definition)
@@ -355,6 +545,25 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
             self._launcher_path(definition).unlink()
         except FileNotFoundError:
             pass
+        try:
+            self._task_xml_path(definition).unlink()
+        except FileNotFoundError:
+            pass
+
+    def autostart_enable(self, definition: ServiceDefinition) -> None:
+        self._require_installed(definition)
+        self._register_task(definition, autostart_enabled=True)
+
+    def autostart_disable(self, definition: ServiceDefinition) -> None:
+        self._require_installed(definition)
+        self._register_task(definition, autostart_enabled=False)
+
+    def autostart_status(self, definition: ServiceDefinition) -> AutostartStatus:
+        if self._query_task_xml(definition) is None:
+            return AutostartStatus(enabled=False, detail="scheduled task missing")
+        enabled = self._task_autostart_enabled(definition)
+        detail = "logon trigger enabled" if enabled else "logon trigger disabled"
+        return AutostartStatus(enabled=enabled, detail=detail)
 
 
 def current_service_manager() -> ServiceManager:
