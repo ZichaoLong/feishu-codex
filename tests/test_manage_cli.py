@@ -2,6 +2,8 @@ import io
 import os
 import pathlib
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -26,6 +28,30 @@ from bot.stores.service_instance_lease import ServiceInstanceLease
 
 
 class ManageCliTests(unittest.TestCase):
+    def test_import_manage_cli_does_not_emit_lark_pkg_resources_warning(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-c", "import bot.manage_cli"],
+            cwd=str(pathlib.Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("pkg_resources is deprecated as an API", result.stderr)
+
+    def test_import_daemon_entry_does_not_emit_lark_pkg_resources_warning(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-c", "import bot.__main__"],
+            cwd=str(pathlib.Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("pkg_resources is deprecated as an API", result.stderr)
+
     def test_top_level_help_includes_examples_and_command_descriptions(self) -> None:
         parser = _build_parser()
         rendered = parser.format_help()

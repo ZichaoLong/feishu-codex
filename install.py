@@ -34,6 +34,10 @@ def main() -> None:
         venv.EnvBuilder(with_pip=True).create(venv_dir)
     venv_python = _venv_python_path(venv_dir)
     subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "--upgrade", "setuptools<81", "wheel"],
+        check=True,
+    )
     subprocess.run([str(venv_python), "-m", "pip", "install", str(install_dir)], check=True)
     subprocess.run([str(venv_python), "-m", "bot.manage_cli", "bootstrap-install"], check=True)
 

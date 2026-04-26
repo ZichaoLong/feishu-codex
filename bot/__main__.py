@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
+import warnings
 from pathlib import Path
 
 import yaml
@@ -15,13 +16,21 @@ from bot.config import ensure_init_token, load_config
 from bot.env_file import load_env_file
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, apply_instance_environment, resolve_instance_paths, validate_instance_name
 from bot.logging_setup import configure_logging
-from bot.standalone import CodexBot
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="feishu-codexd")
     parser.add_argument("--instance", default=DEFAULT_INSTANCE_NAME)
     return parser
+
+
+def _suppress_known_third_party_runtime_warnings() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        message=r"pkg_resources is deprecated as an API\..*",
+        category=UserWarning,
+        module=r"lark_oapi\.ws\.pb\.google",
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -45,6 +54,9 @@ def main(argv: list[str] | None = None) -> None:
 
     ensure_init_token()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    _suppress_known_third_party_runtime_warnings()
+    from bot.standalone import CodexBot
 
     bot = CodexBot(
         cfg["app_id"],

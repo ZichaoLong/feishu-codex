@@ -5,6 +5,7 @@ Cross-platform management CLI for local feishu-codex installation.
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import pathlib
 import secrets
@@ -14,7 +15,6 @@ import subprocess
 import sys
 import time
 
-from bot import __main__ as daemon_entry
 from bot.env_file import ensure_env_template
 from bot.file_permissions import ensure_private_file_permissions
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, apply_instance_environment, resolve_instance_paths, validate_instance_name
@@ -404,6 +404,10 @@ def _prepare_cli_instance(instance_name: str) -> str:
     raise ValueError(f"命名实例 `{normalized}` 尚未创建；请先执行 `feishu-codex instance create {normalized}`。")
 
 
+def _load_daemon_entry():
+    return importlib.import_module("bot.__main__")
+
+
 def _known_instance_names() -> list[str]:
     names = {DEFAULT_INSTANCE_NAME}
     config_root = default_config_root()
@@ -505,6 +509,7 @@ def _handle_autostart_action(instance_name: str, action: str) -> int:
 
 
 def _handle_run(instance_name: str) -> int:
+    daemon_entry = _load_daemon_entry()
     daemon_entry.main(["--instance", _prepare_cli_instance(instance_name)])
     return 0
 
