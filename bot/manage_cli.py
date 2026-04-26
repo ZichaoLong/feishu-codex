@@ -431,21 +431,25 @@ def _print_install_summary(bin_dir: pathlib.Path, rebuilt_instances: list[str]) 
     print(f"配置根目录: {default_config_root()}")
     print(f"数据根目录: {default_data_root()}")
     print(f"命令目录: {bin_dir}")
+    print( "  - 本地服务进程管理 feishu-codex --help")
+    print( "  - 本地查看、管理 binding / thread 状态  feishu-codexctl --help")
     print(f"已重建实例: {', '.join(rebuilt_instances)}。不覆盖各实例现有用户配置")
     if not shutil.which("codex"):
         print("警告: 未检测到 `codex` 命令，请先安装 Codex CLI。")
     print("")
     print("下一步:")
-    print("  1. 本地服务进程管理: feishu-codex")
-    print(
-        "  2. 编辑配置、按需写入 provider 环境变量: "
-        f"{default_paths.config_dir / 'system.yaml'}, {default_config_root() / 'feishu-codex.env'}"
-    )
-    print("  3. 开启登录后自动启动: feishu-codex autostart enable")
-    print("  4. 启动服务: feishu-codex start")
-    print("  5. 查看初始化口令: feishu-codex config init-token")
-    print("  6. 新建并配置命名实例: feishu-codex instance create corp-a, feishu-codex --instance corp-a ...")
-    print("  7. 在本地查看、管理 binding / thread 状态: feishu-codexctl")
+    print("  1. 配置飞书应用、provider 环境变量")
+    print(f"    - feishu-codex config --open system")
+    print(f"    - feishu-codex config --open env（按需）")
+    print("  2. 启动服务并设置登陆后自动启动")
+    print("    - feishu-codex start")
+    print("    - feishu-codex autostart enable")
+    print("  3. 飞书侧初始化")
+    print("    - 查看初始化口令 feishu-codex config init-token")
+    print("    - 在飞书侧发送 /init <token>")
+    print("  4. 新建并配置命名实例")
+    print("    - feishu-codex instance create corp-a")
+    print("    - feishu-codex --instance corp-a start|autostart|config ...")
 
 
 def _handle_bootstrap_install() -> int:

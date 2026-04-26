@@ -1,9 +1,50 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 
 from bot.feishu_codexctl import _build_parser, _thread_target_params
 
 
 class FeishuCodexCtlTests(unittest.TestCase):
+    def test_top_level_help_includes_operator_guidance(self) -> None:
+        parser = _build_parser()
+        rendered = parser.format_help()
+
+        self.assertIn("本地查看 / 管理面", rendered)
+        self.assertIn("不是第二个 Codex 前端", rendered)
+        self.assertIn("除 `instance list` 外", rendered)
+        self.assertIn("binding clear", rendered)
+        self.assertIn("常用命令:", rendered)
+        self.assertIn("feishu-codexctl --instance corp-a service status", rendered)
+
+    def test_thread_help_includes_scope_and_selector_guidance(self) -> None:
+        parser = _build_parser()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as exc:
+                parser.parse_args(["thread", "--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("Thread 管理面", rendered)
+        self.assertIn("`list` 默认列当前目录线程", rendered)
+        self.assertIn("`--thread-id` 或 `--thread-name`", rendered)
+        self.assertIn("thread commands", rendered)
+        self.assertIn("unsubscribe", rendered)
+
+    def test_binding_help_includes_clear_semantics(self) -> None:
+        parser = _build_parser()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as exc:
+                parser.parse_args(["binding", "--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("Binding 管理面", rendered)
+        self.assertIn("Feishu 本地 bookmark", rendered)
+        self.assertIn("不等于 `unsubscribe`", rendered)
+
     def test_binding_clear_accepts_binding_id(self) -> None:
         parser = _build_parser()
 

@@ -21,6 +21,10 @@ from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_e
 from bot.stores.service_instance_lease import ServiceInstanceLease
 
 
+class _HelpFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
+    pass
+
+
 def _data_dir() -> pathlib.Path:
     raw = os.environ.get("FC_DATA_DIR", "").strip()
     if raw:
@@ -282,53 +286,173 @@ def _revoke_thread(data_dir: pathlib.Path, target_params: dict[str, str]) -> int
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="feishu-codexctl")
-    parser.add_argument("--instance")
-    subparsers = parser.add_subparsers(dest="resource", required=True)
+    parser = argparse.ArgumentParser(
+        prog="feishu-codexctl",
+        description=(
+            "本地查看 / 管理面：查看运行中的 feishu-codex service、binding、thread 与实例。\n\n"
+            "说明：\n"
+            "- `feishu-codexctl` 是本地查看 / 管理面，不是第二个 Codex 前端\n"
+            "- 除 `instance list` 外，其余命令默认作用于 `default` 实例；多实例时请显式加 `--instance <name>`\n"
+            "- `binding clear` / `clear-all` 清的是 Feishu 本地 bookmark，不删除 thread，也不等于 `unsubscribe`\n"
+            "- `thread list` 默认列当前目录线程，也支持 `--scope global`\n"
+        ),
+        epilog=(
+            "常用命令:\n"
+            "  feishu-codexctl service status\n"
+            "  feishu-codexctl instance list\n"
+            "  feishu-codexctl binding list\n"
+            "  feishu-codexctl binding status <binding_id>\n"
+            "  feishu-codexctl thread list --scope cwd\n"
+            "  feishu-codexctl thread status --thread-id <id>\n"
+            "  feishu-codexctl thread unsubscribe --thread-name <name>\n"
+            "\n"
+            "多实例:\n"
+            "  feishu-codexctl --instance corp-a service status\n"
+            "  feishu-codexctl --instance corp-a thread admissions\n"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    parser.add_argument(
+        "--instance",
+        help="目标实例；省略时默认连 `default`。仅 `instance list` 不使用这个参数。",
+    )
+    subparsers = parser.add_subparsers(dest="resource", required=True, title="resources", metavar="resource")
 
-    instance = subparsers.add_parser("instance")
-    instance_sub = instance.add_subparsers(dest="action", required=True)
-    instance_sub.add_parser("list")
+    instance = subparsers.add_parser(
+        "instance",
+        help="查看运行中的实例注册表。",
+        description="实例发现面。当前只提供 `list`，用于查看本机运行中的实例及其控制面地址。",
+        formatter_class=_HelpFormatter,
+    )
+    instance_sub = instance.add_subparsers(dest="action", required=True, title="instance commands", metavar="instance-command")
+    instance_sub.add_parser(
+        "list",
+        help="列出运行中的实例。",
+        description="列出本机运行中的实例、owner pid、control endpoint 与 app-server 地址。",
+        formatter_class=_HelpFormatter,
+    )
 
-    service = subparsers.add_parser("service")
-    service_sub = service.add_subparsers(dest="action", required=True)
-    service_sub.add_parser("status")
+    service = subparsers.add_parser(
+        "service",
+        help="查看目标实例的服务状态。",
+        description="服务查看面。用于确认目标实例是否在运行，以及当前 control plane / app-server 发现状态。",
+        formatter_class=_HelpFormatter,
+    )
+    service_sub = service.add_subparsers(dest="action", required=True, title="service commands", metavar="service-command")
+    service_sub.add_parser(
+        "status",
+        help="查看服务运行态。",
+        description="查看目标实例当前服务运行态、control endpoint、app-server 地址以及 binding / thread 统计。",
+        formatter_class=_HelpFormatter,
+    )
 
-    binding = subparsers.add_parser("binding")
-    binding_sub = binding.add_subparsers(dest="action", required=True)
-    binding_sub.add_parser("list")
-    binding_status = binding_sub.add_parser("status")
-    binding_status.add_argument("binding_id")
-    binding_clear = binding_sub.add_parser("clear")
-    binding_clear.add_argument("binding_id")
-    binding_sub.add_parser("clear-all")
+    binding = subparsers.add_parser(
+        "binding",
+        help="查看或清理目标实例里的 Feishu binding。",
+        description=(
+            "Binding 管理面。\n"
+            "`clear` / `clear-all` 清的是 Feishu 本地 bookmark，不删除 thread，也不等于 `unsubscribe`。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    binding_sub = binding.add_subparsers(dest="action", required=True, title="binding commands", metavar="binding-command")
+    binding_sub.add_parser(
+        "list",
+        help="列出当前实例可见 binding。",
+        description="列出当前实例可见的 binding、运行态、关联 thread 与 cwd。",
+        formatter_class=_HelpFormatter,
+    )
+    binding_status = binding_sub.add_parser(
+        "status",
+        help="查看单个 binding 详情。",
+        description="查看单个 binding 的 chat、thread、runtime 与下一次发言可否被接受。",
+        formatter_class=_HelpFormatter,
+    )
+    binding_status.add_argument("binding_id", help="目标 binding id。")
+    binding_clear = binding_sub.add_parser(
+        "clear",
+        help="清除单个 binding bookmark。",
+        description="清除单个 Feishu binding bookmark；不会删除 thread，也不会执行 unsubscribe。",
+        formatter_class=_HelpFormatter,
+    )
+    binding_clear.add_argument("binding_id", help="要清除的 binding id。")
+    binding_sub.add_parser(
+        "clear-all",
+        help="清除当前实例下全部 binding bookmark。",
+        description="清除当前实例下全部 Feishu binding bookmark；不会删除 thread，也不会执行 unsubscribe。",
+        formatter_class=_HelpFormatter,
+    )
 
-    thread = subparsers.add_parser("thread")
-    thread_sub = thread.add_subparsers(dest="action", required=True)
-    thread_list = thread_sub.add_parser("list")
-    thread_list.add_argument("--scope", choices=("cwd", "global"), default="cwd")
-    thread_list.add_argument("--cwd", default="")
-    thread_status = thread_sub.add_parser("status")
+    thread = subparsers.add_parser(
+        "thread",
+        help="查看或管理 thread。",
+        description=(
+            "Thread 管理面。\n"
+            "- `list` 默认列当前目录线程；也支持 `--scope global`\n"
+            "- 其他 thread 子命令必须显式指定 `--thread-id` 或 `--thread-name`"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    thread_sub = thread.add_subparsers(dest="action", required=True, title="thread commands", metavar="thread-command")
+    thread_list = thread_sub.add_parser(
+        "list",
+        help="列出可见 thread。",
+        description="列出当前实例可见 thread。默认按当前目录过滤，也支持 `--scope global` 查看全局线程。",
+        formatter_class=_HelpFormatter,
+    )
+    thread_list.add_argument("--scope", choices=("cwd", "global"), default="cwd", help="列线程时使用的作用域。")
+    thread_list.add_argument("--cwd", default="", help="当 `--scope cwd` 时使用的目录；省略时取当前 shell 目录。")
+    thread_status = thread_sub.add_parser(
+        "status",
+        help="查看单个 thread 详情。",
+        description="查看单个 thread 的 backend 状态、绑定关系与 unsubscribe 可用性。",
+        formatter_class=_HelpFormatter,
+    )
     thread_status_target = thread_status.add_mutually_exclusive_group(required=True)
-    thread_status_target.add_argument("--thread-id")
-    thread_status_target.add_argument("--thread-name")
-    thread_bindings = thread_sub.add_parser("bindings")
+    thread_status_target.add_argument("--thread-id", help="目标 thread id。")
+    thread_status_target.add_argument("--thread-name", help="目标 thread 名称。")
+    thread_bindings = thread_sub.add_parser(
+        "bindings",
+        help="查看某个 thread 关联的 binding。",
+        description="查看某个 thread 当前关联的 binding 列表。",
+        formatter_class=_HelpFormatter,
+    )
     thread_bindings_target = thread_bindings.add_mutually_exclusive_group(required=True)
-    thread_bindings_target.add_argument("--thread-id")
-    thread_bindings_target.add_argument("--thread-name")
-    thread_unsubscribe = thread_sub.add_parser("unsubscribe")
+    thread_bindings_target.add_argument("--thread-id", help="目标 thread id。")
+    thread_bindings_target.add_argument("--thread-name", help="目标 thread 名称。")
+    thread_unsubscribe = thread_sub.add_parser(
+        "unsubscribe",
+        help="让 Feishu 释放某个 thread 的 runtime residency。",
+        description="让 Feishu 释放某个 thread 的 runtime residency，同时保留 thread 与 binding 关系。",
+        formatter_class=_HelpFormatter,
+    )
     thread_unsubscribe_target = thread_unsubscribe.add_mutually_exclusive_group(required=True)
-    thread_unsubscribe_target.add_argument("--thread-id")
-    thread_unsubscribe_target.add_argument("--thread-name")
-    thread_admissions = thread_sub.add_parser("admissions")
-    thread_import = thread_sub.add_parser("import")
+    thread_unsubscribe_target.add_argument("--thread-id", help="目标 thread id。")
+    thread_unsubscribe_target.add_argument("--thread-name", help="目标 thread 名称。")
+    thread_sub.add_parser(
+        "admissions",
+        help="列出当前实例 admitted thread。",
+        description="列出当前实例 admission 集合里允许访问的 thread id。",
+        formatter_class=_HelpFormatter,
+    )
+    thread_import = thread_sub.add_parser(
+        "import",
+        help="把 thread 加入当前实例 admission。",
+        description="把某个已存在 thread 加入当前实例 admission，便于当前实例继续访问它。",
+        formatter_class=_HelpFormatter,
+    )
     thread_import_target = thread_import.add_mutually_exclusive_group(required=True)
-    thread_import_target.add_argument("--thread-id")
-    thread_import_target.add_argument("--thread-name")
-    thread_revoke = thread_sub.add_parser("revoke")
+    thread_import_target.add_argument("--thread-id", help="目标 thread id。")
+    thread_import_target.add_argument("--thread-name", help="目标 thread 名称。")
+    thread_revoke = thread_sub.add_parser(
+        "revoke",
+        help="把 thread 从当前实例 admission 移除。",
+        description="把某个 thread 从当前实例 admission 移除；不会删除 thread 本身。",
+        formatter_class=_HelpFormatter,
+    )
     thread_revoke_target = thread_revoke.add_mutually_exclusive_group(required=True)
-    thread_revoke_target.add_argument("--thread-id")
-    thread_revoke_target.add_argument("--thread-name")
+    thread_revoke_target.add_argument("--thread-id", help="目标 thread id。")
+    thread_revoke_target.add_argument("--thread-name", help="目标 thread 名称。")
     return parser
 
 
