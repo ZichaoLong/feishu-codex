@@ -10,6 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from bot.instance_layout import resolve_instance_paths
+from bot.install_templates import CODEX_YAML_TEMPLATE, SYSTEM_YAML_TEMPLATE
 from bot.manage_cli import (
     _build_parser,
     _handle_autostart_action,
@@ -132,8 +133,10 @@ class ManageCliTests(unittest.TestCase):
                 clear=False,
             ):
                 _ensure_instance_scaffold("corp-a")
+                stdout = io.StringIO()
                 with patch("bot.manage_cli.current_service_manager", return_value=_DummyManager()):
-                    result = _handle_bootstrap_install()
+                    with redirect_stdout(stdout):
+                        result = _handle_bootstrap_install()
 
             self.assertEqual(result, 0)
             self.assertTrue((config_root / "system.yaml").exists())
@@ -167,6 +170,59 @@ class ManageCliTests(unittest.TestCase):
             )
             rendered = (bin_dir / "feishu-codex").read_text(encoding="utf-8")
             self.assertIn(f'exec "{data_root / ".venv" / "bin" / "python"}" -m bot.manage_cli "$@"', rendered)
+            summary = stdout.getvalue()
+            self.assertIn("已重建实例: corp-a, default。不覆盖各实例现有用户配置", summary)
+            self.assertIn("  1. 本地服务进程管理: feishu-codex", summary)
+            self.assertIn(
+                f"  2. 编辑配置、按需写入 provider 环境变量: {config_root / 'system.yaml'}, {env_file}",
+                summary,
+            )
+            self.assertIn("  7. 在本地查看、管理 binding / thread 状态: feishu-codexctl", summary)
+
+    def test_handle_bootstrap_install_preserves_existing_user_config_and_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            bin_dir = root / "bin"
+            env_file = config_root / "feishu-codex.env"
+
+            class _DummyManager:
+                def ensure_service(self, definition) -> None:
+                    del definition
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_BIN_DIR": str(bin_dir),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                _ensure_instance_scaffold("corp-a")
+                paths = resolve_instance_paths("corp-a")
+                (paths.config_dir / "system.yaml").write_text("app_id: custom-app\n", encoding="utf-8")
+                (paths.config_dir / "codex.yaml").write_text("model: custom-model\n", encoding="utf-8")
+                (paths.config_dir / "init.token").write_text("custom-token\n", encoding="utf-8")
+                env_file.write_text("OPENAI_API_KEY=custom-key\n", encoding="utf-8")
+                data_marker = paths.data_dir / "keep.txt"
+                data_marker.write_text("preserve me\n", encoding="utf-8")
+                (paths.config_dir / "system.yaml.example").write_text("stale-system-example\n", encoding="utf-8")
+                (paths.config_dir / "codex.yaml.example").write_text("stale-codex-example\n", encoding="utf-8")
+
+                with patch("bot.manage_cli.current_service_manager", return_value=_DummyManager()):
+                    result = _handle_bootstrap_install()
+
+            self.assertEqual(result, 0)
+            self.assertEqual((paths.config_dir / "system.yaml").read_text(encoding="utf-8"), "app_id: custom-app\n")
+            self.assertEqual((paths.config_dir / "codex.yaml").read_text(encoding="utf-8"), "model: custom-model\n")
+            self.assertEqual((paths.config_dir / "init.token").read_text(encoding="utf-8"), "custom-token\n")
+            self.assertEqual(env_file.read_text(encoding="utf-8"), "OPENAI_API_KEY=custom-key\n")
+            self.assertEqual(data_marker.read_text(encoding="utf-8"), "preserve me\n")
+            self.assertEqual((paths.config_dir / "system.yaml.example").read_text(encoding="utf-8"), SYSTEM_YAML_TEMPLATE)
+            self.assertEqual((paths.config_dir / "codex.yaml.example").read_text(encoding="utf-8"), CODEX_YAML_TEMPLATE)
 
     def test_write_wrapper_creates_windows_cmd_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

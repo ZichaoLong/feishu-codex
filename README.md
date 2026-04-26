@@ -91,7 +91,9 @@
 - `install.sh` 和 `install.ps1` 是唯一公开安装 / 修复入口
 - `install.py` 是它们调用的内部实现
 - 安装后会生成 `feishu-codex`、`feishu-codexd`、`feishu-codexctl`、`fcodex`
-- 安装脚本会初始化 `default` 实例，并重建所有已知实例的本地 service 定义 / 注册材料
+- 安装脚本会初始化 `default` 实例，并为所有已知实例重建本地 service 定义 / 注册材料
+- 这里的“重建”指：刷新 `system.yaml.example` / `codex.yaml.example`，补齐缺失 scaffold，并重建 shared wrapper
+- 重建不会覆盖已有 `system.yaml`、`codex.yaml`、`init.token`、`feishu-codex.env`，也不会删除实例数据
 - 安装脚本不会自动启动 service
 - 安装脚本不会自动开启“登录后自动启动”
 - `feishu-codex` 本身不提供 `install` 子命令
@@ -119,6 +121,33 @@
 | `contact:contact.base:readonly` | 解析用户名 |
 | `contact:user.base:readonly` | `/whoami`、群授权卡片、群上下文显示名字 |
 | `contact:user.employee_id:readonly` | `/whoami` 返回 `user_id` 供排障 |
+
+<details>
+<summary>一键导入权限 JSON（点击展开）</summary>
+
+在飞书开放平台「权限管理」页面点击「批量开通」，粘贴以下 JSON 即可导入 README 当前建议的权限集：
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "application:application:self_manage",
+      "contact:contact.base:readonly",
+      "contact:user.base:readonly",
+      "contact:user.employee_id:readonly",
+      "im:message",
+      "im:message.group_at_msg:readonly",
+      "im:message.group_msg",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:message:update"
+    ]
+  }
+}
+```
+
+</details>
 
 在「事件与回调」中启用：
 
@@ -186,7 +215,7 @@ feishu-codex instance remove corp-a
 - `feishu-codex instance create <name>` 只负责创建该实例的 scaffold，不启动 service
 - `feishu-codex instance list` 列出本机已知实例，并标注它们当前是否在运行
 - 除 `instance create` 外，其他 `feishu-codex --instance <name> ...` 命令都不会隐式创建命名实例；实例不存在时会直接报错
-- 重新运行 `install.sh` / `install.ps1` 时，会重建 shared wrapper，并重建所有已知实例的 service 定义 / 注册材料
+- 重新运行 `install.sh` / `install.ps1` 时，会重建 shared wrapper，并为所有已知实例重建 service 定义 / 注册材料；只刷新 `*.example` 并补齐缺失 scaffold，不覆盖已有配置或数据
 - `--instance default` 等价于不写 `--instance`；`default` 实例直接使用配置根 / 数据根本身，不会创建 `instances/default/`
 - 同一 thread 的 live runtime 不能被两个实例 backend 同时持有
 - 飞书侧 `/session`、`/resume` 受当前实例的 admission 可见性约束；本地 `fcodex` / `feishu-codexctl` 更偏操作者视角
@@ -212,6 +241,7 @@ feishu-codex instance remove corp-a
 - 生成 `init.token`
 - 生成共享的 `feishu-codex.env`
 - 安装平台对应的用户态 service manager 配置 / 注册材料
+- 保留已有 `system.yaml`、`codex.yaml`、`init.token`、`feishu-codex.env` 与实例数据，只补齐缺失 scaffold 并刷新 `*.example`
 
 如果当前没有命名实例，“所有已知实例”就只有 `default`；如果你之前创建过 `corp-a` 之类的命名实例，重新运行安装脚本时也会一起重建它们的 service 定义 / 注册材料。
 

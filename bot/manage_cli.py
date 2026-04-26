@@ -63,7 +63,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "- 首次安装与修复都请从仓库根目录执行 `bash install.sh` 或 `./install.ps1`\n"
             "- `feishu-codex` 是唯一公开管理面；底层会调用原生 service manager\n"
             "  管理后台进程与“登录后自动启动”：Linux=systemd、macOS=LaunchAgent、Windows=Task Scheduler\n"
-            "- 安装脚本会重建 shared wrapper，并重建所有已知实例的 service 定义/注册材料\n"
+            "- 安装脚本会重建 shared wrapper，并为所有已知实例重建 service 定义/注册材料；\n"
+            "  只刷新 `*.example` 并补齐缺失 scaffold，不覆盖现有配置或数据\n"
             "- `start|stop|restart|status` 只管理当前运行态；`autostart` 单独管理登录后自动启动\n"
             "- 命名实例必须先显式 `instance create`；其他命令不会隐式创建命名实例\n"
             "- `run` 是跨平台单一 daemon 入口，通常由底层 service manager 调用\n"
@@ -425,21 +426,26 @@ def _known_instance_names() -> list[str]:
 
 
 def _print_install_summary(bin_dir: pathlib.Path, rebuilt_instances: list[str]) -> None:
+    default_paths = resolve_instance_paths(DEFAULT_INSTANCE_NAME)
     print("安装完成。")
     print(f"配置根目录: {default_config_root()}")
     print(f"数据根目录: {default_data_root()}")
     print(f"命令目录: {bin_dir}")
-    print(f"已重建实例: {', '.join(rebuilt_instances)}")
+    print(f"已重建实例: {', '.join(rebuilt_instances)}。不覆盖各实例现有用户配置")
     if not shutil.which("codex"):
         print("警告: 未检测到 `codex` 命令，请先安装 Codex CLI。")
     print("")
     print("下一步:")
-    print(f"  1. 编辑配置: {resolve_instance_paths(DEFAULT_INSTANCE_NAME).config_dir / 'system.yaml'}")
-    print(f"  2. 按需写入 provider 环境变量: {default_config_root() / 'feishu-codex.env'}")
-    print("  3. 按需开启登录后自动启动: feishu-codex autostart enable")
+    print("  1. 本地服务进程管理: feishu-codex")
+    print(
+        "  2. 编辑配置、按需写入 provider 环境变量: "
+        f"{default_paths.config_dir / 'system.yaml'}, {default_config_root() / 'feishu-codex.env'}"
+    )
+    print("  3. 开启登录后自动启动: feishu-codex autostart enable")
     print("  4. 启动服务: feishu-codex start")
     print("  5. 查看初始化口令: feishu-codex config init-token")
-    print("  6. 新建命名实例: feishu-codex instance create corp-a")
+    print("  6. 新建并配置命名实例: feishu-codex instance create corp-a, feishu-codex --instance corp-a ...")
+    print("  7. 在本地查看、管理 binding / thread 状态: feishu-codexctl")
 
 
 def _handle_bootstrap_install() -> int:
