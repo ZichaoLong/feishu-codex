@@ -162,6 +162,17 @@ class RuntimeAdminController:
         check = self.unsubscribe_check_locked(thread_id)
         return check.allowed, check.reason_text
 
+    def preview_unsubscribe_feishu_runtime_locked(self, thread_id: str) -> bool:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空。")
+        if not self.bound_bindings_for_thread_locked(normalized_thread_id):
+            raise ValueError("当前没有 Feishu 绑定指向该线程。")
+        check = self.unsubscribe_check_locked(normalized_thread_id)
+        if not check.allowed and check.reason_code != UNSUBSCRIBE_NOT_APPLICABLE_ALREADY_RELEASED:
+            raise ValueError(check.reason_text)
+        return bool(self.attached_bindings_for_thread_locked(normalized_thread_id))
+
     def binding_has_pending_request_locked(self, binding: ChatBindingKey) -> bool:
         return self._interaction_requests.binding_has_pending_request_locked(binding)
 
@@ -488,13 +499,16 @@ class RuntimeAdminController:
     def unsubscribe_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
         normalized_thread_id = str(thread_id or "").strip()
         with self._lock:
+            needs_backend_unsubscribe = self.preview_unsubscribe_feishu_runtime_locked(normalized_thread_id)
+        if needs_backend_unsubscribe:
+            self._unsubscribe_thread(normalized_thread_id)
+        with self._lock:
             result = self._binding_runtime.unsubscribe_feishu_runtime_by_thread_id_locked(
                 normalized_thread_id,
                 unsubscribe_availability=self.unsubscribe_availability_locked,
                 on_release_binding_state=self._release_binding_runtime_state_locked,
             )
         if result.unsubscribe_thread_id:
-            self._unsubscribe_thread(result.unsubscribe_thread_id)
             self._release_service_thread_runtime_lease(result.unsubscribe_thread_id)
         resolved_summary, backend_thread_status = self.read_thread_summary_for_status(normalized_thread_id)
         thread_title = result.thread_title

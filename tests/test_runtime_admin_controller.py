@@ -202,6 +202,60 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         self.assertEqual(unsubscribed, ["thread-1"])
         self.assertEqual(released_runtime_leases, ["thread-1"])
 
+    def test_unsubscribe_by_thread_id_keeps_binding_attached_when_backend_unsubscribe_fails(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            unsubscribed,
+            released_runtime_leases,
+            _admitted_thread_ids,
+            _pending_by_thread,
+            _pending_by_binding,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        def _fail_unsubscribe(thread_id: str) -> None:
+            unsubscribed.append(thread_id)
+            raise RuntimeError("backend unsubscribe failed")
+
+        controller._unsubscribe_thread = _fail_unsubscribe
+
+        with self.assertRaisesRegex(RuntimeError, "backend unsubscribe failed"):
+            controller.unsubscribe_feishu_runtime_by_thread_id("thread-1")
+
+        with lock:
+            snapshot = binding_runtime.binding_runtime_snapshot_locked(binding)
+        assert snapshot is not None
+        self.assertEqual(snapshot.feishu_runtime_state, "attached")
+        self.assertEqual(binding_runtime.attached_bindings_for_thread_locked("thread-1"), [binding])
+        self.assertEqual(unsubscribed, ["thread-1"])
+        self.assertEqual(released_runtime_leases, [])
+
+        controller._unsubscribe_thread = lambda thread_id: unsubscribed.append(f"retry:{thread_id}")
+        result = controller.unsubscribe_feishu_runtime_by_thread_id("thread-1")
+
+        self.assertTrue(result["changed"])
+        with lock:
+            snapshot = binding_runtime.binding_runtime_snapshot_locked(binding)
+        assert snapshot is not None
+        self.assertEqual(snapshot.feishu_runtime_state, "released")
+        self.assertEqual(unsubscribed, ["thread-1", "retry:thread-1"])
+        self.assertEqual(released_runtime_leases, ["thread-1"])
+
     def test_handle_service_control_request_service_status_aggregates_runtime_inventory(self) -> None:
         (
             lock,
