@@ -40,6 +40,7 @@ class ServiceDefinition:
 class ServiceStatus:
     installed: bool
     running: bool
+    source: str = ""
     detail: str = ""
 
 
@@ -134,6 +135,9 @@ class SystemdUserServiceManager(ServiceManager):
 
     def _autostart_status_source(self, definition: ServiceDefinition) -> str:
         return f"systemctl --user is-enabled {self._unit_name(definition)}"
+
+    def _status_source(self, definition: ServiceDefinition) -> str:
+        return f"systemctl --user is-active {self._unit_name(definition)}"
 
     def _template_unit_path(self) -> pathlib.Path:
         return default_systemd_user_dir() / "feishu-codex@.service"
@@ -282,11 +286,11 @@ class SystemdUserServiceManager(ServiceManager):
     def status(self, definition: ServiceDefinition) -> ServiceStatus:
         unit_path = self._unit_path(definition)
         if not unit_path.exists():
-            return ServiceStatus(installed=False, running=False, detail="unit file missing")
+            return ServiceStatus(installed=False, running=False, source=self._status_source(definition), detail="unit file missing")
         result = self._run("systemctl", "--user", "is-active", self._unit_name(definition), check=False)
         running = result.returncode == 0 and result.stdout.strip() == "active"
         detail = result.stdout.strip() or result.stderr.strip()
-        return ServiceStatus(installed=True, running=running, detail=detail)
+        return ServiceStatus(installed=True, running=running, source=self._status_source(definition), detail=detail)
 
     def uninstall(self, definition: ServiceDefinition) -> None:
         self.autostart_disable(definition)
@@ -319,6 +323,9 @@ class LaunchdUserServiceManager(ServiceManager):
 
     def _autostart_status_source(self, definition: ServiceDefinition) -> str:
         return f"LaunchAgent {self._label(definition)}"
+
+    def _status_source(self, definition: ServiceDefinition) -> str:
+        return f"launchctl print {self._uid_domain()}/{self._label(definition)}"
 
     def _definition_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return definition.paths.data_dir / "service.plist"
@@ -384,13 +391,13 @@ class LaunchdUserServiceManager(ServiceManager):
     def status(self, definition: ServiceDefinition) -> ServiceStatus:
         plist_path = self._definition_path(definition)
         if not plist_path.exists():
-            return ServiceStatus(installed=False, running=False, detail="plist missing")
+            return ServiceStatus(installed=False, running=False, source=self._status_source(definition), detail="plist missing")
         domain = self._uid_domain()
         label = self._label(definition)
         result = self._run("launchctl", "print", f"{domain}/{label}", check=False)
         running = result.returncode == 0 and "state = running" in result.stdout
         detail = result.stdout.strip() or result.stderr.strip()
-        return ServiceStatus(installed=True, running=running, detail=detail)
+        return ServiceStatus(installed=True, running=running, source=self._status_source(definition), detail=detail)
 
     def uninstall(self, definition: ServiceDefinition) -> None:
         self.stop(definition)
@@ -439,6 +446,9 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
 
     def _autostart_status_source(self, definition: ServiceDefinition) -> str:
         return f"schtasks /Query /TN {self._task_name(definition)} /XML"
+
+    def _status_source(self, definition: ServiceDefinition) -> str:
+        return f"schtasks /Query /TN {self._task_name(definition)} /FO LIST /V"
 
     def _launcher_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return definition.paths.data_dir / "service-launch.cmd"
@@ -561,10 +571,20 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
     def status(self, definition: ServiceDefinition) -> ServiceStatus:
         result = self._run("schtasks", "/Query", "/TN", self._task_name(definition), "/FO", "LIST", "/V", check=False)
         if result.returncode != 0:
-            return ServiceStatus(installed=False, running=False, detail=result.stderr.strip() or result.stdout.strip())
+            return ServiceStatus(
+                installed=False,
+                running=False,
+                source=self._status_source(definition),
+                detail=result.stderr.strip() or result.stdout.strip(),
+            )
         status_line = next((line for line in result.stdout.splitlines() if line.startswith("Status:")), "")
         running = "Running" in status_line
-        return ServiceStatus(installed=True, running=running, detail=status_line.strip())
+        return ServiceStatus(
+            installed=True,
+            running=running,
+            source=self._status_source(definition),
+            detail=status_line.strip(),
+        )
 
     def uninstall(self, definition: ServiceDefinition) -> None:
         self.stop(definition)

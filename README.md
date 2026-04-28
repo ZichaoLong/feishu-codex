@@ -94,6 +94,7 @@
 - 安装脚本会初始化 `default` 实例，并为所有已知实例重建本地 service 定义 / 注册材料
 - 这里的“重建”指：刷新 `system.yaml.example` / `codex.yaml.example`，补齐缺失 scaffold，并重建 shared wrapper
 - 重建不会覆盖已有 `system.yaml`、`codex.yaml`、`init.token`、`feishu-codex.env`，也不会删除实例数据
+- 首次生成 `codex.yaml` 时，如检测到 fnm 管理的 Codex，会自动写入稳定启动命令，避免 service 依赖 `fnm_multishells` 这类临时路径
 - 安装脚本不会自动启动 service
 - 安装脚本不会自动开启“登录后自动启动”
 - `feishu-codex` 本身不提供 `install` 子命令
@@ -191,6 +192,9 @@ provider_api_key=...
 ```
 
 `feishu-codexd` 与 `fcodex` 启动时都会主动加载这个文件。
+
+如果你通过 fnm 管理 Node / Codex，首次安装生成 `codex.yaml` 时会尽量自动写入稳定启动命令。
+后续重新运行安装脚本只会刷新 `codex.yaml.example`，不会覆盖你已经存在的 `codex.yaml`。
 
 ### 多实例
 

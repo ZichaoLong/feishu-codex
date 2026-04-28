@@ -18,7 +18,7 @@ import time
 from bot.env_file import ensure_env_template
 from bot.file_permissions import ensure_private_file_permissions
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, apply_instance_environment, resolve_instance_paths, validate_instance_name
-from bot.install_templates import CODEX_YAML_TEMPLATE, SYSTEM_YAML_TEMPLATE
+from bot.install_templates import CODEX_YAML_TEMPLATE, SYSTEM_YAML_TEMPLATE, render_initial_codex_yaml
 from bot.instance_resolution import list_running_instances
 from bot.platform_paths import default_config_root, default_data_root, default_log_file, default_user_bin_dir, is_windows
 from bot.service_manager import ServiceManagerError, build_service_definition, current_service_manager
@@ -290,7 +290,7 @@ def _ensure_instance_scaffold(instance_name: str) -> None:
     _ensure_text_file(paths.config_dir / "system.yaml.example", SYSTEM_YAML_TEMPLATE, overwrite=True)
     _ensure_text_file(paths.config_dir / "codex.yaml.example", CODEX_YAML_TEMPLATE, overwrite=True)
     _ensure_text_file(paths.config_dir / "system.yaml", SYSTEM_YAML_TEMPLATE, overwrite=False, private=True)
-    _ensure_text_file(paths.config_dir / "codex.yaml", CODEX_YAML_TEMPLATE, overwrite=False)
+    _ensure_text_file(paths.config_dir / "codex.yaml", render_initial_codex_yaml(), overwrite=False)
     ensure_env_template()
     _ensure_init_token(paths.config_dir / "init.token")
 
@@ -487,7 +487,9 @@ def _handle_service_action(instance_name: str, action: str) -> int:
         status = manager.status(definition)
         print(f"service: {'installed' if status.installed else 'missing'}")
         print(f"running: {'yes' if status.running else 'no'}")
-        if status.detail:
+        if status.source and status.detail:
+            print(f"{status.source}: {status.detail}")
+        elif status.detail:
             print(f"detail: {status.detail}")
         return 0 if status.running else 3
     raise ValueError(f"unknown service action: {action}")

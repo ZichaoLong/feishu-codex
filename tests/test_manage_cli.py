@@ -172,12 +172,38 @@ class ManageCliTests(unittest.TestCase):
             self.assertIn(f'exec "{data_root / ".venv" / "bin" / "python"}" -m bot.manage_cli "$@"', rendered)
             summary = stdout.getvalue()
             self.assertIn("已重建实例: corp-a, default。不覆盖各实例现有用户配置", summary)
-            self.assertIn("  1. 本地服务进程管理: feishu-codex", summary)
-            self.assertIn(
-                f"  2. 编辑配置、按需写入 provider 环境变量: {config_root / 'system.yaml'}, {env_file}",
-                summary,
+            self.assertIn("  - 本地服务进程管理 feishu-codex --help", summary)
+            self.assertIn("  - 本地查看、管理 binding / thread 状态  feishu-codexctl --help", summary)
+            self.assertIn("  1. 配置飞书应用、provider 环境变量", summary)
+            self.assertIn("    - feishu-codex config --open system", summary)
+            self.assertIn("    - feishu-codex config --open env（按需）", summary)
+
+    def test_ensure_instance_scaffold_writes_detected_initial_codex_command_without_changing_example(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                with patch(
+                    "bot.manage_cli.render_initial_codex_yaml",
+                    return_value="codex_command: /stable/node /stable/codex.js\n",
+                ):
+                    _ensure_instance_scaffold("default")
+
+            self.assertEqual(
+                (config_root / "codex.yaml").read_text(encoding="utf-8"),
+                "codex_command: /stable/node /stable/codex.js\n",
             )
-            self.assertIn("  7. 在本地查看、管理 binding / thread 状态: feishu-codexctl", summary)
+            self.assertEqual((config_root / "codex.yaml.example").read_text(encoding="utf-8"), CODEX_YAML_TEMPLATE)
 
     def test_handle_bootstrap_install_preserves_existing_user_config_and_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -472,6 +498,46 @@ class ManageCliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(manager.started, ["corp-a"])
             self.assertIn("started service: feishu-codex@corp-a", stdout.getvalue())
+
+    def test_handle_service_status_uses_platform_specific_source_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+
+            class _DummyManager:
+                def status(self, definition):
+                    del definition
+                    from bot.service_manager import ServiceStatus
+
+                    return ServiceStatus(
+                        installed=True,
+                        running=False,
+                        source="systemctl --user is-active feishu-codex@corp-a",
+                        detail="activating",
+                    )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                _ensure_instance_scaffold("corp-a")
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    with patch("bot.manage_cli.current_service_manager", return_value=_DummyManager()):
+                        result = _handle_service_action("corp-a", "status")
+
+            self.assertEqual(result, 3)
+            rendered = stdout.getvalue()
+            self.assertIn("service: installed", rendered)
+            self.assertIn("running: no", rendered)
+            self.assertIn("systemctl --user is-active feishu-codex@corp-a: activating", rendered)
 
     def test_named_instance_commands_do_not_implicitly_create_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

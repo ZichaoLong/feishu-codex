@@ -112,6 +112,7 @@ class ServiceManagerTests(unittest.TestCase):
 
             self.assertTrue(status.installed)
             self.assertTrue(status.running)
+            self.assertEqual(status.source, "systemctl --user is-active feishu-codex@corp-a")
             self.assertEqual(status.detail, "active")
             self.assertEqual(calls[0][0], ("systemctl", "--user", "daemon-reload"))
             self.assertEqual(calls[1][0], ("systemctl", "--user", "start", "feishu-codex@corp-a"))
@@ -172,6 +173,7 @@ class ServiceManagerTests(unittest.TestCase):
 
             self.assertTrue(status.installed)
             self.assertTrue(status.running)
+            self.assertEqual(status.source, "launchctl print gui/501/io.feishu-codex.corp-a")
             self.assertEqual(calls[0][0], ("launchctl", "bootout", "gui/501", "io.feishu-codex.corp-a"))
             self.assertEqual(calls[1][0], ("launchctl", "bootstrap", "gui/501", str(root / "data" / "service.plist")))
             self.assertEqual(calls[2][0], ("launchctl", "kickstart", "-k", "gui/501/io.feishu-codex.corp-a"))
@@ -233,6 +235,7 @@ class ServiceManagerTests(unittest.TestCase):
 
             self.assertTrue(status.installed)
             self.assertTrue(status.running)
+            self.assertEqual(status.source, "schtasks /Query /TN feishu-codex-corp-a /FO LIST /V")
             self.assertEqual(calls[0][0][:4], ("schtasks", "/Query", "/TN", "feishu-codex-corp-a"))
             self.assertEqual(calls[1][0][:4], ("schtasks", "/Create", "/TN", "feishu-codex-corp-a"))
             self.assertEqual(calls[2][0], ("schtasks", "/Run", "/TN", "feishu-codex-corp-a"))
