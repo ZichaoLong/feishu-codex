@@ -69,7 +69,6 @@
 
 下列点不是回归，更像架构清理空间。当前只保留仍值得后续跟进的项：
 
-- **instance routing 重复**：`bot/fcodex.py:176-236` 的 `_resolve_instance_target()` 与 `bot/instance_resolution.py:53-97` 的 `resolve_cli_instance_target()` 都在解析 explicit / running / default / unique-running 选择逻辑；现在两份能共存，将来漂移风险高
 - **说明**：`/group activate` 文案与 profile 责任边界不再列为遗留问题；前者当前成功文案已覆盖审批 / 补充输入 / 管理员兜底，后者也已在正式合同与架构文档中显式写明
 
 ---
@@ -80,4 +79,3 @@
 
 1. 给 `docs/_work/multi-instance-{rollout-plan,admin-user-guide}.{md,zh-CN.md}` 头部加 superseded 标注，避免后续维护者把它们当现状
 2. 在本文头部或结论处补充“`1.1` 已由 `f08f74b` 修复”的状态更新，避免把已修复回归继续读成待办
-3. `instance routing` 的收敛可作为下一轮架构清理项，但不阻塞当前合并

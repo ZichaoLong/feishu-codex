@@ -43,7 +43,9 @@
 - 作用对象：当前绑定 thread
 - 没有绑定 thread 时直接拒绝
 - 只有目标 thread verifiably globally unloaded 时才允许修改
-- 对 loaded thread，或 loaded / unloaded 事实无法验证的 thread，会直接拒绝；不做热切，也不会偷偷记账等下次生效
+- 对当前实例自己仍控制的 loaded thread，不做热切；而是提供“应用并 reset 当前实例 backend”路径
+- 对需要 force reset 的情况，必须显式展示阻塞诊断，并要求管理员 / 操作者确认
+- 对 live runtime owner 在别的实例、或当前实例不支持 reset backend 的情况，直接 blocked
 
 ### `/unsubscribe`
 
@@ -111,6 +113,8 @@
 
 它负责：
 
+- `service status`
+- `service reset-backend`
 - `thread list --scope cwd|global`
 - `thread status`
 - `thread bindings`

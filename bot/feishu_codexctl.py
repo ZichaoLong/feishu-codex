@@ -81,9 +81,32 @@ def _print_service_status(data_dir: pathlib.Path) -> int:
     print(f"pid: {result['pid']}")
     print(f"control endpoint: {result['control_endpoint']}")
     print(f"app server: {result['app_server_url']}")
+    print(f"app server mode: {result.get('app_server_mode', '-')}")
     print(f"bindings: total={result['binding_count']} bound={result['bound_binding_count']} attached={result['attached_binding_count']}")
     print(f"threads: bound={result['thread_count']} feishu-attached={result['attached_thread_count']} loaded={result['loaded_thread_count']}")
     print(f"running bindings: {', '.join(result['running_binding_ids']) or '（无）'}")
+    print(f"backend reset: {result.get('backend_reset_status', '-')}")
+    if result.get("backend_reset_reason_code"):
+        print(f"backend reset reason code: {result['backend_reset_reason_code']}")
+    if result.get("backend_reset_reason"):
+        print(f"backend reset reason: {result['backend_reset_reason']}")
+    return 0
+
+
+def _reset_service_backend(data_dir: pathlib.Path, *, force: bool) -> int:
+    result = control_request(
+        data_dir,
+        "service/reset-backend",
+        {"force": bool(force)},
+        timeout_seconds=30.0,
+    )
+    print("backend reset: ok")
+    print(f"force: {'yes' if result.get('force') else 'no'}")
+    print(f"app server: {result.get('app_server_url', '-')}")
+    print(f"released bindings: {', '.join(result.get('released_binding_ids') or []) or '（无）'}")
+    print(f"interrupted bindings: {', '.join(result.get('interrupted_binding_ids') or []) or '（无）'}")
+    print(f"fail-closed requests: {int(result.get('fail_closed_request_count') or 0)}")
+    print(f"purged runtime leases: {', '.join(result.get('purged_thread_ids') or []) or '（无）'}")
     return 0
 
 
@@ -270,6 +293,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "常用命令:\n"
             "  feishu-codexctl service status\n"
+            "  feishu-codexctl service reset-backend\n"
             "  feishu-codexctl instance list\n"
             "  feishu-codexctl binding list\n"
             "  feishu-codexctl binding status <binding_id>\n"
@@ -315,6 +339,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="查看服务运行态。",
         description="查看目标实例当前服务运行态、control endpoint、app-server 地址以及 binding / thread 统计。",
         formatter_class=_HelpFormatter,
+    )
+    service_reset = service_sub.add_parser(
+        "reset-backend",
+        help="重置当前实例 backend，不重启 feishu-codex service。",
+        description=(
+            "重置当前实例 backend，不重启 feishu-codex service 进程。\n"
+            "普通 reset 只在确认当前实例没有待处理工作时允许；如需打断当前实例里的运行中 turn / 审批 / 输入请求，可加 `--force`。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    service_reset.add_argument(
+        "--force",
+        action="store_true",
+        help="强制重置 backend，允许打断当前实例里正在进行的工作。",
     )
 
     binding = subparsers.add_parser(
@@ -414,6 +452,8 @@ def main() -> None:
         data_dir = _resolve_target_data_dir(args.instance)
         if args.resource == "service" and args.action == "status":
             raise SystemExit(_print_service_status(data_dir))
+        if args.resource == "service" and args.action == "reset-backend":
+            raise SystemExit(_reset_service_backend(data_dir, force=bool(args.force)))
         if args.resource == "binding" and args.action == "list":
             raise SystemExit(_print_binding_list(data_dir))
         if args.resource == "binding" and args.action == "status":

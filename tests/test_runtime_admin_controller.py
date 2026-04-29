@@ -15,6 +15,7 @@ from bot.runtime_admin_controller import RuntimeAdminController
 from bot.runtime_state import ThreadStateChanged
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import InteractionLeaseStore
+from bot.stores.thread_runtime_lease_store import ThreadRuntimeLease
 from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 
 
@@ -44,6 +45,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         pending_by_binding: set[tuple[str, str]] = set()
         summaries: dict[str, ThreadSummary] = {}
         loaded_thread_ids: list[str] = []
+        pending_requests: list[dict[str, object]] = []
+        reset_calls: list[bool] = []
 
         def _read_thread(thread_id: str):
             return ThreadSnapshot(summary=summaries[thread_id])
@@ -60,10 +63,14 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             read_thread=_read_thread,
             list_loaded_thread_ids=lambda: list(loaded_thread_ids),
             current_app_server_url=lambda: "http://127.0.0.1:1234",
+            app_server_mode=lambda: "managed",
             unsubscribe_thread=lambda thread_id: unsubscribed.append(thread_id),
             release_service_thread_runtime_lease=lambda thread_id: released_runtime_leases.append(thread_id),
             service_control_endpoint=lambda: "tcp://127.0.0.1:32001",
             instance_name=lambda: "corp-a",
+            load_thread_runtime_lease=lambda thread_id: None,
+            list_pending_interaction_requests=lambda: list(pending_requests),
+            reset_current_instance_backend=lambda force: reset_calls.append(bool(force)) or {"force": bool(force)},
             safe_read_runtime_config=lambda: RuntimeConfigSummary(current_model_provider="provider1"),
             current_default_profile_resolution=lambda runtime_config: types.SimpleNamespace(
                 effective_profile="default",
@@ -96,6 +103,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             released_runtime_leases,
             pending_by_thread,
             pending_by_binding,
+            pending_requests,
+            reset_calls,
         )
 
     def _bind_thread(self, lock, binding_runtime, binding, *, thread_id: str):
@@ -121,6 +130,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             _released_runtime_leases,
             pending_by_thread,
             _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
         self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
@@ -154,6 +165,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             released_runtime_leases,
             _pending_by_thread,
             _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
         self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
@@ -190,6 +203,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             released_runtime_leases,
             _pending_by_thread,
             _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
         self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
@@ -243,6 +258,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             _released_runtime_leases,
             _pending_by_thread,
             _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
         state = self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
@@ -269,6 +286,165 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         self.assertEqual(status["loaded_thread_ids"], ["thread-1"])
         self.assertEqual(status["running_binding_ids"], ["p2p:ou_user:c1"])
         self.assertEqual(status["app_server_url"], "http://127.0.0.1:1234")
+        self.assertEqual(status["backend_reset_status"], "force-only")
+        self.assertEqual(status["backend_reset_reason_code"], "backend_reset_force_only_by_running_binding")
+
+    def test_plan_thread_reprofile_allows_direct_write_after_released_and_globally_unloaded(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="notLoaded",
+        )
+        controller.unsubscribe_feishu_runtime_by_thread_id("thread-1")
+
+        plan = controller.plan_thread_reprofile("thread-1")
+
+        self.assertEqual(plan.status, "direct-write")
+        self.assertEqual(plan.backend_thread_status, "notLoaded")
+        self.assertEqual(plan.feishu_runtime_state, "released")
+        self.assertIn("verifiably globally unloaded", plan.reason_text)
+
+    def test_plan_thread_reprofile_blocks_when_live_runtime_owned_by_other_instance(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._load_thread_runtime_lease = lambda thread_id: ThreadRuntimeLease(
+            thread_id=thread_id,
+            owner_instance="other-instance",
+            owner_service_token="other-token",
+            control_endpoint="tcp://127.0.0.1:9393",
+            backend_url="ws://127.0.0.1:8765",
+            attached_at=1.0,
+            holders=(),
+        )
+
+        plan = controller.plan_thread_reprofile("thread-1")
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(plan.reason_code, "reprofile_blocked_by_other_instance_owner")
+        self.assertIn("other-instance", plan.reason_text)
+
+    def test_handle_service_control_request_reset_backend_forwards_force_flag(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            reset_calls,
+        ) = self._make_controller()
+
+        result = controller.handle_service_control_request("service/reset-backend", {"force": True})
+
+        self.assertEqual(reset_calls, [True])
+        self.assertTrue(result["force"])
+
+    def test_service_status_reports_runtime_unverified_as_force_only(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+        ) = self._make_controller()
+        controller._list_loaded_thread_ids = lambda: (_ for _ in ()).throw(RuntimeError("backend down"))
+
+        status = controller.handle_service_control_request("service/status", {})
+
+        self.assertEqual(status["backend_reset_status"], "force-only")
+        self.assertEqual(
+            status["backend_reset_reason_code"],
+            "backend_reset_force_only_by_runtime_unverified",
+        )
+
+    def test_plan_thread_reprofile_uses_force_only_reason_when_runtime_is_unverified(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._list_loaded_thread_ids = lambda: (_ for _ in ()).throw(RuntimeError("backend down"))
+
+        plan = controller.plan_thread_reprofile("thread-1")
+
+        self.assertEqual(plan.status, "reset-force-only")
+        self.assertEqual(
+            plan.reason_code,
+            "reprofile_reset_force_only_by_runtime_unverified",
+        )
 
     def test_clear_all_bindings_for_control_rejects_when_binding_has_pending_request(self) -> None:
         (
@@ -281,6 +457,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             _released_runtime_leases,
             _pending_by_thread,
             pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         binding = ("ou_user", "c1")
         self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
@@ -313,6 +491,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             _released_runtime_leases,
             _pending_by_thread,
             _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         binding_a = ("ou_user", "c1")
         binding_b = ("ou_user2", "c2")
@@ -358,6 +538,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             _released_runtime_leases,
             pending_by_thread,
             _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         controller._prompt_write_denial_check = lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.deny(
             PROMPT_DENIED_BY_INTERACTION_OWNER,
@@ -395,6 +577,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             _released_runtime_leases,
             pending_by_thread,
             _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
         ) = self._make_controller()
         controller._prompt_write_denial_check = lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.deny(
             PROMPT_DENIED_BY_INTERACTION_OWNER,

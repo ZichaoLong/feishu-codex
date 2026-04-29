@@ -227,22 +227,39 @@ thread-wise store 至少应保存：
 
 ## 5.6 loaded 时的行为
 
-若目标 thread 当前仍 loaded，或 loaded / unloaded 事实无法验证，则修改请求必须被直接拒绝。
+若目标 thread 当前仍 loaded，或尚未满足 verifiably globally unloaded，系统仍然**不得热切**当前 live runtime。
+
+允许的路径只有两种：
+
+- verifiably globally unloaded：
+  - 直接写入 thread-wise desired resume config
+- 仍未 globally unloaded，但当前实例可安全或可强制 reset backend：
+  - 明确提供“应用该 profile，并 reset 当前实例 backend”路径
+
+这里的 reset backend 是：
+
+- 只重置当前实例 backend / app-server
+- 不重启整个 `feishu-codex` 服务进程
+- 保留 binding bookmark、thread-wise profile 及其他持久化数据
+
+若出现以下情况，则不能直接写入，只能明确提示原因：
+
+- 当前实例仍有待处理审批 / 输入请求
+- 当前实例仍有运行中的 Feishu binding
+- 当前 backend 里仍有 active loaded thread
+- backend loaded / unloaded 事实当前无法完整验证
+- 当前 thread 的 live runtime owner 属于别的实例
+- 当前实例处于 remote app-server 模式，不拥有 backend 进程
 
 不允许：
 
 - 在 loaded thread 上热切 provider
-- 先记账、等下一次莫名其妙生效
+- 先记账、等下一次不透明地自动生效
 - 对 live runtime 做 best-effort 改写
 
-拒绝时应返回直接、可操作的错误提示。
-
-推荐提示方向：
-
-- 飞书侧：先执行 `unsubscribe`
-- 本地侧：关闭所有打开该 thread 的 `fcodex` TUI
-
-本文刻意选择“明确拒绝 + 直接提示”，而不是在 README 里提前铺陈大量复杂背景。
+因此，飞书侧不再只有“直接拒绝”这一条路。
+对当前实例自己可控的 loaded 状态，正式路径是“显式 reset backend 后再写入”。
+只有当当前实例并不拥有足够控制权，或根本不支持 reset backend 时，才应直接 blocked。
 
 ## 5.7 飞书侧写入口
 
@@ -250,7 +267,16 @@ thread-wise store 至少应保存：
 
 - `/profile <name>` 应作用于该 **当前绑定 thread**
 - 若该 thread verifiably globally unloaded，则写入 thread-wise desired resume config
-- 否则拒绝并提示
+- 若当前线程尚未满足 globally unloaded，但当前实例 backend 可重置，则提供“应用并 reset backend”路径
+- 若当前只能 force reset，则必须显式展示阻塞诊断，并要求管理员 / 操作者确认
+- 若 live runtime owner 在别的实例，或当前实例是 remote app-server 模式，则必须 blocked 并明确说明原因
+
+当飞书 chat 已绑定 thread，但只执行 `/profile` 不带参数时：
+
+- 应展示当前 thread-wise profile / provider
+- 应展示 re-profile 诊断
+- 不立即执行 reset
+- 让后续 `/profile <name>` 或卡片按钮再进入 direct-write / reset 路径
 
 当飞书 chat 当前没有绑定 thread 时：
 

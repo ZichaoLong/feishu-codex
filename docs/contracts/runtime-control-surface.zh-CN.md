@@ -102,6 +102,17 @@
 
 旧的 `Feishu 写入 owner` 不再是独立产品概念；Feishu prompt 准入也不再额外维护一层 Feishu-only 写入租约。
 
+### 2.6 交互请求的自动收口
+
+当运行时生命周期控制自动结束一个待处理的审批 / 补充输入请求时，例如：
+
+- chat unavailable 清理
+- `service reset-backend`
+
+系统应先把原卡片 patch 成已收口的视觉状态，再 auto-reject 对应请求。
+
+这只是运行时收口，不表示用户手动批准、手动回答，或请求在业务上成功完成。
+
 ## 3. 状态组合与转移
 
 ### 3.1 两类事实的对照
@@ -325,6 +336,7 @@
 
 - `feishu-codexctl instance list`
 - `feishu-codexctl service status`
+- `feishu-codexctl service reset-backend [--force]`
 - `feishu-codexctl binding list`
 - `feishu-codexctl binding status <binding_id>`
 - `feishu-codexctl binding clear <binding_id>`
@@ -332,6 +344,42 @@
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread unsubscribe (--thread-id <id> | --thread-name <name>)`
+
+### 6.3.1 `service reset-backend` 合同
+
+`feishu-codexctl service reset-backend` 是**实例级**管理动作。
+
+它的作用对象是：
+
+- 当前选中的 `feishu-codex` 实例
+- 该实例自己管理的 backend / app-server 进程
+
+它不是：
+
+- 重启整个 `feishu-codex` 服务进程
+- thread 级写入口
+- binding 清空入口
+
+它的正式语义是：
+
+- 中断当前实例 backend 上仍在执行的 Feishu turn
+- fail-close 当前实例仍待处理的审批 / 输入请求
+- 释放当前实例所有 Feishu binding 对 thread runtime 的附着
+- 清除当前实例持有的 machine-global live runtime lease
+- 重启当前实例 backend / app-server
+
+它不会覆盖：
+
+- binding bookmark
+- thread-wise profile / provider
+- 其他持久化用户配置与数据
+
+正式限制：
+
+- 只有 `managed` app-server 模式支持该动作
+- `service status` 应暴露 `app_server_mode`、`backend_reset_status`、`backend_reset_reason_code`、`backend_reset_reason`
+- 非 `force` 只能在当前实例没有待处理请求、没有运行中的 binding、没有 active loaded thread、且 backend 状态可验证时执行
+- `--force` 表示操作者接受丢失 / 打断当前实例 backend 内的进行中工作
 
 ### 6.4 `binding` 持久化与重置合同
 

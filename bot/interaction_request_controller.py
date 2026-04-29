@@ -80,6 +80,10 @@ class InteractionRequestController:
         with self._lock:
             return self.pending_request_snapshot_locked(request_key)
 
+    def pending_requests_snapshot(self) -> list[PendingRequestState]:
+        with self._lock:
+            return self.pending_requests_snapshot_locked()
+
     def pending_request_snapshot_locked(self, request_key: str) -> PendingRequestState | None:
         normalized_request_key = str(request_key or "").strip()
         if not normalized_request_key:
@@ -88,6 +92,9 @@ class InteractionRequestController:
         if pending is None:
             return None
         return dict(pending)
+
+    def pending_requests_snapshot_locked(self) -> list[PendingRequestState]:
+        return [dict(pending) for pending in self._pending_requests.values()]
 
     def store_pending_request(self, request_key: str, pending: PendingRequestState | dict[str, Any]) -> None:
         normalized_request_key = str(request_key or "").strip()
@@ -136,10 +143,28 @@ class InteractionRequestController:
         normalized_chat_id = str(chat_id or "").strip()
         if not normalized_chat_id:
             return 0
+        return self._fail_close_matching_requests(
+            lambda pending: str(pending.get("chat_id", "") or "").strip() == normalized_chat_id,
+            note="当前 chat 运行态已关闭，已自动结束该请求。",
+        )
+
+    def fail_close_all_requests(self) -> int:
+        return self._fail_close_matching_requests(
+            lambda _pending: True,
+            note="当前实例 backend 已重置，已自动结束该请求。",
+        )
+
+    def _fail_close_matching_requests(
+        self,
+        predicate: Callable[[PendingRequestState], bool],
+        *,
+        note: str,
+    ) -> int:
         pending_to_fail_close: list[tuple[int | str, str, dict[str, Any]]] = []
+        cards_to_patch: list[tuple[str, dict]] = []
         with self._lock:
             for request_key, pending in list(self._pending_requests.items()):
-                if str(pending.get("chat_id", "") or "").strip() != normalized_chat_id:
+                if not predicate(pending):
                     continue
                 pending_to_fail_close.append(
                     (
@@ -148,7 +173,30 @@ class InteractionRequestController:
                         dict(pending.get("params") or {}),
                     )
                 )
+                message_id = str(pending.get("message_id", "") or "").strip()
+                title = str(pending.get("title", "Codex 请求") or "Codex 请求")
+                method = str(pending.get("method", "") or "").strip()
+                if message_id:
+                    if method == "item/tool/requestUserInput":
+                        cards_to_patch.append(
+                            (
+                                message_id,
+                                build_markdown_card(title, note, template="grey"),
+                            )
+                        )
+                    else:
+                        cards_to_patch.append(
+                            (
+                                message_id,
+                                build_approval_handled_card(title, note),
+                            )
+                        )
                 self._pending_requests.pop(request_key, None)
+        for message_id, card in cards_to_patch:
+            try:
+                self._patch_message(message_id, json.dumps(card, ensure_ascii=False))
+            except Exception:
+                logger.exception("fail-close 请求卡片收口失败: message=%s", message_id)
         for rpc_request_id, method, params in pending_to_fail_close:
             self.auto_reject_request(rpc_request_id, method, params)
         return len(pending_to_fail_close)

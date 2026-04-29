@@ -29,10 +29,10 @@ from bot.cards import (
     build_markdown_card,
     make_card_response,
 )
+from bot.binding_identity import format_binding_id
 from bot.binding_runtime_manager import BindingRuntimeManager, ResolvedRuntimeBinding
 from bot.config import load_config_file
 from bot.constants import (
-    DEFAULT_APP_SERVER_MODE,
     DEFAULT_HISTORY_PREVIEW_ROUNDS,
     DEFAULT_SESSION_RECENT_LIMIT,
     DEFAULT_STREAM_PATCH_INTERVAL_MS,
@@ -72,6 +72,7 @@ from bot.runtime_card_publisher import (
 )
 from bot.runtime_state import (
     FEISHU_RUNTIME_ATTACHED,
+    FEISHU_RUNTIME_RELEASED,
     UNSET,
     BindingActivated,
     ExecutionStateChanged,
@@ -338,6 +339,8 @@ class CodexHandler(BotHandler):
                 load_thread_resume_profile=self._thread_resume_profile_store.load,
                 save_thread_resume_profile=self._save_thread_resume_profile_record,
                 check_thread_resume_profile_mutable=self._thread_resume_profile_write_check,
+                plan_thread_reprofile=lambda thread_id: self._runtime_admin.plan_thread_reprofile(thread_id),
+                reset_current_instance_backend=self._reset_current_instance_backend,
                 resolve_profile_resume_config=resolve_profile_from_codex_config,
                 adapter_model_provider=str(self._adapter_config.model_provider or "").strip(),
                 get_runtime_view=self._get_runtime_view,
@@ -412,10 +415,14 @@ class CodexHandler(BotHandler):
             read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=False),
             list_loaded_thread_ids=lambda: self._adapter.list_loaded_thread_ids(),
             current_app_server_url=lambda: self._adapter.current_app_server_url(),
+            app_server_mode=lambda: self._adapter_config.app_server_mode,
             unsubscribe_thread=lambda thread_id: self._adapter.unsubscribe_thread(thread_id),
             release_service_thread_runtime_lease=self._release_service_thread_runtime_lease,
             service_control_endpoint=lambda: self._service_control_plane.control_endpoint,
             instance_name=lambda: self._instance_name,
+            load_thread_runtime_lease=lambda thread_id: self._thread_runtime_lease_store.load(thread_id),
+            list_pending_interaction_requests=self._interaction_requests.pending_requests_snapshot,
+            reset_current_instance_backend=self._reset_current_instance_backend,
             safe_read_runtime_config=self._safe_read_runtime_config,
             current_default_profile_resolution=self._current_default_profile_resolution,
             permissions_summary=_permissions_summary,
@@ -1461,6 +1468,12 @@ class CodexHandler(BotHandler):
                 ),
                 group_guard="group_admin",
             ),
+            "apply_profile_with_backend_reset": ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_apply_profile_with_backend_reset(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
             "set_collaboration_mode": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_set_collaboration_mode(
                     sender_id, chat_id, message_id, action_value
@@ -2043,6 +2056,101 @@ class CodexHandler(BotHandler):
             ),
             list_loaded_thread_ids=self._adapter.list_loaded_thread_ids,
         )
+
+    def _interrupt_binding_execution_for_backend_reset(
+        self,
+        binding: ChatBindingKey,
+        *,
+        note: str,
+    ) -> str:
+        sender_id, chat_id = binding
+        state = self._get_runtime_state(sender_id, chat_id)
+        with self._lock:
+            if not self._turn_execution.has_active_execution_locked(state):
+                return ""
+            self._turn_execution.append_process_note_locked(
+                state,
+                text=f"\n[中断] {note}\n",
+                marks_work=True,
+            )
+            self._apply_runtime_state_message_locked(
+                state,
+                ExecutionStateChanged(
+                    cancelled=True,
+                    pending_cancel=False,
+                    runtime_channel_state="live",
+                ),
+            )
+        self._finalize_execution_card_from_state(sender_id, chat_id)
+        return format_binding_id(binding)
+
+    def _reset_current_instance_backend(self, force: bool) -> dict[str, Any]:
+        preview = self._runtime_admin.backend_reset_preview()
+        if preview.status == "blocked":
+            raise ValueError(preview.reason_text)
+        if preview.status == "force-only" and not force:
+            raise ValueError(preview.reason_text)
+
+        reset_note = "管理员已重置当前实例 backend，本轮执行已中断。"
+        with self._lock:
+            binding_keys = list(self._binding_runtime.binding_keys_locked())
+            active_bindings = [
+                binding
+                for binding in binding_keys
+                if self._turn_execution.has_active_execution_locked(self._get_runtime_state(binding[0], binding[1]))
+            ]
+            bound_thread_ids = sorted(
+                {
+                    str(snapshot.thread_id or "").strip()
+                    for binding in binding_keys
+                    for snapshot in [self._binding_runtime.binding_runtime_snapshot_locked(binding)]
+                    if snapshot is not None and str(snapshot.thread_id or "").strip()
+                }
+            )
+
+        interrupted_binding_ids = [
+            binding_id
+            for binding_id in (
+                self._interrupt_binding_execution_for_backend_reset(binding, note=reset_note)
+                for binding in active_bindings
+            )
+            if binding_id
+        ]
+
+        with self._lock:
+            released_binding_ids: list[str] = []
+            for thread_id in bound_thread_ids:
+                result = self._binding_runtime.unsubscribe_feishu_runtime_by_thread_id_locked(
+                    thread_id,
+                    unsubscribe_availability=lambda _thread_id: (True, ""),
+                    on_release_binding_state=self._cancel_runtime_timers_locked,
+                )
+                released_binding_ids.extend(result.released_binding_ids)
+                for binding in self._binding_runtime.bound_bindings_for_thread_locked(thread_id):
+                    state = self._get_runtime_state(binding[0], binding[1])
+                    self._apply_persisted_runtime_state_message_locked(
+                        binding,
+                        state,
+                        ThreadStateChanged(feishu_runtime_state=FEISHU_RUNTIME_RELEASED),
+                    )
+                    self._sync_stored_binding_locked(binding, state)
+
+        fail_closed_request_count = self._interaction_requests.fail_close_all_requests()
+        self._adapter.stop()
+        purged_thread_ids = self._thread_runtime_lease_store.purge_all_for_instance(
+            instance_name=self._instance_name,
+            owner_service_token=self._service_instance_lease.owner_token,
+        )
+        self._adapter.start()
+        self._register_instance_runtime()
+        return {
+            "force": bool(force),
+            "released_binding_ids": sorted(set(released_binding_ids)),
+            "interrupted_binding_ids": sorted(set(interrupted_binding_ids)),
+            "fail_closed_request_count": fail_closed_request_count,
+            "purged_thread_ids": sorted(set(purged_thread_ids)),
+            "app_server_url": self._adapter.current_app_server_url(),
+        }
 
     def _persist_thread_resume_profile(self, thread_id: str, profile: str) -> ThreadResumeProfileRecord:
         normalized_profile = str(profile or "").strip()

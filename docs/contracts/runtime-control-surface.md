@@ -104,6 +104,21 @@ Ordinary reply streams are not interaction requests: replies from the same backe
 
 The old `Feishu write owner` is no longer a separate product concept; Feishu prompt admission no longer maintains an additional Feishu-only write lease.
 
+### 2.6 Auto-Closing Interaction Requests
+
+When runtime lifecycle control automatically closes a pending approval or
+supplemental-input request, for example during:
+
+- chat-unavailable cleanup
+- `service reset-backend`
+
+the system should patch the original card into a closed visual state before it
+auto-rejects the underlying request.
+
+This is runtime cleanup only. It does not mean the user manually approved,
+manually answered, or that the request completed successfully at the product
+level.
+
 ## 3. State Combinations And Transitions
 
 ### 3.1 Lease comparison
@@ -334,6 +349,7 @@ The current formal command set is:
 
 - `feishu-codexctl instance list`
 - `feishu-codexctl service status`
+- `feishu-codexctl service reset-backend [--force]`
 - `feishu-codexctl binding list`
 - `feishu-codexctl binding status <binding_id>`
 - `feishu-codexctl binding clear <binding_id>`
@@ -341,6 +357,47 @@ The current formal command set is:
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread unsubscribe (--thread-id <id> | --thread-name <name>)`
+
+### 6.3.1 `service reset-backend` Contract
+
+`feishu-codexctl service reset-backend` is an **instance-scoped** admin action.
+
+Its target is:
+
+- the currently selected `feishu-codex` instance
+- the backend / app-server process managed by that instance
+
+It is not:
+
+- a restart of the whole `feishu-codex` service process
+- a thread-level write entry point
+- a binding-clear entry point
+
+Its formal semantics are:
+
+- interrupt running Feishu turns on the current instance backend
+- fail-close still-pending approval / input requests on the current instance
+- release all Feishu runtime attachments held by the current instance bindings
+- clear machine-global live runtime leases held by the current instance
+- restart the current instance backend / app-server
+
+It does not overwrite:
+
+- binding bookmarks
+- thread-wise profile / provider state
+- other persisted user configuration or data
+
+Formal limits:
+
+- only `managed` app-server mode supports this action
+- `service status` should expose `app_server_mode`,
+  `backend_reset_status`, `backend_reset_reason_code`, and
+  `backend_reset_reason`
+- non-force execution is allowed only when the current instance has no pending
+  requests, no running bindings, no active loaded threads, and backend state is
+  verifiable
+- `--force` means the operator accepts losing or interrupting in-flight work in
+  the current instance backend
 
 ### 6.4 Contract for binding persistence and reset
 

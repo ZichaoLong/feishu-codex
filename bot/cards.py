@@ -101,6 +101,7 @@ def build_profile_card(
     content: str,
     profile_names: list[str],
     current_profile: str,
+    extra_action_rows: list[dict] | None = None,
     title: str = "Codex Thread Profile",
 ) -> dict:
     """构造 profile 选择卡片。"""
@@ -128,6 +129,8 @@ def build_profile_card(
                 },
             ]
         )
+    if extra_action_rows:
+        elements.extend(extra_action_rows)
     return {
         "config": _card_config(),
         "header": {

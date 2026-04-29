@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Callable, TypeAlias
 
 from bot.adapters.base import RuntimeConfigSummary, ThreadSummary
@@ -13,7 +14,19 @@ from bot.reason_codes import (
     BINDING_CLEAR_BLOCKED_BINDING_NOT_FOUND,
     BINDING_CLEAR_BLOCKED_BY_INFLIGHT_TURN,
     BINDING_CLEAR_BLOCKED_BY_PENDING_REQUEST,
+    BACKEND_RESET_FORCE_ONLY_BY_ACTIVE_LOADED_THREAD,
+    BACKEND_RESET_FORCE_ONLY_BY_PENDING_REQUEST,
+    BACKEND_RESET_FORCE_ONLY_BY_RUNNING_BINDING,
+    BACKEND_RESET_FORCE_ONLY_BY_RUNTIME_UNVERIFIED,
+    BACKEND_RESET_UNSUPPORTED_REMOTE,
     PROMPT_DENIED_BY_RUNNING_TURN,
+    REPROFILE_BLOCKED_BY_OTHER_INSTANCE_OWNER,
+    REPROFILE_BLOCKED_BY_RESET_UNSUPPORTED,
+    REPROFILE_BLOCKED_BY_UNBOUND_THREAD,
+    REPROFILE_DIRECT_WRITE_AVAILABLE,
+    REPROFILE_RESET_AVAILABLE,
+    REPROFILE_RESET_FORCE_ONLY,
+    REPROFILE_RESET_FORCE_ONLY_BY_RUNTIME_UNVERIFIED,
     UNSUBSCRIBE_BLOCKED_BY_INFLIGHT_TURN,
     UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST,
     UNSUBSCRIBE_NOT_APPLICABLE_NO_BINDING,
@@ -25,17 +38,53 @@ from bot.runtime_state import (
     BACKEND_THREAD_STATUS_ACTIVE,
     BACKEND_THREAD_LOOKUP_ERROR,
     BACKEND_THREAD_LOOKUP_MISSING,
+    BACKEND_THREAD_STATUS_NOT_LOADED,
     BACKEND_THREAD_STATUS_UNKNOWN,
     FEISHU_RUNTIME_ATTACHED,
     FEISHU_RUNTIME_RELEASED,
     LOADED_BACKEND_THREAD_STATUSES,
     RuntimeStateDict,
 )
+from bot.stores.thread_runtime_lease_store import ThreadRuntimeLease
 
 logger = logging.getLogger(__name__)
 
 ChatBindingKey: TypeAlias = tuple[str, str]
 RuntimeState: TypeAlias = RuntimeStateDict
+
+BACKEND_RESET_STATUS_AVAILABLE = "available"
+BACKEND_RESET_STATUS_FORCE_ONLY = "force-only"
+BACKEND_RESET_STATUS_BLOCKED = "blocked"
+
+REPROFILE_STATUS_DIRECT_WRITE = "direct-write"
+REPROFILE_STATUS_RESET_AVAILABLE = "reset-available"
+REPROFILE_STATUS_RESET_FORCE_ONLY = "reset-force-only"
+REPROFILE_STATUS_BLOCKED = "blocked"
+
+
+@dataclass(frozen=True, slots=True)
+class BackendResetPreview:
+    status: str
+    reason_code: str
+    reason_text: str
+    diagnostics: tuple[str, ...] = ()
+    pending_request_count: int = 0
+    running_binding_ids: tuple[str, ...] = ()
+    active_loaded_thread_ids: tuple[str, ...] = ()
+    loaded_thread_ids: tuple[str, ...] = ()
+    runtime_verification_failed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadReprofilePlan:
+    status: str
+    thread_id: str
+    backend_thread_status: str
+    feishu_runtime_state: str
+    live_runtime_owner: str
+    reason_code: str
+    reason_text: str
+    diagnostics: tuple[str, ...] = ()
 
 
 class RuntimeAdminController:
@@ -50,10 +99,14 @@ class RuntimeAdminController:
         read_thread: Callable[[str], Any],
         list_loaded_thread_ids: Callable[[], list[str]],
         current_app_server_url: Callable[[], str],
+        app_server_mode: Callable[[], str],
         unsubscribe_thread: Callable[[str], None],
         release_service_thread_runtime_lease: Callable[[str], None],
         service_control_endpoint: Callable[[], str],
         instance_name: Callable[[], str],
+        load_thread_runtime_lease: Callable[[str], ThreadRuntimeLease | None],
+        list_pending_interaction_requests: Callable[[], list[dict[str, Any]]],
+        reset_current_instance_backend: Callable[[bool], dict[str, Any]],
         safe_read_runtime_config: Callable[[], RuntimeConfigSummary | None],
         current_default_profile_resolution: Callable[[RuntimeConfigSummary | None], Any],
         permissions_summary: Callable[[str, str], str],
@@ -72,10 +125,14 @@ class RuntimeAdminController:
         self._read_thread = read_thread
         self._list_loaded_thread_ids = list_loaded_thread_ids
         self._current_app_server_url = current_app_server_url
+        self._app_server_mode = app_server_mode
         self._unsubscribe_thread = unsubscribe_thread
         self._release_service_thread_runtime_lease = release_service_thread_runtime_lease
         self._service_control_endpoint = service_control_endpoint
         self._instance_name = instance_name
+        self._load_thread_runtime_lease = load_thread_runtime_lease
+        self._list_pending_interaction_requests = list_pending_interaction_requests
+        self._reset_current_instance_backend = reset_current_instance_backend
         self._safe_read_runtime_config = safe_read_runtime_config
         self._current_default_profile_resolution = current_default_profile_resolution
         self._permissions_summary = permissions_summary
@@ -558,10 +615,253 @@ class RuntimeAdminController:
             "unsubscribe_reason": snapshot["unsubscribe_reason"],
         }
 
+    def _backend_reset_preview(self) -> BackendResetPreview:
+        if self._app_server_mode() != "managed":
+            return BackendResetPreview(
+                status=BACKEND_RESET_STATUS_BLOCKED,
+                reason_code=BACKEND_RESET_UNSUPPORTED_REMOTE,
+                reason_text="当前实例是 remote app-server 模式，不拥有 backend 进程，不能执行 reset backend。",
+                diagnostics=(
+                    f"当前 backend 模式：`{self._app_server_mode() or 'unknown'}`",
+                ),
+            )
+
+        pending_requests = self._list_pending_interaction_requests()
+        pending_request_count = len(pending_requests)
+        with self._lock:
+            inventory = self.binding_inventory_locked()
+        running_binding_ids = tuple(item["binding_id"] for item in inventory if item["running_turn"])
+
+        loaded_thread_ids: tuple[str, ...] = ()
+        active_loaded_thread_ids: tuple[str, ...] = ()
+        runtime_verification_failed = False
+        try:
+            loaded_thread_ids = tuple(
+                sorted(
+                    str(thread_id or "").strip()
+                    for thread_id in self._list_loaded_thread_ids()
+                    if str(thread_id or "").strip()
+                )
+            )
+            active_loaded: list[str] = []
+            for thread_id in loaded_thread_ids:
+                _summary, backend_status = self.read_thread_summary_for_status(thread_id)
+                if backend_status in {
+                    BACKEND_THREAD_LOOKUP_ERROR,
+                    BACKEND_THREAD_LOOKUP_MISSING,
+                    BACKEND_THREAD_STATUS_UNKNOWN,
+                }:
+                    runtime_verification_failed = True
+                    continue
+                if backend_status == BACKEND_THREAD_STATUS_ACTIVE:
+                    active_loaded.append(thread_id)
+            active_loaded_thread_ids = tuple(active_loaded)
+        except Exception:
+            logger.exception("构造 backend reset preview 时读取 loaded thread 失败")
+            runtime_verification_failed = True
+
+        diagnostics: list[str] = [
+            f"当前实例：`{self._instance_name()}`",
+            f"当前 backend 模式：`{self._app_server_mode() or 'unknown'}`",
+        ]
+        if loaded_thread_ids:
+            diagnostics.append(
+                "backend loaded threads："
+                + ", ".join(f"`{thread_id[:8]}…`" for thread_id in loaded_thread_ids)
+            )
+        if pending_request_count:
+            diagnostics.append(f"待处理审批/输入请求：`{pending_request_count}`")
+        if running_binding_ids:
+            diagnostics.append("运行中的 Feishu binding：" + ", ".join(f"`{binding_id}`" for binding_id in running_binding_ids))
+        if active_loaded_thread_ids:
+            diagnostics.append(
+                "backend active threads："
+                + ", ".join(f"`{thread_id[:8]}…`" for thread_id in active_loaded_thread_ids)
+            )
+        if runtime_verification_failed:
+            diagnostics.append("当前无法完整确认 backend 是否仍有运行中的 loaded thread。")
+
+        if pending_request_count:
+            return BackendResetPreview(
+                status=BACKEND_RESET_STATUS_FORCE_ONLY,
+                reason_code=BACKEND_RESET_FORCE_ONLY_BY_PENDING_REQUEST,
+                reason_text="当前实例还有待处理审批或输入请求；如确认可打断，可执行 force reset。",
+                diagnostics=tuple(diagnostics),
+                pending_request_count=pending_request_count,
+                running_binding_ids=running_binding_ids,
+                active_loaded_thread_ids=active_loaded_thread_ids,
+                loaded_thread_ids=loaded_thread_ids,
+                runtime_verification_failed=runtime_verification_failed,
+            )
+        if running_binding_ids:
+            return BackendResetPreview(
+                status=BACKEND_RESET_STATUS_FORCE_ONLY,
+                reason_code=BACKEND_RESET_FORCE_ONLY_BY_RUNNING_BINDING,
+                reason_text="当前实例仍有运行中的 Feishu turn；如确认可打断，可执行 force reset。",
+                diagnostics=tuple(diagnostics),
+                pending_request_count=pending_request_count,
+                running_binding_ids=running_binding_ids,
+                active_loaded_thread_ids=active_loaded_thread_ids,
+                loaded_thread_ids=loaded_thread_ids,
+                runtime_verification_failed=runtime_verification_failed,
+            )
+        if active_loaded_thread_ids:
+            return BackendResetPreview(
+                status=BACKEND_RESET_STATUS_FORCE_ONLY,
+                reason_code=BACKEND_RESET_FORCE_ONLY_BY_ACTIVE_LOADED_THREAD,
+                reason_text="当前 backend 仍有 active thread；如确认可打断，可执行 force reset。",
+                diagnostics=tuple(diagnostics),
+                pending_request_count=pending_request_count,
+                running_binding_ids=running_binding_ids,
+                active_loaded_thread_ids=active_loaded_thread_ids,
+                loaded_thread_ids=loaded_thread_ids,
+                runtime_verification_failed=runtime_verification_failed,
+            )
+        if runtime_verification_failed:
+            return BackendResetPreview(
+                status=BACKEND_RESET_STATUS_FORCE_ONLY,
+                reason_code=BACKEND_RESET_FORCE_ONLY_BY_RUNTIME_UNVERIFIED,
+                reason_text="当前无法完整确认 backend 是否仍有运行中的 thread；如确认可打断，可执行 force reset。",
+                diagnostics=tuple(diagnostics),
+                pending_request_count=pending_request_count,
+                running_binding_ids=running_binding_ids,
+                active_loaded_thread_ids=active_loaded_thread_ids,
+                loaded_thread_ids=loaded_thread_ids,
+                runtime_verification_failed=runtime_verification_failed,
+            )
+        return BackendResetPreview(
+            status=BACKEND_RESET_STATUS_AVAILABLE,
+            reason_code="",
+            reason_text="当前实例 backend 可安全重置。",
+            diagnostics=tuple(diagnostics),
+            pending_request_count=pending_request_count,
+            running_binding_ids=running_binding_ids,
+            active_loaded_thread_ids=active_loaded_thread_ids,
+            loaded_thread_ids=loaded_thread_ids,
+            runtime_verification_failed=runtime_verification_failed,
+        )
+
+    def backend_reset_preview(self) -> BackendResetPreview:
+        return self._backend_reset_preview()
+
+    def plan_thread_reprofile(self, thread_id: str) -> ThreadReprofilePlan:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return ThreadReprofilePlan(
+                status=REPROFILE_STATUS_BLOCKED,
+                thread_id="",
+                backend_thread_status=BACKEND_THREAD_STATUS_UNKNOWN,
+                feishu_runtime_state="-",
+                live_runtime_owner="",
+                reason_code=REPROFILE_BLOCKED_BY_UNBOUND_THREAD,
+                reason_text="当前还没有绑定 thread；先执行 `/new`，或直接发送第一条普通消息创建线程。",
+            )
+
+        with self._lock:
+            bound_bindings = self.bound_bindings_for_thread_locked(normalized_thread_id)
+            attached_bindings = self.attached_bindings_for_thread_locked(normalized_thread_id)
+        lease = self._load_thread_runtime_lease(normalized_thread_id)
+        _summary, backend_thread_status = self.read_thread_summary_for_status(normalized_thread_id)
+        current_instance = str(self._instance_name() or "").strip().lower()
+        feishu_runtime_state = (
+            FEISHU_RUNTIME_ATTACHED
+            if attached_bindings
+            else FEISHU_RUNTIME_RELEASED
+            if bound_bindings
+            else "-"
+        )
+        live_runtime_owner = str(lease.owner_instance if lease is not None else "").strip()
+
+        diagnostics = [
+            f"当前 thread：`{normalized_thread_id[:8]}…`",
+            f"当前 backend thread status：`{backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN}`",
+            f"当前 Feishu runtime：`{feishu_runtime_state}`",
+            (
+                f"当前 live runtime owner：`{live_runtime_owner}`"
+                if live_runtime_owner
+                else "当前 live runtime owner：`none`"
+            ),
+        ]
+
+        if (
+            backend_thread_status == BACKEND_THREAD_STATUS_NOT_LOADED
+            and not attached_bindings
+            and lease is None
+        ):
+            diagnostics.append("当前 thread 已 verifiably globally unloaded，可直接写入 profile。")
+            return ThreadReprofilePlan(
+                status=REPROFILE_STATUS_DIRECT_WRITE,
+                thread_id=normalized_thread_id,
+                backend_thread_status=backend_thread_status,
+                feishu_runtime_state=feishu_runtime_state,
+                live_runtime_owner=live_runtime_owner,
+                reason_code=REPROFILE_DIRECT_WRITE_AVAILABLE,
+                reason_text="当前 thread 已 verifiably globally unloaded，可直接写入 profile。",
+                diagnostics=tuple(diagnostics),
+            )
+
+        if lease is not None and lease.owner_instance != current_instance:
+            diagnostics.append(
+                f"当前 thread 的 live runtime 由实例 `{lease.owner_instance}` 持有；当前实例不能代它 reset backend。"
+            )
+            return ThreadReprofilePlan(
+                status=REPROFILE_STATUS_BLOCKED,
+                thread_id=normalized_thread_id,
+                backend_thread_status=backend_thread_status,
+                feishu_runtime_state=feishu_runtime_state,
+                live_runtime_owner=live_runtime_owner,
+                reason_code=REPROFILE_BLOCKED_BY_OTHER_INSTANCE_OWNER,
+                reason_text=(
+                    f"当前 thread 的 live runtime 仍由实例 `{lease.owner_instance}` 持有；"
+                    "请在该实例侧释放或重置 backend 后再重试。"
+                ),
+                diagnostics=tuple(diagnostics),
+            )
+
+        reset_preview = self._backend_reset_preview()
+        diagnostics.extend(reset_preview.diagnostics)
+        if reset_preview.status == BACKEND_RESET_STATUS_BLOCKED:
+            return ThreadReprofilePlan(
+                status=REPROFILE_STATUS_BLOCKED,
+                thread_id=normalized_thread_id,
+                backend_thread_status=backend_thread_status,
+                feishu_runtime_state=feishu_runtime_state,
+                live_runtime_owner=live_runtime_owner,
+                reason_code=REPROFILE_BLOCKED_BY_RESET_UNSUPPORTED,
+                reason_text=reset_preview.reason_text,
+                diagnostics=tuple(diagnostics),
+            )
+        if reset_preview.status == BACKEND_RESET_STATUS_FORCE_ONLY:
+            return ThreadReprofilePlan(
+                status=REPROFILE_STATUS_RESET_FORCE_ONLY,
+                thread_id=normalized_thread_id,
+                backend_thread_status=backend_thread_status,
+                feishu_runtime_state=feishu_runtime_state,
+                live_runtime_owner=live_runtime_owner,
+                reason_code=(
+                    REPROFILE_RESET_FORCE_ONLY_BY_RUNTIME_UNVERIFIED
+                    if reset_preview.reason_code == BACKEND_RESET_FORCE_ONLY_BY_RUNTIME_UNVERIFIED
+                    else REPROFILE_RESET_FORCE_ONLY
+                ),
+                reason_text=reset_preview.reason_text,
+                diagnostics=tuple(diagnostics),
+            )
+        return ThreadReprofilePlan(
+            status=REPROFILE_STATUS_RESET_AVAILABLE,
+            thread_id=normalized_thread_id,
+            backend_thread_status=backend_thread_status,
+            feishu_runtime_state=feishu_runtime_state,
+            live_runtime_owner=live_runtime_owner,
+            reason_code=REPROFILE_RESET_AVAILABLE,
+            reason_text="当前 thread 尚未满足 verifiably globally unloaded；可通过 reset 当前实例 backend 后再写入 profile。",
+            diagnostics=tuple(diagnostics),
+        )
+
     def handle_service_control_request(self, method: str, params: dict[str, Any]) -> Any:
         if method == "service/status":
             with self._lock:
                 bindings = self.binding_inventory_locked()
+            reset_preview = self.backend_reset_preview()
             bound_thread_ids = {item["thread_id"] for item in bindings if item["thread_id"]}
             attached_thread_ids = {
                 item["thread_id"]
@@ -578,6 +878,7 @@ class RuntimeAdminController:
                 "pid": os.getpid(),
                 "control_endpoint": self._service_control_endpoint(),
                 "app_server_url": self._current_app_server_url(),
+                "app_server_mode": self._app_server_mode(),
                 "binding_count": len(bindings),
                 "bound_binding_count": sum(1 for item in bindings if item["binding_state"] == "bound"),
                 "attached_binding_count": sum(
@@ -588,7 +889,13 @@ class RuntimeAdminController:
                 "loaded_thread_count": len(loaded_thread_ids),
                 "loaded_thread_ids": loaded_thread_ids,
                 "running_binding_ids": [item["binding_id"] for item in bindings if item["running_turn"]],
+                "backend_reset_status": reset_preview.status,
+                "backend_reset_reason_code": reset_preview.reason_code,
+                "backend_reset_reason": reset_preview.reason_text,
             }
+        if method == "service/reset-backend":
+            force = bool(params.get("force"))
+            return self._reset_current_instance_backend(force)
         if method == "binding/list":
             with self._lock:
                 return {"bindings": self.binding_inventory_locked()}

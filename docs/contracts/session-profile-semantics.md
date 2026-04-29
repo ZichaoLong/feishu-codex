@@ -45,8 +45,12 @@ If older docs still describe `fcodex` shell slash self-commands, this document w
 - if no thread is bound, reject directly
 - writes are allowed only when the target thread is verifiably globally
   unloaded
-- loaded threads, or threads whose loaded/unloaded state cannot be verified,
-  are rejected directly; no hot-switch and no deferred hidden bookkeeping
+- loaded threads still under the current instance's control are not hot-switched;
+  instead, Feishu offers an “apply and reset the current instance backend” path
+- force-reset-only cases must show explicit blocking diagnostics and require
+  admin/operator confirmation
+- if the live runtime owner belongs to another instance, or the current
+  instance does not support backend reset, the request is hard-blocked
 
 ### `/unsubscribe`
 
@@ -116,6 +120,8 @@ That means shell-level support is removed for:
 
 It owns:
 
+- `service status`
+- `service reset-backend`
 - `thread list --scope cwd|global`
 - `thread status`
 - `thread bindings`

@@ -148,6 +148,24 @@ class FeishuCodexCtlTests(unittest.TestCase):
         self.assertEqual(args.resource, "service")
         self.assertEqual(args.action, "status")
 
+    def test_service_reset_backend_accepts_without_force(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["service", "reset-backend"])
+
+        self.assertEqual(args.resource, "service")
+        self.assertEqual(args.action, "reset-backend")
+        self.assertFalse(args.force)
+
+    def test_service_reset_backend_accepts_force_flag(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["service", "reset-backend", "--force"])
+
+        self.assertEqual(args.resource, "service")
+        self.assertEqual(args.action, "reset-backend")
+        self.assertTrue(args.force)
+
     def test_instance_list_prefers_runtime_store_url_over_stale_registry_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir)

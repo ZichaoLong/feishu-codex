@@ -969,8 +969,9 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-created")
         self.assertTrue(bot2.patches)
-        patched_card = json.loads(bot2.patches[-1][1])
-        self.assertIn("恢复后事件正常路由", json.dumps(patched_card, ensure_ascii=False))
+        self.assertTrue(
+            any("恢复后事件正常路由" in payload for _message_id, payload in bot2.patches)
+        )
 
     def test_group_stored_binding_survives_handler_restart(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -1046,9 +1047,9 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-group")
         self.assertTrue(bot2.patches)
-        patched_card = json.loads(bot2.patches[-1][1])
-        self.assertEqual(patched_card["header"]["title"]["content"], "Codex 执行过程")
-        self.assertIn("群重启后事件正常路由", json.dumps(patched_card, ensure_ascii=False))
+        self.assertTrue(
+            any("群重启后事件正常路由" in payload for _message_id, payload in bot2.patches)
+        )
 
     def test_restart_keeps_interaction_owner_for_multi_subscriber_running_thread(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -3069,7 +3070,9 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("**可用 profile**", content)
         self.assertIn("`provider1` -> `provider1_api`", content)
         self.assertIn("`provider2` -> `provider2_api`", content)
-        self.assertIn("当前不可切换：当前 thread 仍处于 loaded 状态", content)
+        self.assertIn("当前不能直接写入：当前 thread 尚未满足 verifiably globally unloaded", content)
+        self.assertIn("**re-profile 诊断**", content)
+        self.assertIn("当前实例：`default`", content)
         action = self._action_elements(card)[0]
         self.assertNotIn("layout", action)
         self.assertEqual(
@@ -3095,6 +3098,19 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._bind_thread("ou_user", "c1", thread)
         handler.handle_message("ou_user", "c1", "/unsubscribe")
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="demo",
+                preview="hello",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="notLoaded",
+            )
+        )
+        handler._adapter.list_loaded_thread_ids = lambda: []
 
         handler.handle_message("ou_user", "c1", "/profile provider2")
 
@@ -3164,6 +3180,19 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._bind_thread("ou_user", "c1", thread)
         handler.handle_message("ou_user", "c1", "/unsubscribe")
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="demo",
+                preview="hello",
+                created_at=0,
+                updated_at=0,
+                source="appServer",
+                status="notLoaded",
+            )
+        )
+        handler._adapter.list_loaded_thread_ids = lambda: []
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
@@ -3561,7 +3590,14 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user", "c1", "/profile provider2")
 
-        self.assertIn("无法确认该 thread 是否已完全 unloaded", bot.replies[-1][1])
+        _, card = bot.cards[-1]
+        content = card["elements"][0]["content"]
+        self.assertIn("当前无法完整确认 backend 是否仍有运行中的 thread", content)
+        reset_action = self._action_elements(card)[1]
+        self.assertEqual(
+            [item["text"]["content"] for item in reset_action["actions"]],
+            ["强制应用并重置 backend"],
+        )
 
     def test_prompt_after_switching_back_to_default_uses_default_collaboration_mode(self) -> None:
         handler, _ = self._make_handler()

@@ -250,8 +250,34 @@ not merely:
 
 ### 5.6 Behavior While Loaded
 
-If the target thread is still loaded, or the loaded/unloaded fact cannot be
-verified, the write must be rejected directly.
+If the target thread is still loaded, or is otherwise not yet verifiably
+globally unloaded, the system still must **not hot-switch** the live runtime.
+
+There are only two allowed paths:
+
+- verifiably globally unloaded:
+  - write the thread-wise desired resume config directly
+- not yet globally unloaded, but the current instance can safely or forcibly
+  reset its backend:
+  - offer an explicit “apply this profile, then reset the current instance
+    backend” path
+
+That backend reset means:
+
+- reset only the current instance backend / app-server
+- do not restart the whole `feishu-codex` service process
+- keep binding bookmarks, thread-wise profile data, and other persisted state
+
+In the following cases, direct write is not allowed and the reason must be made
+explicit:
+
+- the current instance still has pending approval / input requests
+- the current instance still has running Feishu bindings
+- the current backend still has active loaded threads
+- backend loaded/unloaded facts cannot currently be fully verified
+- the thread's live runtime owner belongs to another instance
+- the current instance is in remote app-server mode and does not own a backend
+  process
 
 The system must not:
 
@@ -259,15 +285,12 @@ The system must not:
 - silently record a future change to take effect later
 - perform a best-effort live rewrite of the current runtime
 
-Rejections should be direct and actionable.
-
-Recommended guidance:
-
-- Feishu side: run `unsubscribe`
-- local side: close every `fcodex` TUI still attached to that thread
-
-This contract intentionally prefers “explicit reject + clear operator guidance”
-over a long README explanation.
+So Feishu is no longer limited to a pure “reject and tell the user to
+unsubscribe” path.
+For loaded state that is still under the current instance's control, the formal
+path is “explicit backend reset, then write”.
+Only when the current instance does not have enough control, or backend reset is
+unsupported, should the request be hard-blocked.
 
 ### 5.7 Feishu Write Surface
 
@@ -276,7 +299,21 @@ When a Feishu chat is currently bound to a thread:
 - `/profile <name>` should target that currently bound thread
 - if the thread is verifiably globally unloaded, it writes the thread-wise desired resume
   config
-- otherwise it rejects with guidance
+- if the thread is not yet globally unloaded but the current instance backend
+  can be reset, it should offer an “apply and reset backend” path
+- if only force reset is available, it must surface explicit blocking
+  diagnostics and require admin/operator confirmation
+- if the live runtime owner belongs to another instance, or the current
+  instance is in remote app-server mode, it must block with a clear reason
+
+When a Feishu chat is already bound to a thread and runs `/profile` with no
+argument:
+
+- it should show the current thread-wise profile / provider
+- it should show re-profile diagnostics
+- it should not reset anything immediately
+- the later `/profile <name>` or profile-card buttons then enter the
+  direct-write or reset path
 
 When a Feishu chat has no bound thread:
 

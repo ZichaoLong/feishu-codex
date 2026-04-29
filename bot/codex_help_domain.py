@@ -149,7 +149,7 @@ class CodexHelpDomain:
                     "这些操作都以**当前绑定线程**为目标。\n\n"
                     "- `/status`：查看当前 binding、feishu runtime、backend thread status、profile 相关信息\n"
                     f"- `{_SHARED_PREFLIGHT_COMMAND.feishu_usage}`：dry-run 当前 chat 下一条普通消息与 release 操作，不启动 turn、不改 binding\n"
-                    f"- `{_SHARED_UNSUBSCRIBE_COMMAND.feishu_usage}`：让 Feishu 释放自己对当前线程的 runtime 持有，但不解绑 thread\n"
+                    f"- `{_SHARED_UNSUBSCRIBE_COMMAND.feishu_usage}`：低层 release 动作；释放 Feishu 对当前线程的 runtime 持有，但不解绑 thread\n"
                     "- `/rename <title>`：重命名当前线程\n"
                     f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
                     "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。"
@@ -251,7 +251,7 @@ class CodexHelpDomain:
                 title="Codex 帮助：设置",
                 markdown=(
                     "**当前 thread profile 与当前会话设置**\n"
-                    f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前绑定 thread 的 resume profile\n"
+                    f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前绑定 thread 的 resume profile；必要时会提供 reset backend 路径\n"
                     "- 推荐先用 `/permissions`；它会同时设置审批策略与沙箱\n"
                     "- `/approval`、`/sandbox`：单独调整审批或沙箱\n"
                     "- `/mode`：切换当前飞书会话后续 turn 的协作模式\n"

@@ -428,6 +428,7 @@ fcodex -p <profile> resume <thread_id|thread_name>
 
 ```bash
 feishu-codexctl service status
+feishu-codexctl service reset-backend
 feishu-codexctl instance list
 feishu-codexctl binding list
 feishu-codexctl binding status <binding_id>

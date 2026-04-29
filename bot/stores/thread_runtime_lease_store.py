@@ -351,6 +351,72 @@ class ThreadRuntimeLeaseStore:
             self._write_all_unlocked(data)
         return True
 
+    def purge_all_for_instance(
+        self,
+        *,
+        instance_name: str,
+        owner_service_token: str | None = None,
+    ) -> list[str]:
+        normalized_instance_name = str(instance_name or "").strip().lower()
+        normalized_token = str(owner_service_token or "").strip()
+        if not normalized_instance_name:
+            return []
+        removed_thread_ids: list[str] = []
+        with self._locked_data() as data:
+            changed = False
+            for thread_id in list(data):
+                raw = data.get(thread_id)
+                lease = self._lease_from_data(thread_id, raw)
+                transfer = self._transfer_from_data(thread_id, raw)
+                if lease is None and transfer is None:
+                    continue
+                matched = False
+                retained: tuple[ThreadRuntimeLeaseHolder, ...] = ()
+                if lease is not None:
+                    retained = tuple(
+                        holder
+                        for holder in lease.holders
+                        if not (
+                            holder.instance_name == normalized_instance_name
+                            and (not normalized_token or holder.owner_service_token == normalized_token)
+                        )
+                    )
+                    matched = len(retained) != len(lease.holders)
+                cleared_transfer = transfer
+                if transfer is not None and (
+                    transfer.owner_instance == normalized_instance_name
+                    or transfer.target_instance == normalized_instance_name
+                ) and (not normalized_token or transfer.owner_service_token == normalized_token or transfer.target_service_token == normalized_token):
+                    cleared_transfer = None
+                    matched = True
+                if not matched:
+                    continue
+                removed_thread_ids.append(thread_id)
+                changed = True
+                if lease is None or not retained:
+                    cleaned = self._serialize_entry(None, cleared_transfer)
+                    if cleaned is None:
+                        data.pop(thread_id, None)
+                    else:
+                        data[thread_id] = cleaned
+                    continue
+                first = retained[0]
+                data[thread_id] = self._serialize_entry(
+                    ThreadRuntimeLease(
+                        thread_id=thread_id,
+                        owner_instance=first.instance_name,
+                        owner_service_token=first.owner_service_token,
+                        control_endpoint=first.control_endpoint,
+                        backend_url=first.backend_url,
+                        attached_at=lease.attached_at,
+                        holders=retained,
+                    ),
+                    cleared_transfer,
+                )
+            if changed:
+                self._write_all_unlocked(data)
+        return removed_thread_ids
+
     @contextmanager
     def _locked_data(self) -> Iterator[dict[str, dict]]:
         with self._lock:
