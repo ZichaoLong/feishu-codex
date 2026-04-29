@@ -208,8 +208,8 @@ follows:
 - the old execution card should then keep only `process_log` and earlier staged
   `reply_segments`
 - if stripping that last answer leaves the old execution card with no visible
-  process log or staged reply content, delete the old execution card instead
-  of keeping an empty shell
+  process log or staged reply content, finalize the old execution card as a
+  minimal terminal card instead of deleting the message
 - if the sender can only fall back to the local transcript, or if terminal
   result delivery fails, do not strip the final reply from the execution card
 

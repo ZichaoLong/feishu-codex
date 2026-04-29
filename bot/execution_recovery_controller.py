@@ -233,13 +233,15 @@ class ExecutionRecoveryController:
                 ExecutionStateChanged(terminal_result_text=normalized),
             )
 
-    def _clear_and_remove_execution_card(
+    def _clear_and_refresh_execution_card(
         self,
         *,
         sender_id: str,
         chat_id: str,
         execution_message_id: str,
         transcript: ExecutionTranscript,
+        cancelled: bool,
+        elapsed: int,
     ) -> bool:
         cleared = transcript.clone()
         cleared.set_reply_text("")
@@ -249,7 +251,15 @@ class ExecutionRecoveryController:
             execution_message_id=execution_message_id,
             transcript=cleared,
         )
-        return self._remove_execution_card_message(execution_message_id)
+        if self._display_changed(transcript, cleared):
+            self._dispatch_execution_card_message(
+                execution_message_id,
+                transcript=cleared,
+                running=False,
+                elapsed=elapsed,
+                cancelled=cancelled,
+            )
+        return True
 
     def _publish_terminal_result_if_needed(
         self,
@@ -318,14 +328,6 @@ class ExecutionRecoveryController:
                 projection=projection,
                 drop_last_text_message=True,
             )
-        if not self._transcript_has_visible_execution_output(display_transcript):
-            self._clear_and_remove_execution_card(
-                sender_id=sender_id,
-                chat_id=chat_id,
-                execution_message_id=execution_message_id,
-                transcript=display_transcript,
-            )
-            return
         self._replace_terminal_execution_transcript(
             sender_id=sender_id,
             chat_id=chat_id,
@@ -395,11 +397,13 @@ class ExecutionRecoveryController:
                     target.transcript,
                     final_reply_text=fallback_reply_text,
                 ):
-                    self._clear_and_remove_execution_card(
+                    self._clear_and_refresh_execution_card(
                         sender_id=target.sender_id,
                         chat_id=target.chat_id,
                         execution_message_id=target.card_message_id,
                         transcript=target.transcript,
+                        cancelled=target.cancelled,
+                        elapsed=target.elapsed,
                     )
             return
 
@@ -431,11 +435,13 @@ class ExecutionRecoveryController:
                 target.transcript,
                 final_reply_text=fallback_reply_text,
             ):
-                self._clear_and_remove_execution_card(
+                self._clear_and_refresh_execution_card(
                     sender_id=target.sender_id,
                     chat_id=target.chat_id,
                     execution_message_id=target.card_message_id,
                     transcript=target.transcript,
+                    cancelled=target.cancelled,
+                    elapsed=target.elapsed,
                 )
 
     def mark_runtime_degraded(self, sender_id: str, chat_id: str, *, reason: str) -> None:
@@ -537,6 +543,12 @@ class ExecutionRecoveryController:
                 card_message_id = runtime.execution.current_message_id.strip()
                 prompt_message_id = runtime.execution.current_prompt_message_id.strip()
                 prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
+                cancelled = runtime.execution.cancelled
+                elapsed = (
+                    int(max(0.0, time.monotonic() - runtime.execution.started_at))
+                    if runtime.execution.started_at
+                    else 0
+                )
             finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
             if finalized and fallback_reply_text:
                 published = self._maybe_publish_terminal_result(
@@ -551,11 +563,13 @@ class ExecutionRecoveryController:
                     runtime.execution.transcript,
                     final_reply_text=fallback_reply_text,
                 ):
-                    self._clear_and_remove_execution_card(
+                    self._clear_and_refresh_execution_card(
                         sender_id=sender_id,
                         chat_id=chat_id,
                         execution_message_id=card_message_id,
                         transcript=runtime.execution.transcript,
+                        cancelled=cancelled,
+                        elapsed=elapsed,
                     )
             return finalized
         try:
@@ -575,6 +589,12 @@ class ExecutionRecoveryController:
                     card_message_id = runtime.execution.current_message_id.strip()
                     prompt_message_id = runtime.execution.current_prompt_message_id.strip()
                     prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
+                    cancelled = runtime.execution.cancelled
+                    elapsed = (
+                        int(max(0.0, time.monotonic() - runtime.execution.started_at))
+                        if runtime.execution.started_at
+                        else 0
+                    )
                 finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
                 if finalized and fallback_reply_text:
                     published = self._maybe_publish_terminal_result(
@@ -589,11 +609,13 @@ class ExecutionRecoveryController:
                         runtime.execution.transcript,
                         final_reply_text=fallback_reply_text,
                     ):
-                        self._clear_and_remove_execution_card(
+                        self._clear_and_refresh_execution_card(
                             sender_id=sender_id,
                             chat_id=chat_id,
                             execution_message_id=card_message_id,
                             transcript=runtime.execution.transcript,
+                            cancelled=cancelled,
+                            elapsed=elapsed,
                         )
                 return finalized
             if self._is_transport_disconnect(exc) or self._is_request_timeout_error(exc):
@@ -671,11 +693,13 @@ class ExecutionRecoveryController:
                 current_transcript,
                 final_reply_text=fallback_reply_text,
             ):
-                self._clear_and_remove_execution_card(
+                self._clear_and_refresh_execution_card(
                     sender_id=sender_id,
                     chat_id=chat_id,
                     execution_message_id=card_message_id,
                     transcript=current_transcript,
+                    cancelled=cancelled,
+                    elapsed=elapsed,
                 )
         return finalized
 

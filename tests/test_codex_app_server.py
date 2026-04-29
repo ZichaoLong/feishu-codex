@@ -607,12 +607,18 @@ class CodexRpcClientTests(unittest.TestCase):
 class FCodexTests(unittest.TestCase):
     def setUp(self) -> None:
         super().setUp()
-        patcher = patch(
-            "bot.instance_resolution.resolve_effective_app_server_url",
-            side_effect=lambda configured_url, *, data_dir: configured_url,
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        patchers = [
+            patch(
+                "bot.instance_resolution.resolve_effective_app_server_url",
+                side_effect=lambda configured_url, *, data_dir: configured_url,
+            ),
+            patch("bot.instance_resolution.list_running_instances", return_value=[]),
+            patch("bot.instance_resolution.load_running_instance", return_value=None),
+            patch("bot.fcodex.current_cli_instance_name", return_value="default"),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_default_data_dir_falls_back_to_install_path_when_not_in_dev_layout(self) -> None:
         with patch.dict("bot.fcodex.os.environ", {}, clear=True):

@@ -1040,6 +1040,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler2._adapter.start_turn_calls[0]["thread_id"], "thread-group")
         self.assertTrue(bot2.patches)
         patched_card = json.loads(bot2.patches[-1][1])
+        self.assertEqual(patched_card["header"]["title"]["content"], "Codex 执行过程")
         self.assertIn("群重启后事件正常路由", json.dumps(patched_card, ensure_ascii=False))
 
     def test_restart_keeps_interaction_owner_for_multi_subscriber_running_thread(self) -> None:
@@ -1818,7 +1819,7 @@ class CodexHandlerTests(unittest.TestCase):
         card = json.loads(bot.sent_messages[-1][2])
         self.assertEqual(card["header"]["title"]["content"], "Codex")
         self.assertIn("snapshot final answer", card["elements"][-1]["content"])
-        self.assertEqual(bot.deletes, [target.card_message_id])
+        self.assertEqual(bot.deletes, [])
 
     def test_mode_command_without_arg_shows_mode_card(self) -> None:
         handler, bot = self._make_handler()
@@ -2505,6 +2506,12 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(card["header"]["title"]["content"], "Codex 执行过程（执行中）")
         self.assertNotIn("/help", json.dumps(card, ensure_ascii=False))
+
+    def test_terminal_empty_execution_card_is_visually_blank(self) -> None:
+        card = build_execution_card("", [], running=False)
+
+        self.assertEqual(card["header"]["title"]["content"], "Codex 执行过程")
+        self.assertEqual(card["body"]["elements"], [{"tag": "markdown", "content": ""}])
 
     def test_status_includes_user_facing_summary(self) -> None:
         handler, bot = self._make_handler()

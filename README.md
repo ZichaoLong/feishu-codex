@@ -90,6 +90,10 @@
 
 - `install.sh` 和 `install.ps1` 是唯一公开安装 / 修复入口
 - `install.py` 是它们调用的内部实现
+- 开发期间不要执行 `pip install .` 或 `pip install -e .`
+  - 这会在当前 Python / Conda 环境额外生成 `feishu-codex` / `feishu-codexctl` / `fcodex` 等 `console_scripts`
+  - 这些残留入口后续不会被 `install.sh` 接管，容易和 `~/.local/bin` 下的受管 wrapper 混淆
+  - 统一使用 `bash install.sh` 或 `./install.ps1`
 - 安装后会生成 `feishu-codex`、`feishu-codexd`、`feishu-codexctl`、`fcodex`
 - 安装脚本会初始化 `default` 实例，并为所有已知实例重建本地 service 定义 / 注册材料
 - 这里的“重建”指：刷新 `system.yaml.example` / `codex.yaml.example`，补齐缺失 scaffold，并重建 shared wrapper

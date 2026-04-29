@@ -168,7 +168,7 @@
   - terminal result card：`Codex`
 - `terminal result card` 发送成功后，如果终态 snapshot 能明确定位最后一个文本型 `agentMessage`，则旧 execution card 的 reply 面板应去掉这最后一段
 - 旧 execution card 只继续保留 `process_log` 与更早的过程性 `reply_segments`
-- 如果剔除后旧 execution card 已经没有任何过程日志或过程性回复可展示，则应直接删除旧 execution card，而不是保留空壳卡片
+- 如果剔除后旧 execution card 已经没有任何过程日志或过程性回复可展示，则应把它收口为一张极简终态卡，而不是删除消息
 - 如果只能回退到本地 transcript，或者终态结果载体发送失败，则不要剔除 execution card 里的最终回复
 
 ### 5.3 终态超长时优先发文本，不发“部分终态卡”

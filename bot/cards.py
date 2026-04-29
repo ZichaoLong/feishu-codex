@@ -238,7 +238,12 @@ def build_execution_card(
     elif log_text:
         elements.append(_panel("执行过程", limit_card_tables(log_text), expanded=False))
     else:
-        elements.append({"tag": "markdown", "content": "*暂无输出*"})
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": "*暂无输出*" if running else "",
+            }
+        )
 
     if running:
         elements.append({"tag": "hr"})

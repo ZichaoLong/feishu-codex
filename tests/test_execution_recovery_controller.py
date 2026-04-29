@@ -248,7 +248,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         controller.cancel_mirror_watchdog_locked(state)
         self.assertIsNone(state["mirror_watchdog_timer"])
 
-    def test_run_terminal_execution_reconcile_removes_empty_execution_card_when_snapshot_only_has_final_reply(self) -> None:
+    def test_run_terminal_execution_reconcile_keeps_minimal_execution_card_when_snapshot_only_has_final_reply(self) -> None:
         state = self._make_state()
         controller, snapshots, patches, deletes, _, terminal_results = self._make_controller(state)
         snapshots.append(
@@ -288,7 +288,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         )
 
         self.assertEqual(patches, [])
-        self.assertEqual(deletes, ["card-1"])
+        self.assertEqual(deletes, [])
         self.assertEqual(state["terminal_result_text"], "")
         self.assertEqual(
             terminal_results,
@@ -396,8 +396,19 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(patches, [])
-        self.assertEqual(deletes, ["card-1"])
+        self.assertEqual(
+            patches,
+            [
+                {
+                    "message_id": "card-1",
+                    "reply_text": "",
+                    "running": False,
+                    "elapsed": 5,
+                    "cancelled": False,
+                }
+            ],
+        )
+        self.assertEqual(deletes, [])
         self.assertEqual(
             terminal_results,
             [
@@ -469,7 +480,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         self.assertEqual(state["execution_transcript"].reply_text(), "最终答案")
         self.assertEqual(state["terminal_result_text"], "")
 
-    def test_run_terminal_execution_reconcile_deletes_execution_card_when_only_final_result_remains(self) -> None:
+    def test_run_terminal_execution_reconcile_keeps_minimal_execution_card_when_only_final_result_remains(self) -> None:
         state = self._make_state()
         controller, snapshots, patches, deletes, _, terminal_results = self._make_controller(state)
         state["current_message_id"] = "card-1"
@@ -511,8 +522,19 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(patches, [])
-        self.assertEqual(deletes, ["card-1"])
+        self.assertEqual(
+            patches,
+            [
+                {
+                    "message_id": "card-1",
+                    "reply_text": "",
+                    "running": False,
+                    "elapsed": 5,
+                    "cancelled": False,
+                }
+            ],
+        )
+        self.assertEqual(deletes, [])
         self.assertEqual(state["execution_transcript"].reply_text(), "")
         self.assertEqual(state["terminal_result_text"], "最终答案")
         self.assertEqual(
