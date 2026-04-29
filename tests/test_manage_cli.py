@@ -14,6 +14,7 @@ from bot.install_templates import CODEX_YAML_TEMPLATE, SYSTEM_YAML_TEMPLATE
 from bot.manage_cli import (
     _build_parser,
     _handle_autostart_action,
+    _handle_autostart_actions,
     _ensure_instance_scaffold,
     _handle_bootstrap_install,
     _handle_config,
@@ -21,7 +22,9 @@ from bot.manage_cli import (
     _handle_instance_list,
     _handle_instance_remove,
     _handle_service_action,
+    _handle_service_actions,
     _write_wrapper,
+    main,
 )
 from bot.service_manager import AutostartStatus
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
@@ -64,10 +67,18 @@ class ManageCliTests(unittest.TestCase):
         self.assertIn("bash install.sh", rendered)
         self.assertIn("autostart", rendered)
         self.assertIn("feishu-codex instance create corp-a", rendered)
+        self.assertIn("feishu-codex --instance default --instance corp-a status", rendered)
         self.assertIn("创建、列出、删除命名实例", rendered)
         self.assertIn("查看或打开当前实例相关配置文件", rendered)
         self.assertNotIn("    install            ", rendered)
         self.assertNotIn("bootstrap-install", rendered)
+
+    def test_parser_collects_repeated_instance_flags(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["--instance", "default", "--instance", "corp-a", "status"])
+
+        self.assertEqual(args.instance, ["default", "corp-a"])
 
     def test_instance_help_includes_subcommand_guidance(self) -> None:
         parser = _build_parser()
@@ -538,6 +549,118 @@ class ManageCliTests(unittest.TestCase):
             self.assertIn("service: installed", rendered)
             self.assertIn("running: no", rendered)
             self.assertIn("systemctl --user is-active feishu-codex@corp-a: activating", rendered)
+
+    def test_handle_service_actions_supports_multiple_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+
+            class _DummyManager:
+                def __init__(self) -> None:
+                    self.status_calls: list[str] = []
+
+                def status(self, definition):
+                    self.status_calls.append(definition.instance_name)
+                    from bot.service_manager import ServiceStatus
+
+                    if definition.instance_name == "default":
+                        return ServiceStatus(
+                            installed=True,
+                            running=True,
+                            source="systemctl --user is-active feishu-codex",
+                            detail="active",
+                        )
+                    return ServiceStatus(
+                        installed=True,
+                        running=False,
+                        source="systemctl --user is-active feishu-codex@corp-a",
+                        detail="inactive",
+                    )
+
+            manager = _DummyManager()
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                _ensure_instance_scaffold("corp-a")
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    with patch("bot.manage_cli.current_service_manager", return_value=manager):
+                        result = _handle_service_actions(["default", "corp-a"], "status")
+
+            self.assertEqual(result, 3)
+            self.assertEqual(manager.status_calls, ["default", "corp-a"])
+            rendered = stdout.getvalue()
+            self.assertIn("instance: default", rendered)
+            self.assertIn("systemctl --user is-active feishu-codex: active", rendered)
+            self.assertIn("instance: corp-a", rendered)
+            self.assertIn("systemctl --user is-active feishu-codex@corp-a: inactive", rendered)
+
+    def test_handle_autostart_actions_supports_multiple_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            config_root = root / "config"
+            data_root = root / "data"
+            env_file = config_root / "feishu-codex.env"
+
+            class _DummyManager:
+                def __init__(self) -> None:
+                    self.enabled: list[str] = []
+
+                def display_name(self, definition) -> str:
+                    return definition.identifier
+
+                def autostart_enable(self, definition) -> None:
+                    self.enabled.append(definition.instance_name)
+
+            manager = _DummyManager()
+            with patch.dict(
+                os.environ,
+                {
+                    "FC_CONFIG_ROOT": str(config_root),
+                    "FC_DATA_ROOT": str(data_root),
+                    "FC_ENV_FILE": str(env_file),
+                },
+                clear=False,
+            ):
+                _ensure_instance_scaffold("corp-a")
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    with patch("bot.manage_cli.current_service_manager", return_value=manager):
+                        result = _handle_autostart_actions(["default", "corp-a"], "enable")
+
+            self.assertEqual(result, 0)
+            self.assertEqual(manager.enabled, ["default", "corp-a"])
+            rendered = stdout.getvalue()
+            self.assertIn("instance: default", rendered)
+            self.assertIn("autostart enabled: feishu-codex", rendered)
+            self.assertIn("instance: corp-a", rendered)
+            self.assertIn("autostart enabled: feishu-codex-corp-a", rendered)
+
+    def test_main_rejects_multiple_instances_for_run(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                main(["--instance", "default", "--instance", "corp-a", "run"])
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("`run` 当前只支持单个实例", stderr.getvalue())
+
+    def test_main_rejects_top_level_instance_for_instance_subcommands(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exc:
+                main(["--instance", "default", "instance", "list"])
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("`feishu-codex instance ...` 不接受顶层 `--instance`", stderr.getvalue())
 
     def test_named_instance_commands_do_not_implicitly_create_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -84,13 +84,23 @@ def _build_parser() -> argparse.ArgumentParser:
             "    feishu-codex --instance corp-a config system --open\n"
             "    feishu-codex --instance corp-a autostart enable\n"
             "    feishu-codex --instance corp-a start\n"
+            "\n"
+            "  批量查看 / 控制多个实例:\n"
+            "    feishu-codex --instance default --instance corp-a status\n"
+            "    feishu-codex --instance default --instance corp-a autostart status\n"
         ),
         formatter_class=_HelpFormatter,
     )
     parser.add_argument(
         "--instance",
-        default=DEFAULT_INSTANCE_NAME,
-        help="目标实例；默认是 `default`。命名实例必须先用 `instance create` 创建。对 `instance ...` 子命令无效。",
+        action="append",
+        default=argparse.SUPPRESS,
+        metavar="NAME",
+        help=(
+            "目标实例；默认是 `default`。可重复传入，仅对 `start|stop|restart|status|autostart ...` "
+            "这类天然可批量命令生效。命名实例必须先用 `instance create` 创建。"
+            "对 `instance ...` 子命令无效。"
+        ),
     )
     subparsers = parser.add_subparsers(
         dest="command",
@@ -405,6 +415,32 @@ def _prepare_cli_instance(instance_name: str) -> str:
     raise ValueError(f"命名实例 `{normalized}` 尚未创建；请先执行 `feishu-codex instance create {normalized}`。")
 
 
+def _normalize_requested_instances(instance_names: list[str] | tuple[str, ...] | None) -> list[str]:
+    raw_values = list(instance_names or [])
+    if not raw_values:
+        raw_values = [DEFAULT_INSTANCE_NAME]
+    normalized_values: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        normalized = validate_instance_name(raw)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_values.append(normalized)
+    return normalized_values
+
+
+def _single_requested_instance(
+    instance_names: list[str] | tuple[str, ...] | None,
+    *,
+    command_label: str,
+) -> str:
+    normalized_values = _normalize_requested_instances(instance_names)
+    if len(normalized_values) != 1:
+        raise ValueError(f"`{command_label}` 当前只支持单个实例；请只传一个 `--instance`。")
+    return normalized_values[0]
+
+
 def _load_daemon_entry():
     return importlib.import_module("bot.__main__")
 
@@ -495,6 +531,46 @@ def _handle_service_action(instance_name: str, action: str) -> int:
     raise ValueError(f"unknown service action: {action}")
 
 
+def _merge_batch_exit_codes(exit_codes: list[int]) -> int:
+    if not exit_codes:
+        return 0
+    if any(code == 2 for code in exit_codes):
+        return 2
+    non_zero_codes = [code for code in exit_codes if code != 0]
+    if non_zero_codes:
+        return max(non_zero_codes)
+    return 0
+
+
+def _run_instance_batch(
+    instance_names: list[str] | tuple[str, ...] | None,
+    *,
+    runner,
+) -> int:
+    normalized_values = _normalize_requested_instances(instance_names)
+    if len(normalized_values) == 1:
+        return int(runner(normalized_values[0]))
+
+    exit_codes: list[int] = []
+    for index, instance_name in enumerate(normalized_values):
+        if index:
+            print("")
+        print(f"instance: {instance_name}")
+        try:
+            exit_codes.append(int(runner(instance_name)))
+        except (ServiceManagerError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            exit_codes.append(2)
+    return _merge_batch_exit_codes(exit_codes)
+
+
+def _handle_service_actions(instance_names: list[str] | tuple[str, ...] | None, action: str) -> int:
+    return _run_instance_batch(
+        instance_names,
+        runner=lambda instance_name: _handle_service_action(instance_name, action),
+    )
+
+
 def _handle_autostart_action(instance_name: str, action: str) -> int:
     normalized = _prepare_cli_instance(instance_name)
     definition = _service_definition(normalized)
@@ -518,6 +594,13 @@ def _handle_autostart_action(instance_name: str, action: str) -> int:
             print(f"detail: {status.detail}")
         return 0 if status.enabled else 3
     raise ValueError(f"unknown autostart action: {action}")
+
+
+def _handle_autostart_actions(instance_names: list[str] | tuple[str, ...] | None, action: str) -> int:
+    return _run_instance_batch(
+        instance_names,
+        runner=lambda instance_name: _handle_autostart_action(instance_name, action),
+    )
 
 
 def _handle_run(instance_name: str) -> int:
@@ -673,21 +756,37 @@ def _handle_instance_remove(instance_name: str) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
+    requested_instances = getattr(args, "instance", [])
     try:
         if args.command == "bootstrap-install":
             raise SystemExit(_handle_bootstrap_install())
         if args.command in {"start", "stop", "restart", "status"}:
-            raise SystemExit(_handle_service_action(args.instance, args.command))
+            raise SystemExit(_handle_service_actions(requested_instances, args.command))
         if args.command == "autostart":
-            raise SystemExit(_handle_autostart_action(args.instance, args.autostart_command))
+            raise SystemExit(_handle_autostart_actions(requested_instances, args.autostart_command))
         if args.command == "run":
-            raise SystemExit(_handle_run(args.instance))
+            raise SystemExit(_handle_run(_single_requested_instance(requested_instances, command_label="run")))
         if args.command == "log":
-            raise SystemExit(_tail_log(default_log_file(resolve_instance_paths(validate_instance_name(args.instance)).data_dir), lines=args.lines))
+            raise SystemExit(
+                _tail_log(
+                    default_log_file(
+                        resolve_instance_paths(
+                            _single_requested_instance(requested_instances, command_label="log")
+                        ).data_dir
+                    ),
+                    lines=args.lines,
+                )
+            )
         if args.command == "config":
-            raise SystemExit(_handle_config(args.instance, args.target, open_editor=args.open))
+            raise SystemExit(
+                _handle_config(
+                    _single_requested_instance(requested_instances, command_label="config"),
+                    args.target,
+                    open_editor=args.open,
+                )
+            )
         if args.command == "instance":
-            if validate_instance_name(args.instance) != DEFAULT_INSTANCE_NAME:
+            if requested_instances:
                 raise ValueError("`feishu-codex instance ...` 不接受顶层 `--instance`；请把目标实例写在子命令参数里。")
             if args.instance_command == "create":
                 raise SystemExit(_handle_instance_create(args.name))
