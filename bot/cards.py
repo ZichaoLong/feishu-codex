@@ -241,7 +241,7 @@ def build_execution_card(
         elements.append(
             {
                 "tag": "markdown",
-                "content": "*暂无输出*" if running else "",
+                "content": "*暂无输出*" if running else "无",
             }
         )
 

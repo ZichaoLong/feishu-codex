@@ -36,6 +36,14 @@ class CardTextProjectionTests(unittest.TestCase):
         self.assertIn("回复", projection.text)
         self.assertIn("阶段回复", projection.text)
 
+    def test_minimal_terminal_execution_card_projects_placeholder_text(self) -> None:
+        projection = project_interactive_card_text(build_execution_card("", [], running=False))
+
+        self.assertFalse(projection.has_authoritative_final_reply)
+        self.assertIn("Codex", projection.text)
+        self.assertIn("执行过程", projection.text)
+        self.assertIn("无", projection.text)
+
     def test_ordinary_card_ignores_button_labels_but_keeps_visible_text_blocks(self) -> None:
         projection = project_interactive_card_text(
             {

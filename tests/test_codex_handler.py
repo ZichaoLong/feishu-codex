@@ -2537,11 +2537,11 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(card["header"]["title"]["content"], "Codex 执行过程（执行中）")
         self.assertNotIn("/help", json.dumps(card, ensure_ascii=False))
 
-    def test_terminal_empty_execution_card_is_visually_blank(self) -> None:
+    def test_terminal_empty_execution_card_shows_minimal_placeholder(self) -> None:
         card = build_execution_card("", [], running=False)
 
         self.assertEqual(card["header"]["title"]["content"], "Codex 执行过程")
-        self.assertEqual(card["body"]["elements"], [{"tag": "markdown", "content": ""}])
+        self.assertEqual(card["body"]["elements"], [{"tag": "markdown", "content": "无"}])
 
     def test_status_includes_user_facing_summary(self) -> None:
         handler, bot = self._make_handler()
