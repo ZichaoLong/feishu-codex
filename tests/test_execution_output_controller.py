@@ -5,6 +5,7 @@ import time
 import unittest
 import json
 
+from bot.card_text_projection import TERMINAL_RESULT_CARD_MARKER
 from bot.binding_runtime_manager import BindingRuntimeManager
 from bot.execution_output_controller import ExecutionOutputController
 from bot.runtime_card_publisher import RuntimeCardPublisher
@@ -135,8 +136,8 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         self.assertEqual(msg_type, "interactive")
         self.assertTrue(reply_in_thread)
         card = json.loads(content)
-        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
-        self.assertIn("<final_reply_text>", card["elements"][-1]["content"])
+        self.assertEqual(card["header"]["title"]["content"], "Codex")
+        self.assertIn(TERMINAL_RESULT_CARD_MARKER, card["elements"][-1]["content"])
         self.assertIn("done", card["elements"][-1]["content"])
 
     def test_publish_terminal_result_uses_independent_budget_from_execution_card_reply_limit(self) -> None:

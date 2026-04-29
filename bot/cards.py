@@ -15,7 +15,6 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.card_text_projection import (
-    TERMINAL_RESULT_CARD_HINT,
     TERMINAL_RESULT_CARD_TITLE,
     render_final_reply_text_block,
 )
@@ -54,7 +53,6 @@ class CommandResult:
 
 _HISTORY_TEXT_MAX = 300
 _PLAN_CONTENT_MAX = 4000
-_SHARED_HELP_COMMAND = get_shared_command("help")
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
 _LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
 _LOCAL_RESUME_COMMAND = "fcodex resume <thread_id|thread_name>"
@@ -94,11 +92,7 @@ def build_terminal_result_card(final_reply_text: str) -> dict:
             "title": {"tag": "plain_text", "content": TERMINAL_RESULT_CARD_TITLE},
             "template": "green",
         },
-        "elements": [
-            {"tag": "markdown", "content": TERMINAL_RESULT_CARD_HINT},
-            {"tag": "hr"},
-            {"tag": "markdown", "content": render_final_reply_text_block(final_reply_text)},
-        ],
+        "elements": [{"tag": "markdown", "content": render_final_reply_text_block(final_reply_text)}],
     }
 
 
@@ -172,13 +166,17 @@ def build_execution_card(
     """构造主执行卡片。"""
     if running:
         template = "turquoise"
-        header_content = f"Codex（执行中 {elapsed}s）" if elapsed > 0 else "Codex（执行中）"
+        header_content = (
+            f"Codex 执行过程（执行中 {elapsed}s）"
+            if elapsed > 0
+            else "Codex 执行过程（执行中）"
+        )
     elif cancelled:
         template = "grey"
-        header_content = "Codex（已停止）"
+        header_content = "Codex 执行过程（已停止）"
     else:
         template = "blue"
-        header_content = "Codex"
+        header_content = "Codex 执行过程"
 
     panel_icon = {
         "tag": "standard_icon",
@@ -228,13 +226,6 @@ def build_execution_card(
         return panel_elements
 
     elements: list[dict] = []
-    elements.append(
-        {
-            "tag": "markdown",
-            "content": f"*提示：发送 `{_SHARED_HELP_COMMAND.slash_name}` 查看可用命令列表。*",
-        }
-    )
-    elements.append({"tag": "hr"})
     reply_panel_elements = _reply_panel_elements(reply_segments)
     if log_text and reply_panel_elements:
         log_tables = count_card_tables(log_text)

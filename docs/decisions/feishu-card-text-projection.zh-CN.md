@@ -163,8 +163,12 @@
 对当前第一阶段 rollout，推荐把发送侧行为进一步收紧为：
 
 - 终态权威结果优先走单独的 `terminal result card`
+- 当前卡片标题合同固定为：
+  - execution card：`Codex 执行过程`
+  - terminal result card：`Codex`
 - `terminal result card` 发送成功后，如果终态 snapshot 能明确定位最后一个文本型 `agentMessage`，则旧 execution card 的 reply 面板应去掉这最后一段
 - 旧 execution card 只继续保留 `process_log` 与更早的过程性 `reply_segments`
+- 如果剔除后旧 execution card 已经没有任何过程日志或过程性回复可展示，则应直接删除旧 execution card，而不是保留空壳卡片
 - 如果只能回退到本地 transcript，或者终态结果载体发送失败，则不要剔除 execution card 里的最终回复
 
 ### 5.3 终态超长时优先发文本，不发“部分终态卡”
@@ -209,6 +213,19 @@
 - 稳定拿到权威 `final_reply_text`
 
 收到后，应把它当作卡片消息的主文本结果交给 Codex。
+
+当前第一阶段强合同对 `terminal result card` 的识别条件进一步固定为：
+
+- header 标题为 `Codex`
+- header template 为 `green`
+- 卡片内至少存在一个 markdown 区块，其内容末尾携带一段不可见 marker
+
+接收侧对这个 markdown 区块的解释是：
+
+- 用户可见部分，就是权威 `final_reply_text`
+- 不可见 marker 只用于声明“这是一张权威 terminal result card”
+
+也就是说，接收侧强合同不再依赖任何额外的说明性提示文案，也不把用户可见提示文案本身当作合同。
 
 ### 6.2 best-effort：`process_log` 与 `reply_segments`
 

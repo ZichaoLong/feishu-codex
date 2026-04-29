@@ -58,6 +58,7 @@ class ExecutionRecoveryController:
         apply_persisted_runtime_state_message_locked: Callable[[tuple[str, str], RuntimeState, RuntimeStateMessage], None],
         finalize_execution_card_from_state: Callable[[str, str], bool],
         dispatch_execution_card_message: Callable[..., None],
+        remove_execution_card_message: Callable[[str], bool],
         publish_terminal_result: Callable[..., bool],
         read_thread: Callable[[str], ThreadSnapshot],
         is_thread_not_found_error: Callable[[Exception], bool],
@@ -76,6 +77,7 @@ class ExecutionRecoveryController:
         self._apply_persisted_runtime_state_message_locked = apply_persisted_runtime_state_message_locked
         self._finalize_execution_card_from_state = finalize_execution_card_from_state
         self._dispatch_execution_card_message = dispatch_execution_card_message
+        self._remove_execution_card_message = remove_execution_card_message
         self._publish_terminal_result = publish_terminal_result
         self._read_thread = read_thread
         self._is_thread_not_found_error = is_thread_not_found_error
@@ -151,6 +153,28 @@ class ExecutionRecoveryController:
         )
 
     @staticmethod
+    def _transcript_has_visible_execution_output(transcript: ExecutionTranscript) -> bool:
+        return transcript.has_process_output() or transcript.has_reply_output()
+
+    @staticmethod
+    def _can_remove_terminal_only_execution_card(
+        transcript: ExecutionTranscript,
+        *,
+        final_reply_text: str,
+    ) -> bool:
+        if transcript.has_process_output():
+            return False
+        normalized_final = str(final_reply_text or "").strip()
+        if not normalized_final:
+            return False
+        assistant_segments = [
+            segment.text.strip()
+            for segment in transcript.reply_segments
+            if segment.kind == "assistant" and segment.text.strip()
+        ]
+        return assistant_segments == [normalized_final]
+
+    @staticmethod
     def _transcript_from_snapshot_projection(
         base: ExecutionTranscript,
         *,
@@ -208,6 +232,24 @@ class ExecutionRecoveryController:
                 state,
                 ExecutionStateChanged(terminal_result_text=normalized),
             )
+
+    def _clear_and_remove_execution_card(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        execution_message_id: str,
+        transcript: ExecutionTranscript,
+    ) -> bool:
+        cleared = transcript.clone()
+        cleared.set_reply_text("")
+        self._replace_terminal_execution_transcript(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            execution_message_id=execution_message_id,
+            transcript=cleared,
+        )
+        return self._remove_execution_card_message(execution_message_id)
 
     def _publish_terminal_result_if_needed(
         self,
@@ -276,6 +318,14 @@ class ExecutionRecoveryController:
                 projection=projection,
                 drop_last_text_message=True,
             )
+        if not self._transcript_has_visible_execution_output(display_transcript):
+            self._clear_and_remove_execution_card(
+                sender_id=sender_id,
+                chat_id=chat_id,
+                execution_message_id=execution_message_id,
+                transcript=display_transcript,
+            )
+            return
         self._replace_terminal_execution_transcript(
             sender_id=sender_id,
             chat_id=chat_id,
@@ -333,7 +383,7 @@ class ExecutionRecoveryController:
                 self._runtime_recovery_reason(exc),
             )
             if fallback_reply_text:
-                self._maybe_publish_terminal_result(
+                published = self._maybe_publish_terminal_result(
                     sender_id=target.sender_id,
                     chat_id=target.chat_id,
                     execution_message_id=target.card_message_id,
@@ -341,6 +391,16 @@ class ExecutionRecoveryController:
                     prompt_message_id=target.prompt_message_id,
                     prompt_reply_in_thread=target.prompt_reply_in_thread,
                 )
+                if published and self._can_remove_terminal_only_execution_card(
+                    target.transcript,
+                    final_reply_text=fallback_reply_text,
+                ):
+                    self._clear_and_remove_execution_card(
+                        sender_id=target.sender_id,
+                        chat_id=target.chat_id,
+                        execution_message_id=target.card_message_id,
+                        transcript=target.transcript,
+                    )
             return
 
         projection = self.snapshot_reply(snapshot, turn_id=target.turn_id)
@@ -359,7 +419,7 @@ class ExecutionRecoveryController:
             return
 
         if fallback_reply_text:
-            self._maybe_publish_terminal_result(
+            published = self._maybe_publish_terminal_result(
                 sender_id=target.sender_id,
                 chat_id=target.chat_id,
                 execution_message_id=target.card_message_id,
@@ -367,6 +427,16 @@ class ExecutionRecoveryController:
                 prompt_message_id=target.prompt_message_id,
                 prompt_reply_in_thread=target.prompt_reply_in_thread,
             )
+            if published and self._can_remove_terminal_only_execution_card(
+                target.transcript,
+                final_reply_text=fallback_reply_text,
+            ):
+                self._clear_and_remove_execution_card(
+                    sender_id=target.sender_id,
+                    chat_id=target.chat_id,
+                    execution_message_id=target.card_message_id,
+                    transcript=target.transcript,
+                )
 
     def mark_runtime_degraded(self, sender_id: str, chat_id: str, *, reason: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -469,7 +539,7 @@ class ExecutionRecoveryController:
                 prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
             finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
             if finalized and fallback_reply_text:
-                self._maybe_publish_terminal_result(
+                published = self._maybe_publish_terminal_result(
                     sender_id=sender_id,
                     chat_id=chat_id,
                     execution_message_id=card_message_id,
@@ -477,6 +547,16 @@ class ExecutionRecoveryController:
                     prompt_message_id=prompt_message_id,
                     prompt_reply_in_thread=prompt_reply_in_thread,
                 )
+                if published and self._can_remove_terminal_only_execution_card(
+                    runtime.execution.transcript,
+                    final_reply_text=fallback_reply_text,
+                ):
+                    self._clear_and_remove_execution_card(
+                        sender_id=sender_id,
+                        chat_id=chat_id,
+                        execution_message_id=card_message_id,
+                        transcript=runtime.execution.transcript,
+                    )
             return finalized
         try:
             snapshot = self._read_thread(normalized_thread_id)
@@ -497,7 +577,7 @@ class ExecutionRecoveryController:
                     prompt_reply_in_thread = runtime.execution.current_prompt_reply_in_thread
                 finalized = self._finalize_execution_card_from_state(sender_id, chat_id)
                 if finalized and fallback_reply_text:
-                    self._maybe_publish_terminal_result(
+                    published = self._maybe_publish_terminal_result(
                         sender_id=sender_id,
                         chat_id=chat_id,
                         execution_message_id=card_message_id,
@@ -505,6 +585,16 @@ class ExecutionRecoveryController:
                         prompt_message_id=prompt_message_id,
                         prompt_reply_in_thread=prompt_reply_in_thread,
                     )
+                    if published and self._can_remove_terminal_only_execution_card(
+                        runtime.execution.transcript,
+                        final_reply_text=fallback_reply_text,
+                    ):
+                        self._clear_and_remove_execution_card(
+                            sender_id=sender_id,
+                            chat_id=chat_id,
+                            execution_message_id=card_message_id,
+                            transcript=runtime.execution.transcript,
+                        )
                 return finalized
             if self._is_transport_disconnect(exc) or self._is_request_timeout_error(exc):
                 self.mark_runtime_degraded(
@@ -569,7 +659,7 @@ class ExecutionRecoveryController:
             )
             return True
         if fallback_reply_text:
-            self._maybe_publish_terminal_result(
+            published = self._maybe_publish_terminal_result(
                 sender_id=sender_id,
                 chat_id=chat_id,
                 execution_message_id=card_message_id,
@@ -577,6 +667,16 @@ class ExecutionRecoveryController:
                 prompt_message_id=prompt_message_id,
                 prompt_reply_in_thread=prompt_reply_in_thread,
             )
+            if published and self._can_remove_terminal_only_execution_card(
+                current_transcript,
+                final_reply_text=fallback_reply_text,
+            ):
+                self._clear_and_remove_execution_card(
+                    sender_id=sender_id,
+                    chat_id=chat_id,
+                    execution_message_id=card_message_id,
+                    transcript=current_transcript,
+                )
         return finalized
 
     @staticmethod

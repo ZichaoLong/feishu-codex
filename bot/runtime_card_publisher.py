@@ -69,6 +69,7 @@ _PATCH_DISPATCHER_STOP = object()
 
 class _CardPublisherBot(Protocol):
     def patch_message(self, message_id: str, content: str) -> bool: ...
+    def delete_message(self, message_id: str) -> bool: ...
 
     def reply_to_message(
         self,
@@ -167,6 +168,12 @@ class RuntimeCardPublisher:
             normalized_message_id,
             json.dumps(render_execution_card(model), ensure_ascii=False),
         )
+
+    def delete_card_message(self, message_id: str) -> bool:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return False
+        return self._bot.delete_message(normalized_message_id)
 
     def publish_terminal_result_card(
         self,

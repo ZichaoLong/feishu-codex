@@ -177,6 +177,9 @@ time:
   authoritative terminal-result carrier has been delivered successfully; if the
   system can only fall back to the local transcript, or terminal-result
   delivery fails, the execution card must keep that final reply
+- if removing that final answer leaves the old execution card with no visible
+  process log or staged reply content, the old card should be deleted instead
+  of being kept as an empty execution shell
 - if later reconciliation discovers a different authoritative
   `final_reply_text`, the system must emit a corrected terminal-result carrier
   again instead of only patching the old execution card

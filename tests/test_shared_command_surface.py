@@ -1,3 +1,4 @@
+import json
 import pathlib
 import tempfile
 import unittest
@@ -97,7 +98,6 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         overview_markdown = overview["elements"][0]["content"]
         session_markdown = session["elements"][0]["content"]
         sessions_markdown = sessions_card["elements"][0]["content"]
-        execution_markdown = execution_card["body"]["elements"][0]["content"]
 
         self.assertIn("`fcodex resume <thread_id|thread_name>`", overview_markdown)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", overview_markdown)
@@ -106,7 +106,8 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         self.assertIn("`fcodex resume <thread_id|thread_name>`", sessions_markdown)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", sessions_markdown)
         self.assertIn(f"`{resume_command.feishu_usage}`", sessions_markdown)
-        self.assertIn("`/help`", execution_markdown)
+        self.assertEqual(execution_card["header"]["title"]["content"], "Codex 执行过程（执行中）")
+        self.assertNotIn("`/help`", json.dumps(execution_card, ensure_ascii=False))
 
     def test_generated_cards_do_not_emit_plugin_payload_keys(self) -> None:
         help_domain = CodexHelpDomain(local_thread_safety_rule="测试规则")

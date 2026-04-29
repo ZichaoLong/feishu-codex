@@ -2,6 +2,7 @@ import unittest
 
 from bot.card_text_projection import (
     CardTextProjection,
+    TERMINAL_RESULT_CARD_MARKER,
     can_render_terminal_result_card,
     project_interactive_card_text,
 )
@@ -17,7 +18,7 @@ class CardTextProjectionTests(unittest.TestCase):
         self.assertTrue(projection.has_authoritative_final_reply)
         self.assertEqual(projection.final_reply_text, "最终答复")
         self.assertEqual(projection.text, "最终答复")
-        self.assertIn("Codex 最终结果", projection.visible_text)
+        self.assertIn("Codex", projection.visible_text)
 
     def test_execution_card_projects_visible_text_best_effort(self) -> None:
         projection = project_interactive_card_text(
@@ -84,7 +85,7 @@ class CardTextProjectionTests(unittest.TestCase):
     def test_terminal_result_card_budget_is_fail_closed_on_marker_collision(self) -> None:
         self.assertFalse(
             can_render_terminal_result_card(
-                "包含 <final_reply_text> 标记",
+                f"包含{TERMINAL_RESULT_CARD_MARKER}隐藏标记",
                 char_limit=1000,
             )
         )
@@ -93,14 +94,10 @@ class CardTextProjectionTests(unittest.TestCase):
         projection = project_interactive_card_text(
             {
                 "header": {
-                    "title": {"tag": "plain_text", "content": "Codex 最终结果"},
+                    "title": {"tag": "plain_text", "content": "Codex"},
+                    "template": "green",
                 },
                 "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": "*以下区块是本轮权威 `final_reply_text`，可被其他 Codex 机器人稳定解析。*",
-                    },
-                    {"tag": "hr"},
                     {"tag": "markdown", "content": "这里只剩普通展示文本"},
                 ],
             }
@@ -108,5 +105,22 @@ class CardTextProjectionTests(unittest.TestCase):
 
         self.assertFalse(projection.has_authoritative_final_reply)
         self.assertEqual(projection.final_reply_text, "")
-        self.assertEqual(projection.text, "")
+        self.assertIn("Codex", projection.text)
         self.assertIn("这里只剩普通展示文本", projection.visible_text)
+
+    def test_terminal_result_card_requires_green_template(self) -> None:
+        projection = project_interactive_card_text(
+            {
+                "header": {
+                    "title": {"tag": "plain_text", "content": "Codex"},
+                    "template": "blue",
+                },
+                "elements": [
+                    {"tag": "markdown", "content": f"foo{TERMINAL_RESULT_CARD_MARKER}"},
+                ],
+            }
+        )
+
+        self.assertFalse(projection.has_authoritative_final_reply)
+        self.assertEqual(projection.final_reply_text, "")
+        self.assertEqual(projection.text, "Codex\n\nfoo")

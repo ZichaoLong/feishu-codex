@@ -199,11 +199,17 @@ For the current phase-one rollout, the sender behavior is further tightened as
 follows:
 
 - prefer a separate `terminal result card` as the normal authoritative carrier
+- the current card-title contract is fixed as:
+  - execution card: `Codex 执行过程`
+  - terminal result card: `Codex`
 - once that carrier has been delivered successfully, and the terminal snapshot
   can identify the last textual `agentMessage`, patch the old execution card so
   its reply panel no longer repeats that last terminal answer
 - the old execution card should then keep only `process_log` and earlier staged
   `reply_segments`
+- if stripping that last answer leaves the old execution card with no visible
+  process log or staged reply content, delete the old execution card instead
+  of keeping an empty shell
 - if the sender can only fall back to the local transcript, or if terminal
   result delivery fails, do not strip the final reply from the execution card
 
@@ -253,6 +259,24 @@ The only formal success condition is:
 - the receiver reliably obtains authoritative `final_reply_text`
 
 That text becomes the primary card-derived message delivered to Codex.
+
+For the current phase-one rollout, the strong receiver-side identification of a
+`terminal result card` is further fixed as:
+
+- header title is `Codex`
+- header template is `green`
+- the card contains at least one markdown block whose trailing content carries
+  an invisible marker
+
+The receiver interprets that markdown block as:
+
+- the user-visible portion is the authoritative `final_reply_text`
+- the invisible marker only declares that this card is an authoritative
+  terminal-result carrier
+
+In other words, the strong contract no longer depends on any extra explanatory
+hint copy, and it does not treat user-visible hint prose as part of the
+contract.
 
 ### 6.2 Best-effort: `process_log` and `reply_segments`
 

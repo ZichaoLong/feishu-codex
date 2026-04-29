@@ -19,6 +19,7 @@ class _FakeBot:
         self.patch_results: dict[str, bool] = {}
         self.reply_calls: list[tuple[str, str, str]] = []
         self.send_calls: list[tuple[str, str, str]] = []
+        self.deletes: list[str] = []
 
     def patch_message(self, message_id: str, content: str) -> bool:
         self.patches.append((message_id, content))
@@ -31,6 +32,10 @@ class _FakeBot:
     def send_message_get_id(self, chat_id: str, msg_type: str, content: str) -> str:
         self.send_calls.append((chat_id, msg_type, content))
         return "send-card-id"
+
+    def delete_message(self, message_id: str) -> bool:
+        self.deletes.append(message_id)
+        return True
 
 
 class RuntimeCardPublisherTests(unittest.TestCase):
@@ -130,7 +135,16 @@ class RuntimeCardPublisherTests(unittest.TestCase):
         message_id, content = bot.patches[0]
         self.assertEqual(message_id, "exec-1")
         card = json.loads(content)
-        self.assertEqual(card["header"]["title"]["content"], "Codex（执行中 3s）")
+        self.assertEqual(card["header"]["title"]["content"], "Codex 执行过程（执行中 3s）")
+
+    def test_delete_card_message_delegates_to_bot(self) -> None:
+        bot = _FakeBot()
+        publisher = RuntimeCardPublisher(bot)
+
+        ok = publisher.delete_card_message("exec-1")
+
+        self.assertTrue(ok)
+        self.assertEqual(bot.deletes, ["exec-1"])
 
     def test_execution_card_patch_dispatcher_coalesces_stale_updates_for_same_message(self) -> None:
         first_started = threading.Event()

@@ -1,21 +1,11 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
 
-FINAL_REPLY_TEXT_OPEN = "<final_reply_text>"
-FINAL_REPLY_TEXT_CLOSE = "</final_reply_text>"
-TERMINAL_RESULT_CARD_TITLE = "Codex 最终结果"
-TERMINAL_RESULT_CARD_HINT = (
-    "*以下区块是本轮权威 `final_reply_text`，可被其他 Codex 机器人稳定解析。*"
-)
-
-_FINAL_REPLY_BLOCK_PATTERN = re.compile(
-    rf"{re.escape(FINAL_REPLY_TEXT_OPEN)}\s*(.*?)\s*{re.escape(FINAL_REPLY_TEXT_CLOSE)}",
-    re.DOTALL,
-)
+TERMINAL_RESULT_CARD_TITLE = "Codex"
+TERMINAL_RESULT_CARD_MARKER = "\u2063\u2060\u2064\u2060\u2063"
 _TEXT_NODE_TAGS = {"markdown", "plain_text", "lark_md"}
 _IGNORED_TAGS = {
     "action",
@@ -51,20 +41,28 @@ def render_final_reply_text_block(final_reply_text: str) -> str:
     normalized = str(final_reply_text or "").strip()
     if not normalized:
         return ""
-    return f"{FINAL_REPLY_TEXT_OPEN}\n{normalized}\n{FINAL_REPLY_TEXT_CLOSE}"
+    return f"{normalized}{TERMINAL_RESULT_CARD_MARKER}"
 
 
 def can_render_terminal_result_card(final_reply_text: str, *, char_limit: int) -> bool:
     normalized = str(final_reply_text or "").strip()
     if not normalized:
         return False
-    if FINAL_REPLY_TEXT_OPEN in normalized or FINAL_REPLY_TEXT_CLOSE in normalized:
+    if TERMINAL_RESULT_CARD_MARKER in normalized:
         return False
     budget = max(int(char_limit), 0)
     if budget <= 0:
         return False
-    payload = f"{TERMINAL_RESULT_CARD_HINT}\n\n{render_final_reply_text_block(normalized)}"
+    payload = render_final_reply_text_block(normalized)
     return len(payload) <= budget
+
+
+def _contains_terminal_result_marker(text: str) -> bool:
+    return TERMINAL_RESULT_CARD_MARKER in str(text or "")
+
+
+def _strip_terminal_result_marker(text: str) -> str:
+    return str(text or "").replace(TERMINAL_RESULT_CARD_MARKER, "")
 
 
 def project_interactive_card_text(content_dict: dict[str, Any]) -> CardTextProjection:
@@ -100,17 +98,19 @@ def _matches_terminal_result_card_contract(content_dict: dict[str, Any]) -> bool
         return False
     if str(title.get("content", "") or "").strip() != TERMINAL_RESULT_CARD_TITLE:
         return False
+    if str(header.get("template", "") or "").strip() != "green":
+        return False
 
     elements = content_dict.get("elements") or []
     if not isinstance(elements, list):
         return False
-    has_contract_hint = any(
+    has_final_reply_block = any(
         isinstance(element, dict)
         and str(element.get("tag", "") or "").strip() == "markdown"
-        and str(element.get("content", "") or "").strip() == TERMINAL_RESULT_CARD_HINT
+        and _contains_terminal_result_marker(str(element.get("content", "") or ""))
         for element in elements
     )
-    return has_contract_hint
+    return has_final_reply_block
 
 
 def _extract_terminal_result_card_final_reply_text(content_dict: dict[str, Any]) -> str:
@@ -123,11 +123,8 @@ def _extract_terminal_result_card_final_reply_text(content_dict: dict[str, Any])
         if str(element.get("tag", "") or "").strip() != "markdown":
             continue
         content = str(element.get("content", "") or "")
-        if content.strip() == TERMINAL_RESULT_CARD_HINT:
-            continue
-        match = _FINAL_REPLY_BLOCK_PATTERN.search(content)
-        if match:
-            return str(match.group(1) or "").strip()
+        if _contains_terminal_result_marker(content):
+            return _strip_terminal_result_marker(content).strip()
     return ""
 
 
@@ -139,7 +136,7 @@ def _extract_visible_card_text(content_dict: dict[str, Any]) -> str:
 
 
 def _append_block(blocks: list[str], text: Any) -> None:
-    normalized = str(text or "").strip()
+    normalized = _strip_terminal_result_marker(str(text or "")).strip()
     if not normalized:
         return
     if blocks and blocks[-1] == normalized:

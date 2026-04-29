@@ -246,6 +246,7 @@ class _FakeBot:
         self.card_parents: list[tuple[str, dict, str]] = []
         self.sent_messages: list[tuple[str, str, str]] = []
         self.patches: list[tuple[str, str]] = []
+        self.deletes: list[str] = []
         self.patch_results: dict[str, bool] = {}
         self.message_contexts: dict[str, dict] = {}
         self.group_modes: dict[str, str] = {}
@@ -286,6 +287,10 @@ class _FakeBot:
     def patch_message(self, message_id: str, content: str) -> bool:
         self.patches.append((message_id, content))
         return self.patch_results.get(message_id, True)
+
+    def delete_message(self, message_id: str) -> bool:
+        self.deletes.append(message_id)
+        return True
 
     def make_card_response(self, card=None, toast=None, toast_type="info"):
         return {"card": card, "toast": toast, "toast_type": toast_type}
@@ -1199,7 +1204,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(state["execution_transcript"].reply_text(), "")
         self.assertEqual(state["terminal_result_text"], "watchdog final")
         card = json.loads(bot.sent_messages[-1][2])
-        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertEqual(card["header"]["title"]["content"], "Codex")
         self.assertIn("watchdog final", card["elements"][-1]["content"])
 
     def test_cancel_refreshes_stale_execution_card_when_turn_already_finished(self) -> None:
@@ -1356,7 +1361,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(bot.reply_refs[-1][0], "m-thread")
         self.assertEqual(bot.reply_ref_calls[-1][3], True)
         card = json.loads(bot.reply_refs[-1][2])
-        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertEqual(card["header"]["title"]["content"], "Codex")
         self.assertIn("123456789", card["elements"][-1]["content"])
 
     def test_group_terminal_result_card_stays_in_topic_after_message_context_is_gone(self) -> None:
@@ -1511,9 +1516,10 @@ class CodexHandlerTests(unittest.TestCase):
             bot.replies,
         )
         state_b = handler._get_runtime_state("ou_user", "chat-b")
-        self.assertEqual(state_b["execution_transcript"].reply_text(), "done")
+        self.assertEqual(state_b["execution_transcript"].reply_text(), "")
         self.assertEqual(state_b["current_message_id"], "")
         self.assertTrue(state_b["last_execution_message_id"])
+        self.assertEqual(state_b["terminal_result_text"], "done")
 
     def test_handle_chat_unavailable_clears_binding_and_persistence(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -1775,8 +1781,8 @@ class CodexHandlerTests(unittest.TestCase):
             if parent_id == "msg-1" and msg_type == "interactive"
         ]
         self.assertEqual(len(terminal_cards), 2)
-        card = next(card for card in terminal_cards if card["header"]["title"]["content"] == "Codex 最终结果")
-        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        card = next(card for card in terminal_cards if card["header"]["title"]["content"] == "Codex")
+        self.assertEqual(card["header"]["title"]["content"], "Codex")
         self.assertIn("123456789", card["elements"][-1]["content"])
 
     def test_terminal_reconcile_sends_authoritative_result_card_from_snapshot_without_live_reply_delta(self) -> None:
@@ -1810,8 +1816,9 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(bot.sent_messages[-1][1], "interactive")
         card = json.loads(bot.sent_messages[-1][2])
-        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertEqual(card["header"]["title"]["content"], "Codex")
         self.assertIn("snapshot final answer", card["elements"][-1]["content"])
+        self.assertEqual(bot.deletes, [target.card_message_id])
 
     def test_mode_command_without_arg_shows_mode_card(self) -> None:
         handler, bot = self._make_handler()
@@ -2493,10 +2500,11 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertFalse(any(element.get("tag") == "form" for element in card["elements"]))
 
-    def test_execution_card_shows_help_hint(self) -> None:
+    def test_execution_card_uses_process_title_without_help_hint(self) -> None:
         card = build_execution_card("", [], running=True)
 
-        self.assertIn("/help", card["body"]["elements"][0]["content"])
+        self.assertEqual(card["header"]["title"]["content"], "Codex 执行过程（执行中）")
+        self.assertNotIn("/help", json.dumps(card, ensure_ascii=False))
 
     def test_status_includes_user_facing_summary(self) -> None:
         handler, bot = self._make_handler()

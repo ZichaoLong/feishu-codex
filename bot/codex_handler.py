@@ -253,6 +253,7 @@ class CodexHandler(BotHandler):
             apply_persisted_runtime_state_message_locked=self._apply_persisted_runtime_state_message_locked,
             finalize_execution_card_from_state=self._finalize_execution_card_from_state,
             dispatch_execution_card_message=self._dispatch_execution_card_message,
+            remove_execution_card_message=self._remove_execution_card_message,
             publish_terminal_result=self._publish_terminal_result,
             read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=True),
             is_thread_not_found_error=self._is_thread_not_found_error,
@@ -2270,6 +2271,9 @@ class CodexHandler(BotHandler):
             elapsed=elapsed,
             cancelled=cancelled,
         )
+
+    def _remove_execution_card_message(self, message_id: str) -> bool:
+        return self._runtime_card_publisher().delete_card_message(message_id)
 
     def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         self._execution_output.schedule_execution_card_update(sender_id, chat_id)
