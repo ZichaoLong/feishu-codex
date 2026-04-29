@@ -67,6 +67,7 @@ from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSur
 from bot.prompt_turn_entry_controller import PromptTurnEntryController, PromptTurnEntryPorts
 from bot.runtime_admin_controller import RuntimeAdminController
 from bot.runtime_card_publisher import (
+    ExecutionCardPatchDispatcher,
     RuntimeCardPublisher,
 )
 from bot.runtime_state import (
@@ -222,6 +223,9 @@ class CodexHandler(BotHandler):
             interaction_lease_store=self._interaction_lease_store,
             is_group_chat=self._is_group_chat,
         )
+        self._execution_card_patch_dispatcher = ExecutionCardPatchDispatcher(
+            lambda message_id, model: self._runtime_card_publisher().patch_execution_card(message_id, model),
+        )
         self._turn_execution = TurnExecutionCoordinator()
         self._execution_output = ExecutionOutputController(
             lock=self._lock,
@@ -232,6 +236,7 @@ class CodexHandler(BotHandler):
             apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
             cancel_patch_timer_locked=self._cancel_patch_timer_locked,
             card_publisher_factory=self._runtime_card_publisher,
+            dispatch_execution_card_patch=self._execution_card_patch_dispatcher.submit,
             reply_text=self._reply_text,
             card_reply_limit=lambda: self._card_reply_limit,
             terminal_result_card_limit=lambda: self._terminal_result_card_limit,
@@ -247,7 +252,7 @@ class CodexHandler(BotHandler):
             apply_runtime_state_message_locked=self._apply_runtime_state_message_locked,
             apply_persisted_runtime_state_message_locked=self._apply_persisted_runtime_state_message_locked,
             finalize_execution_card_from_state=self._finalize_execution_card_from_state,
-            patch_execution_card_message=self._patch_execution_card_message,
+            dispatch_execution_card_message=self._dispatch_execution_card_message,
             publish_terminal_result=self._publish_terminal_result,
             read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=True),
             is_thread_not_found_error=self._is_thread_not_found_error,
@@ -296,7 +301,7 @@ class CodexHandler(BotHandler):
             apply_persisted_runtime_state_message_locked=self._apply_persisted_runtime_state_message_locked,
             cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
             finalize_execution_from_terminal_signal=self._finalize_execution_from_terminal_signal,
-            patch_execution_card_message=self._patch_execution_card_message,
+            dispatch_execution_card_message=self._dispatch_execution_card_message,
             send_execution_card=self._send_execution_card,
             schedule_mirror_watchdog=self._schedule_mirror_watchdog,
             schedule_execution_card_update=self._schedule_execution_card_update,
@@ -875,6 +880,7 @@ class CodexHandler(BotHandler):
         except Exception:
             logger.exception("停止 Codex adapter 失败")
         finally:
+            self._execution_card_patch_dispatcher.shutdown()
             self._runtime_loop.stop()
             self._service_instance_lease.release()
 
@@ -1560,7 +1566,7 @@ class CodexHandler(BotHandler):
         if not transition.had_card:
             self._retire_execution_anchor(sender_id, chat_id)
             return False
-        self._flush_execution_card(sender_id, chat_id, immediate=True)
+        self._flush_execution_card(sender_id, chat_id, immediate=True, background=True)
         self._retire_execution_anchor(sender_id, chat_id)
         return True
 
@@ -2248,11 +2254,40 @@ class CodexHandler(BotHandler):
             cancelled=cancelled,
         )
 
+    def _dispatch_execution_card_message(
+        self,
+        message_id: str,
+        *,
+        transcript: ExecutionTranscript,
+        running: bool,
+        elapsed: int,
+        cancelled: bool,
+    ) -> None:
+        self._execution_output.dispatch_execution_card_message(
+            message_id,
+            transcript=transcript,
+            running=running,
+            elapsed=elapsed,
+            cancelled=cancelled,
+        )
+
     def _schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         self._execution_output.schedule_execution_card_update(sender_id, chat_id)
 
-    def _flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
-        self._execution_output.flush_execution_card(sender_id, chat_id, immediate=immediate)
+    def _flush_execution_card(
+        self,
+        sender_id: str,
+        chat_id: str,
+        immediate: bool = False,
+        *,
+        background: bool = False,
+    ) -> None:
+        self._execution_output.flush_execution_card(
+            sender_id,
+            chat_id,
+            immediate=immediate,
+            background=background,
+        )
 
     def _publish_terminal_result(
         self,

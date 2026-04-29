@@ -70,7 +70,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
                 message,
             ),
             finalize_execution_card_from_state=lambda sender_id, chat_id: finalized.append((sender_id, chat_id)) or True,
-            patch_execution_card_message=lambda message_id, *, transcript, running, elapsed, cancelled: patches.append(
+            dispatch_execution_card_message=lambda message_id, *, transcript, running, elapsed, cancelled: patches.append(
                 {
                     "message_id": message_id,
                     "reply_text": transcript.reply_text(),

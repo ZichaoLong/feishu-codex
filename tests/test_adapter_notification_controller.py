@@ -72,7 +72,7 @@ class AdapterNotificationControllerTests(unittest.TestCase):
             finalize_execution_from_terminal_signal=lambda sender_id, chat_id, *, thread_id, turn_id="": (
                 finalizations.append((sender_id, chat_id, thread_id, turn_id)) or True
             ),
-            patch_execution_card_message=lambda message_id, *, transcript, running, elapsed, cancelled: patches.append(
+            dispatch_execution_card_message=lambda message_id, *, transcript, running, elapsed, cancelled: patches.append(
                 {
                     "message_id": message_id,
                     "reply_text": transcript.reply_text(),

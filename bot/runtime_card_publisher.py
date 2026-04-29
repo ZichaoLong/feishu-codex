@@ -8,8 +8,10 @@ These helpers keep Feishu card payload assembly and message IO out of
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from bot.cards import build_execution_card, build_plan_card, build_terminal_result_card
 from bot.execution_transcript import ExecutionReplySegment, ExecutionTranscript
@@ -54,6 +56,15 @@ class PlanCardPublishResult:
     message_id: str | None
     attempted_existing: bool
     reused_existing: bool
+
+
+@dataclass(slots=True)
+class _ExecutionCardPatchSlot:
+    queued: bool = False
+    inflight: bool = False
+
+
+_PATCH_DISPATCHER_STOP = object()
 
 
 class _CardPublisherBot(Protocol):
@@ -213,3 +224,84 @@ class RuntimeCardPublisher:
             attempted_existing=attempted_existing,
             reused_existing=False,
         )
+
+
+class ExecutionCardPatchDispatcher:
+    def __init__(
+        self,
+        publish_patch: Callable[[str, ExecutionCardModel], bool],
+        *,
+        worker_count: int = 2,
+    ) -> None:
+        self._publish_patch = publish_patch
+        self._worker_count = max(int(worker_count), 1)
+        self._queue: queue.Queue[str | object] = queue.Queue()
+        self._lock = threading.Lock()
+        self._pending: dict[str, ExecutionCardModel] = {}
+        self._slots: dict[str, _ExecutionCardPatchSlot] = {}
+        self._workers: list[threading.Thread] = []
+        self._closed = False
+
+    def submit(self, message_id: str, model: ExecutionCardModel) -> None:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return
+        with self._lock:
+            if self._closed:
+                return
+            self._pending[normalized_message_id] = model
+            slot = self._slots.setdefault(normalized_message_id, _ExecutionCardPatchSlot())
+            if slot.queued or slot.inflight:
+                return
+            slot.queued = True
+            self._ensure_workers_locked()
+            self._queue.put(normalized_message_id)
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            workers = list(self._workers)
+        for _ in workers:
+            self._queue.put(_PATCH_DISPATCHER_STOP)
+        for worker in workers:
+            if worker.is_alive():
+                worker.join(timeout=1)
+
+    def _ensure_workers_locked(self) -> None:
+        while len(self._workers) < self._worker_count:
+            worker = threading.Thread(
+                target=self._run_worker,
+                name=f"execution-card-patch-{len(self._workers) + 1}",
+                daemon=True,
+            )
+            self._workers.append(worker)
+            worker.start()
+
+    def _run_worker(self) -> None:
+        while True:
+            message_id = self._queue.get()
+            if message_id is _PATCH_DISPATCHER_STOP:
+                return
+            assert isinstance(message_id, str)
+            with self._lock:
+                slot = self._slots.setdefault(message_id, _ExecutionCardPatchSlot())
+                slot.queued = False
+                model = self._pending.pop(message_id, None)
+                if model is None:
+                    if not slot.inflight:
+                        self._slots.pop(message_id, None)
+                    continue
+                slot.inflight = True
+            try:
+                self._publish_patch(message_id, model)
+            finally:
+                with self._lock:
+                    slot = self._slots.setdefault(message_id, _ExecutionCardPatchSlot())
+                    slot.inflight = False
+                    if self._pending.get(message_id) is not None and not slot.queued and not self._closed:
+                        slot.queued = True
+                        self._queue.put(message_id)
+                    elif message_id not in self._pending and not slot.queued:
+                        self._slots.pop(message_id, None)

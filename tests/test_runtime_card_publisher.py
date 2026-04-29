@@ -1,8 +1,11 @@
 import json
+import threading
+import time
 import unittest
 
 from bot.execution_transcript import ExecutionReplySegment, ExecutionTranscript
 from bot.runtime_card_publisher import (
+    ExecutionCardPatchDispatcher,
     RuntimeCardPublisher,
     build_execution_card_model,
     build_plan_card_model,
@@ -128,6 +131,57 @@ class RuntimeCardPublisherTests(unittest.TestCase):
         self.assertEqual(message_id, "exec-1")
         card = json.loads(content)
         self.assertEqual(card["header"]["title"]["content"], "Codex（执行中 3s）")
+
+    def test_execution_card_patch_dispatcher_coalesces_stale_updates_for_same_message(self) -> None:
+        first_started = threading.Event()
+        release_first = threading.Event()
+        calls: list[tuple[str, int]] = []
+
+        def publish_patch(message_id: str, model) -> bool:
+            calls.append((message_id, model.elapsed))
+            if len(calls) == 1:
+                first_started.set()
+                release_first.wait(timeout=1)
+            return True
+
+        dispatcher = ExecutionCardPatchDispatcher(publish_patch, worker_count=2)
+        self.addCleanup(dispatcher.shutdown)
+
+        dispatcher.submit("exec-1", build_execution_card_model(ExecutionTranscript(), running=True, elapsed=1, cancelled=False, log_limit=100, reply_limit=100))
+        self.assertTrue(first_started.wait(timeout=1))
+        dispatcher.submit("exec-1", build_execution_card_model(ExecutionTranscript(), running=True, elapsed=2, cancelled=False, log_limit=100, reply_limit=100))
+        dispatcher.submit("exec-1", build_execution_card_model(ExecutionTranscript(), running=False, elapsed=3, cancelled=False, log_limit=100, reply_limit=100))
+        release_first.set()
+
+        deadline = time.time() + 1
+        while len(calls) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(calls, [("exec-1", 1), ("exec-1", 3)])
+
+    def test_execution_card_patch_dispatcher_does_not_block_other_messages(self) -> None:
+        first_started = threading.Event()
+        second_started = threading.Event()
+        release_first = threading.Event()
+
+        def publish_patch(message_id: str, model) -> bool:
+            del model
+            if message_id == "exec-1":
+                first_started.set()
+                release_first.wait(timeout=1)
+            elif message_id == "exec-2":
+                second_started.set()
+            return True
+
+        dispatcher = ExecutionCardPatchDispatcher(publish_patch, worker_count=2)
+        self.addCleanup(dispatcher.shutdown)
+
+        dispatcher.submit("exec-1", build_execution_card_model(ExecutionTranscript(), running=True, elapsed=1, cancelled=False, log_limit=100, reply_limit=100))
+        self.assertTrue(first_started.wait(timeout=1))
+        dispatcher.submit("exec-2", build_execution_card_model(ExecutionTranscript(), running=True, elapsed=2, cancelled=False, log_limit=100, reply_limit=100))
+
+        self.assertTrue(second_started.wait(timeout=1))
+        release_first.set()
 
 
 if __name__ == "__main__":

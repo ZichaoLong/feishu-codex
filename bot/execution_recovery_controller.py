@@ -57,7 +57,7 @@ class ExecutionRecoveryController:
         apply_runtime_state_message_locked: Callable[[RuntimeState, RuntimeStateMessage], None],
         apply_persisted_runtime_state_message_locked: Callable[[tuple[str, str], RuntimeState, RuntimeStateMessage], None],
         finalize_execution_card_from_state: Callable[[str, str], bool],
-        patch_execution_card_message: Callable[..., bool],
+        dispatch_execution_card_message: Callable[..., None],
         publish_terminal_result: Callable[..., bool],
         read_thread: Callable[[str], ThreadSnapshot],
         is_thread_not_found_error: Callable[[Exception], bool],
@@ -75,7 +75,7 @@ class ExecutionRecoveryController:
         self._apply_runtime_state_message_locked = apply_runtime_state_message_locked
         self._apply_persisted_runtime_state_message_locked = apply_persisted_runtime_state_message_locked
         self._finalize_execution_card_from_state = finalize_execution_card_from_state
-        self._patch_execution_card_message = patch_execution_card_message
+        self._dispatch_execution_card_message = dispatch_execution_card_message
         self._publish_terminal_result = publish_terminal_result
         self._read_thread = read_thread
         self._is_thread_not_found_error = is_thread_not_found_error
@@ -284,7 +284,7 @@ class ExecutionRecoveryController:
         )
         if not self._display_changed(current_transcript, display_transcript):
             return
-        self._patch_execution_card_message(
+        self._dispatch_execution_card_message(
             execution_message_id,
             transcript=display_transcript,
             running=False,

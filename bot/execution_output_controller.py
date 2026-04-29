@@ -6,6 +6,7 @@ from typing import Any, Callable, Protocol, TypeAlias
 
 from bot.card_text_projection import can_render_terminal_result_card
 from bot.runtime_card_publisher import (
+    ExecutionCardModel,
     RuntimeCardPublisher,
     build_execution_card_model,
     build_plan_card_model,
@@ -40,6 +41,7 @@ class ExecutionOutputController:
         apply_runtime_state_message_locked: Callable[[RuntimeState, RuntimeStateMessage], None],
         cancel_patch_timer_locked: Callable[[RuntimeState], None],
         card_publisher_factory: Callable[[], RuntimeCardPublisher],
+        dispatch_execution_card_patch: Callable[[str, ExecutionCardModel], None],
         reply_text: _ReplyText,
         card_reply_limit: Callable[[], int],
         terminal_result_card_limit: Callable[[], int],
@@ -54,6 +56,7 @@ class ExecutionOutputController:
         self._apply_runtime_state_message_locked = apply_runtime_state_message_locked
         self._cancel_patch_timer_locked = cancel_patch_timer_locked
         self._card_publisher_factory = card_publisher_factory
+        self._dispatch_execution_card_patch = dispatch_execution_card_patch
         self._reply_text = reply_text
         self._card_reply_limit = card_reply_limit
         self._terminal_result_card_limit = terminal_result_card_limit
@@ -91,6 +94,25 @@ class ExecutionOutputController:
             reply_limit=int(self._card_reply_limit()),
         )
         return self._card_publisher_factory().patch_execution_card(message_id, model)
+
+    def dispatch_execution_card_message(
+        self,
+        message_id: str,
+        *,
+        transcript,
+        running: bool,
+        elapsed: int,
+        cancelled: bool,
+    ) -> None:
+        model = build_execution_card_model(
+            transcript,
+            running=running,
+            elapsed=elapsed,
+            cancelled=cancelled,
+            log_limit=int(self._card_log_limit()),
+            reply_limit=int(self._card_reply_limit()),
+        )
+        self._dispatch_execution_card_patch(message_id, model)
 
     def refresh_terminal_execution_card_from_state(self, sender_id: str, chat_id: str) -> bool:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -130,7 +152,12 @@ class ExecutionOutputController:
                 immediate = True
             elif timer is None:
                 delay = interval_seconds - (now - last_patch)
-                timer = threading.Timer(delay, self.submit_flush_execution_card, args=(sender_id, chat_id))
+                timer = threading.Timer(
+                    delay,
+                    self.submit_flush_execution_card,
+                    args=(sender_id, chat_id),
+                    kwargs={"background": True},
+                )
                 timer.daemon = True
                 self._apply_runtime_state_message_locked(
                     state,
@@ -141,12 +168,32 @@ class ExecutionOutputController:
             else:
                 immediate = False
         if immediate:
-            self.flush_execution_card(sender_id, chat_id)
+            self.flush_execution_card(sender_id, chat_id, background=True)
 
-    def submit_flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
-        self._runtime_submit(self.flush_execution_card, sender_id, chat_id, immediate=immediate)
+    def submit_flush_execution_card(
+        self,
+        sender_id: str,
+        chat_id: str,
+        immediate: bool = False,
+        *,
+        background: bool = False,
+    ) -> None:
+        self._runtime_submit(
+            self.flush_execution_card,
+            sender_id,
+            chat_id,
+            immediate=immediate,
+            background=background,
+        )
 
-    def flush_execution_card(self, sender_id: str, chat_id: str, immediate: bool = False) -> None:
+    def flush_execution_card(
+        self,
+        sender_id: str,
+        chat_id: str,
+        immediate: bool = False,
+        *,
+        background: bool = False,
+    ) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
         with self._lock:
             self._cancel_patch_timer_locked(state)
@@ -162,14 +209,27 @@ class ExecutionOutputController:
             reply_text = transcript.reply_text()
             running = runtime.execution.running
             cancelled = runtime.execution.cancelled
+            elapsed = (
+                int(max(0.0, time.monotonic() - runtime.execution.started_at))
+                if runtime.execution.started_at
+                else 0
+            )
+
+        if background:
+            self.dispatch_execution_card_message(
+                message_id,
+                transcript=transcript,
+                running=running,
+                elapsed=elapsed,
+                cancelled=cancelled,
+            )
+            return
 
         ok = self.patch_execution_card_message(
             message_id,
             transcript=transcript,
             running=running,
-            elapsed=int(max(0.0, time.monotonic() - runtime.execution.started_at))
-            if runtime.execution.started_at
-            else 0,
+            elapsed=elapsed,
             cancelled=cancelled,
         )
         if not ok and immediate and reply_text:

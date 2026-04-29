@@ -45,7 +45,7 @@ class AdapterNotificationController:
         apply_persisted_runtime_state_message_locked: Callable[[ChatBindingKey, RuntimeState, RuntimeStateMessage], None],
         cancel_mirror_watchdog_locked: Callable[[RuntimeState], None],
         finalize_execution_from_terminal_signal: Callable[..., bool],
-        patch_execution_card_message: Callable[..., bool],
+        dispatch_execution_card_message: Callable[..., None],
         send_execution_card: Callable[..., str | None],
         schedule_mirror_watchdog: Callable[[str, str], None],
         schedule_execution_card_update: Callable[[str, str], None],
@@ -63,7 +63,7 @@ class AdapterNotificationController:
         self._apply_persisted_runtime_state_message_locked = apply_persisted_runtime_state_message_locked
         self._cancel_mirror_watchdog_locked = cancel_mirror_watchdog_locked
         self._finalize_execution_from_terminal_signal = finalize_execution_from_terminal_signal
-        self._patch_execution_card_message = patch_execution_card_message
+        self._dispatch_execution_card_message = dispatch_execution_card_message
         self._send_execution_card = send_execution_card
         self._schedule_mirror_watchdog = schedule_mirror_watchdog
         self._schedule_execution_card_update = schedule_execution_card_update
@@ -203,7 +203,7 @@ class AdapterNotificationController:
                 self._turn_execution.clear_plan_state_locked(state)
             if not transition.reuse_existing_card:
                 if transition.previous_execution_card is not None:
-                    self._patch_execution_card_message(
+                    self._dispatch_execution_card_message(
                         transition.previous_execution_card.message_id,
                         transcript=transition.previous_execution_card.transcript,
                         running=False,

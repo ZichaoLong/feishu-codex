@@ -65,6 +65,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
     ):
         bot = _FakeBot()
         replies: list[tuple[str, str, str, bool]] = []
+        dispatched: list[dict[str, object]] = []
         lock = threading.RLock()
         turn_execution = TurnExecutionCoordinator()
 
@@ -83,6 +84,14 @@ class ExecutionOutputControllerTests(unittest.TestCase):
             apply_runtime_state_message_locked=apply_runtime_state_message,
             cancel_patch_timer_locked=_cancel_patch_timer_locked,
             card_publisher_factory=lambda: RuntimeCardPublisher(bot),
+            dispatch_execution_card_patch=lambda message_id, model: dispatched.append(
+                {
+                    "message_id": message_id,
+                    "running": model.running,
+                    "elapsed": model.elapsed,
+                    "cancelled": model.cancelled,
+                }
+            ),
             reply_text=lambda chat_id, text, *, message_id="", reply_in_thread=False: replies.append(
                 (chat_id, text, message_id, reply_in_thread)
             ),
@@ -91,11 +100,11 @@ class ExecutionOutputControllerTests(unittest.TestCase):
             card_log_limit=lambda: 100,
             stream_patch_interval_ms=lambda: 1,
         )
-        return controller, bot, replies
+        return controller, bot, replies, dispatched
 
     def test_flush_execution_card_patch_failure_falls_back_once(self) -> None:
         state = self._make_state()
-        controller, bot, replies = self._make_controller(state)
+        controller, bot, replies, _ = self._make_controller(state)
         state["current_message_id"] = "card-1"
         state["current_prompt_message_id"] = "msg-1"
         state["current_prompt_reply_in_thread"] = True
@@ -110,7 +119,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
 
     def test_publish_terminal_result_prefers_terminal_result_card_when_reply_fits_budget(self) -> None:
         state = self._make_state()
-        controller, bot, replies = self._make_controller(state)
+        controller, bot, replies, _ = self._make_controller(state)
 
         ok = controller.publish_terminal_result(
             "c1",
@@ -132,7 +141,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
 
     def test_publish_terminal_result_uses_independent_budget_from_execution_card_reply_limit(self) -> None:
         state = self._make_state()
-        controller, bot, replies = self._make_controller(
+        controller, bot, replies, _ = self._make_controller(
             state,
             card_reply_limit=3,
             terminal_result_card_limit=200,
@@ -152,7 +161,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
 
     def test_publish_terminal_result_falls_back_to_top_level_card_before_text(self) -> None:
         state = self._make_state()
-        controller, bot, replies = self._make_controller(state)
+        controller, bot, replies, _ = self._make_controller(state)
 
         def _reply_fail(parent_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> str | None:
             bot.reply_refs.append((parent_id, msg_type, content, reply_in_thread))
@@ -173,9 +182,9 @@ class ExecutionOutputControllerTests(unittest.TestCase):
         self.assertEqual(bot.sent_messages[-1][0], "c1")
         self.assertEqual(bot.sent_messages[-1][1], "interactive")
 
-    def test_schedule_execution_card_update_immediate_path_patches_card(self) -> None:
+    def test_schedule_execution_card_update_immediate_path_dispatches_card_patch(self) -> None:
         state = self._make_state()
-        controller, bot, _ = self._make_controller(state)
+        controller, bot, _, dispatched = self._make_controller(state)
         state["current_message_id"] = "card-1"
         state["started_at"] = time.monotonic() - 1
         state["execution_transcript"].set_reply_text("done")
@@ -183,11 +192,24 @@ class ExecutionOutputControllerTests(unittest.TestCase):
 
         controller.schedule_execution_card_update("ou_user", "c1")
 
-        self.assertEqual(bot.patches[-1][0], "card-1")
+        self.assertEqual(bot.patches, [])
+        self.assertEqual(dispatched[-1]["message_id"], "card-1")
+
+    def test_background_flush_execution_card_dispatches_without_sync_patch(self) -> None:
+        state = self._make_state()
+        controller, bot, _, dispatched = self._make_controller(state)
+        state["current_message_id"] = "card-2"
+        state["started_at"] = time.monotonic() - 2
+        state["execution_transcript"].set_reply_text("done")
+
+        controller.flush_execution_card("ou_user", "c1", immediate=True, background=True)
+
+        self.assertEqual(bot.patches, [])
+        self.assertEqual(dispatched[-1]["message_id"], "card-2")
 
     def test_refresh_terminal_execution_card_uses_effective_message_id(self) -> None:
         state = self._make_state()
-        controller, bot, _ = self._make_controller(state)
+        controller, bot, _, _ = self._make_controller(state)
         state["last_execution_message_id"] = "archived-card"
         state["started_at"] = time.monotonic() - 3
         state["execution_transcript"].set_reply_text("complete")
@@ -199,7 +221,7 @@ class ExecutionOutputControllerTests(unittest.TestCase):
 
     def test_flush_plan_card_reuses_existing_or_updates_message_id(self) -> None:
         state = self._make_state()
-        controller, bot, _ = self._make_controller(state)
+        controller, bot, _, _ = self._make_controller(state)
         state["current_message_id"] = "exec-1"
         state["plan_message_id"] = "plan-existing"
         state["plan_turn_id"] = "turn-1"

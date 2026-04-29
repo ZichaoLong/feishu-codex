@@ -1791,12 +1791,14 @@ class FeishuBot(ABC):
         try:
             response = self.client.im.v1.message.patch(request)
         except Exception as e:
-            logger.error("消息更新失败(SDK异常): %s", e)
+            logger.error("消息更新失败(SDK异常): message_id=%s error=%s", message_id, e)
             return False
         if not response.success():
             logger.error(
-                "消息更新失败: code=%s, msg=%s, ext=%s",
-                response.code, response.msg,
+                "消息更新失败: message_id=%s code=%s msg=%s ext=%s",
+                message_id,
+                response.code,
+                response.msg,
                 getattr(response, 'raw', {}).get('ext', '') if isinstance(getattr(response, 'raw', None), dict) else '',
             )
             return False
@@ -1877,9 +1879,17 @@ class FeishuBot(ABC):
             logger.error("引用回复失败: code=%s, msg=%s", response.code, response.msg)
             return None
         try:
-            return response.data.message_id
+            reply_message_id = response.data.message_id
         except AttributeError:
             return None
+        logger.info(
+            "引用回复成功: parent_id=%s message_id=%s msg_type=%s reply_in_thread=%s",
+            parent_id,
+            reply_message_id,
+            msg_type,
+            effective_reply_in_thread,
+        )
+        return reply_message_id
 
     def delete_message(self, message_id: str) -> bool:
         """删除指定消息

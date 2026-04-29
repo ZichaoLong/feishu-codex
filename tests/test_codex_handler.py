@@ -431,6 +431,17 @@ class CodexHandlerTests(unittest.TestCase):
             return handler._binding_runtime.binding_keys_locked()
 
     @staticmethod
+    def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(interval)
+        if predicate():
+            return
+        raise AssertionError("condition not met within timeout")
+
+    @staticmethod
     def _store_pending_request(handler: CodexHandler, request_key: str, pending: dict) -> None:
         handler._interaction_requests.store_pending_request(request_key, pending)
 
@@ -644,7 +655,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._handle_turn_started({"threadId": "thread-1", "turn": {"id": "turn-2"}})
 
-        self.assertTrue(any(message_id == "old-card" for message_id, _ in bot.patches))
+        self._wait_until(lambda: any(message_id == "old-card" for message_id, _ in bot.patches))
         patched = json.loads(next(content for message_id, content in bot.patches if message_id == "old-card"))
         body_elements = patched["body"]["elements"]
         self.assertFalse(
@@ -1738,21 +1749,35 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertIsNone(store.load("thread-1"))
 
-    def test_patch_failure_fallback_does_not_send_duplicate_followup(self) -> None:
+    def test_terminal_reconcile_fallback_does_not_duplicate_terminal_result_delivery(self) -> None:
         handler, bot = self._make_handler()
         handler._card_reply_limit = 5
+        bot.message_contexts["msg-1"] = {
+            "chat_type": "p2p",
+            "sender_open_id": "ou_user",
+        }
 
-        handler.handle_message("ou_user", "c1", "hello")
-        bot.patch_results["plan-card-2"] = False
+        handler.handle_message("ou_user", "c1", "hello", message_id="msg-1")
+        bot.patch_results["plan-card-1"] = False
         handler._handle_agent_message_delta({"threadId": "thread-created", "delta": "123456789"})
         target = handler._capture_terminal_reconcile_target("ou_user", "c1", thread_id="thread-created", turn_id="turn-1")
         assert target is not None
         handler._handle_turn_completed({"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}})
+        reply_refs_before_reconcile = list(bot.reply_refs)
         handler._adapter.thread_snapshots[("thread-created", True)] = RuntimeError("snapshot down")
         handler._run_terminal_execution_reconcile(target)
 
-        matching_replies = [item for item in bot.replies if item == ("c1", "123456789")]
-        self.assertEqual(len(matching_replies), 1)
+        self.assertEqual(bot.replies, [])
+        self.assertEqual(bot.reply_refs, reply_refs_before_reconcile)
+        terminal_cards = [
+            json.loads(content)
+            for parent_id, msg_type, content in bot.reply_refs
+            if parent_id == "msg-1" and msg_type == "interactive"
+        ]
+        self.assertEqual(len(terminal_cards), 2)
+        card = next(card for card in terminal_cards if card["header"]["title"]["content"] == "Codex 最终结果")
+        self.assertEqual(card["header"]["title"]["content"], "Codex 最终结果")
+        self.assertIn("123456789", card["elements"][-1]["content"])
 
     def test_terminal_reconcile_sends_authoritative_result_card_from_snapshot_without_live_reply_delta(self) -> None:
         handler, bot = self._make_handler()
