@@ -175,8 +175,8 @@ def _resolve_runtime_target_for_wrapper(
             preferred_running_instance=preferred_running_instance,
             default_instance_data_dir=_default_data_dir(),
         )
-    except ValueError:
-        print("检测到多个运行中的实例，请显式传 `--instance <name>`。", file=sys.stderr)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         raise SystemExit(2)
 
 

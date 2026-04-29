@@ -50,6 +50,7 @@ fcodex shell wrapper
 
 - `shared backend` 现在指的是**实例内共享 backend**
 - 多个实例共享的是 `CODEX_HOME`，不是同一个 live app-server backend
+- managed backend 启动会经过机器级协调；即使多个实例在同一条命令里几乎同时启动，也必须各自落到独立的 live backend URL，而不能误连到别的实例已经占住的 `8765`
 - 飞书和 `fcodex` 如果要安全继续同一个 live thread，预期应连接到同一个**实例 backend**
 
 ## 3. 为什么需要 `fcodex`

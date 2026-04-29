@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 from io import StringIO
 from pathlib import Path
 
+from bot import process_utils
 from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, ThreadSummary
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.codex_protocol.client import CodexRpcClient
@@ -494,6 +495,36 @@ class AppServerRuntimeStoreTests(unittest.TestCase):
                 "ws://127.0.0.1:43210",
             )
 
+    def test_resolve_running_instance_app_server_url_fails_closed_without_live_default_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            entry = InstanceRegistryEntry(
+                instance_name="explorer",
+                owner_pid=os.getpid(),
+                service_token="token-explorer",
+                control_endpoint="tcp://127.0.0.1:9393",
+                app_server_url="ws://127.0.0.1:8765",
+                config_dir="/tmp/config-explorer",
+                data_dir=str(data_dir),
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            self.assertEqual(
+                resolve_running_instance_app_server_url(
+                    entry,
+                    configured_app_server_url="ws://127.0.0.1:8765",
+                ),
+                "",
+            )
+
+
+class ProcessUtilsTests(unittest.TestCase):
+    def test_process_exists_treats_linux_zombie_as_not_running(self) -> None:
+        with patch("bot.process_utils.os.kill", return_value=None):
+            with patch("bot.process_utils._linux_process_state", return_value="Z"):
+                self.assertFalse(process_utils.process_exists(1234))
+
 
 class InteractionLeaseStoreTests(unittest.TestCase):
     def test_interaction_lease_store_acquire_and_release_round_trip(self) -> None:
@@ -613,7 +644,10 @@ class CodexRpcClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             fallback_url = "ws://127.0.0.1:43210"
             store = AppServerRuntimeStore(Path(tmpdir))
-            client = CodexRpcClient(app_server_runtime_store=store)
+            client = CodexRpcClient(
+                app_server_runtime_store=store,
+                managed_startup_lock_path=Path(tmpdir) / "startup.lock",
+            )
 
             class _Proc:
                 pid = os.getpid()
@@ -639,6 +673,61 @@ class CodexRpcClientTests(unittest.TestCase):
 
             self.assertEqual(client.current_app_server_url(), fallback_url)
             self.assertEqual(mock_popen.call_args[0][0][-1], fallback_url)
+            self.assertEqual(
+                resolve_effective_app_server_url("ws://127.0.0.1:8765", data_dir=Path(tmpdir)),
+                fallback_url,
+            )
+
+    def test_start_locked_retries_default_url_when_child_exits_after_connect(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            default_url = "ws://127.0.0.1:8765"
+            fallback_url = "ws://127.0.0.1:43210"
+            store = AppServerRuntimeStore(Path(tmpdir))
+            client = CodexRpcClient(
+                app_server_runtime_store=store,
+                managed_startup_lock_path=Path(tmpdir) / "startup.lock",
+            )
+
+            class _ProcDead:
+                pid = 111
+                stdout = StringIO("")
+                stderr = StringIO("")
+
+                def poll(self):
+                    return 1
+
+            class _ProcLive:
+                pid = os.getpid()
+                stdout = StringIO("")
+                stderr = StringIO("")
+
+                def poll(self):
+                    return None
+
+            class _ThreadStub:
+                def __init__(self, *args, **kwargs) -> None:
+                    pass
+
+                def start(self) -> None:
+                    return None
+
+            def _fake_connect() -> None:
+                client._ws = Mock()
+
+            with patch.object(client, "_select_managed_listen_url", return_value=default_url):
+                with patch.object(client, "_allocate_free_listen_url", return_value=fallback_url):
+                    with patch.object(client, "_connect_ws_locked", _fake_connect):
+                        with patch("bot.codex_protocol.client._MANAGED_APP_SERVER_VERIFY_GRACE_SECONDS", 0.0):
+                            with patch(
+                                "bot.codex_protocol.client.subprocess.Popen",
+                                side_effect=[_ProcDead(), _ProcLive()],
+                            ) as mock_popen:
+                                with patch("bot.codex_protocol.client.threading.Thread", _ThreadStub):
+                                    client._start_locked()
+
+            self.assertEqual(mock_popen.call_args_list[0].args[0][-1], default_url)
+            self.assertEqual(mock_popen.call_args_list[1].args[0][-1], fallback_url)
+            self.assertEqual(client.current_app_server_url(), fallback_url)
             self.assertEqual(
                 resolve_effective_app_server_url("ws://127.0.0.1:8765", data_dir=Path(tmpdir)),
                 fallback_url,
@@ -898,6 +987,36 @@ class FCodexTests(unittest.TestCase):
         self.assertEqual(resolved.data_dir, data_dir)
         self.assertEqual(resolved.app_server_url, "ws://127.0.0.1:43210")
         self.assertEqual(resolved.service_token, "token-explorer")
+
+    def test_runtime_target_rejects_running_instance_without_live_default_runtime(self) -> None:
+        data_dir = Path("/tmp/data-explorer")
+        running_entry = InstanceRegistryEntry(
+            instance_name="explorer",
+            owner_pid=os.getpid(),
+            service_token="token-explorer",
+            control_endpoint="tcp://127.0.0.1:9393",
+            app_server_url="ws://127.0.0.1:8765",
+            config_dir="/tmp/config-explorer",
+            data_dir=str(data_dir),
+            started_at=1.0,
+            updated_at=1.0,
+        )
+
+        with patch(
+            "bot.instance_resolution.resolve_cli_instance_target",
+            return_value=CliInstanceTarget(
+                instance_name="explorer",
+                data_dir=data_dir,
+                running_entry=running_entry,
+            ),
+        ):
+            with self.assertRaises(ValueError) as exc:
+                resolve_cli_runtime_target(
+                    configured_app_server_url="ws://127.0.0.1:8765",
+                    explicit_instance="explorer",
+                )
+
+        self.assertIn("未发布可用的 app-server 地址", str(exc.exception))
 
     def test_fcodex_requires_explicit_instance_when_multiple_instances_are_running(self) -> None:
         stderr = StringIO()

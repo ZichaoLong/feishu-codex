@@ -9,7 +9,11 @@ import pathlib
 from dataclasses import dataclass
 
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, current_instance_name, resolve_instance_paths, validate_instance_name
-from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
+from bot.stores.app_server_runtime_store import (
+    AppServerRuntimeStore,
+    resolve_effective_app_server_url,
+    uses_default_app_server_url,
+)
 from bot.stores.instance_registry_store import InstanceRegistryEntry, InstanceRegistryStore
 
 
@@ -54,9 +58,10 @@ def resolve_running_instance_app_server_url(
     if runtime is not None and str(runtime.active_url or "").strip():
         return str(runtime.active_url).strip()
     recorded_url = str(entry.app_server_url or "").strip()
-    if recorded_url:
+    if recorded_url and not uses_default_app_server_url(recorded_url):
         return recorded_url
-    if configured_app_server_url:
+    normalized_configured_url = str(configured_app_server_url or "").strip()
+    if normalized_configured_url and not uses_default_app_server_url(normalized_configured_url):
         return resolve_effective_app_server_url(configured_app_server_url, data_dir=data_dir)
     return ""
 
@@ -159,6 +164,10 @@ def resolve_cli_runtime_target(
             running_entry,
             configured_app_server_url=configured_app_server_url,
         )
+        if not app_server_url:
+            raise ValueError(
+                f"运行中的实例 `{resolved.instance_name}` 未发布可用的 app-server 地址；请重启该实例后再试。"
+            )
         service_token = running_entry.service_token
     else:
         app_server_url = resolve_effective_app_server_url(configured_app_server_url, data_dir=data_dir)

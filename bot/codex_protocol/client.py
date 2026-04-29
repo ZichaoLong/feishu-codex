@@ -7,11 +7,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
 import shlex
 import socket
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -19,9 +21,14 @@ from typing import Any, Callable
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
+from bot.file_lock import acquire_file_lock, release_file_lock
+from bot.instance_layout import global_data_dir
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, uses_default_app_server_url
 
 logger = logging.getLogger(__name__)
+_MANAGED_APP_SERVER_START_LOCK = "codex-app-server-start.lock"
+_MANAGED_APP_SERVER_VERIFY_GRACE_SECONDS = 0.5
+_MANAGED_DEFAULT_START_MAX_ATTEMPTS = 3
 
 
 class CodexRpcError(RuntimeError):
@@ -55,6 +62,7 @@ class CodexRpcClient:
         on_notification: Callable[[str, dict[str, Any]], None] | None = None,
         on_request: Callable[[int | str, str, dict[str, Any]], None] | None = None,
         app_server_runtime_store: AppServerRuntimeStore | None = None,
+        managed_startup_lock_path: pathlib.Path | str | None = None,
     ) -> None:
         self._codex_command = codex_command
         self._app_server_mode = app_server_mode
@@ -65,6 +73,9 @@ class CodexRpcClient:
         self._on_notification = on_notification or (lambda _method, _params: None)
         self._on_request = on_request or (lambda _request_id, _method, _params: None)
         self._app_server_runtime_store = app_server_runtime_store
+        self._managed_startup_lock_path = (
+            pathlib.Path(managed_startup_lock_path) if managed_startup_lock_path is not None else None
+        )
 
         self._lock = threading.RLock()
         self._send_lock = threading.Lock()
@@ -163,38 +174,108 @@ class CodexRpcClient:
             if self._process is not None and self._process.poll() is not None:
                 self._process = None
             if self._process is None:
-                self._app_server_url = self._select_managed_listen_url()
-                cmd = [*shlex.split(self._codex_command), "app-server", "--listen", self._app_server_url]
-                logger.info("启动 Codex app-server: %s", cmd)
-                self._process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
-                    env=os.environ.copy(),
-                )
-                assert self._process.stdout is not None
-                assert self._process.stderr is not None
-                threading.Thread(
-                    target=self._log_stream,
-                    args=(self._process.stdout, logging.DEBUG, "stdout"),
-                    daemon=True,
-                ).start()
-                threading.Thread(
-                    target=self._log_stream,
-                    args=(self._process.stderr, logging.INFO, "stderr"),
-                    daemon=True,
-                ).start()
+                self._start_managed_process_locked()
             else:
                 logger.info("复用已运行的 Codex app-server: %s", self._app_server_url)
+                self._connect_ws_locked()
+                self._verify_managed_process_alive_locked()
         else:
             self._app_server_url = self._configured_app_server_url
-        self._connect_ws_locked()
+            self._connect_ws_locked()
         self._record_managed_runtime_state()
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
+
+    def _start_managed_process_locked(self) -> None:
+        is_default_url = uses_default_app_server_url(self._configured_app_server_url)
+        max_attempts = _MANAGED_DEFAULT_START_MAX_ATTEMPTS if is_default_url else 1
+        attempt = 0
+        listen_url = self._select_managed_listen_url()
+        with self._managed_startup_lock():
+            while True:
+                attempt += 1
+                self._launch_managed_process_locked(listen_url)
+                try:
+                    self._connect_ws_locked()
+                    self._verify_managed_process_alive_locked()
+                    return
+                except Exception as exc:
+                    self._cleanup_failed_managed_start_locked()
+                    if attempt >= max_attempts:
+                        raise
+                    listen_url = self._allocate_free_listen_url(self._configured_app_server_url)
+                    logger.warning(
+                        "Codex app-server 启动失败（%s），默认地址改用备用端口重试：%s",
+                        exc,
+                        listen_url,
+                    )
+
+    def _launch_managed_process_locked(self, listen_url: str) -> None:
+        self._app_server_url = listen_url
+        cmd = [*shlex.split(self._codex_command), "app-server", "--listen", self._app_server_url]
+        logger.info("启动 Codex app-server: %s", cmd)
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            env=os.environ.copy(),
+        )
+        assert self._process.stdout is not None
+        assert self._process.stderr is not None
+        threading.Thread(
+            target=self._log_stream,
+            args=(self._process.stdout, logging.DEBUG, "stdout"),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._log_stream,
+            args=(self._process.stderr, logging.INFO, "stderr"),
+            daemon=True,
+        ).start()
+
+    def _verify_managed_process_alive_locked(self) -> None:
+        if self._app_server_mode != "managed" or self._process is None:
+            return
+        deadline = time.time() + _MANAGED_APP_SERVER_VERIFY_GRACE_SECONDS
+        while True:
+            if self._process.poll() is not None:
+                raise RuntimeError("codex app-server exited after websocket connected")
+            if time.time() >= deadline:
+                return
+            time.sleep(0.05)
+
+    def _cleanup_failed_managed_start_locked(self) -> None:
+        ws = self._ws
+        process = self._process
+        self._ws = None
+        self._process = None
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    @contextmanager
+    def _managed_startup_lock(self):
+        lock_path = self._managed_startup_lock_path
+        if lock_path is None:
+            lock_path = global_data_dir() / _MANAGED_APP_SERVER_START_LOCK
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as handle:
+            acquire_file_lock(handle, blocking=True)
+            try:
+                yield
+            finally:
+                release_file_lock(handle)
 
     def _connect_ws_locked(self) -> None:
         deadline = time.time() + self._connect_timeout_seconds

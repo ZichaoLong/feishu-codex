@@ -54,6 +54,10 @@ The important points are:
 - `shared backend` now means an instance-local shared backend
 - multiple instances share `CODEX_HOME`, not one universal live app-server
   backend
+- managed backend startup is machine-coordinated; even when several instances
+  are started almost simultaneously from one command, each instance must end up
+  with its own live backend URL instead of accidentally attaching to another
+  instance's `8765`
 - if Feishu and `fcodex` should safely continue the same live thread, they are
   expected to talk to the same instance backend
 
