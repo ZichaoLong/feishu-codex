@@ -8,6 +8,7 @@ from pathlib import Path
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
 
 from bot.codex_handler import CodexHandler
+from bot.constants import DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS
 from bot.feishu_bot import FeishuBot
 
 
@@ -18,7 +19,7 @@ class CodexBot(FeishuBot):
         self,
         app_id: str,
         app_secret: str,
-        request_timeout_seconds: float = 10.0,
+        request_timeout_seconds: float = DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS,
         *,
         system_config: dict | None = None,
     ):

@@ -42,6 +42,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.card_text_projection import project_interactive_card_text
+from bot.constants import DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS
 from bot.feishu_types import (
     BotIdentitySnapshot,
     GroupActivationSnapshot,
@@ -239,7 +240,7 @@ class FeishuBot(ABC):
         self,
         app_id: str,
         app_secret: str,
-        request_timeout_seconds: float = 10.0,
+        request_timeout_seconds: float = DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS,
         *,
         data_dir: pathlib.Path | None = None,
         system_config: dict[str, Any] | None = None,

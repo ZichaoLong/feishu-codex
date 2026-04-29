@@ -13,8 +13,8 @@ import yaml
 SYSTEM_YAML_TEMPLATE = """app_id: "your_cc_bot_app_id"
 app_secret: "your_cc_bot_app_secret"
 
-# 飞书 HTTP API 请求超时（秒）；默认值：10
-# request_timeout_seconds: 10
+# 飞书 HTTP API 请求超时（秒）；默认值：5
+# request_timeout_seconds: 5
 
 # 群聊管理员 open_id 列表；这些人始终具备群聊触发资格，并可使用
 # 所有群里的 `/` 命令（包括 `/group`、`/groupmode`、`/new`、`/session` 等）。

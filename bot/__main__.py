@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 from bot.config import ensure_init_token, load_config
+from bot.constants import DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS
 from bot.env_file import load_env_file
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, apply_instance_environment, resolve_instance_paths, validate_instance_name
 from bot.logging_setup import configure_logging
@@ -61,7 +62,9 @@ def main(argv: list[str] | None = None) -> None:
     bot = CodexBot(
         cfg["app_id"],
         cfg["app_secret"],
-        request_timeout_seconds=float(cfg.get("request_timeout_seconds", 10)),
+        request_timeout_seconds=float(
+            cfg.get("request_timeout_seconds", DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS)
+        ),
         system_config=cfg,
     )
     bot.start()
