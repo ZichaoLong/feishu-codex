@@ -327,13 +327,14 @@ def _service_daemon_command(instance_name: str) -> tuple[str, ...]:
 
 def _write_wrapper(path: pathlib.Path, module_name: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    entrypoint = f"from {module_name} import main; main()"
     if is_windows():
         wrapper_path = path.with_suffix(".cmd")
         wrapper_path.write_text(
             "\r\n".join(
                 [
                     "@echo off",
-                    f'"{_venv_python()}" -m {module_name} %*',
+                    f'"{_venv_python()}" -c "{entrypoint}" %*',
                     "",
                 ]
             ),
@@ -344,7 +345,7 @@ def _write_wrapper(path: pathlib.Path, module_name: str) -> None:
         "\n".join(
             [
                 "#!/usr/bin/env sh",
-                f'exec "{_venv_python()}" -m {module_name} "$@"',
+                f'exec "{_venv_python()}" -c \'{entrypoint}\' "$@"',
                 "",
             ]
         ),

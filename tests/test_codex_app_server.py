@@ -22,7 +22,13 @@ from bot.fcodex import (
     _resolve_thread_target_via_remote_backend,
     main as fcodex_main,
 )
-from bot.fcodex_proxy import _ProxyInteractionGate, _relay_messages, _rewrite_thread_start_cwd, run_proxy
+from bot.fcodex_proxy import (
+    _DEFAULT_IDLE_TIMEOUT_SECONDS,
+    _ProxyInteractionGate,
+    _relay_messages,
+    _rewrite_thread_start_cwd,
+    run_proxy,
+)
 from bot.instance_resolution import CliRuntimeTarget
 from bot.profile_resolution import resolve_local_default_profile
 from bot.stores.instance_registry_store import InstanceRegistryEntry
@@ -1322,6 +1328,9 @@ class FCodexTests(unittest.TestCase):
             if backend_server is not None:
                 backend_server.shutdown()
             backend_thread.join(timeout=1)
+
+    def test_proxy_default_idle_timeout_keeps_startup_reconnect_window(self) -> None:
+        self.assertGreaterEqual(_DEFAULT_IDLE_TIMEOUT_SECONDS, 30.0)
 
     def test_proxy_exits_when_parent_process_disappears(self) -> None:
         proxy_url_queue: queue.Queue[str] = queue.Queue()

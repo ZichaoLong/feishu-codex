@@ -180,7 +180,10 @@ class ManageCliTests(unittest.TestCase):
                 (str(bin_dir / "feishu-codex"), "--instance", "corp-a", "run"),
             )
             rendered = (bin_dir / "feishu-codex").read_text(encoding="utf-8")
-            self.assertIn(f'exec "{data_root / ".venv" / "bin" / "python"}" -m bot.manage_cli "$@"', rendered)
+            self.assertIn(
+                f'exec "{data_root / ".venv" / "bin" / "python"}" -c \'from bot.manage_cli import main; main()\' "$@"',
+                rendered,
+            )
             summary = stdout.getvalue()
             self.assertIn("已重建实例: corp-a, default。不覆盖各实例现有用户配置", summary)
             self.assertIn("  - 本地服务进程管理 feishu-codex --help", summary)
@@ -271,7 +274,7 @@ class ManageCliTests(unittest.TestCase):
             wrapper_path = root / "feishu-codex.cmd"
             self.assertTrue(wrapper_path.exists())
             rendered = wrapper_path.read_text(encoding="utf-8")
-            self.assertIn('"C:/Python311/python.exe" -m bot.manage_cli %*', rendered)
+            self.assertIn('"C:/Python311/python.exe" -c "from bot.manage_cli import main; main()" %*', rendered)
 
     def test_write_wrapper_creates_unix_shell_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -283,7 +286,7 @@ class ManageCliTests(unittest.TestCase):
 
             self.assertTrue(wrapper_path.exists())
             rendered = wrapper_path.read_text(encoding="utf-8")
-            self.assertIn('exec "/tmp/venv/bin/python" -m bot.manage_cli "$@"', rendered)
+            self.assertIn('exec "/tmp/venv/bin/python" -c \'from bot.manage_cli import main; main()\' "$@"', rendered)
             self.assertEqual(stat.S_IMODE(wrapper_path.stat().st_mode), 0o755)
 
     def test_handle_instance_remove_deletes_named_instance_dirs(self) -> None:

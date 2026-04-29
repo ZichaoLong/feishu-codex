@@ -602,3 +602,7 @@ def main() -> None:
     if exit_code is not None:
         raise SystemExit(exit_code)
     return
+
+
+if __name__ == "__main__":
+    main()
