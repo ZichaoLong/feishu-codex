@@ -1,5 +1,14 @@
 # Draft: Admin and User Workflows in Multi-Instance Mode
 
+> Status: superseded
+>
+> The current formal contracts no longer use the old named-instance admission
+> design. All instances now share one persisted thread namespace; instance
+> boundaries primarily apply to binding, local runtime state, and
+> `ThreadRuntimeLease` coordination.
+> See `docs/contracts/runtime-control-surface.md` §6.8 and
+> `docs/contracts/session-profile-semantics.md` §5.
+
 > Status: a first implementation pass has been completed along the direction of
 > this document; it remains a draft for administrator / end-user workflows.
 >

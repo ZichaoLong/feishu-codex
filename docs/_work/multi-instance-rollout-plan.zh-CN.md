@@ -1,5 +1,13 @@
 # 多实例支持实施计划（草案）
 
+> Status: superseded
+>
+> 当前正式合同已不再采用“命名实例 admission”这条设计。
+> 现在所有实例共享同一套 persisted thread 命名空间；实例边界主要体现在
+> binding、本地运行态与 `ThreadRuntimeLease` 协调上。
+> 请以 `docs/contracts/runtime-control-surface.zh-CN.md` §6.8、
+> `docs/contracts/session-profile-semantics.zh-CN.md` §5 为准。
+
 > 状态：已按本文方向完成第一轮实现，后续仍需继续收正式合同文档
 >
 > 说明：本文档先作为实现前计划，放在 `docs/_work/`。在设计确认并落地后，相关结论应再分别下沉到 `docs/architecture/`、`docs/contracts/`、`docs/decisions/` 与 README。

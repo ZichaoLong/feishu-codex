@@ -1,5 +1,13 @@
 # 多实例模式下的管理员与用户使用方式（草案）
 
+> Status: superseded
+>
+> 当前正式合同已不再采用“命名实例 admission”这条设计。
+> 现在所有实例共享同一套 persisted thread 命名空间；实例边界主要体现在
+> binding、本地运行态与 `ThreadRuntimeLease` 协调上。
+> 请以 `docs/contracts/runtime-control-surface.zh-CN.md` §6.8、
+> `docs/contracts/session-profile-semantics.zh-CN.md` §5 为准。
+
 > 状态：已按本文方向完成第一轮实现，本文继续作为管理员/用户工作流说明草案
 >
 > 说明：本文描述的是目标使用方式，不表示当前代码已全部支持。待设计确认并实现后，再把稳定部分下沉到正式合同与 README。
