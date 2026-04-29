@@ -462,6 +462,13 @@ class CodexHandlerTests(unittest.TestCase):
     def _register_pending_rename_form(handler: CodexHandler, message_id: str, *, thread_id: str) -> None:
         handler._session_ui_domain.register_pending_rename_form(message_id, thread_id=thread_id)
 
+    @staticmethod
+    def _service_runtime_holder_ids(handler: CodexHandler, thread_id: str) -> tuple[str, ...]:
+        lease = handler._thread_runtime_lease_store.load(thread_id)
+        if lease is None:
+            return ()
+        return tuple(holder.holder_id for holder in lease.holders)
+
     def _make_handler(
         self,
         cfg: dict | None = None,
@@ -1318,6 +1325,29 @@ class CodexHandlerTests(unittest.TestCase):
         handler._bind_thread("ou_user", "c1", thread)
 
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, [])
+
+    def test_bind_thread_failure_keeps_existing_service_runtime_lease(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler.on_register(bot)
+        handler._bind_thread("ou_user", "c1", thread)
+        holder_ids_before = self._service_runtime_holder_ids(handler, "thread-1")
+
+        with patch.object(handler, "_resolve_runtime_binding", side_effect=RuntimeError("bind failed")):
+            with self.assertRaisesRegex(RuntimeError, "bind failed"):
+                handler._bind_thread("ou_user2", "c2", thread)
+
+        self.assertEqual(self._service_runtime_holder_ids(handler, "thread-1"), holder_ids_before)
+        self.assertEqual(handler._thread_subscribers("thread-1"), (("ou_user", "c1"),))
 
     def test_group_terminal_result_card_stays_on_trigger_message(self) -> None:
         handler, bot = self._make_handler()
@@ -3591,6 +3621,32 @@ class CodexHandlerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "未找到匹配的线程"):
             handler._resume_snapshot("00000000-0000-0000-0000-000000000000")
+
+    def test_resume_failure_keeps_existing_service_runtime_lease(self) -> None:
+        handler, bot = self._make_handler()
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler.on_register(bot)
+        handler._bind_thread("ou_user", "c1", thread)
+        holder_ids_before = self._service_runtime_holder_ids(handler, "thread-1")
+
+        def fake_resume_thread(thread_id: str, **kwargs):
+            raise RuntimeError("resume failed")
+
+        handler._adapter.resume_thread = fake_resume_thread
+
+        with self.assertRaisesRegex(RuntimeError, "resume failed"):
+            handler._resume_snapshot_by_id(thread.thread_id, original_arg=thread.thread_id, summary=thread)
+
+        self.assertEqual(self._service_runtime_holder_ids(handler, "thread-1"), holder_ids_before)
 
     def test_resume_by_name_uses_exact_name_match(self) -> None:
         handler, _ = self._make_handler()

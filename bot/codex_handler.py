@@ -615,16 +615,17 @@ class CodexHandler(BotHandler):
             updated_at=time.time(),
         )
 
-    def _ensure_service_thread_runtime_lease(self, thread_id: str) -> None:
+    def _ensure_service_thread_runtime_lease(self, thread_id: str) -> bool:
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
-            return
-        acquire_thread_runtime_holder_or_raise(
+            return False
+        outcome = acquire_thread_runtime_holder_or_raise(
             thread_id=normalized_thread_id,
             holder=self._service_thread_runtime_holder(),
             lease_store=self._thread_runtime_lease_store,
             registry_store=self._instance_registry,
         )
+        return outcome.result.acquired
 
     def _release_service_thread_runtime_lease(self, thread_id: str) -> None:
         normalized_thread_id = str(thread_id or "").strip()
@@ -1902,7 +1903,7 @@ class CodexHandler(BotHandler):
         profile = profile_record.profile if profile_record is not None else ""
         model = profile_record.model if profile_record is not None else ""
         model_provider = profile_record.model_provider if profile_record is not None else ""
-        self._ensure_service_thread_runtime_lease(thread_id)
+        lease_was_newly_acquired = self._ensure_service_thread_runtime_lease(thread_id)
         try:
             return self._adapter.resume_thread(
                 thread_id,
@@ -1911,7 +1912,8 @@ class CodexHandler(BotHandler):
                 model_provider=model_provider or None,
             )
         except Exception as exc:
-            self._release_service_thread_runtime_lease(thread_id)
+            if lease_was_newly_acquired:
+                self._release_service_thread_runtime_lease(thread_id)
             if self._is_thread_not_found_error(exc):
                 raise ValueError(f"未找到匹配的线程：`{original_arg}`") from exc
             if thread and thread.source == "cli" and self._is_transport_disconnect(exc):
@@ -1947,7 +1949,7 @@ class CodexHandler(BotHandler):
         *,
         message_id: str = "",
     ) -> None:
-        self._ensure_service_thread_runtime_lease(thread.thread_id)
+        lease_was_newly_acquired = self._ensure_service_thread_runtime_lease(thread.thread_id)
         try:
             resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
             state = resolved.state
@@ -1967,7 +1969,8 @@ class CodexHandler(BotHandler):
                 self._adapter.unsubscribe_thread(unsubscribe_thread_id)
                 self._release_service_thread_runtime_lease(unsubscribe_thread_id)
         except Exception:
-            self._release_service_thread_runtime_lease(thread.thread_id)
+            if lease_was_newly_acquired:
+                self._release_service_thread_runtime_lease(thread.thread_id)
             raise
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
