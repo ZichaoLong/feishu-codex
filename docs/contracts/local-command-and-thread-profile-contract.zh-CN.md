@@ -132,7 +132,6 @@
 - thread / binding 查看
 - thread 发现与本地诊断
 - `unsubscribe`
-- admission 管理
 - 其他 thread-scoped / binding-scoped 管理动作
 
 这意味着：

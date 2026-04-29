@@ -54,9 +54,6 @@ class RuntimeAdminController:
         release_service_thread_runtime_lease: Callable[[str], None],
         service_control_endpoint: Callable[[], str],
         instance_name: Callable[[], str],
-        admitted_thread_ids: Callable[[], tuple[str, ...]],
-        admit_thread: Callable[[str], bool],
-        revoke_thread: Callable[[str], bool],
         safe_read_runtime_config: Callable[[], RuntimeConfigSummary | None],
         current_default_profile_resolution: Callable[[RuntimeConfigSummary | None], Any],
         permissions_summary: Callable[[str, str], str],
@@ -79,9 +76,6 @@ class RuntimeAdminController:
         self._release_service_thread_runtime_lease = release_service_thread_runtime_lease
         self._service_control_endpoint = service_control_endpoint
         self._instance_name = instance_name
-        self._admitted_thread_ids = admitted_thread_ids
-        self._admit_thread = admit_thread
-        self._revoke_thread = revoke_thread
         self._safe_read_runtime_config = safe_read_runtime_config
         self._current_default_profile_resolution = current_default_profile_resolution
         self._permissions_summary = permissions_summary
@@ -584,7 +578,6 @@ class RuntimeAdminController:
                 "pid": os.getpid(),
                 "control_endpoint": self._service_control_endpoint(),
                 "app_server_url": self._current_app_server_url(),
-                "admitted_thread_count": len(self._admitted_thread_ids()),
                 "binding_count": len(bindings),
                 "bound_binding_count": sum(1 for item in bindings if item["binding_state"] == "bound"),
                 "attached_binding_count": sum(
@@ -634,23 +627,4 @@ class RuntimeAdminController:
                     ],
                 }
             return self.unsubscribe_feishu_runtime_by_thread_id(thread.thread_id)
-        if method == "thread/admissions":
-            return {"instance_name": self._instance_name(), "thread_ids": list(self._admitted_thread_ids())}
-        if method == "thread/import":
-            thread = self._resolve_thread_target_for_control_params(params)
-            return {
-                "thread_id": thread.thread_id,
-                "thread_title": thread.title,
-                "imported": self._admit_thread(thread.thread_id),
-            }
-        if method == "thread/revoke":
-            thread = self._resolve_thread_target_for_control_params(params)
-            with self._lock:
-                if self.bound_bindings_for_thread_locked(thread.thread_id):
-                    raise ValueError("当前仍有 binding 指向该线程，不能撤销 admission。")
-            return {
-                "thread_id": thread.thread_id,
-                "thread_title": thread.title,
-                "revoked": self._revoke_thread(thread.thread_id),
-            }
         raise ValueError(f"未知控制面方法：{method}")

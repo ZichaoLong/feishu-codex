@@ -194,12 +194,11 @@ The repository decision is to no longer block this path with a preview/confirm
 card. Avoiding dual-backend writes for such threads is an operational rule, not
 a UI-enforced guard.
 
-Named instances add one more visibility boundary:
+Multi-instance mode no longer adds a separate thread-admission filter:
 
-- Feishu `/session` and Feishu `/resume` obey the current instance's
-  `admission + binding` visible surface
-- `feishu-codexctl thread list` and `fcodex resume <thread_name>` are
-  operator-local and do not read that admission filter
+- all instances resolve persisted threads from the same shared namespace
+- Feishu `/session` and `feishu-codexctl thread list --scope cwd` are
+  current-directory views over that namespace
 - once a path actually wants live runtime residency, all of them still obey
   the same `ThreadRuntimeLease`
 

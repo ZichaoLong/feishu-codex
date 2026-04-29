@@ -73,7 +73,7 @@
 | `/status`、`/unsubscribe`、`feishu-codexctl` 共享的状态词汇与管理面合同是什么？ | [`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md) |
 | `/session`、`/resume`、`/profile`、`/rm` 在飞书、`fcodex`、TUI 三层里分别是什么意思？ | [`session-profile-semantics.zh-CN.md`](./contracts/session-profile-semantics.zh-CN.md) |
 | 本地命令面应如何重划？`unsubscribe`、`fcodex` thin wrapper、`feishu-codexctl` 分工、thread-wise profile/provider 的当前正式合同是什么？ | [`local-command-and-thread-profile-contract.zh-CN.md`](./contracts/local-command-and-thread-profile-contract.zh-CN.md) |
-| 多实例下 `default` / 命名实例、admission、`fcodex --instance`、全局 runtime lease 怎么工作？ | [`session-profile-semantics.zh-CN.md`](./contracts/session-profile-semantics.zh-CN.md)、[`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md)、[`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md) |
+| 多实例下 `default` / 命名实例、共享 thread 可见面、`fcodex --instance`、全局 runtime lease 怎么工作？ | [`session-profile-semantics.zh-CN.md`](./contracts/session-profile-semantics.zh-CN.md)、[`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md)、[`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md) |
 | 飞书 `/help` 的信息架构、按钮导航与 slash 语义一致性合同是什么？ | [`feishu-help-navigation.zh-CN.md`](./contracts/feishu-help-navigation.zh-CN.md) |
 | 群激活、群聊模式、历史回捞、群命令触发的正式合同是什么？ | [`group-chat-contract.zh-CN.md`](./contracts/group-chat-contract.zh-CN.md) |
 | approval、sandbox、writable roots、受保护路径的语义是什么？ | [`codex-permissions-model.zh-CN.md`](./contracts/codex-permissions-model.zh-CN.md) |
@@ -103,7 +103,7 @@
   - [`local-command-and-thread-profile-contract.zh-CN.md`](./contracts/local-command-and-thread-profile-contract.zh-CN.md)
   - [`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md)
   - [`shared-backend-resume-safety.zh-CN.md`](./decisions/shared-backend-resume-safety.zh-CN.md)
-- 改多实例、实例 admission、`feishu-codexctl --instance` 或跨实例 runtime lease 相关逻辑时：
+- 改多实例、共享 thread 可见面、`feishu-codexctl --instance` 或跨实例 runtime lease 相关逻辑时：
   - [`session-profile-semantics.zh-CN.md`](./contracts/session-profile-semantics.zh-CN.md)
   - [`runtime-control-surface.zh-CN.md`](./contracts/runtime-control-surface.zh-CN.md)
   - [`fcodex-shared-backend-runtime.zh-CN.md`](./architecture/fcodex-shared-backend-runtime.zh-CN.md)

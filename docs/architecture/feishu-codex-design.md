@@ -180,8 +180,6 @@ Current module split:
   fragments, and can support hiding the terminal final-answer segment from the
   execution card once that answer has been delivered through a separate
   authoritative carrier; it does not own thread, owner, or binding-level state
-- `bot/stores/thread_admission_store.py`: per-instance Feishu visible-thread
-  admissions
 - `bot/stores/instance_registry_store.py`: machine-global running-instance registry
 - `bot/stores/thread_runtime_lease_store.py`: machine-global thread
   live-runtime lease
@@ -316,7 +314,6 @@ Codex remains the authority for:
 - p2p thread bindings and group-shared thread bindings keyed by `chat_id`
 - group-chat mode, group activation state, group context logs, and boundary state
 - transient approval, rename, and card state
-- the per-instance thread-admission set
 
 There are also two machine-global coordination states:
 
@@ -452,8 +449,7 @@ full-tree dump.
     `stores/chat_binding_store.py`, `stores/group_chat_store.py`,
     `stores/instance_registry_store.py`, `stores/interaction_lease_store.py`,
     `stores/pending_attachment_store.py`, `stores/profile_state_store.py`,
-    `stores/service_instance_lease.py`, `stores/thread_admission_store.py`,
-    `stores/thread_runtime_lease_store.py`
+    `stores/service_instance_lease.py`, `stores/thread_runtime_lease_store.py`
 - `config/`
   - example local config files: `system.yaml.example`, `codex.yaml.example`
 - `docs/`

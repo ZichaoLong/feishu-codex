@@ -226,7 +226,7 @@ feishu-codex instance remove corp-a
 - 重新运行 `install.sh` / `install.ps1` 时，会重建 shared wrapper，并为所有已知实例重建 service 定义 / 注册材料；只刷新 `*.example` 并补齐缺失 scaffold，不覆盖已有配置或数据
 - `--instance default` 等价于不写 `--instance`；`default` 实例直接使用配置根 / 数据根本身，不会创建 `instances/default/`
 - 同一 thread 的 live runtime 不能被两个实例 backend 同时持有
-- 飞书侧 `/session`、`/resume` 受当前实例的 admission 可见性约束；本地 `fcodex` / `feishu-codexctl` 更偏操作者视角
+- 所有实例共享同一套 persisted thread 可见面；真正按实例隔离的是 binding、本地运行态与 live runtime lease
 - 删除命名实例请用 `feishu-codex instance remove <name>`；它只删除该命名实例的配置、数据与实例级 service 注册材料，不会删除 `default`、共享 env 或 `_global`
 
 多实例的推荐管理面分工：
@@ -441,9 +441,6 @@ feishu-codexctl thread bindings --thread-id <id>
 feishu-codexctl thread bindings --thread-name <name>
 feishu-codexctl thread unsubscribe --thread-id <id>
 feishu-codexctl thread unsubscribe --thread-name <name>
-feishu-codexctl thread admissions
-feishu-codexctl thread import --thread-id <id>
-feishu-codexctl thread revoke --thread-id <id>
 ```
 
 说明：

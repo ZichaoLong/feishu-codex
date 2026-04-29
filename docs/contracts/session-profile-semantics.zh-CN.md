@@ -22,16 +22,14 @@
 
 - 作用范围：当前目录
 - provider：跨 provider 聚合
-- `default` 实例：看当前 backend 的当前目录线程
-- 命名实例：只看当前实例可见线程；可见集合受 `admission + 当前实例现有 binding` 约束
+- 所有实例：都看当前 backend 的当前目录线程
 
 ### `/resume <thread_id|thread_name>`
 
 - 支持精确 `thread_id`
 - 也支持精确 `thread_name`
 - provider：跨 provider
-- `default` 实例：看 backend 全局
-- 命名实例：只在当前实例可见集合内匹配
+- 所有实例：都看 backend 全局
 - 0 个匹配报错；多个同名精确匹配也报错
 
 ### `/new`
@@ -79,7 +77,7 @@
 - `thread_id`：按目标实例 shared backend 直接恢复
 - `thread_name`：先做跨 provider 精确名字匹配，再按 thread id 恢复
 - 多实例下，仍服从 runtime lease 与实例路由规则
-- 本地恢复目标解析是操作者视角，不读取 Feishu 命名实例的 admission 过滤
+- 本地恢复目标解析是操作者视角；真正的 live attach 安全边界在后续 runtime lease 获取阶段
 
 ### `fcodex -p <profile>`
 
@@ -118,7 +116,6 @@
 - `thread bindings`
 - `thread unsubscribe`
 - `binding list/status/clear`
-- `thread admissions/import/revoke`
 
 它不是第二个 Codex 前端，也不负责进入 TUI。
 
@@ -153,6 +150,7 @@
 
 ## 5. 多实例与可见性
 
-- 飞书 `/session`、`/resume` 在命名实例下受 admission 过滤
-- `fcodex resume <thread_name>` 与 `feishu-codexctl thread list` 更偏本地操作者视角
+- 所有实例共享同一套 persisted thread 命名空间
+- 飞书 `/session` 与 `feishu-codexctl thread list --scope cwd` 都是在该命名空间上的当前目录视图
+- 飞书 `/resume`、`fcodex resume <thread_name>` 与按 thread 定位的本地管理命令，都针对同一套全局 persisted thread 集合解析目标
 - runtime lease、实例选择与转移安全边界，见 `docs/decisions/shared-backend-resume-safety.zh-CN.md`

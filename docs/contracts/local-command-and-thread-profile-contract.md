@@ -145,7 +145,6 @@ Capabilities that primarily live in `feishu-codexctl` include:
 - thread and binding inspection
 - local discovery and diagnosis
 - `unsubscribe`
-- admission management
 - other thread-scoped or binding-scoped admin actions
 
 This means:

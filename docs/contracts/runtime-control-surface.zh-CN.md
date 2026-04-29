@@ -332,9 +332,6 @@
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread unsubscribe (--thread-id <id> | --thread-name <name>)`
-- `feishu-codexctl thread admissions`
-- `feishu-codexctl thread import (--thread-id <id> | --thread-name <name>)`
-- `feishu-codexctl thread revoke (--thread-id <id> | --thread-name <name>)`
 
 ### 6.4 `binding` 持久化与重置合同
 
@@ -433,7 +430,7 @@
 不允许在同一个 `FC_DATA_DIR` 上并存。
 如果二者指向同一目录，后启动的一方必须直接退出，而不是尝试替换已发布的 control endpoint。
 
-### 6.8 实例作用域、admission 与全局协调
+### 6.8 实例作用域与全局协调
 
 多实例下，`feishu-codexctl` 的作用域需要明确拆成两层：
 
@@ -446,20 +443,12 @@
   - 作用于某一个运行中的 `feishu-codex` service
   - 可通过 `--instance <name>` 显式选择；未显式指定时，按 current / unique-running / default-running 规则解析；若仍有歧义，则必须报错
 
-与实例可见范围相关的正式合同是：
+多实例下与 thread 可见性相关的正式合同是：
 
-- `default` 实例保留原单实例的全局 Feishu 可见行为
-- 命名实例默认是 `admission-scoped`
-- `thread admissions`
-  - 列出当前实例已 admitted 的 thread 集合
-- `thread import`
-  - 只把 persisted thread 纳入当前实例的 Feishu 可见面
-  - 不等于 bind thread
-  - 不等于把 thread load 进当前实例 backend
-  - 不等于立刻获取 live runtime lease
-- `thread revoke`
-  - 只移除当前实例对该 thread 的 admission
-  - 若当前仍有 binding 指向该 thread，必须拒绝
+- `default` 与命名实例共享同一套 persisted thread 命名空间
+- 飞书 `/session` 与 `feishu-codexctl thread list --scope cwd` 都是在该命名空间上的当前目录视图
+- 飞书 `/resume`、`fcodex resume <thread_name>` 与按 thread 定位的控制面命令，都针对同一套全局 persisted thread 集合解析目标
+- 只有当路径真正需要服务内 binding 状态或 live runtime residency 时，实例边界才开始起作用
 
 机器级还有两份共享协调事实：
 

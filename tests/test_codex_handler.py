@@ -3780,7 +3780,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("用法：`/session`", bot.replies[-1][1])
         self.assertIn("不接受额外参数", bot.replies[-1][1])
 
-    def test_named_instance_session_filters_to_admitted_threads(self) -> None:
+    def test_named_instance_session_shares_global_current_dir_threads(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
@@ -3806,42 +3806,7 @@ class CodexHandlerTests(unittest.TestCase):
             source="cli",
             status="idle",
         )
-        handler._thread_admission_store.admit("thread-1")
         handler._adapter.list_threads_all = lambda **kwargs: [thread_1, thread_2]
-
-        handler.handle_message("ou_user", "c1", "/session")
-
-        _, card = bot.cards[-1]
-        content = "\n".join(
-            element["content"]
-            for element in card["elements"]
-            if isinstance(element, dict) and element.get("tag") == "markdown"
-        )
-        self.assertIn("thread-1", content)
-        self.assertNotIn("thread-2", content)
-
-    def test_named_instance_bound_thread_stays_visible_without_admission(self) -> None:
-        tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tempdir.cleanup)
-        data_dir = pathlib.Path(tempdir.name)
-        handler, bot = self._make_handler(data_dir=data_dir, instance_name="corp-b")
-        runtime = handler._get_runtime_view("ou_user", "c1")
-        admitted = ThreadSummary(
-            thread_id="thread-1",
-            cwd=runtime.working_dir,
-            name="one",
-            preview="hello",
-            created_at=0,
-            updated_at=1,
-            source="cli",
-            status="idle",
-        )
-        handler._thread_admission_store.admit("thread-1")
-        handler._adapter.list_threads_all = lambda **kwargs: [admitted]
-        state = handler._get_runtime_state("ou_user", "c1")
-        with handler._lock:
-            state["current_thread_id"] = "thread-2"
-            state["current_thread_title"] = "bound-two"
 
         handler.handle_message("ou_user", "c1", "/session")
 
@@ -3854,43 +3819,27 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("thread-1", content)
         self.assertIn("thread-2", content)
 
-    def test_named_instance_resume_rejects_unadmitted_thread(self) -> None:
+    def test_named_instance_resume_accepts_global_thread_id(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
         handler, _ = self._make_handler(data_dir=data_dir, instance_name="corp-b")
-        thread_id = "019d2e94-a475-7bc1-b2f7-a3ce37628ede"
-
-        with self.assertRaisesRegex(ValueError, "未导入到本实例"):
-            handler._resume_snapshot(thread_id)
-
-    def test_control_plane_can_import_and_revoke_thread_admission(self) -> None:
-        tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tempdir.cleanup)
-        data_dir = pathlib.Path(tempdir.name)
-        handler, bot = self._make_handler(data_dir=data_dir, instance_name="corp-b")
-        handler.on_register(bot)
-        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(
-            summary=ThreadSummary(
-                thread_id="thread-1",
-                cwd="/tmp/project",
-                name="demo",
-                preview="hello",
-                created_at=0,
-                updated_at=0,
-                source="cli",
-                status="idle",
-            )
+        thread = ThreadSummary(
+            thread_id="019d2e94-a475-7bc1-b2f7-a3ce37628ede",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
         )
+        handler._adapter.thread_snapshots[(thread.thread_id, None)] = ThreadSnapshot(summary=thread)
 
-        imported = control_request(data_dir, "thread/import", {"thread_id": "thread-1"})
-        admissions = control_request(data_dir, "thread/admissions")
-        revoked = control_request(data_dir, "thread/revoke", {"thread_id": "thread-1"})
+        snapshot = handler._resume_snapshot(thread.thread_id)
 
-        self.assertTrue(imported["imported"])
-        self.assertIn("thread-1", admissions["thread_ids"])
-        self.assertTrue(revoked["revoked"])
-        self.assertFalse(handler._thread_admission_store.contains("thread-1"))
+        self.assertEqual(snapshot.summary.thread_id, thread.thread_id)
+        self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], thread.thread_id)
 
     def test_close_sessions_card_action_returns_closed_card(self) -> None:
         handler, _ = self._make_handler()

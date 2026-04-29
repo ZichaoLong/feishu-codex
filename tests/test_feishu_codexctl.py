@@ -31,6 +31,7 @@ class FeishuCodexCtlTests(unittest.TestCase):
         self.assertIn("`--thread-id` 或 `--thread-name`", rendered)
         self.assertIn("thread commands", rendered)
         self.assertIn("unsubscribe", rendered)
+        self.assertIn("persisted thread", rendered)
 
     def test_binding_help_includes_clear_semantics(self) -> None:
         parser = _build_parser()
@@ -140,17 +141,3 @@ class FeishuCodexCtlTests(unittest.TestCase):
         self.assertEqual(args.instance, "corp-b")
         self.assertEqual(args.resource, "service")
         self.assertEqual(args.action, "status")
-
-    def test_thread_import_accepts_explicit_thread_id(self) -> None:
-        parser = _build_parser()
-
-        args = parser.parse_args(["thread", "import", "--thread-id", "thread-1"])
-
-        self.assertEqual(_thread_target_params(args), {"thread_id": "thread-1"})
-
-    def test_thread_revoke_accepts_explicit_thread_name(self) -> None:
-        parser = _build_parser()
-
-        args = parser.parse_args(["thread", "revoke", "--thread-name", "demo"])
-
-        self.assertEqual(_thread_target_params(args), {"thread_name": "demo"})

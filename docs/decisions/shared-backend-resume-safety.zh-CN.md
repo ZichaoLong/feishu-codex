@@ -156,10 +156,10 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 本仓库的取舍是**不再**通过预览/确认卡片拦截这类 resume。
 因此，对“可能同时被另一个 isolated backend 写入”的线程，避免双 backend 写入的责任在操作侧，而不是由 UI 强制保护。
 
-对命名实例还要再补一条可见性边界：
+多实例模式不再额外引入一层 thread admission 过滤：
 
-- 飞书 `/session`、飞书 `/resume` 受当前实例的 `admission + binding` 可见面约束
-- `feishu-codexctl thread list`、`fcodex resume <thread_name>` 则是本地操作者视角，不读取该 admission 过滤
+- 所有实例都从同一套共享 persisted thread 命名空间解析目标
+- 飞书 `/session` 与 `feishu-codexctl thread list --scope cwd` 都是在这套命名空间上的当前目录视图
 - 但一旦真的要 live attach，所有路径仍统一服从 `ThreadRuntimeLease`
 
 ## 7. 来源展示与对称风险

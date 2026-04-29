@@ -128,7 +128,6 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态，以及通过 `RuntimeLoop` 串行化的 resume 目标解析
 - `bot/codex_settings_domain.py`：用户侧设置与身份命令，包括 `/profile`、`/approval`、`/sandbox`、`/permissions`、`/mode`、`/whoami` 与 `/init`；它通过显式 `SettingsDomainPorts` 穿过 bot/runtime/profile 边界，而不是继续持有宽泛的 handler owner
 - `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 display-only 的 `reply_segments` / `process_log` 片段拼装，并支持在权威终态结果已经单独送达后，把最后一段最终答案从 execution card 的 reply 面板里剔除；它不承担 thread、owner 或 binding 级状态职责
-- `bot/stores/thread_admission_store.py`：每实例 Feishu 可见线程的 admission
 - `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
 - `bot/stores/thread_runtime_lease_store.py`：机器级 thread live runtime lease
 - `bot/stores/*.py`：每实例新 thread seed profile、shared backend 运行时发现状态、群聊状态；以及机器级 thread-wise resume profile / lease / registry
@@ -221,7 +220,6 @@ shared backend 与 wrapper 的具体机制，见
 - 私聊当前绑定到哪个 thread，以及群聊按 `chat_id` 共享绑定到哪个 thread
 - 群聊工作态、群激活状态、群上下文日志与上下文边界状态
 - 审批、重命名、卡片等临时 UI 状态
-- 每实例 thread admission 集合
 
 另外还有两份机器级共享协调状态：
 
@@ -335,8 +333,7 @@ shared backend 与 wrapper 的具体机制，见
     `stores/chat_binding_store.py`、`stores/group_chat_store.py`、
     `stores/instance_registry_store.py`、`stores/interaction_lease_store.py`、
     `stores/pending_attachment_store.py`、`stores/profile_state_store.py`、
-    `stores/service_instance_lease.py`、`stores/thread_admission_store.py`、
-    `stores/thread_runtime_lease_store.py`
+    `stores/service_instance_lease.py`、`stores/thread_runtime_lease_store.py`
 - `config/`
   - 本地配置样例：`system.yaml.example`、`codex.yaml.example`
 - `docs/`

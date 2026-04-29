@@ -43,7 +43,7 @@ from bot.constants import (
     resolve_working_dir,
 )
 from bot.handler import BotHandler
-from bot.instance_layout import DEFAULT_INSTANCE_NAME, current_instance_name, global_data_dir
+from bot.instance_layout import current_instance_name, global_data_dir
 from bot.codex_config_reader import resolve_profile_from_codex_config
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
 from bot.codex_protocol.client import CodexRpcError
@@ -89,7 +89,6 @@ from bot.session_resolution import (
     looks_like_thread_id,
     resolve_resume_target_by_name,
 )
-from bot.stores.thread_admission_store import ThreadAdmissionStore
 from bot.stores.pending_attachment_store import PendingAttachmentStore
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.chat_binding_store import ChatBindingStore
@@ -174,7 +173,6 @@ class CodexHandler(BotHandler):
         self._runtime_loop = RuntimeLoop(name="codex-handler-runtime")
         self._service_instance_lease = ServiceInstanceLease(self._data_dir)
         self._instance_registry = InstanceRegistryStore(self._global_data_dir)
-        self._thread_admission_store = ThreadAdmissionStore(self._data_dir)
         self._thread_runtime_lease_store = ThreadRuntimeLeaseStore(self._global_data_dir)
         self._service_control_plane = ServiceControlPlane(
             data_dir=self._data_dir,
@@ -418,9 +416,6 @@ class CodexHandler(BotHandler):
             release_service_thread_runtime_lease=self._release_service_thread_runtime_lease,
             service_control_endpoint=lambda: self._service_control_plane.control_endpoint,
             instance_name=lambda: self._instance_name,
-            admitted_thread_ids=lambda: tuple(sorted(self._thread_admission_store.list_all())),
-            admit_thread=self._thread_admission_store.admit,
-            revoke_thread=self._thread_admission_store.revoke,
             safe_read_runtime_config=self._safe_read_runtime_config,
             current_default_profile_resolution=self._current_default_profile_resolution,
             permissions_summary=_permissions_summary,
@@ -659,32 +654,6 @@ class CodexHandler(BotHandler):
                     self._runtime_admin.unsubscribe_feishu_runtime_by_thread_id(thread_id)
                 except Exception:
                     logger.exception("将冲突线程 fail-closed 为 released 失败: thread=%s", thread_id[:12])
-
-    def _visible_thread_ids_for_instance(self) -> set[str]:
-        if self._instance_name == DEFAULT_INSTANCE_NAME:
-            return {thread.thread_id for thread in self._list_global_threads() if thread.thread_id}
-        visible = set(self._thread_admission_store.list_all())
-        with self._lock:
-            for binding in self._binding_runtime.binding_keys_locked():
-                snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
-                if snapshot is not None and snapshot.thread_id:
-                    visible.add(snapshot.thread_id)
-        return visible
-
-    def _is_thread_visible_in_instance(self, thread_id: str) -> bool:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return False
-        if self._instance_name == DEFAULT_INSTANCE_NAME:
-            return True
-        if self._thread_admission_store.contains(normalized_thread_id):
-            return True
-        with self._lock:
-            for binding in self._binding_runtime.binding_keys_locked():
-                snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
-                if snapshot is not None and snapshot.thread_id == normalized_thread_id:
-                    return True
-        return False
 
     def handle_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
         self._runtime_call(self._handle_message_impl, sender_id, chat_id, text, message_id=message_id)
@@ -1864,22 +1833,11 @@ class CodexHandler(BotHandler):
     def _resolve_resume_target(self, arg: str) -> ThreadSummary:
         target = arg.strip()
         if looks_like_thread_id(target):
-            if not self._is_thread_visible_in_instance(target):
-                raise ValueError("该线程当前未导入到本实例，也不属于本实例现有 binding。")
             return self._read_thread_summary_authoritatively(target, original_arg=target)
-        if self._instance_name == DEFAULT_INSTANCE_NAME:
-            thread = resolve_resume_target_by_name(
-                self._adapter,
-                name=target,
-                limit=self._thread_list_query_limit,
-            )
-            return self._read_thread_summary_authoritatively(thread.thread_id, original_arg=target)
-        visible_ids = self._visible_thread_ids_for_instance()
         thread = resolve_resume_target_by_name(
             self._adapter,
             name=target,
             limit=self._thread_list_query_limit,
-            predicate=lambda item: item.thread_id in visible_ids,
         )
         return self._read_thread_summary_authoritatively(thread.thread_id, original_arg=target)
 
@@ -1989,9 +1947,7 @@ class CodexHandler(BotHandler):
         *,
         message_id: str = "",
     ) -> None:
-        thread_was_visible = self._is_thread_visible_in_instance(thread.thread_id)
         self._ensure_service_thread_runtime_lease(thread.thread_id)
-        self._thread_admission_store.admit(thread.thread_id)
         try:
             resolved = self._resolve_runtime_binding(sender_id, chat_id, message_id)
             state = resolved.state
@@ -2011,8 +1967,7 @@ class CodexHandler(BotHandler):
                 self._adapter.unsubscribe_thread(unsubscribe_thread_id)
                 self._release_service_thread_runtime_lease(unsubscribe_thread_id)
         except Exception:
-            if not thread_was_visible:
-                self._release_service_thread_runtime_lease(thread.thread_id)
+            self._release_service_thread_runtime_lease(thread.thread_id)
             raise
 
     def _clear_thread_binding(self, sender_id: str, chat_id: str, *, message_id: str = "") -> None:
@@ -2044,18 +1999,10 @@ class CodexHandler(BotHandler):
         message_id: str = "",
     ) -> list[ThreadSummary]:
         runtime = self._get_runtime_view(sender_id, chat_id, message_id)
-        if self._instance_name == DEFAULT_INSTANCE_NAME:
-            return list_current_dir_threads(
-                self._adapter,
-                cwd=runtime.working_dir,
-                limit=self._thread_list_query_limit,
-            )
-        visible_ids = self._visible_thread_ids_for_instance()
         return list_current_dir_threads(
             self._adapter,
             cwd=runtime.working_dir,
             limit=self._thread_list_query_limit,
-            predicate=lambda thread: thread.thread_id in visible_ids,
         )
 
     def _safe_read_runtime_config(self) -> RuntimeConfigSummary | None:

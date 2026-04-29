@@ -341,9 +341,6 @@ The current formal command set is:
 - `feishu-codexctl thread status (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread bindings (--thread-id <id> | --thread-name <name>)`
 - `feishu-codexctl thread unsubscribe (--thread-id <id> | --thread-name <name>)`
-- `feishu-codexctl thread admissions`
-- `feishu-codexctl thread import (--thread-id <id> | --thread-name <name>)`
-- `feishu-codexctl thread revoke (--thread-id <id> | --thread-name <name>)`
 
 ### 6.4 Contract for binding persistence and reset
 
@@ -455,7 +452,7 @@ Therefore `feishu-codex run` and a background service started via
 If both point at the same directory, the later starter must exit instead of
 trying to replace the published control endpoint.
 
-### 6.8 Instance Scope, Admission, and Global Coordination
+### 6.8 Instance Scope and Global Coordination
 
 In multi-instance mode, `feishu-codexctl` deliberately splits into two scopes:
 
@@ -470,21 +467,15 @@ In multi-instance mode, `feishu-codexctl` deliberately splits into two scopes:
     by current / unique-running / default-running rules and must fail when the
     target remains ambiguous
 
-The formal contract for instance visibility is:
+The formal contract for multi-instance thread visibility is:
 
-- the `default` instance preserves the original single-instance globally visible
-  Feishu surface
-- named instances are `admission-scoped` by default
-- `thread admissions`
-  - lists the thread set currently admitted into this instance
-- `thread import`
-  - only makes a persisted thread visible on this instance's Feishu surface
-  - does not bind the thread
-  - does not load the thread into this instance backend
-  - does not immediately acquire a live runtime lease
-- `thread revoke`
-  - only removes this instance's admission for the thread
-  - must reject while a binding still points at that thread
+- `default` and named instances share the same persisted thread namespace
+- Feishu `/session` and `feishu-codexctl thread list --scope cwd` are
+  current-directory views over that namespace
+- Feishu `/resume`, `fcodex resume <thread_name>`, and thread-targeted control
+  plane commands resolve against the same global persisted thread set
+- instance boundaries matter only once a path wants service-local binding state
+  or live runtime residency
 
 There are also two machine-level coordination facts:
 

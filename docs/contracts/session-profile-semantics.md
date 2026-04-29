@@ -22,16 +22,14 @@ If older docs still describe `fcodex` shell slash self-commands, this document w
 
 - scope: current directory
 - provider behavior: cross-provider aggregation
-- `default` instance: current backend's current-directory threads
-- named instance: only the current instance-visible set, constrained by `admission + current bindings`
+- all instances: current backend's current-directory threads
 
 ### `/resume <thread_id|thread_name>`
 
 - supports exact `thread_id`
 - also supports exact `thread_name`
 - provider behavior: cross-provider
-- `default` instance: backend-global
-- named instance: only within the current instance-visible set
+- all instances: backend-global
 - zero matches error; multiple exact-name matches also error
 
 ### `/new`
@@ -82,7 +80,7 @@ That means shell-level support is removed for:
 - `thread_id`: resume directly on the selected instance shared backend
 - `thread_name`: do cross-provider exact-name resolution first, then resume by thread id
 - multi-instance routing still follows runtime-lease safety rules
-- local resolution is operator-local and does not read Feishu named-instance admission filtering
+- local resolution is operator-local; live-attach safety is enforced later by runtime-lease acquisition
 
 ### `fcodex -p <profile>`
 
@@ -123,7 +121,6 @@ It owns:
 - `thread bindings`
 - `thread unsubscribe`
 - `binding list/status/clear`
-- `thread admissions/import/revoke`
 
 It is not a second Codex frontend and does not enter the TUI.
 
@@ -160,6 +157,7 @@ The active model is:
 
 ## 5. Multi-Instance Visibility
 
-- Feishu `/session` and `/resume` in named instances are admission-filtered
-- `fcodex resume <thread_name>` and `feishu-codexctl thread list` are more operator-local views
+- all instances share one persisted thread namespace
+- Feishu `/session` and `feishu-codexctl thread list --scope cwd` are current-directory views over that namespace
+- Feishu `/resume`, `fcodex resume <thread_name>`, and thread-targeted local admin commands resolve against the same global persisted thread set
 - runtime-lease routing and transfer safety are defined in `docs/decisions/shared-backend-resume-safety.md`

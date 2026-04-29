@@ -81,8 +81,6 @@ def _print_service_status(data_dir: pathlib.Path) -> int:
     print(f"pid: {result['pid']}")
     print(f"control endpoint: {result['control_endpoint']}")
     print(f"app server: {result['app_server_url']}")
-    if "admitted_thread_count" in result:
-        print(f"admitted threads: {result['admitted_thread_count']}")
     print(f"bindings: total={result['binding_count']} bound={result['bound_binding_count']} attached={result['attached_binding_count']}")
     print(f"threads: bound={result['thread_count']} feishu-attached={result['attached_thread_count']} loaded={result['loaded_thread_count']}")
     print(f"running bindings: {', '.join(result['running_binding_ids']) or '（无）'}")
@@ -258,33 +256,6 @@ def _list_running_instances() -> int:
     return 0
 
 
-def _list_thread_admissions(data_dir: pathlib.Path) -> int:
-    result = _request(data_dir, "thread/admissions")
-    print(f"instance: {result['instance_name']}")
-    thread_ids = result.get("thread_ids") or []
-    if not thread_ids:
-        print("admitted threads: （无）")
-        return 0
-    print("admitted threads:")
-    for thread_id in thread_ids:
-        print(f"- {thread_id}")
-    return 0
-
-
-def _import_thread(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
-    result = _request(data_dir, "thread/import", target_params)
-    print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
-    print("imported: yes" if result["imported"] else "imported: already-admitted")
-    return 0
-
-
-def _revoke_thread(data_dir: pathlib.Path, target_params: dict[str, str]) -> int:
-    result = _request(data_dir, "thread/revoke", target_params)
-    print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
-    print("revoked: yes" if result["revoked"] else "revoked: already-absent")
-    return 0
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="feishu-codexctl",
@@ -308,7 +279,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "\n"
             "多实例:\n"
             "  feishu-codexctl --instance corp-a service status\n"
-            "  feishu-codexctl --instance corp-a thread admissions\n"
+            "  feishu-codexctl --instance corp-a thread status --thread-name demo\n"
         ),
         formatter_class=_HelpFormatter,
     )
@@ -389,7 +360,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Thread 管理面。\n"
             "- `list` 默认列当前目录线程；也支持 `--scope global`\n"
-            "- 其他 thread 子命令必须显式指定 `--thread-id` 或 `--thread-name`"
+            "- 其他 thread 子命令必须显式指定 `--thread-id` 或 `--thread-name`\n"
+            "- 所有实例共享同一套 persisted thread 发现面；实例差异主要体现在 live runtime 持有"
         ),
         formatter_class=_HelpFormatter,
     )
@@ -397,7 +369,7 @@ def _build_parser() -> argparse.ArgumentParser:
     thread_list = thread_sub.add_parser(
         "list",
         help="列出可见 thread。",
-        description="列出当前实例可见 thread。默认按当前目录过滤，也支持 `--scope global` 查看全局线程。",
+        description="列出 persisted thread。默认按当前目录过滤，也支持 `--scope global` 查看全局线程。",
         formatter_class=_HelpFormatter,
     )
     thread_list.add_argument("--scope", choices=("cwd", "global"), default="cwd", help="列线程时使用的作用域。")
@@ -429,30 +401,6 @@ def _build_parser() -> argparse.ArgumentParser:
     thread_unsubscribe_target = thread_unsubscribe.add_mutually_exclusive_group(required=True)
     thread_unsubscribe_target.add_argument("--thread-id", help="目标 thread id。")
     thread_unsubscribe_target.add_argument("--thread-name", help="目标 thread 名称。")
-    thread_sub.add_parser(
-        "admissions",
-        help="列出当前实例 admitted thread。",
-        description="列出当前实例 admission 集合里允许访问的 thread id。",
-        formatter_class=_HelpFormatter,
-    )
-    thread_import = thread_sub.add_parser(
-        "import",
-        help="把 thread 加入当前实例 admission。",
-        description="把某个已存在 thread 加入当前实例 admission，便于当前实例继续访问它。",
-        formatter_class=_HelpFormatter,
-    )
-    thread_import_target = thread_import.add_mutually_exclusive_group(required=True)
-    thread_import_target.add_argument("--thread-id", help="目标 thread id。")
-    thread_import_target.add_argument("--thread-name", help="目标 thread 名称。")
-    thread_revoke = thread_sub.add_parser(
-        "revoke",
-        help="把 thread 从当前实例 admission 移除。",
-        description="把某个 thread 从当前实例 admission 移除；不会删除 thread 本身。",
-        formatter_class=_HelpFormatter,
-    )
-    thread_revoke_target = thread_revoke.add_mutually_exclusive_group(required=True)
-    thread_revoke_target.add_argument("--thread-id", help="目标 thread id。")
-    thread_revoke_target.add_argument("--thread-name", help="目标 thread 名称。")
     return parser
 
 
@@ -483,12 +431,6 @@ def main() -> None:
             raise SystemExit(_print_thread_bindings(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "unsubscribe":
             raise SystemExit(_unsubscribe_thread(data_dir, _thread_target_params(args)))
-        if args.resource == "thread" and args.action == "admissions":
-            raise SystemExit(_list_thread_admissions(data_dir))
-        if args.resource == "thread" and args.action == "import":
-            raise SystemExit(_import_thread(data_dir, _thread_target_params(args)))
-        if args.resource == "thread" and args.action == "revoke":
-            raise SystemExit(_revoke_thread(data_dir, _thread_target_params(args)))
     except ServiceControlError as exc:
         print(f"控制面请求失败：{exc}", file=sys.stderr)
         raise SystemExit(2)
