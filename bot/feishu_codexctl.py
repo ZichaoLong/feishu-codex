@@ -13,7 +13,7 @@ from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerC
 from bot.config import load_config_file
 from bot.constants import display_path
 from bot.env_file import load_env_file
-from bot.instance_resolution import list_running_instances, resolve_cli_instance_target
+from bot.instance_resolution import list_running_instances, resolve_cli_instance_target, resolve_running_instance_app_server_url
 from bot.platform_paths import default_data_root
 from bot.session_resolution import list_current_dir_threads, list_global_threads
 from bot.service_control_plane import ServiceControlError, control_request
@@ -251,7 +251,7 @@ def _list_running_instances() -> int:
     print("INSTANCE\tPID\tCONTROL\tAPP_SERVER")
     for item in instances:
         control = item.control_endpoint
-        app_server = item.app_server_url or "-"
+        app_server = resolve_running_instance_app_server_url(item) or "-"
         print(f"{item.instance_name}\t{item.owner_pid}\t{control}\t{app_server}")
     return 0
 

@@ -1,8 +1,14 @@
 import io
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
 
-from bot.feishu_codexctl import _build_parser, _thread_target_params
+from bot.feishu_codexctl import _build_parser, _list_running_instances, _thread_target_params
+from bot.stores.app_server_runtime_store import AppServerRuntimeStore
+from bot.stores.instance_registry_store import InstanceRegistryEntry
 
 
 class FeishuCodexCtlTests(unittest.TestCase):
@@ -141,3 +147,32 @@ class FeishuCodexCtlTests(unittest.TestCase):
         self.assertEqual(args.instance, "corp-b")
         self.assertEqual(args.resource, "service")
         self.assertEqual(args.action, "status")
+
+    def test_instance_list_prefers_runtime_store_url_over_stale_registry_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            AppServerRuntimeStore(data_dir).save_managed_runtime(
+                configured_url="ws://127.0.0.1:8765",
+                active_url="ws://127.0.0.1:43210",
+                owner_pid=os.getpid(),
+                app_server_pid=os.getpid(),
+            )
+            entry = InstanceRegistryEntry(
+                instance_name="explorer",
+                owner_pid=os.getpid(),
+                service_token="token-explorer",
+                control_endpoint="tcp://127.0.0.1:9393",
+                app_server_url="ws://127.0.0.1:8765",
+                config_dir="/tmp/config-explorer",
+                data_dir=str(data_dir),
+                started_at=1.0,
+                updated_at=1.0,
+            )
+            stdout = io.StringIO()
+            with patch("bot.feishu_codexctl.list_running_instances", return_value=[entry]):
+                with redirect_stdout(stdout):
+                    result = _list_running_instances()
+
+        self.assertEqual(result, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("ws://127.0.0.1:43210", rendered)

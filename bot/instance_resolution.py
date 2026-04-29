@@ -9,7 +9,7 @@ import pathlib
 from dataclasses import dataclass
 
 from bot.instance_layout import DEFAULT_INSTANCE_NAME, current_instance_name, resolve_instance_paths, validate_instance_name
-from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
+from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.instance_registry_store import InstanceRegistryEntry, InstanceRegistryStore
 
 
@@ -42,6 +42,23 @@ def current_cli_instance_name() -> str:
 
 def current_cli_instance_paths():
     return resolve_instance_paths(current_cli_instance_name())
+
+
+def resolve_running_instance_app_server_url(
+    entry: InstanceRegistryEntry,
+    *,
+    configured_app_server_url: str = "",
+) -> str:
+    data_dir = pathlib.Path(entry.data_dir)
+    runtime = AppServerRuntimeStore(data_dir).load_managed_runtime()
+    if runtime is not None and str(runtime.active_url or "").strip():
+        return str(runtime.active_url).strip()
+    recorded_url = str(entry.app_server_url or "").strip()
+    if recorded_url:
+        return recorded_url
+    if configured_app_server_url:
+        return resolve_effective_app_server_url(configured_app_server_url, data_dir=data_dir)
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,9 +155,9 @@ def resolve_cli_runtime_target(
     if resolved.instance_name == DEFAULT_INSTANCE_NAME and default_instance_data_dir is not None:
         data_dir = pathlib.Path(default_instance_data_dir)
     if running_entry is not None:
-        app_server_url = str(running_entry.app_server_url or "").strip() or resolve_effective_app_server_url(
-            configured_app_server_url,
-            data_dir=data_dir,
+        app_server_url = resolve_running_instance_app_server_url(
+            running_entry,
+            configured_app_server_url=configured_app_server_url,
         )
         service_token = running_entry.service_token
     else:

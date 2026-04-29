@@ -29,7 +29,12 @@ from bot.fcodex_proxy import (
     _rewrite_thread_start_cwd,
     run_proxy,
 )
-from bot.instance_resolution import CliRuntimeTarget
+from bot.instance_resolution import (
+    CliInstanceTarget,
+    CliRuntimeTarget,
+    resolve_cli_runtime_target,
+    resolve_running_instance_app_server_url,
+)
 from bot.profile_resolution import resolve_local_default_profile
 from bot.stores.instance_registry_store import InstanceRegistryEntry
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
@@ -459,6 +464,36 @@ class AppServerRuntimeStoreTests(unittest.TestCase):
             self.assertEqual(mock_process_exists.call_args_list[1].args, (5678,))
             self.assertFalse((data_dir / "app_server_runtime.json").exists())
 
+    def test_resolve_running_instance_app_server_url_prefers_runtime_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            store = AppServerRuntimeStore(data_dir)
+            store.save_managed_runtime(
+                configured_url="ws://127.0.0.1:8765",
+                active_url="ws://127.0.0.1:43210",
+                owner_pid=os.getpid(),
+                app_server_pid=os.getpid(),
+            )
+            entry = InstanceRegistryEntry(
+                instance_name="explorer",
+                owner_pid=os.getpid(),
+                service_token="token-explorer",
+                control_endpoint="tcp://127.0.0.1:9393",
+                app_server_url="ws://127.0.0.1:8765",
+                config_dir="/tmp/config-explorer",
+                data_dir=str(data_dir),
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            self.assertEqual(
+                resolve_running_instance_app_server_url(
+                    entry,
+                    configured_app_server_url="ws://127.0.0.1:8765",
+                ),
+                "ws://127.0.0.1:43210",
+            )
+
 
 class InteractionLeaseStoreTests(unittest.TestCase):
     def test_interaction_lease_store_acquire_and_release_round_trip(self) -> None:
@@ -824,6 +859,45 @@ class FCodexTests(unittest.TestCase):
             mock_exec.call_args[0][1],
             ["codex", "--remote", "ws://127.0.0.1:9200", "--cd", os.getcwd(), "resume", "thread-1"],
         )
+
+    def test_runtime_target_prefers_instance_runtime_store_over_stale_registry_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            AppServerRuntimeStore(data_dir).save_managed_runtime(
+                configured_url="ws://127.0.0.1:8765",
+                active_url="ws://127.0.0.1:43210",
+                owner_pid=os.getpid(),
+                app_server_pid=os.getpid(),
+            )
+            running_entry = InstanceRegistryEntry(
+                instance_name="explorer",
+                owner_pid=os.getpid(),
+                service_token="token-explorer",
+                control_endpoint="tcp://127.0.0.1:9393",
+                app_server_url="ws://127.0.0.1:8765",
+                config_dir="/tmp/config-explorer",
+                data_dir=str(data_dir),
+                started_at=1.0,
+                updated_at=1.0,
+            )
+
+            with patch(
+                "bot.instance_resolution.resolve_cli_instance_target",
+                return_value=CliInstanceTarget(
+                    instance_name="explorer",
+                    data_dir=data_dir,
+                    running_entry=running_entry,
+                ),
+            ):
+                resolved = resolve_cli_runtime_target(
+                    configured_app_server_url="ws://127.0.0.1:8765",
+                    explicit_instance="explorer",
+                )
+
+        self.assertEqual(resolved.instance_name, "explorer")
+        self.assertEqual(resolved.data_dir, data_dir)
+        self.assertEqual(resolved.app_server_url, "ws://127.0.0.1:43210")
+        self.assertEqual(resolved.service_token, "token-explorer")
 
     def test_fcodex_requires_explicit_instance_when_multiple_instances_are_running(self) -> None:
         stderr = StringIO()
