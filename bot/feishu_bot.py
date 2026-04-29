@@ -92,6 +92,8 @@ _GROUP_HISTORY_FETCH_LOOKBACK_SECONDS = 24 * 3600
 _DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES = {"image", "file", "audio", "media"}
 _UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES = {"folder", "sticker"}
 _ATTACHMENT_MESSAGE_TYPES = _DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES | _UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES
+# 普通非管理员私聊默认拒绝；仅保留显式 bootstrap / identity 命令作为例外。
+_NON_ADMIN_P2P_BOOTSTRAP_COMMANDS = frozenset({"/whoami", "/whoareyou", "/init"})
 
 
 def _non_negative_int(value: Any, default: int) -> int:
@@ -1310,6 +1312,11 @@ class FeishuBot(ABC):
             "如需协作使用，请让管理员把机器人拉进群，并先在群里执行 `/group activate`。"
         )
 
+    @staticmethod
+    def _is_allowed_non_admin_p2p_bootstrap_text(text: str) -> bool:
+        command, _, _ = str(text or "").strip().partition(" ")
+        return command.lower() in _NON_ADMIN_P2P_BOOTSTRAP_COMMANDS
+
     def _fetch_merge_forward_items(self, merge_message_id: str) -> list[Any]:
         try:
             request = GetMessageRequest.builder().message_id(merge_message_id).build()
@@ -1493,8 +1500,9 @@ class FeishuBot(ABC):
             return
 
         if chat_type != "group" and not self.is_admin(open_id=sender_open_id):
-            self.reply(chat_id, self._p2p_owner_only_denied_text(), parent_message_id=message_id)
-            return
+            if not self._is_allowed_non_admin_p2p_bootstrap_text(text):
+                self.reply(chat_id, self._p2p_owner_only_denied_text(), parent_message_id=message_id)
+                return
 
         if chat_type == "group":
             control_text = self._is_group_control_text(text)

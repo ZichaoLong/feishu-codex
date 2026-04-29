@@ -218,6 +218,47 @@ def _message_event(
     )
 
 
+def _p2p_message_event(
+    *,
+    message_id: str,
+    chat_id: str,
+    text: str,
+    sender_user_id: str,
+    sender_open_id: str,
+    sender_type: str = "user",
+    mentions: list[dict] | None = None,
+    create_time: int = 1712476800000,
+    thread_id: str = "",
+    root_id: str = "",
+    parent_id: str = "",
+) -> P2ImMessageReceiveV1:
+    return P2ImMessageReceiveV1(
+        {
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "user_id": sender_user_id,
+                        "open_id": sender_open_id,
+                    },
+                    "sender_type": sender_type,
+                },
+                "message": {
+                    "message_id": message_id,
+                    "chat_id": chat_id,
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": json.dumps({"text": text}, ensure_ascii=False),
+                    "mentions": mentions or [],
+                    "create_time": create_time,
+                    "thread_id": thread_id,
+                    "root_id": root_id,
+                    "parent_id": parent_id,
+                },
+            }
+        }
+    )
+
+
 def _attachment_message_event(
     *,
     message_id: str,
@@ -417,27 +458,49 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         bot = self._make_bot()
 
         bot._handle_raw_message(
-            P2ImMessageReceiveV1(
-                {
-                    "event": {
-                        "sender": {
-                            "sender_id": {"user_id": "u-user", "open_id": "ou-user"},
-                            "sender_type": "user",
-                        },
-                        "message": {
-                            "message_id": "m-p2p",
-                            "chat_id": "ou-user",
-                            "chat_type": "p2p",
-                            "message_type": "text",
-                            "content": json.dumps({"text": "你好"}, ensure_ascii=False),
-                            "mentions": [],
-                            "create_time": 1712476800000,
-                            "thread_id": "",
-                            "root_id": "",
-                            "parent_id": "",
-                        },
-                    }
-                }
+            _p2p_message_event(
+                message_id="m-p2p",
+                chat_id="ou-user",
+                text="你好",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
+            )
+        )
+
+        self.assertEqual(bot.received_messages, [])
+        self.assertIn("仅支持管理员私聊使用", bot.replies[-1][1])
+
+    def test_non_admin_p2p_bootstrap_commands_are_forwarded(self) -> None:
+        for text in ("/whoami", "/whoareyou", "/init secret-1"):
+            with self.subTest(text=text):
+                bot = self._make_bot()
+
+                bot._handle_raw_message(
+                    _p2p_message_event(
+                        message_id="m-p2p",
+                        chat_id="ou-user",
+                        text=text,
+                        sender_user_id="u-user",
+                        sender_open_id="ou-user",
+                    )
+                )
+
+                self.assertEqual(
+                    bot.received_messages,
+                    [("ou-user", "ou-user", text, "m-p2p")],
+                )
+                self.assertEqual(bot.replies, [])
+
+    def test_non_admin_p2p_non_bootstrap_command_is_rejected(self) -> None:
+        bot = self._make_bot()
+
+        bot._handle_raw_message(
+            _p2p_message_event(
+                message_id="m-p2p",
+                chat_id="ou-user",
+                text="/status",
+                sender_user_id="u-user",
+                sender_open_id="ou-user",
             )
         )
 

@@ -163,6 +163,10 @@ That includes:
 - private-chat-only commands
 - group-only commands
 - group admin restrictions
+- ordinary non-admin private chats remaining denied by default
+- `/whoami`, `/whoareyou`, and `/init <token>` remaining directly reachable in
+  private chat as identity/bootstrap commands, rather than being swallowed by a
+  generic "admin private chat only" guard first
 
 If a slash command would be rejected in the current scope, the same operation triggered from `/help` must also be rejected.
 
