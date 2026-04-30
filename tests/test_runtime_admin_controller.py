@@ -7,6 +7,7 @@ import unittest
 from bot.adapters.base import RuntimeConfigSummary, ThreadSnapshot, ThreadSummary
 from bot.binding_runtime_manager import BindingRuntimeManager
 from bot.reason_codes import (
+    PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
     PROMPT_DENIED_BY_INTERACTION_OWNER,
     UNSUBSCRIBE_BLOCKED_BY_PENDING_REQUEST,
     ReasonedCheck,
@@ -79,6 +80,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             load_thread_resume_profile=lambda thread_id: None,
             permissions_summary=lambda approval_policy, sandbox: f"{sandbox}/{approval_policy}",
             prompt_write_denial_check=lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.allow(),
+            released_runtime_reattach_check=lambda thread_id: ReasonedCheck.allow(),
             resolve_thread_target_for_control_params=lambda params: ThreadSummary(
                 thread_id=str(params.get("thread_id", "") or "").strip(),
                 cwd="/tmp/project",
@@ -386,6 +388,45 @@ class RuntimeAdminControllerTests(unittest.TestCase):
 
         self.assertEqual(reset_calls, [True])
         self.assertTrue(result["force"])
+
+    def test_handle_preflight_command_blocks_released_binding_when_live_runtime_owner_blocks_reattach(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        state = self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        state["feishu_runtime_state"] = "released"
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="notLoaded",
+        )
+        controller._released_runtime_reattach_check = lambda thread_id: ReasonedCheck.deny(
+            PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
+            "当前线程正由实例 `default` 的本地 `fcodex` 持有 live runtime；当前不能自动转移。",
+        )
+
+        result = controller.handle_preflight_command(binding, "")
+
+        assert result.card is not None
+        content = result.card["elements"][0]["content"]
+        self.assertIn("下一条普通消息：`blocked` (`prompt_denied_by_live_runtime_owner`)", content)
+        self.assertIn("本地 `fcodex` 持有 live runtime", content)
 
     def test_service_status_reports_runtime_unverified_as_force_only(self) -> None:
         (

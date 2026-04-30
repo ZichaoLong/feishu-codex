@@ -172,7 +172,7 @@ The table below is authoritative for Feishu-facing state transitions.
 | `bound` | `attached` | `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Acquires the interaction owner for the turn |
 | `bound` | `attached` | `active` | turn terminal event | none | `bound` | `attached` | usually `idle` | Clears the interaction owner; binding and attachment remain |
 | `bound` | `attached` | `idle` or `active` | `/unsubscribe` | no Feishu in-flight turn and no pending Feishu approval / input | `bound` | `released` | `notLoaded`, `idle`, or `active` | Unsubscribe releases Feishu residency across the whole running service |
-| `bound` | `released` | `notLoaded` or `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Feishu reattaches / resumes first, then starts the turn |
+| `bound` | `released` | `notLoaded` or `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Feishu reattaches / resumes first, then starts the turn; accepted here also means machine-global live-runtime admission passes |
 | `bound` | `released` | any | ordinary prompt | prompt preflight denied | unchanged | unchanged | unchanged | Pure reject: no resume, no subscriber add, no `released -> attached` flip |
 | `bound` | `attached` or `released` | any | `/new` or `/resume <other>` | accepted | `bound` to another thread | `attached` | usually `idle` | Replaces the current binding with the new target |
 | `bound` | `attached` or `released` | any | explicit clear / archive current binding / chat unavailable cleanup | accepted | `unbound` | `not-applicable` | `not-applicable` for Feishu binding | Clears the Feishu binding and any Feishu-local execution anchor |
@@ -184,6 +184,11 @@ The table below is authoritative for Feishu-facing state transitions.
 - A denied prompt is a pure reject.
   It must not call `thread/resume`, add a Feishu subscriber, or mutate
   `feishu runtime` from `released` to `attached`.
+- For a `bound + released` binding, ordinary-prompt acceptance is not decided
+  by same-instance interaction-owner checks alone.
+  The path must also pass machine-global live-runtime admission:
+  if another instance still owns `ThreadRuntimeLease` and cannot release it
+  immediately, the prompt must be a pure reject.
 - Releasing Feishu runtime drops Feishu residency and clears the interaction owner when Feishu currently owns it, but
   it does not erase the chat's binding bookmark.
 
@@ -256,6 +261,22 @@ text.
 If the current binding is `bound + released`, `/preflight` may only report
 whether the next ordinary prompt would be accepted. It must not flip
 `released` back to `attached`.
+
+For that `bound + released` case, "accepted" means both of these are true:
+
+- the normal prompt-write / interaction-owner checks pass
+- the machine-global `ThreadRuntimeLease` can either be acquired directly or
+  transferred immediately from the current owner instance
+
+So if another instance still owns the live runtime but:
+
+- is still executing
+- still has pending approval / input
+- has no Feishu binding on that thread
+- or still has a local `fcodex` holder on that thread
+
+then `/preflight` must report `blocked`, and the next ordinary prompt must stay
+a pure reject.
 
 ## 5. Exact Contract of `/unsubscribe`
 
@@ -566,6 +587,9 @@ The formal contract for cross-instance live-runtime transfer is:
   automatic transfer is allowed
 - if the current owner instance is still executing, or still has pending
   approval / input, the write attempt must reject clearly
+- if the current owner instance has no Feishu binding for that thread, or still
+  has a non-service holder such as local `fcodex`, the write attempt must also
+  reject clearly; current code does not silently steal that live runtime
 - no queueing, no implicit stealing, and no "last binder wins" guesswork
 
 This `ThreadRuntimeLease` is a machine-level live-runtime fact.

@@ -6,6 +6,7 @@ import unittest
 from bot.adapters.base import ThreadSnapshot, ThreadSummary
 from bot.binding_runtime_manager import BindingRuntimeManager, ResolvedRuntimeBinding
 from bot.prompt_turn_entry_controller import PromptTurnEntryController, PromptTurnEntryPorts
+from bot.reason_codes import PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER, ReasonedCheck
 from bot.runtime_state import ThreadStateChanged
 from bot.runtime_view import build_runtime_view
 from bot.stores.chat_binding_store import ChatBindingStore
@@ -200,6 +201,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
                 message_reply_in_thread=lambda message_id: message_id.startswith("thread-"),
                 group_actor_open_id=lambda message_id: "ou_actor" if message_id else "",
                 access_policy=access_policy,
+                released_runtime_reattach_check=lambda thread_id: ReasonedCheck.allow(),
                 acquire_interaction_lease_for_binding=binding_runtime.acquire_interaction_lease_for_binding,
                 release_interaction_lease_for_binding=binding_runtime.release_interaction_lease_for_binding,
                 sync_stored_binding_locked=binding_runtime.sync_stored_binding_locked,
@@ -344,6 +346,30 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         self.assertEqual([call["thread_id"] for call in env["resume_calls"]], ["thread-1"])
         self.assertEqual(env["start_turn_calls"][-1]["thread_id"], "thread-1")
         self.assertEqual(env["state"]["feishu_runtime_state"], "attached")
+
+    def test_start_prompt_turn_pure_rejects_released_thread_when_live_runtime_owner_blocks_reattach(self) -> None:
+        env = self._make_controller()
+        controller = env["controller"]
+        self._bind_thread(env, thread_id="thread-1", runtime_state="released")
+        controller._released_runtime_reattach_check = lambda thread_id: ReasonedCheck.deny(
+            PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
+            "当前线程正由实例 `default` 的本地 `fcodex` 持有 live runtime；当前不能自动转移。",
+        )
+
+        started = controller.start_prompt_turn("ou_user", "c1", "hello", message_id="msg-1")
+
+        self.assertFalse(started)
+        self.assertEqual(env["resume_calls"], [])
+        self.assertEqual(env["start_turn_calls"], [])
+        self.assertEqual(
+            env["replies"][-1],
+            (
+                "c1",
+                "当前线程正由实例 `default` 的本地 `fcodex` 持有 live runtime；当前不能自动转移。",
+                "msg-1",
+                False,
+            ),
+        )
 
     def test_start_prompt_turn_retries_after_thread_not_found(self) -> None:
         env = self._make_controller()

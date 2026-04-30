@@ -52,6 +52,7 @@ from bot.codex_help_domain import CodexHelpDomain
 from bot.codex_session_ui_domain import CodexSessionUiDomain, SessionUiRuntimePorts
 from bot.codex_settings_domain import CodexSettingsDomain, SettingsDomainPorts
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
+from bot.reason_codes import ReasonedCheck
 from bot.thread_profile_mutability import check_thread_resume_profile_mutable
 from bot.execution_transcript import ExecutionTranscript
 from bot.execution_output_controller import ExecutionOutputController
@@ -106,7 +107,10 @@ from bot.stores.service_instance_lease import (
 )
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
 from bot.thread_subscription_registry import ThreadSubscriptionRegistry
-from bot.thread_runtime_coordination import acquire_thread_runtime_holder_or_raise
+from bot.thread_runtime_coordination import (
+    acquire_thread_runtime_holder_or_raise,
+    preview_thread_runtime_holder_acquire,
+)
 from bot.thread_access_policy import ThreadAccessPolicy
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
 from bot.runtime_loop import RuntimeLoop, RuntimeLoopClosedError
@@ -428,6 +432,7 @@ class CodexHandler(BotHandler):
             load_thread_resume_profile=self._thread_resume_profile_store.load,
             permissions_summary=_permissions_summary,
             prompt_write_denial_check=self._thread_access_policy.prompt_write_denial_check,
+            released_runtime_reattach_check=self._released_runtime_reattach_check,
             resolve_thread_target_for_control_params=self._resolve_thread_target_for_control_params,
             cancel_patch_timer_locked=self._cancel_patch_timer_locked,
             cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
@@ -472,6 +477,7 @@ class CodexHandler(BotHandler):
                 message_reply_in_thread=self._message_reply_in_thread,
                 group_actor_open_id=self._group_actor_open_id,
                 access_policy=self._thread_access_policy,
+                released_runtime_reattach_check=self._released_runtime_reattach_check,
                 acquire_interaction_lease_for_binding=self._acquire_interaction_lease_for_binding,
                 release_interaction_lease_for_binding=self._release_interaction_lease_for_binding,
                 sync_stored_binding_locked=self._sync_stored_binding_locked,
@@ -622,6 +628,20 @@ class CodexHandler(BotHandler):
             backend_url=self._adapter.current_app_server_url(),
             updated_at=time.time(),
         )
+
+    def _released_runtime_reattach_check(self, thread_id: str) -> ReasonedCheck:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return ReasonedCheck.allow()
+        preview = preview_thread_runtime_holder_acquire(
+            thread_id=normalized_thread_id,
+            holder=self._service_thread_runtime_holder(),
+            lease_store=self._thread_runtime_lease_store,
+            registry_store=self._instance_registry,
+        )
+        if preview.allowed:
+            return ReasonedCheck.allow()
+        return ReasonedCheck.deny(preview.reason_code, preview.reason_text)
 
     def _ensure_service_thread_runtime_lease(self, thread_id: str) -> bool:
         normalized_thread_id = str(thread_id or "").strip()

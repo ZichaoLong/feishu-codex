@@ -112,6 +112,7 @@ class RuntimeAdminController:
         load_thread_resume_profile: Callable[[str], Any],
         permissions_summary: Callable[[str, str], str],
         prompt_write_denial_check: Callable[[ChatBindingKey, str, str, str], ReasonedCheck],
+        released_runtime_reattach_check: Callable[[str], ReasonedCheck],
         resolve_thread_target_for_control_params: Callable[[dict[str, Any]], ThreadSummary],
         cancel_patch_timer_locked: Callable[[RuntimeState], None],
         cancel_mirror_watchdog_locked: Callable[[RuntimeState], None],
@@ -139,6 +140,7 @@ class RuntimeAdminController:
         self._load_thread_resume_profile = load_thread_resume_profile
         self._permissions_summary = permissions_summary
         self._prompt_write_denial_check = prompt_write_denial_check
+        self._released_runtime_reattach_check = released_runtime_reattach_check
         self._resolve_thread_target_for_control_params = resolve_thread_target_for_control_params
         self._cancel_patch_timer_locked = cancel_patch_timer_locked
         self._cancel_mirror_watchdog_locked = cancel_mirror_watchdog_locked
@@ -268,25 +270,53 @@ class RuntimeAdminController:
 
     def binding_prompt_check(self, binding: ChatBindingKey) -> ReasonedCheck:
         with self._lock:
-            return self.binding_prompt_check_locked(binding)
+            snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+        return self._binding_prompt_check_from_snapshot(binding, snapshot)
 
     def binding_prompt_check_locked(self, binding: ChatBindingKey) -> ReasonedCheck:
         snapshot = self._binding_runtime.binding_runtime_snapshot_locked(binding)
+        return self._binding_prompt_check_from_snapshot(binding, snapshot)
+
+    def _binding_prompt_check_from_snapshot(
+        self,
+        binding: ChatBindingKey,
+        snapshot: Any,
+    ) -> ReasonedCheck:
         if snapshot is None:
             return ReasonedCheck.allow()
-        if snapshot.has_inflight_turn:
+        has_inflight_turn = bool(
+            snapshot.has_inflight_turn
+            if hasattr(snapshot, "has_inflight_turn")
+            else snapshot.get("running_turn", False)
+        )
+        thread_id = str(
+            snapshot.thread_id
+            if hasattr(snapshot, "thread_id")
+            else snapshot.get("thread_id", "")
+        ).strip()
+        feishu_runtime_state = str(
+            snapshot.feishu_runtime_state
+            if hasattr(snapshot, "feishu_runtime_state")
+            else snapshot.get("feishu_runtime_state", "")
+        ).strip()
+        if has_inflight_turn:
             return ReasonedCheck.deny(
                 PROMPT_DENIED_BY_RUNNING_TURN,
                 "当前线程仍在执行，请等待结束或先执行 `/cancel`。",
             )
-        if not snapshot.thread_id:
+        if not thread_id:
             return ReasonedCheck.allow()
-        return self._prompt_write_denial_check(
+        denial = self._prompt_write_denial_check(
             binding,
             binding[1],
-            snapshot.thread_id,
+            thread_id,
             message_id="",
         )
+        if not denial.allowed:
+            return denial
+        if feishu_runtime_state == FEISHU_RUNTIME_RELEASED:
+            return self._released_runtime_reattach_check(thread_id)
+        return ReasonedCheck.allow()
 
     def clear_binding_for_control(self, binding: ChatBindingKey) -> dict[str, Any]:
         unsubscribe_thread_id = ""
@@ -348,7 +378,7 @@ class RuntimeAdminController:
         with self._lock:
             snapshot = self._binding_runtime.binding_status_state_snapshot_locked(binding)
             unsubscribe_check = self.unsubscribe_check_locked(str(snapshot["thread_id"] or "").strip())
-            prompt_check = self.binding_prompt_check_locked(binding)
+        prompt_check = self._binding_prompt_check_from_snapshot(binding, snapshot)
         thread_id = str(snapshot["thread_id"] or "").strip()
         summary, backend_thread_status = self.read_thread_summary_for_status(thread_id)
         if summary is not None:

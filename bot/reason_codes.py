@@ -17,6 +17,7 @@ PROMPT_DENIED_BY_RUNNING_TURN = "prompt_denied_by_running_turn"
 PROMPT_DENIED_BY_GROUP_ALL_MODE_SHARING = "prompt_denied_by_group_all_mode_sharing"
 PROMPT_DENIED_BY_OTHER_GROUP_ALL_OWNER = "prompt_denied_by_other_group_all_owner"
 PROMPT_DENIED_BY_INTERACTION_OWNER = "prompt_denied_by_interaction_owner"
+PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER = "prompt_denied_by_live_runtime_owner"
 
 BACKEND_RESET_UNSUPPORTED_REMOTE = "backend_reset_unsupported_remote"
 BACKEND_RESET_FORCE_ONLY_BY_RUNTIME_UNVERIFIED = "backend_reset_force_only_by_runtime_unverified"

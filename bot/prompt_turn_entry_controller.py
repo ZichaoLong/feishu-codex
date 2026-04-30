@@ -13,6 +13,7 @@ from bot.runtime_card_publisher import build_execution_card_model
 from bot.runtime_state import BACKEND_THREAD_STATUS_IDLE, ExecutionStateChanged, RuntimeStateDict
 from bot.runtime_view import build_runtime_view
 from bot.turn_execution_coordinator import TurnExecutionCoordinator
+from bot.reason_codes import ReasonedCheck
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ class PromptTurnEntryPorts:
     message_reply_in_thread: Callable[[str], bool]
     group_actor_open_id: Callable[[str], str]
     access_policy: _ThreadAccessPolicy
+    released_runtime_reattach_check: Callable[[str], ReasonedCheck]
     acquire_interaction_lease_for_binding: Callable[[ChatBindingKey, str], Any]
     release_interaction_lease_for_binding: Callable[[ChatBindingKey, str], bool]
     sync_stored_binding_locked: Callable[[ChatBindingKey, RuntimeState], None]
@@ -110,6 +112,7 @@ class PromptTurnEntryController:
         self._message_reply_in_thread = ports.message_reply_in_thread
         self._group_actor_open_id = ports.group_actor_open_id
         self._access_policy = ports.access_policy
+        self._released_runtime_reattach_check = ports.released_runtime_reattach_check
         self._acquire_interaction_lease_for_binding = ports.acquire_interaction_lease_for_binding
         self._release_interaction_lease_for_binding = ports.release_interaction_lease_for_binding
         self._sync_stored_binding_locked = ports.sync_stored_binding_locked
@@ -304,6 +307,15 @@ class PromptTurnEntryController:
                 self._reply_text(
                     chat_id,
                     denial_text,
+                    message_id=message_id,
+                    reply_in_thread=self._message_reply_in_thread(message_id),
+                )
+                return False
+            reattach_check = self._released_runtime_reattach_check(released_thread_id)
+            if not reattach_check.allowed:
+                self._reply_text(
+                    chat_id,
+                    reattach_check.reason_text,
                     message_id=message_id,
                     reply_in_thread=self._message_reply_in_thread(message_id),
                 )

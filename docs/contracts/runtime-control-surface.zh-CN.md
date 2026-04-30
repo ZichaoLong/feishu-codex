@@ -169,7 +169,7 @@
 | `bound` | `attached` | `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 获取交互 owner |
 | `bound` | `attached` | `active` | turn 终态事件 | 无 | `bound` | `attached` | 通常为 `idle` | 清理交互 owner；binding 与附着保持不变 |
 | `bound` | `attached` | `idle` 或 `active` | `/unsubscribe` | 当前没有 Feishu 侧运行中的 turn，且没有待处理审批 / 输入 | `bound` | `released` | `notLoaded`、`idle` 或 `active` | unsubscribe 释放的是整个运行中 Feishu 服务对该 thread 的 runtime 持有 |
-| `bound` | `released` | `notLoaded` 或 `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 先重新附着 / resume，再启动 turn |
+| `bound` | `released` | `notLoaded` 或 `idle` | 普通 prompt | prompt preflight 通过 | `bound` | `attached` | `active` | 先重新附着 / resume，再启动 turn；这里的 accepted 还要求 machine-global live runtime 准入通过 |
 | `bound` | `released` | 任意 | 普通 prompt | prompt preflight 被拒绝 | 不变 | 不变 | 不变 | 纯拒绝：不得 resume，不得新增 subscriber，不得把 `released` 改成 `attached` |
 | `bound` | `attached` 或 `released` | 任意 | `/new` 或 `/resume <other>` | 被接受 | 绑定到另一 thread | `attached` | 通常为 `idle` | 当前 binding 切换到新目标 |
 | `bound` | `attached` 或 `released` | 任意 | 显式清空 / 归档当前 binding / chat unavailable 清理 | 被接受 | `unbound` | `not-applicable` | 对该 Feishu binding 来说为 `not-applicable` | 清理 Feishu 侧 binding 以及本地执行锚点 |
@@ -180,6 +180,11 @@
 - 被拒绝的 prompt 必须是 pure reject。
   它不能调用 `thread/resume`，不能新增 Feishu subscriber，也不能把
   `feishu runtime` 从 `released` 改成 `attached`。
+- 对 `bound + released` 的普通 prompt，是否 accepted 不能只看同实例内的
+  interaction owner / prompt-write 检查。
+  它还必须通过 machine-global live runtime 准入：
+  如果另一个实例仍持有 `ThreadRuntimeLease`，且当前不能立即释放，就必须
+  pure reject。
 - `unsubscribe` 释放的是 Feishu 的 runtime residency，并在当前 owner 是 Feishu 时清除交互 owner；
   它不会抹掉 chat 仍指向哪个 thread 的 binding bookmark。
 
@@ -244,6 +249,21 @@
 
 如果当前 binding 是 `bound + released`，`/preflight` 只能说明下一条普通消息是否会被接受。
 它本身不能把 `released` 改成 `attached`。
+
+对这个 `bound + released` 场景，所谓 “accepted” 必须同时满足：
+
+- 普通 prompt 的写入 / interaction-owner 检查通过
+- machine-global `ThreadRuntimeLease` 要么可直接获取，要么可从当前 owner
+  实例立即转移过来
+
+因此，如果另一个实例仍持有 live runtime，但它：
+
+- 仍在执行
+- 仍有待处理审批 / 输入
+- 当前没有任何 Feishu binding 指向该 thread
+- 或该 thread 上仍有本地 `fcodex` 这类非 service holder
+
+那么 `/preflight` 必须显示 `blocked`，下一条普通消息也必须保持 pure reject。
 
 ## 5. `/unsubscribe` 精确合同
 
@@ -526,6 +546,9 @@
 
 - 若当前 owner 实例可以立即 release Feishu runtime，则允许自动流转
 - 若当前 owner 实例仍在执行，或仍有待处理审批 / 输入，则必须明确拒绝
+- 若当前 owner 实例对该 thread 没有任何 Feishu binding，或仍有本地
+  `fcodex` 这类非 service holder，也必须明确拒绝；当前实现不会静默强抢
+  这份 live runtime
 - 不排队，不隐式强抢，不靠“最后一个 binding”猜测 owner
 
 这里的 `ThreadRuntimeLease` 是机器级 live runtime 事实。

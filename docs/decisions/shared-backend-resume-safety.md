@@ -109,6 +109,9 @@ Properties:
   automatic transfer is allowed
 - if the owner instance is still executing or still has pending approval /
   input, the write attempt must reject clearly
+- if the owner instance has no Feishu binding for that thread, or still has a
+  local `fcodex` holder on that thread, the write attempt must also reject
+  clearly instead of trying to force that runtime away
 
 So this is neither "one shared backend" nor "two backends that may dual-write".
 It is a coordinated path with a shared persisted namespace but strictly

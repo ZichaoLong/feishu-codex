@@ -88,6 +88,8 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 - 自动转移会先写入一个短时机器级 transfer reservation，给目标实例预留 live runtime 接管窗口，再要求 owner 实例释放 Feishu runtime，最后由目标实例接管
 - 若 owner 实例当前 idle，且其 `unsubscribe_available` 为真，则允许自动转移
 - 若 owner 实例当前仍在执行，或仍有待处理审批 / 输入，则必须明确拒绝
+- 若 owner 实例对该 thread 当前没有任何 Feishu binding，或该 thread 上仍有本地
+  `fcodex` 这类 holder，也必须明确拒绝，而不是尝试强行夺走这份 live runtime
 
 因此，这不是“共享 backend”，也不是“可以并发双写的两个 backend”。
 它是一条**共享持久化 namespace、但 live runtime 严格单 owner** 的协调路径。
