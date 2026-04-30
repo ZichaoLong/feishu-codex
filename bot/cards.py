@@ -54,6 +54,7 @@ class CommandResult:
 _HISTORY_TEXT_MAX = 300
 _PLAN_CONTENT_MAX = 4000
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
+_SHARED_RESET_BACKEND_COMMAND = get_shared_command("reset-backend")
 _LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
 _LOCAL_RESUME_COMMAND = "fcodex resume <thread_id|thread_name>"
 
@@ -136,6 +137,60 @@ def build_profile_card(
         "header": {
             "title": {"tag": "plain_text", "content": title},
             "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def build_backend_reset_card(
+    *,
+    content: str,
+    force: bool | None = None,
+    title: str = "Codex Backend Reset",
+    template: str = "blue",
+) -> dict:
+    """构造 backend reset 预览/结果卡片。"""
+    elements: list[dict] = [
+        {"tag": "markdown", "content": content},
+    ]
+    if force is not None:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "强制重置 backend" if force else "重置 backend",
+                            },
+                            "type": "danger" if force else "primary",
+                            "value": {
+                                "action": "reset_backend",
+                                "force": bool(force),
+                            },
+                        }
+                    ],
+                },
+            ]
+        )
+    else:
+        elements.extend(
+            [
+                {"tag": "hr"},
+                {
+                    "tag": "markdown",
+                    "content": f"重新检查请发送 `{_SHARED_RESET_BACKEND_COMMAND.slash_name}`。",
+                },
+            ]
+        )
+    return {
+        "config": _card_config(),
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": template,
         },
         "elements": elements,
     }

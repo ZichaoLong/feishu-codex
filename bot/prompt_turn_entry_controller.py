@@ -32,7 +32,7 @@ class _ThreadAccessPolicy(Protocol):
         current_chat_mode: str | None = None,
     ) -> str: ...
 
-    def thread_sharing_policy_violation(
+    def all_mode_thread_exclusivity_violation(
         self,
         chat_id: str,
         thread_id: str,
@@ -348,17 +348,17 @@ class PromptTurnEntryController:
             )
             return False
 
-        sharing_violation = self._access_policy.thread_sharing_policy_violation(
+        all_mode_exclusivity_violation = self._access_policy.all_mode_thread_exclusivity_violation(
             chat_id,
             thread_id,
             message_id=message_id,
         )
-        if sharing_violation:
+        if all_mode_exclusivity_violation:
             if preattached_interaction_lease is not None and preattached_interaction_lease.acquired:
                 self._release_interaction_lease_for_binding(chat_binding_key, released_thread_id)
             self._reply_text(
                 chat_id,
-                sharing_violation,
+                all_mode_exclusivity_violation,
                 message_id=message_id,
                 reply_in_thread=self._message_reply_in_thread(message_id),
             )

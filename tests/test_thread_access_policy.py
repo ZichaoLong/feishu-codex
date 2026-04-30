@@ -37,28 +37,28 @@ class ThreadAccessPolicyTests(unittest.TestCase):
         )
         return lock, registry, interaction_store, group_modes, policy
 
-    def test_thread_sharing_policy_violation_rejects_all_mode_when_thread_is_shared(self) -> None:
+    def test_all_mode_thread_exclusivity_violation_rejects_all_mode_when_thread_is_shared(self) -> None:
         lock, registry, _interaction_store, group_modes, policy = self._make_policy()
         group_modes["chat-group"] = "all"
         with lock:
             registry.subscribe((GROUP_SHARED_BINDING_OWNER_ID, "chat-group"), "thread-1")
             registry.subscribe(("ou_user2", "chat-other"), "thread-1")
 
-        violation = policy.thread_sharing_policy_violation("chat-group", "thread-1", message_id="msg-1")
-        check = policy.thread_sharing_policy_violation_check("chat-group", "thread-1", message_id="msg-1")
+        violation = policy.all_mode_thread_exclusivity_violation("chat-group", "thread-1", message_id="msg-1")
+        check = policy.all_mode_thread_exclusivity_violation_check("chat-group", "thread-1", message_id="msg-1")
 
         self.assertIn("`all` 模式", violation)
         self.assertIn("不能与其他飞书会话共享", violation)
         self.assertEqual(check.reason_code, PROMPT_DENIED_BY_GROUP_ALL_MODE_SHARING)
 
-    def test_thread_sharing_policy_violation_rejects_when_other_all_group_is_attached(self) -> None:
+    def test_all_mode_thread_exclusivity_violation_rejects_when_other_all_group_is_attached(self) -> None:
         lock, registry, _interaction_store, group_modes, policy = self._make_policy()
         group_modes["chat-other"] = "all"
         with lock:
             registry.subscribe((GROUP_SHARED_BINDING_OWNER_ID, "chat-group"), "thread-1")
             registry.subscribe((GROUP_SHARED_BINDING_OWNER_ID, "chat-other"), "thread-1")
 
-        violation = policy.thread_sharing_policy_violation("chat-group", "thread-1", message_id="msg-1")
+        violation = policy.all_mode_thread_exclusivity_violation("chat-group", "thread-1", message_id="msg-1")
 
         self.assertIn("已被处于 `all` 模式的其他群聊独占", violation)
 

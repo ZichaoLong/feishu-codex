@@ -85,20 +85,21 @@
 - 风险最高，容易刷屏
 - 发给 backend 时默认等价于单聊直转，不附带群历史上下文，也不额外包一层 `group turn`
 - 如果当前绑定 thread 已被其他飞书会话共享，`/groupmode all` 必须拒绝
-- 一旦群聊处于 `all` 模式，该 thread 也不能再被其他飞书会话共享；更精确的 runtime 词汇与拒绝规则见 `docs/contracts/runtime-control-surface.zh-CN.md`
+- 一旦群聊处于 `all` 模式，该 thread 就进入 `all` 模式线程独占规则，不能再被其他飞书会话共享；更精确的 runtime 词汇与拒绝规则见 `docs/contracts/runtime-control-surface.zh-CN.md`
 
 ## 5. 群命令与共享状态规则
 
 - 群里的所有 `/` 命令都只给管理员
 - 群聊 `assistant` 和 `mention-only` 工作态下，管理员群命令本身也必须先显式 mention 触发对象
 - 群聊 `all` 工作态下，管理员可直接发送群命令
-- 这里的“群命令”既包括群聊专属命令（如 `/group`、`/groupmode`），也包括在群上下文里触发的通用 Feishu 命令（如 `/status`、`/unsubscribe`）
+- 这里的“群命令”既包括群聊专属命令（如 `/group`、`/groupmode`），也包括在群上下文里触发的通用 Feishu 命令（如 `/status`、`/unsubscribe`、`/reset-backend`）
 - 群命令不会写入 `assistant` 上下文日志，也不会推进上下文边界
 - 会改变共享状态的命令和设置继续严格 admin-only，包括：
   - `/new`
   - `/session`
   - `/resume`
   - `/unsubscribe`
+  - `/reset-backend`
   - `/profile`
   - `/approval`
   - `/sandbox`

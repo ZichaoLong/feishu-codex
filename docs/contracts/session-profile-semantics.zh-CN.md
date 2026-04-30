@@ -47,6 +47,14 @@
 - 对需要 force reset 的情况，必须显式展示阻塞诊断，并要求管理员 / 操作者确认
 - 对 live runtime owner 在别的实例、或当前实例不支持 reset backend 的情况，直接 blocked
 
+### `/reset-backend`
+
+- 作用对象：当前实例 backend，不是当前 thread
+- 只允许管理员
+- 先预览，真正执行必须显式确认
+- 与 `/profile` 触发的 re-profile 恢复路径，共享同一套实例级 backend-reset 语义
+- 它存在的原因是：即使当前并不是为了切 profile，操作者也仍可能需要清理卡住的 loaded / pending runtime 状态
+
 ### `/unsubscribe`
 
 - 作用对象：当前 chat binding 指向的 thread

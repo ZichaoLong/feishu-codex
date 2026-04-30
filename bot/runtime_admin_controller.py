@@ -5,10 +5,19 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, TypeAlias
 
+from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    P2CardActionTriggerResponse,
+)
+
 from bot.adapters.base import RuntimeConfigSummary, ThreadSummary
 from bot.binding_identity import format_binding_id, parse_binding_id
 from bot.binding_runtime_manager import BindingRuntimeManager
-from bot.cards import CommandResult, build_markdown_card
+from bot.cards import (
+    CommandResult,
+    build_backend_reset_card,
+    build_markdown_card,
+    make_card_response,
+)
 from bot.constants import display_path
 from bot.reason_codes import (
     BINDING_CLEAR_BLOCKED_BINDING_NOT_FOUND,
@@ -513,6 +522,112 @@ class RuntimeAdminController:
         snapshot = self.binding_status_snapshot(binding)
         content, template = self.render_binding_preflight_markdown(snapshot, include_profile_lines=True)
         return CommandResult(card=build_markdown_card("Codex Preflight", content, template=template))
+
+    @staticmethod
+    def _short_thread_ids(thread_ids: tuple[str, ...] | list[str]) -> str:
+        normalized = [str(thread_id or "").strip() for thread_id in thread_ids if str(thread_id or "").strip()]
+        if not normalized:
+            return "（无）"
+        return ", ".join(f"`{thread_id[:8]}…`" for thread_id in normalized)
+
+    @staticmethod
+    def _format_binding_ids(binding_ids: tuple[str, ...] | list[str]) -> str:
+        normalized = [str(binding_id or "").strip() for binding_id in binding_ids if str(binding_id or "").strip()]
+        if not normalized:
+            return "（无）"
+        return ", ".join(f"`{binding_id}`" for binding_id in normalized)
+
+    def _build_backend_reset_preview_card(
+        self,
+        preview: BackendResetPreview,
+        *,
+        leading_lines: list[str] | None = None,
+    ) -> dict:
+        lines = list(leading_lines or [])
+        lines.extend(
+            [
+                "作用对象：当前实例 backend；这是实例级管理动作，不是当前线程命令。",
+                "不会覆盖 binding bookmark、thread-wise profile/provider、其他用户配置或数据。",
+                "",
+                f"当前结论：{preview.reason_text}",
+            ]
+        )
+        if preview.status == BACKEND_RESET_STATUS_FORCE_ONLY:
+            lines.append("当前只能显式确认强制重置；这会打断当前实例内尚未完成的工作。")
+        elif preview.status == BACKEND_RESET_STATUS_BLOCKED:
+            lines.append("当前不能在本实例执行 backend reset。")
+        if preview.diagnostics:
+            lines.extend(["", "**诊断**"])
+            lines.extend(f"- {line}" for line in preview.diagnostics)
+        template = {
+            BACKEND_RESET_STATUS_AVAILABLE: "green",
+            BACKEND_RESET_STATUS_FORCE_ONLY: "yellow",
+            BACKEND_RESET_STATUS_BLOCKED: "red",
+        }.get(preview.status, "blue")
+        force = None
+        if preview.status == BACKEND_RESET_STATUS_AVAILABLE:
+            force = False
+        elif preview.status == BACKEND_RESET_STATUS_FORCE_ONLY:
+            force = True
+        return build_backend_reset_card(
+            content="\n".join(lines),
+            force=force,
+            template=template,
+        )
+
+    def _build_backend_reset_result_card(self, result: dict[str, Any], *, forced: bool) -> dict:
+        lines = [
+            "已重置当前实例 backend。",
+            f"当前实例：`{self._instance_name()}`",
+            f"执行方式：`{'force' if forced else 'safe'}`",
+            f"已中断运行中的 binding：{self._format_binding_ids(result.get('interrupted_binding_ids') or [])}",
+            f"已释放 Feishu runtime：{self._format_binding_ids(result.get('released_binding_ids') or [])}",
+            f"已结束待处理审批/输入请求：`{int(result.get('fail_closed_request_count') or 0)}`",
+            f"已清理 live runtime lease thread：{self._short_thread_ids(result.get('purged_thread_ids') or [])}",
+            f"当前 backend 地址：`{str(result.get('app_server_url') or '').strip() or '（未知）'}`",
+            "",
+            "不会覆盖 binding bookmark、thread-wise profile/provider、其他用户配置或数据。",
+        ]
+        return build_backend_reset_card(
+            content="\n".join(lines),
+            force=None,
+            template="green",
+        )
+
+    def handle_reset_backend_command(self, arg: str) -> CommandResult:
+        if str(arg or "").strip():
+            return CommandResult(text="用法：`/reset-backend`")
+        preview = self.backend_reset_preview()
+        return CommandResult(card=self._build_backend_reset_preview_card(preview))
+
+    def handle_reset_backend_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse:
+        del sender_id
+        del chat_id
+        del message_id
+        force = bool(action_value.get("force"))
+        try:
+            result = self._reset_current_instance_backend(force)
+        except Exception as exc:
+            preview = self.backend_reset_preview()
+            return make_card_response(
+                card=self._build_backend_reset_preview_card(
+                    preview,
+                    leading_lines=[f"reset backend 失败：{exc}", ""],
+                ),
+                toast=str(exc) or "reset backend 失败",
+                toast_type="warning",
+            )
+        return make_card_response(
+            card=self._build_backend_reset_result_card(result, forced=force),
+            toast="已重置当前实例 backend。",
+            toast_type="success",
+        )
 
     def handle_unsubscribe_command(self, binding: ChatBindingKey, arg: str) -> CommandResult:
         if str(arg or "").strip():

@@ -384,13 +384,13 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
         self.assertEqual(env["state"]["current_turn_id"], "turn-1")
         self.assertEqual(env["scheduled_watchdogs"], [("ou_user", "c1")])
 
-    def test_start_prompt_turn_releases_preattached_lease_by_released_thread_id_on_sharing_violation(self) -> None:
+    def test_start_prompt_turn_releases_preattached_lease_by_released_thread_id_on_all_mode_exclusivity_violation(self) -> None:
         env = self._make_controller()
         controller = env["controller"]
         self._bind_thread(env, thread_id="thread-1", runtime_state="released")
 
         controller.ensure_binding_runtime_attached = lambda *args, **kwargs: "thread-2"
-        controller._access_policy.thread_sharing_policy_violation = lambda *args, **kwargs: "sharing denied"
+        controller._access_policy.all_mode_thread_exclusivity_violation = lambda *args, **kwargs: "sharing denied"
 
         controller.start_prompt_turn("ou_user", "c1", "hello", message_id="msg-1")
 

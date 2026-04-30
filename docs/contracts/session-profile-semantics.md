@@ -52,6 +52,16 @@ If older docs still describe `fcodex` shell slash self-commands, this document w
 - if the live runtime owner belongs to another instance, or the current
   instance does not support backend reset, the request is hard-blocked
 
+### `/reset-backend`
+
+- target: the current instance backend, not the current thread
+- admin-only
+- preview first; execution must require explicit confirmation
+- uses the same instance-scoped backend-reset semantics that `/profile` may
+  rely on for re-profile recovery
+- exists so operators can clear stale loaded / pending runtime state even when
+  they are not currently changing a thread profile
+
 ### `/unsubscribe`
 
 - target: the thread currently bound by the chat

@@ -4364,6 +4364,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`/approval`", content)
         self.assertIn("`/sandbox`", content)
         self.assertIn("`/mode`", content)
+        self.assertIn("`/reset-backend`", content)
         self.assertIn("身份与初始化", content)
         self.assertIn("如果当前正在执行，新设置从下一轮生效。", content)
         action_elements = self._action_elements(card)
@@ -4373,11 +4374,11 @@ class CodexHandlerTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
-            ["/sandbox", "/mode", "身份与初始化"],
+            ["/sandbox", "/mode", "/reset-backend"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[2]["actions"]],
-            ["返回帮助"],
+            ["身份与初始化", "返回帮助"],
         )
 
     def test_help_group_card_has_shortcuts(self) -> None:
@@ -4419,6 +4420,33 @@ class CodexHandlerTests(unittest.TestCase):
             [item["text"]["content"] for item in self._action_elements(response["card"])[0]["actions"]],
             ["/profile", "/permissions", "/approval"],
         )
+        self.assertEqual(
+            [item["text"]["content"] for item in self._action_elements(response["card"])[1]["actions"]],
+            ["/sandbox", "/mode", "/reset-backend"],
+        )
+
+    def test_reset_backend_command_returns_preview_card(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "/reset-backend")
+
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex Backend Reset")
+        self.assertIn("作用对象：当前实例 backend", card["elements"][0]["content"])
+
+    def test_reset_backend_card_action_is_group_admin_only(self) -> None:
+        handler, _ = self._make_handler()
+        handler.bot.message_contexts["msg-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "chat-group",
+            "msg-group",
+            {"action": "reset_backend", "force": True, "_operator_open_id": "ou_user"},
+        ))
+
+        self.assertEqual(response["toast_type"], "warning")
+        self.assertEqual(response["toast"], "仅管理员可操作群共享会话或群设置。")
 
     def test_help_settings_shortcut_can_open_permissions_card(self) -> None:
         handler, _ = self._make_handler()

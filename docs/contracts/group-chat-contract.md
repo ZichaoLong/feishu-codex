@@ -107,8 +107,9 @@ Those remain owned by their dedicated documents.
 - has the highest spam risk
 - `/groupmode all` must reject when the currently bound thread is already
   shared by other Feishu chats
-- once a group is in `all` mode, that thread must not be shared with other
-  Feishu chats; for the exact runtime vocabulary and rejection rules, see
+- once a group is in `all` mode, that thread enters the `all`-mode thread
+  exclusivity rule and must not be shared with other Feishu chats; for the
+  exact runtime vocabulary and rejection rules, see
   `docs/contracts/runtime-control-surface.md`
 
 ## 5. Group Commands and Shared-State Rules
@@ -119,7 +120,7 @@ Those remain owned by their dedicated documents.
 - in group `all`, admins can send group commands directly
 - "group commands" here includes both group-specific commands such as
   `/group` and `/groupmode`, and generic Feishu commands triggered from a group
-  context such as `/status` and `/unsubscribe`
+  context such as `/status`, `/unsubscribe`, and `/reset-backend`
 - group commands do not enter the `assistant` context log and do not advance
   the assistant boundary
 - commands and settings that mutate shared state remain strictly admin-only,
@@ -128,6 +129,7 @@ Those remain owned by their dedicated documents.
   - `/session`
   - `/resume`
   - `/unsubscribe`
+  - `/reset-backend`
   - `/profile`
   - `/approval`
   - `/sandbox`

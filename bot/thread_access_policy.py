@@ -53,7 +53,7 @@ class ThreadAccessPolicy:
     def interaction_denied_text(cls, lease: InteractionLease | None) -> str:
         return cls.interaction_denied_check(lease).reason_text
 
-    def thread_sharing_policy_violation_check(
+    def all_mode_thread_exclusivity_violation_check(
         self,
         chat_id: str,
         thread_id: str,
@@ -91,7 +91,7 @@ class ThreadAccessPolicy:
             )
         return ReasonedCheck.allow()
 
-    def thread_sharing_policy_violation(
+    def all_mode_thread_exclusivity_violation(
         self,
         chat_id: str,
         thread_id: str,
@@ -99,7 +99,7 @@ class ThreadAccessPolicy:
         message_id: str = "",
         current_chat_mode: str | None = None,
     ) -> str:
-        return self.thread_sharing_policy_violation_check(
+        return self.all_mode_thread_exclusivity_violation_check(
             chat_id,
             thread_id,
             message_id=message_id,
@@ -111,7 +111,7 @@ class ThreadAccessPolicy:
         normalized_thread_id = str(thread_id or "").strip()
         if normalized_mode != "all" or not normalized_thread_id:
             return ""
-        return self.thread_sharing_policy_violation(
+        return self.all_mode_thread_exclusivity_violation(
             chat_id,
             normalized_thread_id,
             message_id=message_id,
@@ -127,14 +127,14 @@ class ThreadAccessPolicy:
         message_id: str = "",
         current_chat_mode: str | None = None,
     ) -> ReasonedCheck:
-        sharing_violation = self.thread_sharing_policy_violation_check(
+        all_mode_exclusivity_violation = self.all_mode_thread_exclusivity_violation_check(
             chat_id,
             thread_id,
             message_id=message_id,
             current_chat_mode=current_chat_mode,
         )
-        if not sharing_violation.allowed:
-            return sharing_violation
+        if not all_mode_exclusivity_violation.allowed:
+            return all_mode_exclusivity_violation
         with self._lock:
             interaction_lease = self._current_interaction_lease_locked(thread_id)
             if interaction_lease is not None and not interaction_lease.holder.same_holder(

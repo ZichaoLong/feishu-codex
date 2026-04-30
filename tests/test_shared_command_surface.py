@@ -7,6 +7,7 @@ from unittest.mock import patch
 from bot.cards import (
     build_approval_policy_card,
     build_ask_user_card,
+    build_backend_reset_card,
     build_collaboration_mode_card,
     build_command_approval_card,
     build_execution_card,
@@ -115,6 +116,7 @@ class SharedCommandSurfaceTests(unittest.TestCase):
             help_domain.reply_help("chat-1").card,
             help_domain.reply_help("chat-1", "session").card,
             build_profile_card(content="切换 profile", profile_names=["p1"], current_profile="p1"),
+            build_backend_reset_card(content="预览", force=False),
             build_execution_card("log", [], running=True),
             build_command_approval_card("req-1", command="ls", cwd="/tmp/project", reason="需要执行"),
             build_approval_policy_card("on-request", running=True),

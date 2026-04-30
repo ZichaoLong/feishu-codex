@@ -1331,6 +1331,11 @@ class CodexHandler(BotHandler):
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
+            "/reset-backend": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._runtime_admin.handle_reset_backend_command(
+                    arg
+                ),
+            ),
             "/cancel": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: CommandResult(
                     text=self._cancel_current_turn(sender_id, chat_id, message_id=message_id)[1],
@@ -1491,6 +1496,12 @@ class CodexHandler(BotHandler):
             ),
             "apply_profile_with_backend_reset": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_apply_profile_with_backend_reset(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "reset_backend": ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._runtime_admin.handle_reset_backend_action(
                     sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",
@@ -1808,13 +1819,13 @@ class CodexHandler(BotHandler):
         refresh_session_message_id: str = "",
     ) -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
-        sharing_violation = self._thread_access_policy.thread_sharing_policy_violation(
+        all_mode_exclusivity_violation = self._thread_access_policy.all_mode_thread_exclusivity_violation(
             chat_id,
             thread_id,
             message_id=message_id,
         )
-        if sharing_violation:
-            self._reply_text(chat_id, sharing_violation, message_id=message_id)
+        if all_mode_exclusivity_violation:
+            self._reply_text(chat_id, all_mode_exclusivity_violation, message_id=message_id)
             if refresh_session_message_id:
                 self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
             return

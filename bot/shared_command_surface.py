@@ -32,6 +32,12 @@ _SHARED_COMMAND_SPECS = (
         feishu_summary="查看或切换当前绑定 thread 的 resume profile。",
     ),
     SharedCommandSpec(
+        key="reset-backend",
+        slash_name="/reset-backend",
+        feishu_usage="/reset-backend",
+        feishu_summary="预览并重置当前实例 backend。",
+    ),
+    SharedCommandSpec(
         key="rm",
         slash_name="/rm",
         feishu_usage="/rm [thread_id|thread_name]",

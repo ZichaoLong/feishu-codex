@@ -3,10 +3,11 @@
 英文原文：`docs/contracts/runtime-control-surface.md`
 
 本文定义 Feishu 命令面、本地 `feishu-codexctl` 管理面，以及 shared backend
-之间共享的一组状态词汇与控制合同。它主要回答四件事：
+之间共享的一组状态词汇与控制合同。它主要回答五件事：
 
 - `/status` 到底在描述哪些状态
 - `/preflight` 可以 dry-run 什么，不可以改变什么
+- Feishu `/reset-backend` 可以重置什么，绝不能覆盖什么
 - `/unsubscribe` 具体释放什么，不释放什么
 - 为什么本地管理 CLI 必须通过正在运行的 `feishu-codex` 服务，而不能自己直连 app-server 做释放
 
@@ -264,6 +265,43 @@
 - 或该 thread 上仍有本地 `fcodex` 这类非 service holder
 
 那么 `/preflight` 必须显示 `blocked`，下一条普通消息也必须保持 pure reject。
+
+### 4.2 `/reset-backend` 合同
+
+Feishu `/reset-backend` 是**实例级**管理动作，且只能由管理员执行。
+
+它的作用对象是：
+
+- 当前选中的 `feishu-codex` 实例
+- 该实例自己管理的 backend / app-server 进程
+
+它不是：
+
+- thread 级写命令
+- binding 清空命令
+- 重启整个 `feishu-codex` 服务进程
+
+它在飞书侧的交互合同是：
+
+- `/reset-backend` 本身只负责预览，不能直接立刻重置
+- 它可以展示与本地管理面一致的 backend-reset 诊断
+- 如果当前可安全重置，可以提供直接确认按钮
+- 如果当前只能 `force reset`，必须要求显式强制确认
+- 如果当前实例不支持 reset 或当前被阻塞，必须 fail-closed，只展示原因，不提供破坏性动作
+
+真正执行成功后的语义，与本地 `service reset-backend` 完全一致：
+
+- 中断当前实例 backend 上仍在执行的 Feishu turn
+- fail-close 当前实例仍待处理的审批 / 输入请求
+- 释放当前实例所有 Feishu binding 对 thread runtime 的附着
+- 清除当前实例持有的 machine-global live runtime lease
+- 重启当前实例 backend / app-server
+
+它绝不能覆盖：
+
+- binding bookmark
+- thread-wise profile / provider
+- 其他持久化用户配置与数据
 
 ## 5. `/unsubscribe` 精确合同
 

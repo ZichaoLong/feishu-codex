@@ -16,6 +16,7 @@ from bot.shared_command_surface import get_shared_command
 
 
 _SHARED_PROFILE_COMMAND = get_shared_command("profile")
+_SHARED_RESET_BACKEND_COMMAND = get_shared_command("reset-backend")
 _SHARED_PREFLIGHT_COMMAND = get_shared_command("preflight")
 _SHARED_RM_COMMAND = get_shared_command("rm")
 _SHARED_SESSION_COMMAND = get_shared_command("session")
@@ -252,6 +253,7 @@ class CodexHelpDomain:
                 markdown=(
                     "**当前 thread profile 与当前会话设置**\n"
                     f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前绑定 thread 的 resume profile；必要时会提供 reset backend 路径\n"
+                    f"- `{_SHARED_RESET_BACKEND_COMMAND.feishu_usage}`：管理员预览并重置当前实例 backend；适合清理卡住的 loaded / pending 状态\n"
                     "- 推荐先用 `/permissions`；它会同时设置审批策略与沙箱\n"
                     "- `/approval`、`/sandbox`：单独调整审批或沙箱\n"
                     "- `/mode`：切换当前飞书会话后续 turn 的协作模式\n"
@@ -276,12 +278,19 @@ class CodexHelpDomain:
                         buttons=(
                             _HelpCommandButtonSpec(label="/sandbox", command="/sandbox", title="Codex 沙箱策略"),
                             _HelpCommandButtonSpec(label="/mode", command="/mode", title="Codex 协作模式"),
-                            _HelpPageButtonSpec(label="身份与初始化", page="settings-identity"),
+                            _HelpCommandButtonSpec(
+                                label="/reset-backend",
+                                command="/reset-backend",
+                                title="Codex Backend Reset",
+                            ),
                         ),
                         layout="trisection",
                     ),
                     _HelpActionRowSpec(
-                        buttons=(_HelpPageButtonSpec(label="返回帮助", page="overview"),),
+                        buttons=(
+                            _HelpPageButtonSpec(label="身份与初始化", page="settings-identity"),
+                            _HelpPageButtonSpec(label="返回帮助", page="overview"),
+                        ),
                     ),
                 ),
             ),

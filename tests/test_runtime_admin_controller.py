@@ -389,6 +389,79 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         self.assertEqual(reset_calls, [True])
         self.assertTrue(result["force"])
 
+    def test_handle_reset_backend_command_renders_available_preview_card(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+        ) = self._make_controller()
+
+        result = controller.handle_reset_backend_command("")
+
+        assert result.card is not None
+        self.assertEqual(result.card["header"]["title"]["content"], "Codex Backend Reset")
+        self.assertIn("作用对象：当前实例 backend", result.card["elements"][0]["content"])
+        action = result.card["elements"][2]["actions"][0]
+        self.assertEqual(action["text"]["content"], "重置 backend")
+        self.assertEqual(action["value"]["force"], False)
+
+    def test_handle_reset_backend_command_renders_force_reset_button_when_force_only(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            pending_requests,
+            _reset_calls,
+        ) = self._make_controller()
+        pending_requests.append({"request_id": "req-1"})
+
+        result = controller.handle_reset_backend_command("")
+
+        assert result.card is not None
+        self.assertIn("只能显式确认强制重置", result.card["elements"][0]["content"])
+        action = result.card["elements"][2]["actions"][0]
+        self.assertEqual(action["text"]["content"], "强制重置 backend")
+        self.assertEqual(action["value"]["force"], True)
+
+    def test_handle_reset_backend_action_executes_reset_and_returns_result_card(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            reset_calls,
+        ) = self._make_controller()
+
+        response = controller.handle_reset_backend_action("ou_user", "c1", "m1", {"force": True})
+
+        self.assertEqual(reset_calls, [True])
+        self.assertEqual(response.toast.type, "success")
+        self.assertEqual(response.toast.content, "已重置当前实例 backend。")
+        self.assertIsNotNone(response.card)
+        assert response.card is not None
+        self.assertEqual(response.card.data["header"]["title"]["content"], "Codex Backend Reset")
+        self.assertIn("已重置当前实例 backend。", response.card.data["elements"][0]["content"])
+
     def test_handle_preflight_command_blocks_released_binding_when_live_runtime_owner_blocks_reattach(self) -> None:
         (
             lock,

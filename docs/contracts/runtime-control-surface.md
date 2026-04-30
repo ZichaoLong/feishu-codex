@@ -8,10 +8,11 @@ This document defines the shared state vocabulary and control contract across:
 - the local `feishu-codexctl` admin CLI
 - the shared app-server backend
 
-It answers four questions:
+It answers five questions:
 
 - what `/status` is actually describing
 - what `/preflight` may dry-run and must not mutate
+- what Feishu `/reset-backend` may reset and what it must not overwrite
 - what `/unsubscribe` releases and does not release
 - why local runtime-release actions must go through the running `feishu-codex` service rather than directly calling app-server from a separate CLI connection
 
@@ -277,6 +278,45 @@ So if another instance still owns the live runtime but:
 
 then `/preflight` must report `blocked`, and the next ordinary prompt must stay
 a pure reject.
+
+### 4.2 `/reset-backend` Contract
+
+Feishu `/reset-backend` is an **instance-scoped** admin action.
+
+Its target is:
+
+- the currently selected `feishu-codex` instance
+- the backend / app-server process managed by that instance
+
+It is not:
+
+- a thread-level write command
+- a binding-clear command
+- a restart of the whole `feishu-codex` service process
+
+Its Feishu-side interaction contract is:
+
+- `/reset-backend` itself is preview-only and must not reset immediately
+- it may render the same backend-reset diagnostics as local admin surfaces
+- if the reset is safe, it may offer a direct confirm action
+- if the reset is `force-only`, it must require an explicit force confirm
+- if reset is unsupported or otherwise blocked, it must fail closed and render
+  the blocking reason without offering a destructive action
+
+Its successful execution semantics are the same as local
+`service reset-backend`:
+
+- interrupt running Feishu turns on the current instance backend
+- fail-close still-pending approval / input requests on the current instance
+- release all Feishu runtime attachments held by the current instance bindings
+- clear machine-global live runtime leases held by the current instance
+- restart the current instance backend / app-server
+
+It must not overwrite:
+
+- binding bookmarks
+- thread-wise profile / provider state
+- other persisted user configuration or data
 
 ## 5. Exact Contract of `/unsubscribe`
 
