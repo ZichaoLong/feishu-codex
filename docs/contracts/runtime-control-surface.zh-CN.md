@@ -192,15 +192,29 @@
 
 它只回答：
 
-- 当前这个聊天绑定的 `binding`
-- 当前这个绑定所指 thread 的 `feishu runtime`
-- 当前 shared backend 中该 thread 的 `backend thread status`
-- 当前该 thread 是否有 `backend running turn`
-- 当前 `交互 owner`
-- 当前是否 `re-profile possible`
-- 当前是否允许执行 `/unsubscribe`
+- 当前目录
+- 当前线程
+- 当前绑定 thread 的 thread-wise `profile`
+- 当前飞书会话后续 turn 会使用的权限 / 批准 / 沙箱 / Codex 协作模式设置
 
-其中，`re-profile possible` 的含义是：当前 thread-wise profile 写入是允许的，也就是该 thread **可验证地 globally unloaded**。如果 backend 不可达、状态读不到、或 loaded / unloaded 事实无法验证，就必须显示为 `no`，而不是模糊地放行。
+它是用户视角的简明摘要，不承担完整调试面。
+
+下列更细的 runtime / admission 事实不再要求由飞书 `/status` 直接展示：
+
+- `binding`
+- `feishu runtime`
+- `backend thread status`
+- `backend running turn`
+- `interaction owner`
+- `re-profile possible`
+- `/unsubscribe` 当前是否允许
+- 下一条普通消息当前会被 accepted 还是 blocked
+
+这些信息应通过以下入口获取：
+
+- 飞书 `/preflight`
+- 本地 `feishu-codexctl binding status`
+- 本地 `feishu-codexctl thread status`
 
 当 `/status` 或本地管理面需要解释某个 deny / blocked 结果时，可以同时暴露：
 

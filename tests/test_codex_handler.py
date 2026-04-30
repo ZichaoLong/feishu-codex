@@ -2553,14 +2553,15 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 当前状态")
         content = card["elements"][0]["content"]
-        self.assertIn("新 thread seed profile：`（未设置）`", content)
-        self.assertIn("当前 provider：`provider1_api`", content)
         self.assertIn("权限预设：`Default`", content)
         self.assertIn("审批策略：`on-request`", content)
         self.assertIn("沙箱策略：`workspace-write`", content)
-        self.assertIn("直接发送普通文本，会在当前目录自动新建线程。", content)
+        self.assertIn("Codex 协作模式：`default`", content)
+        self.assertNotIn("新 thread seed profile", content)
+        self.assertNotIn("当前 provider", content)
+        self.assertNotIn("binding：", content)
 
-    def test_status_surfaces_shared_runtime_vocabulary(self) -> None:
+    def test_status_shows_current_thread_profile_and_hides_runtime_debug_fields(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -2573,17 +2574,28 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
+        handler._thread_resume_profile_store.save(
+            "thread-1",
+            profile="provider2",
+            model="provider2-model",
+            model_provider="provider2_api",
+        )
         handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
 
         handler.handle_message("ou_user", "c1", "/status")
 
         _, card = bot.cards[-1]
         content = card["elements"][0]["content"]
-        self.assertIn("binding：`bound`", content)
-        self.assertIn("feishu runtime：`attached`", content)
-        self.assertIn("backend thread status：`idle`", content)
-        self.assertIn("re-profile possible：`no`", content)
-        self.assertIn("unsubscribe：`available`", content)
+        self.assertIn("当前 profile：`provider2`", content)
+        self.assertIn("权限预设：`Default`", content)
+        self.assertIn("Codex 协作模式：`default`", content)
+        self.assertNotIn("binding：", content)
+        self.assertNotIn("feishu runtime：", content)
+        self.assertNotIn("backend thread status：", content)
+        self.assertNotIn("交互 owner：", content)
+        self.assertNotIn("re-profile possible：", content)
+        self.assertNotIn("unsubscribe：", content)
+        self.assertNotIn("当前直接提问：", content)
 
     def test_unsubscribe_command_releases_all_bound_bindings_but_keeps_binding(self) -> None:
         handler, bot = self._make_handler()
@@ -3269,7 +3281,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("ou_user", "c1", "/status")
 
         _, card = bot.cards[-1]
-        self.assertIn("已自动回退到 Codex 原生默认", card["elements"][0]["content"])
+        self.assertNotIn("新 thread seed profile", card["elements"][0]["content"])
         self.assertEqual(handler._profile_state.load_default_profile(), "")
 
     def test_new_thread_uses_local_default_profile(self) -> None:
@@ -4610,7 +4622,7 @@ class CodexHandlerTests(unittest.TestCase):
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前状态")
-        self.assertIn("binding：`bound`", response["card"]["elements"][0]["content"])
+        self.assertIn("当前线程：`thread-1", response["card"]["elements"][0]["content"])
 
     def test_help_submit_resume_command_reuses_resume_handler(self) -> None:
         handler, _ = self._make_handler()

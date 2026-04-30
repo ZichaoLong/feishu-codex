@@ -109,6 +109,7 @@ class RuntimeAdminController:
         reset_current_instance_backend: Callable[[bool], dict[str, Any]],
         safe_read_runtime_config: Callable[[], RuntimeConfigSummary | None],
         current_default_profile_resolution: Callable[[RuntimeConfigSummary | None], Any],
+        load_thread_resume_profile: Callable[[str], Any],
         permissions_summary: Callable[[str, str], str],
         prompt_write_denial_check: Callable[[ChatBindingKey, str, str, str], ReasonedCheck],
         resolve_thread_target_for_control_params: Callable[[dict[str, Any]], ThreadSummary],
@@ -135,6 +136,7 @@ class RuntimeAdminController:
         self._reset_current_instance_backend = reset_current_instance_backend
         self._safe_read_runtime_config = safe_read_runtime_config
         self._current_default_profile_resolution = current_default_profile_resolution
+        self._load_thread_resume_profile = load_thread_resume_profile
         self._permissions_summary = permissions_summary
         self._prompt_write_denial_check = prompt_write_denial_check
         self._resolve_thread_target_for_control_params = resolve_thread_target_for_control_params
@@ -142,6 +144,20 @@ class RuntimeAdminController:
         self._cancel_mirror_watchdog_locked = cancel_mirror_watchdog_locked
         self._is_thread_not_found_error = is_thread_not_found_error
         self._reprofile_possible_check = reprofile_possible_check
+
+    def _current_thread_profile_text(self, thread_id: str) -> str:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return ""
+        try:
+            record = self._load_thread_resume_profile(normalized_thread_id)
+        except Exception:
+            logger.exception("读取 thread-wise profile 失败: thread=%s", normalized_thread_id[:12])
+            return "读取失败"
+        if record is None:
+            return "（未设置）"
+        profile = str(getattr(record, "profile", "") or "").strip()
+        return profile or "（未设置）"
 
     @staticmethod
     def binding_has_inflight_turn_locked(state: RuntimeState) -> bool:
@@ -355,7 +371,6 @@ class RuntimeAdminController:
         *,
         include_profile_lines: bool,
     ) -> tuple[str, str]:
-        binding_state = snapshot["binding_state"]
         thread_id = snapshot["thread_id"]
         if thread_id:
             thread_line = f"当前线程：`{thread_id[:8]}…` {snapshot['thread_title'] or '（无标题）'}"
@@ -364,63 +379,21 @@ class RuntimeAdminController:
         lines = [
             f"目录：`{display_path(snapshot['working_dir'])}`",
             thread_line,
-            f"binding：`{binding_state}`",
-            f"feishu runtime：`{snapshot['feishu_runtime_state']}`",
-            f"backend thread status：`{snapshot['backend_thread_status']}`",
-            f"backend running turn：`{'yes' if snapshot['backend_running_turn'] else 'no'}`",
-            f"交互 owner：`{snapshot['interaction_owner']['label']}`",
-            f"re-profile possible：`{'yes' if snapshot['reprofile_possible'] else 'no'}`",
-            (
-                "unsubscribe：`available`"
-                if snapshot["unsubscribe_available"]
-                else (
-                    "unsubscribe："
-                    f"`blocked` (`{snapshot['unsubscribe_reason_code']}`) {snapshot['unsubscribe_reason']}"
-                )
-                if thread_id
-                else "unsubscribe：`not-applicable`"
-            ),
-            (
-                "当前直接提问：`accepted`"
-                if snapshot["next_prompt_allowed"]
-                else f"当前直接提问：`blocked` (`{snapshot['next_prompt_reason_code']}`) {snapshot['next_prompt_reason']}"
-            ),
         ]
-        if snapshot["running_turn"]:
-            lines.append(
-                f"当前 Feishu turn：`{snapshot['current_turn_id'][:8]}…`"
-                if snapshot["current_turn_id"]
-                else "当前 Feishu turn：`pending`"
-            )
         if include_profile_lines:
             runtime_config = self._safe_read_runtime_config()
-            profile_resolution = self._current_default_profile_resolution(runtime_config)
-            local_profile = profile_resolution.effective_profile
+            self._current_default_profile_resolution(runtime_config)
+            current_profile = self._current_thread_profile_text(thread_id)
+            if current_profile:
+                lines.append(f"当前 profile：`{current_profile}`")
             lines.extend(
                 [
-                    f"新 thread seed profile：`{local_profile or '（未设置）'}`",
-                    (
-                        f"当前 provider：`{runtime_config.current_model_provider or '（未设置）'}`"
-                        if runtime_config
-                        else "当前 provider：读取失败"
-                    ),
                     f"权限预设：`{self._permissions_summary(snapshot['approval_policy'], snapshot['sandbox'])}`",
                     f"审批策略：`{snapshot['approval_policy']}`",
                     f"沙箱策略：`{snapshot['sandbox']}`",
-                    f"协作模式：`{snapshot['collaboration_mode']}`",
+                    f"Codex 协作模式：`{snapshot['collaboration_mode']}`",
                 ]
             )
-            if profile_resolution.stale_profile:
-                lines.append(
-                    f"注意：之前保存的新 thread seed profile `{profile_resolution.stale_profile}` 已不存在，已自动回退到 Codex 原生默认。"
-                )
-        if snapshot["running_turn"]:
-            next_step = "如需停止当前执行，可点当前执行卡片上的停止按钮。"
-        elif binding_state == "unbound":
-            next_step = "直接发送普通文本，会在当前目录自动新建线程。"
-        else:
-            next_step = "发送 `/help session` 查看线程恢复、unsubscribe 与本地继续规则。"
-        lines.extend(["", next_step])
         template = "turquoise" if snapshot["running_turn"] else "blue"
         return "\n".join(lines), template
 

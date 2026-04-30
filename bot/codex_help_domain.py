@@ -147,7 +147,7 @@ class CodexHelpDomain:
                 title="Codex 帮助：当前线程",
                 markdown=(
                     "这些操作都以**当前绑定线程**为目标。\n\n"
-                    "- `/status`：查看当前 binding、feishu runtime、backend thread status、profile 相关信息\n"
+                    "- `/status`：查看当前线程、当前 profile，以及当前飞书会话的权限 / 协作模式设置\n"
                     f"- `{_SHARED_PREFLIGHT_COMMAND.feishu_usage}`：dry-run 当前 chat 下一条普通消息与 release 操作，不启动 turn、不改 binding\n"
                     f"- `{_SHARED_UNSUBSCRIBE_COMMAND.feishu_usage}`：低层 release 动作；释放 Feishu 对当前线程的 runtime 持有，但不解绑 thread\n"
                     "- `/rename <title>`：重命名当前线程\n"

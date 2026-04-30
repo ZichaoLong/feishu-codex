@@ -425,6 +425,7 @@ class CodexHandler(BotHandler):
             reset_current_instance_backend=self._reset_current_instance_backend,
             safe_read_runtime_config=self._safe_read_runtime_config,
             current_default_profile_resolution=self._current_default_profile_resolution,
+            load_thread_resume_profile=self._thread_resume_profile_store.load,
             permissions_summary=_permissions_summary,
             prompt_write_denial_check=self._thread_access_policy.prompt_write_denial_check,
             resolve_thread_target_for_control_params=self._resolve_thread_target_for_control_params,

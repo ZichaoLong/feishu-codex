@@ -198,6 +198,17 @@ in that group is governed by the group-command rules in
 
 It answers, for the current chat binding:
 
+- current directory
+- current thread
+- the bound thread's thread-wise `profile`
+- the current Feishu session's later-turn settings for permissions, approval,
+  sandbox, and Codex collaboration mode
+
+It is a compact user-facing summary, not the full runtime debug surface.
+
+The following lower-level runtime / admission facts are no longer required to
+be rendered directly by Feishu `/status`:
+
 - `binding`
 - `feishu runtime`
 - `backend thread status`
@@ -205,11 +216,13 @@ It answers, for the current chat binding:
 - `interaction owner`
 - `re-profile possible`
 - whether `/unsubscribe` is currently allowed
+- whether the next ordinary prompt would currently be accepted or blocked
 
-Here, `re-profile possible` means thread-wise profile writes are currently
-allowed because the thread is verifiably globally unloaded. Backend-unavailable,
-`unknown`, or otherwise unreadable states must resolve to `no`, not a permissive
-maybe.
+Those details should be obtained through:
+
+- Feishu `/preflight`
+- local `feishu-codexctl binding status`
+- local `feishu-codexctl thread status`
 
 When `/status` or local admin surfaces need to explain a deny / blocked result,
 they may expose both:

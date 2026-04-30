@@ -76,6 +76,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
                 effective_profile="default",
                 stale_profile="",
             ),
+            load_thread_resume_profile=lambda thread_id: None,
             permissions_summary=lambda approval_policy, sandbox: f"{sandbox}/{approval_policy}",
             prompt_write_denial_check=lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.allow(),
             resolve_thread_target_for_control_params=lambda params: ThreadSummary(
