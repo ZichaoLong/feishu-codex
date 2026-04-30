@@ -41,7 +41,7 @@ class InboundSurfaceController:
         reply_text: Callable[..., None],
         reply_card: Callable[..., None],
         resolve_chat_type: Callable[[str, str], str],
-        group_command_admin_denial_text: Callable[[str, str], str],
+        group_command_admin_denial_text: Callable[[str, str, str], str],
         is_group_chat: Callable[[str, str], bool],
         is_group_admin_actor: Callable[..., bool],
         is_group_turn_actor: Callable[..., bool],
@@ -176,7 +176,7 @@ class InboundSurfaceController:
             return CommandExecution(
                 error_text=f"未知命令：`{command}`\n发送 `/help` 查看可用命令。"
             )
-        denied_text = self._command_denial_text(route, chat_id, message_id=message_id)
+        denied_text = self._command_denial_text(route, sender_id, chat_id, message_id=message_id)
         if denied_text:
             return CommandExecution(error_text=denied_text)
         return CommandExecution(result=route.handler(sender_id, chat_id, arg, message_id))
@@ -260,12 +260,18 @@ class InboundSurfaceController:
                 denied_text = "该命令仅支持私聊使用。"
         return denied_text
 
-    def _command_denial_text(self, route: CommandRoute, chat_id: str, message_id: str = "") -> str:
+    def _command_denial_text(
+        self,
+        route: CommandRoute,
+        sender_id: str,
+        chat_id: str,
+        message_id: str = "",
+    ) -> str:
         scope_denial = self._command_scope_denial_text(route, chat_id, message_id=message_id)
         if scope_denial:
             return scope_denial
         if route.admin_only_in_group:
-            return self._group_command_admin_denial_text(chat_id, message_id)
+            return self._group_command_admin_denial_text(chat_id, message_id, sender_id)
         return ""
 
     @staticmethod

@@ -2152,6 +2152,15 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
         self.assertIn("已切换群聊工作态：`assistant`", bot.replies[-1][1])
 
+    def test_groupmode_command_uses_sender_id_fallback_when_message_context_lacks_sender_open_id(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group"}
+
+        handler.handle_message("ou_admin", "chat-group", "/groupmode all", message_id="m-group")
+
+        self.assertEqual(bot.get_group_mode("chat-group"), "all")
+        self.assertIn("已切换群聊工作态：`all`", bot.replies[-1][1])
+
     def test_groupmode_command_rejects_all_when_thread_is_shared(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
@@ -2211,6 +2220,16 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertTrue(snapshot["activated"])
         self.assertEqual(snapshot["activated_by"], "ou_admin")
         self.assertIn("已激活当前群聊", bot.replies[-1][1])
+
+    def test_group_command_uses_sender_id_fallback_for_activation_actor(self) -> None:
+        handler, bot = self._make_handler()
+        bot.message_contexts["m-group"] = {"chat_type": "group"}
+
+        handler.handle_message("ou_admin", "chat-group", "/group activate", message_id="m-group")
+
+        snapshot = bot.get_group_activation_snapshot("chat-group")
+        self.assertTrue(snapshot["activated"])
+        self.assertEqual(snapshot["activated_by"], "ou_admin")
 
     def test_groupmode_card_action_updates_group_mode(self) -> None:
         handler, _ = self._make_handler()
@@ -4651,6 +4670,19 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前状态")
         self.assertIn("当前线程：`thread-1", response["card"]["elements"][0]["content"])
+
+    def test_help_execute_group_command_uses_sender_id_fallback_for_group_admin(self) -> None:
+        handler, _ = self._make_handler()
+        handler.bot.chat_types["chat-group"] = "group"
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_admin",
+            "chat-group",
+            "msg-help-card",
+            {"action": "help_execute_command", "command": "/session", "title": "Codex Session"},
+        ))
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
 
     def test_help_submit_resume_command_reuses_resume_handler(self) -> None:
         handler, _ = self._make_handler()

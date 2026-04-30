@@ -52,12 +52,17 @@ class CodexGroupDomain:
         normalized_open_ids = sorted({str(item).strip() for item in open_ids if str(item).strip()})
         return [self._group_member_label(open_id) for open_id in normalized_open_ids]
 
-    def _group_command_context(self, message_id: str = "") -> MessageContextPayload:
+    def _group_command_context(self, message_id: str = "", sender_open_id: str = "") -> MessageContextPayload:
         """Return message context for a command that has already passed group scope checks."""
         context = self._ports.get_message_context(message_id) if message_id else {}
         if context:
+            if sender_open_id and not str(context.get("sender_open_id", "")).strip():
+                context["sender_open_id"] = str(sender_open_id).strip()
             return context
-        return {"chat_type": "group"}
+        fallback_context: MessageContextPayload = {"chat_type": "group"}
+        if sender_open_id:
+            fallback_context["sender_open_id"] = str(sender_open_id).strip()
+        return fallback_context
 
     @staticmethod
     def _normalize_group_mode(mode: str) -> str:
@@ -87,9 +92,10 @@ class CodexGroupDomain:
         self,
         chat_id: str,
         arg: str,
+        sender_open_id: str = "",
         message_id: str = "",
     ) -> CommandResult:
-        context = self._group_command_context(message_id)
+        context = self._group_command_context(message_id, sender_open_id=sender_open_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
             return CommandResult(card=self._group_mode_card(chat_id, open_id=sender_open_id))
@@ -111,9 +117,10 @@ class CodexGroupDomain:
         self,
         chat_id: str,
         arg: str,
+        sender_open_id: str = "",
         message_id: str = "",
     ) -> CommandResult:
-        context = self._group_command_context(message_id)
+        context = self._group_command_context(message_id, sender_open_id=sender_open_id)
         sender_open_id = str(context.get("sender_open_id", "")).strip()
         if not arg:
             return CommandResult(card=self._group_activation_card(chat_id, open_id=sender_open_id))

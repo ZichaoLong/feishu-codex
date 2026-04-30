@@ -1122,14 +1122,21 @@ class CodexHandler(BotHandler):
                 return existing
         return self._fresh_chat_binding_key(sender_id, chat_id, message_id)
 
-    def _group_actor_open_id(self, message_id: str = "", operator_open_id: str = "") -> str:
+    def _group_actor_open_id(
+        self,
+        message_id: str = "",
+        operator_open_id: str = "",
+        sender_open_id: str = "",
+    ) -> str:
         normalized_operator_open_id = str(operator_open_id or "").strip()
         if normalized_operator_open_id:
             return normalized_operator_open_id
-        if not message_id:
-            return ""
-        context = self.bot.get_message_context(message_id)
-        return str(context.get("sender_open_id", "")).strip()
+        if message_id:
+            context = self.bot.get_message_context(message_id)
+            context_sender_open_id = str(context.get("sender_open_id", "")).strip()
+            if context_sender_open_id:
+                return context_sender_open_id
+        return str(sender_open_id or "").strip()
 
     def _message_reply_in_thread(self, message_id: str) -> bool:
         if not message_id:
@@ -1150,16 +1157,30 @@ class CodexHandler(BotHandler):
         *,
         message_id: str = "",
         operator_open_id: str = "",
+        sender_open_id: str = "",
     ) -> bool:
         if not self._is_group_chat(chat_id, message_id):
             return True
-        actor_open_id = self._group_actor_open_id(message_id, operator_open_id)
+        actor_open_id = self._group_actor_open_id(
+            message_id,
+            operator_open_id,
+            sender_open_id,
+        )
         return self.bot.is_group_admin(open_id=actor_open_id)
 
-    def _group_command_admin_denial_text(self, chat_id: str, message_id: str = "") -> str:
+    def _group_command_admin_denial_text(
+        self,
+        chat_id: str,
+        message_id: str = "",
+        sender_open_id: str = "",
+    ) -> str:
         if not self._is_group_chat(chat_id, message_id):
             return ""
-        if self._is_group_admin_actor(chat_id, message_id=message_id):
+        if self._is_group_admin_actor(
+            chat_id,
+            message_id=message_id,
+            sender_open_id=sender_open_id,
+        ):
             return ""
         return "群里的 `/` 命令仅管理员可用；已授权成员请直接提问或显式 mention 触发机器人。"
 
@@ -1387,6 +1408,7 @@ class CodexHandler(BotHandler):
                 handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_groupmode_command(
                     chat_id,
                     arg,
+                    sender_id,
                     message_id=message_id,
                 ),
                 scope="group",
@@ -1395,6 +1417,7 @@ class CodexHandler(BotHandler):
                 handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_group_command(
                     chat_id,
                     arg,
+                    sender_id,
                     message_id=message_id,
                 ),
                 scope="group",

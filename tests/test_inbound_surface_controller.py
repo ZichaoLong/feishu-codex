@@ -46,8 +46,8 @@ class InboundSurfaceControllerTests(unittest.TestCase):
                 (chat_id, card, str(kwargs.get("message_id", "") or ""))
             ),
             resolve_chat_type=lambda chat_id, message_id: "group" if chat_id.startswith("group") else "p2p",
-            group_command_admin_denial_text=lambda chat_id, message_id: (
-                "admin only" if chat_id.startswith("group") else ""
+            group_command_admin_denial_text=lambda chat_id, message_id, sender_id: (
+                "admin only" if chat_id.startswith("group") and sender_id != "ou_admin" else ""
             ),
             is_group_chat=lambda chat_id, message_id: chat_id.startswith("group"),
             is_group_admin_actor=lambda chat_id, **kwargs: str(kwargs.get("operator_open_id", "") or "").strip()
