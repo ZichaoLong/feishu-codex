@@ -7,7 +7,7 @@ See also:
 - `docs/contracts/feishu-command-matrix.md`
 - `docs/contracts/local-command-and-thread-profile-contract.md`
 - `docs/contracts/runtime-control-surface.md`
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 
 This document defines the formal local command matrix for `feishu-codexctl`.
 
@@ -32,7 +32,7 @@ It does not redefine:
 - the Feishu slash-command matrix
 - `fcodex` wrapper semantics
 - thread lifecycle and runtime vocabulary
-- the low-level behavior of `reset-backend`, `unsubscribe`, `/status`, or
+- the low-level behavior of `reset-backend`, `thread unsubscribe`, `/status`, or
   `/preflight`
 
 Those remain defined by their dedicated docs.
@@ -107,7 +107,7 @@ This is a hard surface constraint, not a recommendation.
 
 - clears Feishu-side local bookmarks
 - does not delete the thread
-- is not `unsubscribe`
+- is not `thread unsubscribe`
 
 `thread unsubscribe`:
 
@@ -136,7 +136,7 @@ in code, docs, or product wording.
 
 | Command | Purpose | State layer | Type | Key parameters | Feishu counterpart |
 | --- | --- | --- | --- | --- | --- |
-| `feishu-codexctl [--instance <name>] binding list` | List visible bindings in the target instance, including binding state, Feishu runtime state, associated thread, and cwd | instance-local binding discovery | read-only | optional `--instance` | no direct Feishu counterpart; lower-level than Feishu `/session` and `/status` |
+| `feishu-codexctl [--instance <name>] binding list` | List visible bindings in the target instance, including binding state, Feishu runtime state, associated thread, and cwd | instance-local binding discovery | read-only | optional `--instance` | no direct Feishu counterpart; lower-level than Feishu `/threads` and `/status` |
 | `feishu-codexctl [--instance <name>] binding status <binding_id>` | Show a single binding's chat, thread, runtime, next-prompt availability, interaction owner, and current session settings | single-binding detailed state | read-only | `binding_id` | covers and exceeds Feishu `/status` and `/preflight` |
 | `feishu-codexctl [--instance <name>] binding clear <binding_id>` | Clear a single binding bookmark | single-binding bookmark | mutating | `binding_id` | no direct Feishu counterpart |
 | `feishu-codexctl [--instance <name>] binding clear-all` | Clear all binding bookmarks in the target instance | all binding bookmarks in one instance | mutating | optional `--instance` | no direct Feishu counterpart |
@@ -145,10 +145,10 @@ in code, docs, or product wording.
 
 | Command | Purpose | State layer | Type | Key parameters | Feishu counterpart |
 | --- | --- | --- | --- | --- | --- |
-| `feishu-codexctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>]` | List persisted threads; defaults to current-directory filtering, but also supports a global view | persisted-thread discovery | read-only | optional `--instance`; `--scope cwd/global`; `--cwd` is meaningful only for `cwd` scope | partially corresponds to Feishu `/session` and `/resume` target discovery |
-| `feishu-codexctl [--instance <name>] thread status (--thread-id <id> \| --thread-name <name>)` | Show one thread's backend status, bound / attached / released bindings, interaction owner, and unsubscribe availability | single thread's thread-scoped state | read-only | exactly one of `--thread-id` or `--thread-name` | no single exact Feishu equivalent; overlaps the lower-level diagnostics behind Feishu `/status`, `/preflight`, and `/unsubscribe` |
+| `feishu-codexctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>]` | List persisted threads; defaults to current-directory filtering, but also supports a global view | persisted-thread discovery | read-only | optional `--instance`; `--scope cwd/global`; `--cwd` is meaningful only for `cwd` scope | partially corresponds to Feishu `/threads` and `/resume` target discovery |
+| `feishu-codexctl [--instance <name>] thread status (--thread-id <id> \| --thread-name <name>)` | Show one thread's backend status, bound / attached / released bindings, interaction owner, and `/release-runtime` availability | single thread's thread-scoped state | read-only | exactly one of `--thread-id` or `--thread-name` | no single exact Feishu equivalent; overlaps the lower-level diagnostics behind Feishu `/status`, `/preflight`, and `/release-runtime` |
 | `feishu-codexctl [--instance <name>] thread bindings (--thread-id <id> \| --thread-name <name>)` | Show the binding list currently associated with a target thread | reverse mapping from a thread to bindings | read-only | exactly one of `--thread-id` or `--thread-name` | no direct Feishu counterpart |
-| `feishu-codexctl [--instance <name>] thread unsubscribe (--thread-id <id> \| --thread-name <name>)` | Make Feishu release runtime residency for a target thread while keeping thread and binding relationships intact | Feishu runtime residency for one thread | mutating | exactly one of `--thread-id` or `--thread-name` | corresponds to Feishu `/unsubscribe`, but is thread-scoped rather than current-chat-scoped |
+| `feishu-codexctl [--instance <name>] thread unsubscribe (--thread-id <id> \| --thread-name <name>)` | Make Feishu release runtime residency for a target thread while keeping thread and binding relationships intact | Feishu runtime residency for one thread | mutating | exactly one of `--thread-id` or `--thread-name` | corresponds to Feishu `/release-runtime`, but is thread-scoped rather than current-chat-scoped |
 
 ## 5. Mapping to the Feishu command surface
 
@@ -158,8 +158,8 @@ in code, docs, or product wording.
 | --- | --- | --- |
 | `service reset-backend` | `/reset-backend` | both are instance-level backend management; Feishu is an admin card flow, local is a CLI admin flow |
 | `binding status <binding_id>` | `/status`, `/preflight` | local output is lower-level and includes binding id, interaction owner, reason codes, and other debugging details |
-| `thread unsubscribe --thread-id/--thread-name` | `/unsubscribe` | Feishu `/unsubscribe` only targets the current chat binding; the local command can target any thread directly |
-| `thread list --scope cwd` | `/session` | Feishu `/session` is a chat usage surface; the local command is only thread discovery |
+| `thread unsubscribe --thread-id/--thread-name` | `/release-runtime` | Feishu `/release-runtime` only targets the current chat binding; the local command can target any thread directly |
+| `thread list --scope cwd` | `/threads` | Feishu `/threads` is a chat usage surface; the local command is only thread discovery |
 | `thread list --scope global` / `thread status` | `/resume` target discovery and diagnosis | Feishu `/resume` is a resume action; the local commands are inspection / management surfaces and do not enter the live thread |
 
 ### 5.2 Surfaces intentionally without a Feishu counterpart
@@ -211,7 +211,7 @@ The main implementation fact sources for this document include:
 - `bot/feishu_codexctl.py`
 - `bot/runtime_admin_controller.py`
 - `bot/instance_resolution.py`
-- `bot/session_resolution.py`
+- `bot/thread_resolution.py`
 - `bot/service_control_plane.py`
 
 If any future change adds, removes, renames, or re-scopes a `feishu-codexctl`

@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from bot.adapters.base import ThreadSummary
-from bot.codex_session_ui_domain import CodexSessionUiDomain, SessionUiRuntimePorts
+from bot.codex_threads_ui_domain import CodexThreadsUiDomain, ThreadsUiRuntimePorts
 
 
 class _OwnerStub:
@@ -11,7 +11,7 @@ class _OwnerStub:
         self.bot = SimpleNamespace(patch_message=lambda message_id, content: None)
         self._adapter = SimpleNamespace()
         self._lock = threading.RLock()
-        self._session_recent_limit = 5
+        self._threads_initial_limit = 5
         self._thread_list_query_limit = 20
         self.reply_calls: list[tuple[str, str, str]] = []
         self.resolve_calls: list[str] = []
@@ -91,14 +91,14 @@ class _OwnerStub:
         return self.thread
 
 
-class CodexSessionUiDomainTests(unittest.TestCase):
+class CodexThreadsUiDomainTests(unittest.TestCase):
     def test_handle_resume_command_dispatches_via_runtime_port(self) -> None:
         owner = _OwnerStub()
         submit_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
         resume_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-        domain = CodexSessionUiDomain(
+        domain = CodexThreadsUiDomain(
             owner,
-            runtime_ports=SessionUiRuntimePorts(
+            runtime_ports=ThreadsUiRuntimePorts(
                 submit_to_runtime=lambda fn, *args, **kwargs: submit_calls.append((fn, args, kwargs)),
                 resume_thread_on_runtime=lambda *args, **kwargs: resume_calls.append((args, kwargs)),
             ),
@@ -121,9 +121,9 @@ class CodexSessionUiDomainTests(unittest.TestCase):
         owner = _OwnerStub()
         submit_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
         resume_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-        domain = CodexSessionUiDomain(
+        domain = CodexThreadsUiDomain(
             owner,
-            runtime_ports=SessionUiRuntimePorts(
+            runtime_ports=ThreadsUiRuntimePorts(
                 submit_to_runtime=lambda fn, *args, **kwargs: submit_calls.append((fn, args, kwargs)),
                 resume_thread_on_runtime=lambda *args, **kwargs: resume_calls.append((args, kwargs)),
             ),
@@ -134,7 +134,7 @@ class CodexSessionUiDomainTests(unittest.TestCase):
             "chat-a",
             "thread-1",
             message_id="msg-1",
-            refresh_session_message_id="msg-session",
+            refresh_threads_message_id="msg-session",
         )
 
         self.assertEqual(owner.resolve_calls, ["thread-1"])
@@ -145,7 +145,7 @@ class CodexSessionUiDomainTests(unittest.TestCase):
         self.assertEqual(kwargs["original_arg"], "thread-1")
         self.assertEqual(kwargs["summary"], owner.thread)
         self.assertEqual(kwargs["message_id"], "msg-1")
-        self.assertEqual(kwargs["refresh_session_message_id"], "msg-session")
+        self.assertEqual(kwargs["refresh_threads_message_id"], "msg-session")
 
 
 if __name__ == "__main__":

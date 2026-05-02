@@ -4,7 +4,7 @@
 
 另见：
 
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 - `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`
 - `docs/decisions/shared-backend-resume-safety.zh-CN.md`
 - `docs/archive/codex-handler-decomposition-plan.zh-CN.md`
@@ -69,7 +69,7 @@
    - 命令路由
    - 私聊按用户维护运行时状态，群聊按 `chat_id` 维护共享运行时状态
    - 卡片渲染
-   - `/session` 与 `/resume` 协调
+   - `/threads` 与 `/resume` 协调
 3. Codex adapter / protocol 层
    - 持有 Codex 运行时连接
    - 将 handler 的意图翻译成 Codex 请求
@@ -118,15 +118,15 @@ shared backend 与 wrapper 的具体机制，见
 - `bot/thread_access_policy.py`：线程共享与 interaction owner 的准入 policy 边界
 - `bot/thread_runtime_coordination.py`：跨实例 live runtime lease 获取、自动转移与拒绝
 - `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、终态结果载体发送、watchdog / reconcile / degrade 处理
-- `bot/runtime_admin_controller.py`：`/status`、`/unsubscribe` 与 control-plane 查询/管理
+- `bot/runtime_admin_controller.py`：`/status`、`/release-runtime` 与 control-plane 查询/管理
 - `bot/inbound_surface_controller.py`：入站命令面、卡片 action 路由、help 卡片命令复用
 - `bot/forward_aggregator.py`：合并转发缓冲、超时分发与转发树文本化；它只持有这组 transport 内部状态机，不再把这部分状态散落在 `FeishuBot` 主体里
 - `bot/group_history_recovery.py`：`assistant` 群模式的历史回捞、实时日志合并、上下文格式化与边界 `message_id` 推导；它不直接依赖飞书 SDK，请求构造与 API 调用仍留在 `FeishuBot` 这一 transport 边界，并通过显式 ports 传入分页结果
 - `bot/prompt_turn_entry_controller.py`：prompt 进入、lease 准入、released -> attached 恢复编排
 - `bot/adapter_notification_controller.py`：adapter notification 的 method 路由、语义解释与下游分发
 - `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
-- `bot/codex_session_ui_domain.py`：session 卡片 UI 流程，包括重命名表单这类瞬时 UI 状态，以及通过 `RuntimeLoop` 串行化的 resume 目标解析
-- `bot/codex_settings_domain.py`：用户侧设置与身份命令，包括 `/profile`、`/approval`、`/sandbox`、`/permissions`、`/mode`、`/whoami` 与 `/init`；它通过显式 `SettingsDomainPorts` 穿过 bot/runtime/profile 边界，而不是继续持有宽泛的 handler owner
+- `bot/codex_threads_ui_domain.py`：当前目录线程卡片 UI 流程，包括重命名表单这类瞬时 UI 状态，以及通过 `RuntimeLoop` 串行化的 resume 目标解析
+- `bot/codex_settings_domain.py`：用户侧设置与身份命令，包括 `/profile`、`/approval`、`/sandbox`、`/permissions`、`/collab-mode`、`/whoami` 与 `/init`；它通过显式 `SettingsDomainPorts` 穿过 bot/runtime/profile 边界，而不是继续持有宽泛的 handler owner
 - `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 display-only 的 `reply_segments` / `process_log` 片段拼装，并支持在权威终态结果已经单独送达后，把最后一段最终答案从 execution card 的 reply 面板里剔除；它不承担 thread、owner 或 binding 级状态职责
 - `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
 - `bot/stores/thread_runtime_lease_store.py`：机器级 thread live runtime lease
@@ -171,7 +171,7 @@ shared backend 与 wrapper 的具体机制，见
   而不是依赖宽泛的 handler owner protocol
 - `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面
 
-当前这一层拆分已经不只是“把 help/settings/group/session/file 等领域从单体逻辑里抽出去”。历史计划里提出的 ownership 拆分主线，目前已经大体落地：
+当前这一层拆分已经不只是“把 help/settings/group/thread/file 等领域从单体逻辑里抽出去”。历史计划里提出的 ownership 拆分主线，目前已经大体落地：
 
 - `BindingRuntimeManager` 已持有 `binding` / `subscribe` / `attach` / `released` 这一组 Feishu runtime 管理
 - `ThreadAccessPolicy` 与 lease store 已持有 interaction owner 的准入规则
@@ -259,7 +259,7 @@ shared backend 与 wrapper 的具体机制，见
 
 精确命令语义不在本文展开，而是交给专门文档：
 
-- `docs/contracts/session-profile-semantics.zh-CN.md` 说明 `/session`、`/resume`、`/profile`、`/rm` 与 wrapper 语义
+- `docs/contracts/thread-profile-semantics.zh-CN.md` 说明 `/threads`、`/resume`、`/profile`、`/archive` 与 wrapper 语义
 - `docs/decisions/shared-backend-resume-safety.zh-CN.md` 说明当前 `/resume` 合同与 backend 安全规则
 
 本文只固定这些边界：
@@ -306,7 +306,7 @@ shared backend 与 wrapper 的具体机制，见
   - 入口与传输边界：`__main__.py`、`standalone.py`、`handler.py`、`feishu_bot.py`
   - 顶层编排与用户侧 domain：
     `codex_handler.py`、`codex_group_domain.py`、`codex_help_domain.py`、
-    `codex_session_ui_domain.py`、`codex_settings_domain.py`、
+    `codex_threads_ui_domain.py`、`codex_settings_domain.py`、
     `file_message_domain.py`、`inbound_surface_controller.py`
   - 运行时状态、执行流与协调：
     `runtime_loop.py`、`runtime_state.py`、`runtime_view.py`、
@@ -324,7 +324,7 @@ shared backend 与 wrapper 的具体机制，见
     `shared_command_surface.py`、`feishu_types.py`、`codex_config_reader.py`
   - wrapper 与服务管理路径：`fcodex.py`、`fcodex_proxy.py`、
     `feishu_codexctl.py`、`service_control_plane.py`、`instance_layout.py`、
-    `instance_resolution.py`、`profile_resolution.py`、`session_resolution.py`、
+    `instance_resolution.py`、`profile_resolution.py`、`thread_resolution.py`、
     `binding_identity.py`
   - Codex adapter / protocol 边界：
     `adapters/base.py`、`adapters/codex_app_server.py`、

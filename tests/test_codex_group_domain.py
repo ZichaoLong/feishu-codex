@@ -99,7 +99,7 @@ class CodexGroupDomainTests(unittest.TestCase):
         stub = _GroupPortsStub()
         domain = _make_domain(stub)
 
-        result = domain.handle_groupmode_command("chat-group", "all", message_id="m-group")
+        result = domain.handle_group_mode_command("chat-group", "all", message_id="m-group")
 
         self.assertEqual(stub.validate_calls, [("chat-group", "all", "m-group")])
         self.assertEqual(stub.set_mode_calls, [("chat-group", "all")])

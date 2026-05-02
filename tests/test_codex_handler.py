@@ -456,11 +456,11 @@ class CodexHandlerTests(unittest.TestCase):
 
     @staticmethod
     def _pending_rename_form_snapshot(handler: CodexHandler, message_id: str) -> dict[str, str] | None:
-        return handler._session_ui_domain.pending_rename_form_snapshot(message_id)
+        return handler._threads_ui_domain.pending_rename_form_snapshot(message_id)
 
     @staticmethod
     def _register_pending_rename_form(handler: CodexHandler, message_id: str, *, thread_id: str) -> None:
-        handler._session_ui_domain.register_pending_rename_form(message_id, thread_id=thread_id)
+        handler._threads_ui_domain.register_pending_rename_form(message_id, thread_id=thread_id)
 
     @staticmethod
     def _service_runtime_holder_ids(handler: CodexHandler, thread_id: str) -> tuple[str, ...]:
@@ -507,7 +507,7 @@ class CodexHandlerTests(unittest.TestCase):
     def test_mode_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
 
-        handler.handle_message("ou_user", "c1", "/mode plan")
+        handler.handle_message("ou_user", "c1", "/collab-mode plan")
 
         state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["collaboration_mode"], "plan")
@@ -929,7 +929,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler1, _ = self._make_handler(data_dir=data_dir)
         handler1.handle_message("ou_user", "c1", f"/cd {project_dir}")
         handler1.handle_message("ou_user", "c1", "/permissions full-access")
-        handler1.handle_message("ou_user", "c1", "/mode plan")
+        handler1.handle_message("ou_user", "c1", "/collab-mode plan")
         handler1.handle_message("ou_user", "c1", "hello")
 
         handler2, _ = self._make_handler(data_dir=data_dir)
@@ -1855,7 +1855,7 @@ class CodexHandlerTests(unittest.TestCase):
     def test_mode_command_without_arg_shows_mode_card(self) -> None:
         handler, bot = self._make_handler()
 
-        handler.handle_message("ou_user", "c1", "/mode")
+        handler.handle_message("ou_user", "c1", "/collab-mode")
 
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
@@ -1987,7 +1987,7 @@ class CodexHandlerTests(unittest.TestCase):
             "trigger_open_ids": ["ou_alias_1", "ou_alias_2"],
         }
 
-        handler.handle_message("ou_user", "chat-p2p", "/whoareyou")
+        handler.handle_message("ou_user", "chat-p2p", "/bot-status")
 
         reply = bot.replies[-1][1]
         self.assertIn("机器人身份信息", reply)
@@ -2007,7 +2007,7 @@ class CodexHandlerTests(unittest.TestCase):
             "trigger_open_ids": [],
         }
 
-        handler.handle_message("ou_user", "chat-p2p", "/whoareyou")
+        handler.handle_message("ou_user", "chat-p2p", "/bot-status")
 
         reply = bot.replies[-1][1]
         self.assertIn("configured bot_open_id: `（空）`", reply)
@@ -2124,7 +2124,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
 
-        handler.handle_message("ou_user", "chat-group", "/groupmode", message_id="m-group")
+        handler.handle_message("ou_user", "chat-group", "/group-mode", message_id="m-group")
 
         card = bot.cards[-1][1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 群聊工作态")
@@ -2139,7 +2139,7 @@ class CodexHandlerTests(unittest.TestCase):
         bot.chat_types["chat-group"] = "group"
         bot.message_contexts["m-group"] = {"sender_open_id": "ou_admin"}
 
-        handler.handle_message("ou_user", "chat-group", "/groupmode", message_id="m-group")
+        handler.handle_message("ou_user", "chat-group", "/group-mode", message_id="m-group")
 
         self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 群聊工作态")
 
@@ -2147,7 +2147,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
 
-        handler.handle_message("ou_user", "chat-group", "/groupmode assistant", message_id="m-group")
+        handler.handle_message("ou_user", "chat-group", "/group-mode assistant", message_id="m-group")
 
         self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
         self.assertIn("已切换群聊工作态：`assistant`", bot.replies[-1][1])
@@ -2156,7 +2156,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group"}
 
-        handler.handle_message("ou_admin", "chat-group", "/groupmode all", message_id="m-group")
+        handler.handle_message("ou_admin", "chat-group", "/group-mode all", message_id="m-group")
 
         self.assertEqual(bot.get_group_mode("chat-group"), "all")
         self.assertIn("已切换群聊工作态：`all`", bot.replies[-1][1])
@@ -2179,7 +2179,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._bind_thread("ou_user", "chat-group", thread)
         handler._bind_thread("ou_user2", "chat-other", thread)
 
-        handler.handle_message("ou_user", "chat-group", "/groupmode all", message_id="m-group")
+        handler.handle_message("ou_user", "chat-group", "/group-mode all", message_id="m-group")
 
         self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
         self.assertIn("`all` 模式", bot.replies[-1][1])
@@ -2189,7 +2189,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
 
-        handler.handle_message("ou_user2", "chat-group", "/groupmode all", message_id="m-group")
+        handler.handle_message("ou_user2", "chat-group", "/group-mode all", message_id="m-group")
 
         self.assertIn("群里的 `/` 命令仅管理员可用", bot.replies[-1][1])
         self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
@@ -2302,7 +2302,7 @@ class CodexHandlerTests(unittest.TestCase):
         bot.fetched_chat_types["oc_group123"] = "group"
         bot.message_contexts["m-group"] = {"sender_open_id": "ou_admin"}
 
-        handler.handle_message("ou_user", "oc_group123", "/groupmode", message_id="m-group")
+        handler.handle_message("ou_user", "oc_group123", "/group-mode", message_id="m-group")
 
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
@@ -2648,7 +2648,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.unsubscribe_thread = _unsubscribe
 
-        handler.handle_message("ou_user", "chat-a", "/unsubscribe")
+        handler.handle_message("ou_user", "chat-a", "/release-runtime")
 
         self.assertEqual(handler._adapter.unsubscribe_thread_calls, ["thread-1"])
         self.assertEqual(handler._get_runtime_state("ou_user", "chat-a")["current_thread_id"], "thread-1")
@@ -3128,7 +3128,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        handler.handle_message("ou_user", "c1", "/unsubscribe")
+        handler.handle_message("ou_user", "c1", "/release-runtime")
         handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(
             summary=ThreadSummary(
                 thread_id="thread-1",
@@ -3210,7 +3210,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        handler.handle_message("ou_user", "c1", "/unsubscribe")
+        handler.handle_message("ou_user", "c1", "/release-runtime")
         handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(
             summary=ThreadSummary(
                 thread_id="thread-1",
@@ -3280,7 +3280,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._bind_thread("ou_user", "c1", thread)
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(summary=thread)
 
-        handler.handle_message("ou_user", "c1", "/rm")
+        handler.handle_message("ou_user", "c1", "/archive")
 
         self.assertEqual(handler._adapter.archive_thread_calls, ["thread-1"])
         self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_id"], "")
@@ -3339,7 +3339,7 @@ class CodexHandlerTests(unittest.TestCase):
             status="idle",
         )
         handler._bind_thread("ou_user", "c1", thread)
-        handler.handle_message("ou_user", "c1", "/unsubscribe")
+        handler.handle_message("ou_user", "c1", "/release-runtime")
         handler._thread_resume_profile_store.save(
             "thread-1",
             profile="provider2",
@@ -3633,8 +3633,8 @@ class CodexHandlerTests(unittest.TestCase):
     def test_prompt_after_switching_back_to_default_uses_default_collaboration_mode(self) -> None:
         handler, _ = self._make_handler()
 
-        handler.handle_message("ou_user", "c1", "/mode plan")
-        handler.handle_message("ou_user", "c1", "/mode default")
+        handler.handle_message("ou_user", "c1", "/collab-mode plan")
+        handler.handle_message("ou_user", "c1", "/collab-mode default")
         handler.handle_message("ou_user", "c1", "hello")
 
         self.assertEqual(handler._adapter.start_turn_calls[-1]["collaboration_mode"], "default")
@@ -3831,7 +3831,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.list_threads_all = fake_list_threads_all
 
-        handler.handle_message("ou_user", "c1", "/session")
+        handler.handle_message("ou_user", "c1", "/threads")
 
         self.assertEqual(captured_kwargs["model_providers"], [])
         self.assertEqual(len(bot.cards), 1)
@@ -3857,7 +3857,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        handler.handle_message("ou_user", "c1", "/session")
+        handler.handle_message("ou_user", "c1", "/threads")
 
         _, card = bot.cards[0]
         action_elements = self._action_elements(card)
@@ -3886,7 +3886,7 @@ class CodexHandlerTests(unittest.TestCase):
             state["current_thread_id"] = "thread-1"
         handler._adapter.list_threads_all = lambda **kwargs: [thread]
 
-        handler.handle_message("ou_user", "c1", "/session")
+        handler.handle_message("ou_user", "c1", "/threads")
 
         _, card = bot.cards[0]
         self.assertNotIn("**当前**", card["elements"][2]["content"])
@@ -3897,10 +3897,10 @@ class CodexHandlerTests(unittest.TestCase):
     def test_session_command_rejects_extra_args(self) -> None:
         handler, bot = self._make_handler()
 
-        handler.handle_message("ou_user", "c1", "/session extra")
+        handler.handle_message("ou_user", "c1", "/threads extra")
 
         self.assertEqual(bot.cards, [])
-        self.assertIn("用法：`/session`", bot.replies[-1][1])
+        self.assertIn("用法：`/threads`", bot.replies[-1][1])
         self.assertIn("不接受额外参数", bot.replies[-1][1])
 
     def test_named_instance_session_shares_global_current_dir_threads(self) -> None:
@@ -3931,7 +3931,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         handler._adapter.list_threads_all = lambda **kwargs: [thread_1, thread_2]
 
-        handler.handle_message("ou_user", "c1", "/session")
+        handler.handle_message("ou_user", "c1", "/threads")
 
         _, card = bot.cards[-1]
         content = "\n".join(
@@ -3964,21 +3964,21 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(snapshot.summary.thread_id, thread.thread_id)
         self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], thread.thread_id)
 
-    def test_close_sessions_card_action_returns_closed_card(self) -> None:
+    def test_close_threads_card_action_returns_closed_card(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-session",
-            {"action": "close_sessions_card"},
+            {"action": "close_threads_card"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程（已收起）")
         action = self._first_action(response["card"])
-        self.assertEqual(action["actions"][0]["text"]["content"], "展开会话列表")
+        self.assertEqual(action["actions"][0]["text"]["content"], "展开线程列表")
 
-    def test_reopen_sessions_card_action_returns_sessions_card(self) -> None:
+    def test_reopen_threads_card_action_returns_sessions_card(self) -> None:
         handler, _ = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -3996,13 +3996,13 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_user",
             "c1",
             "msg-session",
-            {"action": "reopen_sessions_card"},
+            {"action": "reopen_threads_card"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
 
-    def test_show_more_sessions_action_expands_all_rows(self) -> None:
-        handler, _ = self._make_handler({"session_recent_limit": 1})
+    def test_show_more_threads_action_expands_all_rows(self) -> None:
+        handler, _ = self._make_handler({"threads_initial_limit": 1})
         threads = [
             ThreadSummary(
                 thread_id="thread-1",
@@ -4041,7 +4041,7 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_user",
             "c1",
             "msg-session",
-            {"action": "show_more_sessions"},
+            {"action": "show_more_threads"},
         ))
 
         content = "\n".join(
@@ -4057,7 +4057,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast"], "已展开全部线程。")
 
     def test_expanded_sessions_card_stays_expanded_after_archive(self) -> None:
-        handler, _ = self._make_handler({"session_recent_limit": 1})
+        handler, _ = self._make_handler({"threads_initial_limit": 1})
         threads = [
             ThreadSummary(
                 thread_id="thread-1",
@@ -4099,7 +4099,7 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_user",
             "c1",
             "msg-session",
-            {"action": "show_more_sessions"},
+            {"action": "show_more_threads"},
         )
         handler._adapter.list_threads_all = _list_threads_all
         handler._adapter.read_thread = lambda thread_id, include_turns=False: ThreadSnapshot(
@@ -4125,7 +4125,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
 
     def test_expanded_sessions_card_stays_expanded_after_rename(self) -> None:
-        handler, _ = self._make_handler({"session_recent_limit": 1})
+        handler, _ = self._make_handler({"threads_initial_limit": 1})
         threads = [
             ThreadSummary(
                 thread_id="thread-1",
@@ -4186,7 +4186,7 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_user",
             "c1",
             "msg-session",
-            {"action": "show_more_sessions"},
+            {"action": "show_more_threads"},
         )
         handler.handle_card_action(
             "ou_user",
@@ -4242,14 +4242,14 @@ class CodexHandlerTests(unittest.TestCase):
             original_arg="thread-1",
             summary=thread,
             message_id="msg-session",
-            refresh_session_message_id="msg-session",
+            refresh_threads_message_id="msg-session",
         )
         handler._runtime_call(lambda: None)
 
         self.assertTrue(any(message_id == "msg-session" for message_id, _ in bot.patches))
 
     def test_expanded_sessions_card_stays_expanded_after_resume_refresh(self) -> None:
-        handler, bot = self._make_handler({"session_recent_limit": 1})
+        handler, bot = self._make_handler({"threads_initial_limit": 1})
         threads = [
             ThreadSummary(
                 thread_id="thread-1",
@@ -4295,7 +4295,7 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_user",
             "c1",
             "msg-session",
-            {"action": "show_more_sessions"},
+            {"action": "show_more_threads"},
         )
 
         response = self._unpack_card_response(handler.handle_card_action(
@@ -4385,7 +4385,7 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：线程")
         content = card["elements"][0]["content"]
-        self.assertIn("`/session`", content)
+        self.assertIn("`/threads`", content)
         self.assertIn("`/resume <thread_id|thread_name>`", content)
         self.assertIn("`/new`", content)
         self.assertIn("当前线程", content)
@@ -4394,7 +4394,7 @@ class CodexHandlerTests(unittest.TestCase):
         action_elements = self._action_elements(card)
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/session", "/new", "恢复线程"],
+            ["/threads", "/new", "恢复线程"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
@@ -4414,7 +4414,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("推荐先用 `/permissions`", content)
         self.assertIn("`/approval`", content)
         self.assertIn("`/sandbox`", content)
-        self.assertIn("`/mode`", content)
+        self.assertIn("`/collab-mode`", content)
         self.assertIn("`/reset-backend`", content)
         self.assertIn("如果当前正在执行，新设置从下一轮生效。", content)
         action_elements = self._action_elements(card)
@@ -4424,7 +4424,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
-            ["/mode", "/reset-backend", "返回帮助"],
+            ["/collab-mode", "/reset-backend", "返回帮助"],
         )
 
     def test_help_group_card_has_shortcuts(self) -> None:
@@ -4441,7 +4441,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`all`", card["elements"][0]["content"])
         self.assertIn("自己发起 turn 的审批", card["elements"][0]["content"])
         action = self._first_action(card)
-        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["/group", "/groupmode", "返回帮助"])
+        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["/group", "/group-mode", "返回帮助"])
 
     def test_help_identity_page_has_bootstrap_shortcuts(self) -> None:
         handler, bot = self._make_handler()
@@ -4453,13 +4453,13 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：身份")
         content = card["elements"][0]["content"]
         self.assertIn("`/whoami`", content)
-        self.assertIn("`/whoareyou`", content)
+        self.assertIn("`/bot-status`", content)
         self.assertIn("`/init <token>`", content)
         self.assertNotIn("/debug-contact", content)
         action_elements = self._action_elements(card)
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/whoami", "/whoareyou", "初始化"],
+            ["/whoami", "/bot-status", "初始化"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
@@ -4483,7 +4483,7 @@ class CodexHandlerTests(unittest.TestCase):
         )
         self.assertEqual(
             [item["text"]["content"] for item in self._action_elements(response["card"])[1]["actions"]],
-            ["/mode", "/reset-backend", "返回帮助"],
+            ["/collab-mode", "/reset-backend", "返回帮助"],
         )
 
     def test_reset_backend_command_returns_preview_card(self) -> None:
@@ -4562,7 +4562,7 @@ class CodexHandlerTests(unittest.TestCase):
         action_elements = self._action_elements(response["card"])
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/profile", "/rm", "重命名"],
+            ["/profile", "/archive", "重命名"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
@@ -4626,7 +4626,7 @@ class CodexHandlerTests(unittest.TestCase):
         action_elements = self._action_elements(response["card"])
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/whoami", "/whoareyou", "初始化"],
+            ["/whoami", "/bot-status", "初始化"],
         )
 
     def test_help_show_page_action_can_open_identity_init_form(self) -> None:
@@ -4695,7 +4695,7 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_admin",
             "chat-group",
             "msg-help-card",
-            {"action": "help_execute_command", "command": "/session", "title": "Codex Session"},
+            {"action": "help_execute_command", "command": "/threads", "title": "Codex Threads"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
@@ -5006,7 +5006,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._runtime_call(lambda: None)
 
     def test_resume_card_action_failure_refreshes_sessions_card(self) -> None:
-        handler, bot = self._make_handler({"session_recent_limit": 1})
+        handler, bot = self._make_handler({"threads_initial_limit": 1})
         thread = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -5023,7 +5023,7 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_user",
             "c1",
             "msg-session",
-            {"action": "show_more_sessions"},
+            {"action": "show_more_threads"},
         )
 
         response = self._unpack_card_response(handler.handle_card_action(

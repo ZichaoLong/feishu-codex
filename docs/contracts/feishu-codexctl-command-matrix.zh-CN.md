@@ -7,7 +7,7 @@
 - `docs/contracts/feishu-command-matrix.zh-CN.md`
 - `docs/contracts/local-command-and-thread-profile-contract.zh-CN.md`
 - `docs/contracts/runtime-control-surface.zh-CN.md`
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 
 本文定义本地 `feishu-codexctl` 管理面的正式命令矩阵。
 
@@ -30,7 +30,7 @@
 - 飞书 slash 命令矩阵
 - `fcodex` wrapper 语义
 - thread 生命周期与 runtime 词汇
-- `reset-backend`、`unsubscribe`、`/status`、`/preflight` 的底层行为
+- `reset-backend`、`thread unsubscribe`、`/status`、`/preflight` 的底层行为
 
 这些内容分别以相关专题文档为准。
 
@@ -99,7 +99,7 @@
 
 - 清的是 Feishu 本地 bookmark
 - 不删除 thread
-- 不等于 `unsubscribe`
+- 不等于 `thread unsubscribe`
 
 `thread unsubscribe`：
 
@@ -127,7 +127,7 @@
 
 | 命令 | 作用 | 状态层 | 类型 | 关键参数 | 飞书对应 |
 | --- | --- | --- | --- | --- | --- |
-| `feishu-codexctl [--instance <name>] binding list` | 列出当前实例可见 binding，以及其 binding state、Feishu runtime、关联 thread 与 cwd | 实例内 binding 发现面 | 只读 | 可选 `--instance` | 无直接飞书对应；比飞书 `/session` 和 `/status` 更底层 |
+| `feishu-codexctl [--instance <name>] binding list` | 列出当前实例可见 binding，以及其 binding state、Feishu runtime、关联 thread 与 cwd | 实例内 binding 发现面 | 只读 | 可选 `--instance` | 无直接飞书对应；比飞书 `/threads` 和 `/status` 更底层 |
 | `feishu-codexctl [--instance <name>] binding status <binding_id>` | 查看单个 binding 的 chat、thread、runtime、next prompt 可用性、interaction owner、当前会话设置等 | 单个 binding 详细状态 | 只读 | `binding_id` | 覆盖并超出飞书 `/status` 与 `/preflight` |
 | `feishu-codexctl [--instance <name>] binding clear <binding_id>` | 清除单个 binding bookmark | 单个 binding bookmark | 变更 | `binding_id` | 无直接飞书对应 |
 | `feishu-codexctl [--instance <name>] binding clear-all` | 清除当前实例下全部 binding bookmark | 实例内全部 binding bookmark | 变更 | 可选 `--instance` | 无直接飞书对应 |
@@ -136,10 +136,10 @@
 
 | 命令 | 作用 | 状态层 | 类型 | 关键参数 | 飞书对应 |
 | --- | --- | --- | --- | --- | --- |
-| `feishu-codexctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>]` | 列 persisted thread；默认按当前目录过滤，也支持全局列出 | persisted thread 发现面 | 只读 | 可选 `--instance`；`--scope cwd/global`；`--cwd` 仅对 `cwd` 作用域有意义 | 部分对应飞书 `/session` 与 `/resume` 的目标发现面 |
-| `feishu-codexctl [--instance <name>] thread status (--thread-id <id> \| --thread-name <name>)` | 查看某个 thread 的 backend 状态、bound/attached/released bindings、interaction owner、unsubscribe 可用性 | 单个 thread 的 thread-scoped 状态 | 只读 | 必须二选一：`--thread-id` 或 `--thread-name` | 无一条完全等价的飞书命令；部分覆盖飞书 `/status`、`/preflight`、`/unsubscribe` 的底层诊断 |
+| `feishu-codexctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>]` | 列 persisted thread；默认按当前目录过滤，也支持全局列出 | persisted thread 发现面 | 只读 | 可选 `--instance`；`--scope cwd/global`；`--cwd` 仅对 `cwd` 作用域有意义 | 部分对应飞书 `/threads` 与 `/resume` 的目标发现面 |
+| `feishu-codexctl [--instance <name>] thread status (--thread-id <id> \| --thread-name <name>)` | 查看某个 thread 的 backend 状态、bound/attached/released bindings、interaction owner、`/release-runtime` 可用性 | 单个 thread 的 thread-scoped 状态 | 只读 | 必须二选一：`--thread-id` 或 `--thread-name` | 无一条完全等价的飞书命令；部分覆盖飞书 `/status`、`/preflight`、`/release-runtime` 的底层诊断 |
 | `feishu-codexctl [--instance <name>] thread bindings (--thread-id <id> \| --thread-name <name>)` | 查看某个 thread 当前关联的 binding 列表 | 单个 thread 到 binding 的反向关系 | 只读 | 必须二选一：`--thread-id` 或 `--thread-name` | 无直接飞书对应 |
-| `feishu-codexctl [--instance <name>] thread unsubscribe (--thread-id <id> \| --thread-name <name>)` | 让 Feishu 释放某个 thread 的 runtime residency，同时保留 thread 与 binding 关系 | 单个 thread 的 Feishu runtime residency | 变更 | 必须二选一：`--thread-id` 或 `--thread-name` | 对应飞书 `/unsubscribe`，但这是 thread-scoped 而不是当前 chat-scoped |
+| `feishu-codexctl [--instance <name>] thread unsubscribe (--thread-id <id> \| --thread-name <name>)` | 让 Feishu 释放某个 thread 的 runtime residency，同时保留 thread 与 binding 关系 | 单个 thread 的 Feishu runtime residency | 变更 | 必须二选一：`--thread-id` 或 `--thread-name` | 对应飞书 `/release-runtime`，但这是 thread-scoped 而不是当前 chat-scoped |
 
 ## 5. 与飞书命令面的对应关系
 
@@ -149,8 +149,8 @@
 | --- | --- | --- |
 | `service reset-backend` | `/reset-backend` | 都是实例级 backend 管理；飞书面是管理员卡片流，本地面是 CLI 管理流 |
 | `binding status <binding_id>` | `/status`、`/preflight` | 本地输出更底层，包含 binding id、interaction owner、reason code 等调试信息 |
-| `thread unsubscribe --thread-id/--thread-name` | `/unsubscribe` | 飞书 `/unsubscribe` 只作用于当前 chat binding；本地命令可按任意 thread 定位 |
-| `thread list --scope cwd` | `/session` | 飞书 `/session` 是 chat 使用入口；本地命令只是线程发现面 |
+| `thread unsubscribe --thread-id/--thread-name` | `/release-runtime` | 飞书 `/release-runtime` 只作用于当前 chat binding；本地命令可按任意 thread 定位 |
+| `thread list --scope cwd` | `/threads` | 飞书 `/threads` 是 chat 使用入口；本地命令只是线程发现面 |
 | `thread list --scope global` / `thread status` | `/resume` 的目标发现与诊断 | 飞书 `/resume` 是恢复动作；本地命令是查看 / 管理，不会帮你进入 live thread |
 
 ### 5.2 刻意没有飞书对应的项目
@@ -197,7 +197,7 @@
 - `bot/feishu_codexctl.py`
 - `bot/runtime_admin_controller.py`
 - `bot/instance_resolution.py`
-- `bot/session_resolution.py`
+- `bot/thread_resolution.py`
 - `bot/service_control_plane.py`
 
 如果未来新增、删除、改名任何 `feishu-codexctl` 子命令，或改变实例选择规则、thread 目标约束、状态层边界、以及与飞书命令面的对应关系，都应同步更新本文。

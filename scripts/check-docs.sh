@@ -16,7 +16,7 @@ check_legacy_doc_paths() {
   local matches
   matches="$(
     git grep -nE \
-      'docs/(feishu-codex-design|feishu-thread-lifecycle|runtime-control-surface|session-profile-semantics|shared-backend-resume-safety|fcodex-shared-backend-runtime|codex-handler-decomposition-plan|group-chat-manual-test-checklist|feishu-help-navigation|codex-permissions-model|group-chat-contract)(\.zh-CN)?\.md' \
+      'docs/(feishu-codex-design|feishu-thread-lifecycle|runtime-control-surface|thread-profile-semantics|shared-backend-resume-safety|fcodex-shared-backend-runtime|codex-handler-decomposition-plan|group-chat-manual-test-checklist|feishu-help-navigation|codex-permissions-model|group-chat-contract)(\.zh-CN)?\.md' \
       -- README.md docs ':(exclude)docs/_work/**' || true
   )"
   if [[ -n "$matches" ]]; then

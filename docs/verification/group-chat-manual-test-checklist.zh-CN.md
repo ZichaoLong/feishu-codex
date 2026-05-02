@@ -30,11 +30,11 @@
    `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`
    如需让 `/whoami`、群授权卡片、群上下文里显示可读名字，再补 `contact:contact.base:readonly`、`contact:user.base:readonly`
    如需让 `/whoami` 和日志里稳定看到 `user_id`，再补 `contact:user.employee_id:readonly`；缺少时 `user_id` 允许为空
-   如需用 `/whoareyou` 实时探测机器人 `open_id`，再补 `application:application:self_manage`
+   如需用 `/bot-status` 实时探测机器人 `open_id`，再补 `application:application:self_manage`
 3. 确认事件与回调已启用：
    `im.message.receive_v1`、`card.action.trigger`
 4. 让 `Admin` 私聊机器人执行 `/whoami`，确认已把正确的 `open_id` 写入 `system.yaml.admin_open_ids`
-5. 让 `Admin` 私聊机器人执行 `/whoareyou`，确认返回里包含 `configured bot_open_id`、`discovered open_id`，并把需要启用的值写入 `system.yaml.bot_open_id`
+5. 让 `Admin` 私聊机器人执行 `/bot-status`，确认返回里包含 `configured bot_open_id`、`discovered open_id`，并把需要启用的值写入 `system.yaml.bot_open_id`
 6. 如需验证“别人 @我本人时由机器人代答”，再把对应成员的 `open_id` 写入 `system.yaml.trigger_open_ids`
 7. 准备一个新群，拉入 `Admin`、`MemberA`、`MemberB`、`feishu-codex` 机器人
 8. 如需验证其他机器人历史消息路径，再把 `OtherBot` 拉入群
@@ -44,7 +44,7 @@
 
 1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`open_id`，以及仅用于排障的 `user_id`；若未开 `contact:user.employee_id:readonly`，`user_id` 允许为空。若未开通讯录权限，`name` 允许退化成 open_id 前缀。
 2. `Admin` 私聊发送 `/debug-contact <open_id>`。预期：能看到 cache 命中情况、live resolved name，以及 fallback 原因 / API 错误；若未开通讯录权限，应能明确看到 fallback。
-3. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/group`、`/groupmode`，且不再提旧群授权命令。
+3. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/group`、`/group-mode`，且不再提旧群授权命令。
 4. `MemberA` 私聊发送普通文本。预期：被拒绝，并提示“如需协作使用，请让管理员在群里先执行 `/group activate`”。
 
 ## 5. 新群默认值
@@ -53,7 +53,7 @@
 2. `Admin` 在群里发送普通文本，不 `@机器人`。预期：不响应。
 3. `Admin` 在群里发送 `@机器人 你好`。预期：正常响应；管理员可在未激活群里先完成初始化和管理。
 4. `MemberA` 在群里发送 `@机器人 你好`。预期：收到“请管理员先 `/group activate`”的拒绝提示。
-5. `Admin` 在群里发送 `@机器人 /groupmode`。预期：显示当前工作态卡片，默认值为 `assistant`。
+5. `Admin` 在群里发送 `@机器人 /group-mode`。预期：显示当前工作态卡片，默认值为 `assistant`。
 6. `Admin` 在群里发送 `@机器人 /group`。预期：显示当前群授权卡片，默认值为“未激活”。
 7. 如已配置 `trigger_open_ids`，让 `MemberA` 发送 `@Alias 你好`。预期：若群未激活，则仍收到拒绝提示；说明 alias mention 仍受群激活边界约束。
 
@@ -110,7 +110,7 @@
    `MemberB: 第三条讨论`
    `MemberA: @机器人 再总结`
    预期：本轮只基于上次 boundary 之后的新消息，至少包含第三条讨论。
-4. 在两次 `@` 之间插入 `@机器人 /status` 或 `@机器人 /groupmode`。
+4. 在两次 `@` 之间插入 `@机器人 /status` 或 `@机器人 /group-mode`。
    预期：这些群命令不进入上下文，也不切断 boundary；下一次真正对话触发仍能看到命令前后的普通群消息。
 5. 若群里存在 `OtherBot`，让它在两次人类 `@` 之间发一条普通消息，再由人类 `@机器人`。
    预期：`OtherBot` 的消息不会实时触发，但在下一次有效人类 `@` 时会通过历史回捞进入上下文。
@@ -148,7 +148,7 @@
 2. 重启服务：
    `feishu-codex restart`
 3. 重新验证：
-   `@机器人 /groupmode`
+   `@机器人 /group-mode`
    `@机器人 /group`
    预期：群工作态和群激活状态都保留。
 4. 如果此前已经产生 `assistant` 上下文，再次人类 `@机器人`。预期：上下文边界仍可继续工作，不会整段重置。

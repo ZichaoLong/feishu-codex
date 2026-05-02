@@ -17,7 +17,7 @@ from bot.cards import (
     build_profile_card,
     build_rename_card,
     build_sandbox_policy_card,
-    build_sessions_card,
+    build_threads_card,
 )
 from bot.codex_handler import CodexHandler
 from bot.codex_help_domain import CodexHelpDomain
@@ -71,15 +71,15 @@ class SharedCommandSurfaceTests(unittest.TestCase):
 
         self.assertTrue(handler._inbound_surface.has_command_route("/preflight"))
 
-    def test_help_thread_and_session_cards_reuse_shared_command_specs(self) -> None:
-        session_command = get_shared_command("session")
+    def test_help_thread_and_threads_cards_reuse_shared_command_specs(self) -> None:
+        threads_command = get_shared_command("threads")
         resume_command = get_shared_command("resume")
         help_domain = CodexHelpDomain(local_thread_safety_rule="测试规则")
 
         overview = help_domain.reply_help("chat-1").card
         thread_help = help_domain.reply_help("chat-1", "thread").card
-        sessions_card = build_sessions_card(
-            sessions=[
+        threads_card = build_threads_card(
+            threads=[
                 {
                     "thread_id": "thread-1",
                     "title": "Demo",
@@ -99,16 +99,16 @@ class SharedCommandSurfaceTests(unittest.TestCase):
 
         overview_markdown = overview["elements"][0]["content"]
         thread_markdown = thread_help["elements"][0]["content"]
-        sessions_markdown = sessions_card["elements"][0]["content"]
+        threads_markdown = threads_card["elements"][0]["content"]
 
         self.assertIn("`fcodex resume <thread_id|thread_name>`", overview_markdown)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", overview_markdown)
-        self.assertIn(f"`{session_command.feishu_usage}`", thread_markdown)
+        self.assertIn(f"`{threads_command.feishu_usage}`", thread_markdown)
         self.assertIn(f"`{resume_command.feishu_usage}`", thread_markdown)
         self.assertIn("`fcodex resume <thread_id|thread_name>`", thread_markdown)
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", sessions_markdown)
-        self.assertIn("`feishu-codexctl thread list --scope cwd`", sessions_markdown)
-        self.assertIn(f"`{resume_command.feishu_usage}`", sessions_markdown)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", threads_markdown)
+        self.assertIn("`feishu-codexctl thread list --scope cwd`", threads_markdown)
+        self.assertIn(f"`{resume_command.feishu_usage}`", threads_markdown)
         self.assertEqual(execution_card["header"]["title"]["content"], "Codex 执行过程（执行中）")
         self.assertNotIn("`/help`", json.dumps(execution_card, ensure_ascii=False))
 
@@ -146,8 +146,8 @@ class SharedCommandSurfaceTests(unittest.TestCase):
                     }
                 ],
             ),
-            build_sessions_card(
-                sessions=[
+            build_threads_card(
+                threads=[
                     {
                         "thread_id": "thread-1",
                         "title": "Demo",

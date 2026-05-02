@@ -18,8 +18,8 @@ from bot.shared_command_surface import get_shared_command
 _SHARED_PROFILE_COMMAND = get_shared_command("profile")
 _SHARED_RESET_BACKEND_COMMAND = get_shared_command("reset-backend")
 _SHARED_PREFLIGHT_COMMAND = get_shared_command("preflight")
-_SHARED_RM_COMMAND = get_shared_command("rm")
-_SHARED_SESSION_COMMAND = get_shared_command("session")
+_SHARED_ARCHIVE_COMMAND = get_shared_command("archive")
+_SHARED_THREADS_COMMAND = get_shared_command("threads")
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
 
 _LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
@@ -89,7 +89,7 @@ class CodexHelpDomain:
                     "- `群聊`：当前群的激活、工作态、管理员边界\n"
                     "- `线程`：新建、浏览、恢复、当前 thread 管理\n"
                     "- `运行时`：当前会话设置，以及当前实例 backend reset\n"
-                    "- `身份`：`/whoami`、`/whoareyou`、`/init <token>`\n\n"
+                    "- `身份`：`/whoami`、`/bot-status`、`/init <token>`\n\n"
                     f"{self._local_thread_safety_rule}\n\n"
                     "本地继续同一线程请用 "
                     f"`{_LOCAL_RESUME_COMMAND}`；"
@@ -178,7 +178,7 @@ class CodexHelpDomain:
                     "- `/group deactivate`：由管理员停用当前群\n"
                     "- 未激活群里，非管理员不能使用机器人\n\n"
                     "**群聊工作态**\n"
-                    "- `/groupmode`：查看或切换当前群聊工作态\n"
+                    "- `/group-mode`：查看或切换当前群聊工作态\n"
                     "- `assistant`：默认；只在有效 mention 时回复，并附带群上下文\n"
                     "- `mention-only`：只在有效 mention 时触发，不带群历史上下文\n"
                     "- `all`：允许成员直接发普通消息触发；风险最高，且当前 thread 进入 `all` 独占规则\n"
@@ -196,8 +196,8 @@ class CodexHelpDomain:
                                 title="Codex 群聊授权",
                             ),
                             _HelpCommandButtonSpec(
-                                label="/groupmode",
-                                command="/groupmode",
+                                label="/group-mode",
+                                command="/group-mode",
                                 title="Codex 群聊工作态",
                             ),
                             _HelpPageButtonSpec(label="返回帮助", page="overview"),
@@ -210,7 +210,7 @@ class CodexHelpDomain:
                 title="Codex 帮助：线程",
                 markdown=(
                     "作用对象：**当前或目标 thread**。\n\n"
-                    f"- `{_SHARED_SESSION_COMMAND.feishu_usage}`：浏览当前目录线程\n"
+                    f"- `{_SHARED_THREADS_COMMAND.feishu_usage}`：浏览当前目录线程\n"
                     "- `/new`：立即新建线程\n"
                     f"- `{_SHARED_RESUME_COMMAND.feishu_usage}`：全局精确恢复线程，可填 `thread_id` 或 `thread_name`\n"
                     "- “当前线程”页：查看 `/profile`、重命名、归档当前绑定 thread\n\n"
@@ -223,7 +223,7 @@ class CodexHelpDomain:
                 action_rows=(
                     _HelpActionRowSpec(
                         buttons=(
-                            _HelpCommandButtonSpec(label="/session", command="/session", title="Codex Session"),
+                            _HelpCommandButtonSpec(label="/threads", command="/threads", title="Codex Threads"),
                             _HelpCommandButtonSpec(
                                 label="/new",
                                 command="/new",
@@ -249,9 +249,9 @@ class CodexHelpDomain:
                     "作用对象：**当前绑定 thread**。\n\n"
                     f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前 thread 的 resume profile；必要时会提供 reset backend 路径\n"
                     "- `/rename <title>`：重命名当前线程\n"
-                    f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
+                    f"- `{_SHARED_ARCHIVE_COMMAND.slash_name}`：归档当前线程\n\n"
                     "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。\n\n"
-                    "通常不需要在飞书侧主动理解 `/unsubscribe`。\n"
+                    "通常不需要在飞书侧主动理解 `/release-runtime`。\n"
                     "如果只是为了 re-profile，优先直接使用 `/profile <name>` 走现有路径；"
                     "需要排障或本地管理时，再用 "
                     f"`{_LOCAL_THREAD_UNSUBSCRIBE}`。"
@@ -264,7 +264,11 @@ class CodexHelpDomain:
                                 command="/profile",
                                 title="Codex Thread Profile",
                             ),
-                            _HelpCommandButtonSpec(label="/rm", command="/rm", title="Codex 归档线程"),
+                            _HelpCommandButtonSpec(
+                                label="/archive",
+                                command="/archive",
+                                title="Codex 归档线程",
+                            ),
                             _HelpPageButtonSpec(label="重命名", page="thread-rename-current-form"),
                         ),
                         layout="trisection",
@@ -325,7 +329,7 @@ class CodexHelpDomain:
                     "- `/profile` 属于当前 thread 管理，入口在“线程 -> 当前线程”\n"
                     "- 推荐先用 `/permissions`；它会同时设置审批策略与沙箱\n"
                     "- `/approval`、`/sandbox`：单独调整审批或沙箱\n"
-                    "- `/mode`：切换当前飞书会话后续 turn 的协作模式\n"
+                    "- `/collab-mode`：切换当前飞书会话后续 turn 的协作模式\n"
                     f"- `{_SHARED_RESET_BACKEND_COMMAND.feishu_usage}`：管理员预览并重置当前实例 backend；这是实例级管理动作，不是当前 thread 命令\n"
                     "- 如果当前正在执行，新设置从下一轮生效。"
                 ),
@@ -344,7 +348,11 @@ class CodexHelpDomain:
                     ),
                     _HelpActionRowSpec(
                         buttons=(
-                            _HelpCommandButtonSpec(label="/mode", command="/mode", title="Codex 协作模式"),
+                            _HelpCommandButtonSpec(
+                                label="/collab-mode",
+                                command="/collab-mode",
+                                title="Codex 协作模式",
+                            ),
                             _HelpCommandButtonSpec(
                                 label="/reset-backend",
                                 command="/reset-backend",
@@ -360,7 +368,7 @@ class CodexHelpDomain:
                 title="Codex 帮助：身份",
                 markdown=(
                     "- `/whoami`：私聊查看自己的 `open_id` 等身份信息\n"
-                    "- `/whoareyou`：查看机器人的 `app_id`、配置的 `bot_open_id`、实时探测结果\n"
+                    "- `/bot-status`：查看机器人的 `app_id`、配置的 `bot_open_id`、实时探测结果\n"
                     "- `/init <token>`：私聊初始化管理员与 `bot_open_id`\n\n"
                     "注意：`/whoami` 与 `/init` 只支持私聊；如果在群里触发，会按 slash 语义拒绝。"
                 ),
@@ -369,9 +377,9 @@ class CodexHelpDomain:
                         buttons=(
                             _HelpCommandButtonSpec(label="/whoami", command="/whoami", title="Codex 身份信息"),
                             _HelpCommandButtonSpec(
-                                label="/whoareyou",
-                                command="/whoareyou",
-                                title="Codex 机器人身份",
+                                label="/bot-status",
+                                command="/bot-status",
+                                title="Codex 机器人状态",
                             ),
                             _HelpPageButtonSpec(label="初始化", page="identity-init-form"),
                         ),

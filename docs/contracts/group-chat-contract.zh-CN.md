@@ -26,7 +26,7 @@
 它不重新定义：
 
 - 单聊线程生命周期
-- `/status`、`/unsubscribe` 与本地管理面词汇
+- `/status`、`/release-runtime` 与本地管理面词汇
 - `fcodex` wrapper 语义
 
 这些分别以各自专题文档为准。
@@ -59,7 +59,7 @@
 ## 4. 群聊工作态
 
 - 严格群聊显式 mention 判定依赖 `system.yaml.bot_open_id`
-- `/whoareyou` 与 `/init` 中的实时探测只用于诊断和初始化，不会替代运行时读取的 `system.yaml.bot_open_id`
+- `/bot-status` 与 `/init` 中的实时探测只用于诊断和初始化，不会替代运行时读取的 `system.yaml.bot_open_id`
 - 如配置 `system.yaml.trigger_open_ids`，命中这些 `open_id` 的 mentions 也视为有效触发
 - `trigger_open_ids` 只扩展“哪些 mentions 算触发”，不绕过群激活，也不替代 `bot_open_id`
 - 私聊底层会话按用户隔离；群聊底层会话按 `chat_id` 共享
@@ -84,7 +84,7 @@
 - 当前允许使用机器人的人类群消息可直接触发
 - 风险最高，容易刷屏
 - 发给 backend 时默认等价于单聊直转，不附带群历史上下文，也不额外包一层 `group turn`
-- 如果当前绑定 thread 已被其他飞书会话共享，`/groupmode all` 必须拒绝
+- 如果当前绑定 thread 已被其他飞书会话共享，`/group-mode all` 必须拒绝
 - 一旦群聊处于 `all` 模式，该 thread 就进入 `all` 模式线程独占规则，不能再被其他飞书会话共享；更精确的 runtime 词汇与拒绝规则见 `docs/contracts/runtime-control-surface.zh-CN.md`
 
 ## 5. 群命令与共享状态规则
@@ -92,13 +92,13 @@
 - 群里的所有 `/` 命令都只给管理员
 - 群聊 `assistant` 和 `mention-only` 工作态下，管理员群命令本身也必须先显式 mention 触发对象
 - 群聊 `all` 工作态下，管理员可直接发送群命令
-- 这里的“群命令”既包括群聊专属命令（如 `/group`、`/groupmode`），也包括在群上下文里触发的通用 Feishu 命令（如 `/status`、`/unsubscribe`、`/reset-backend`）
+- 这里的“群命令”既包括群聊专属命令（如 `/group`、`/group-mode`），也包括在群上下文里触发的通用 Feishu 命令（如 `/status`、`/release-runtime`、`/reset-backend`）
 - 群命令不会写入 `assistant` 上下文日志，也不会推进上下文边界
 - 会改变共享状态的命令和设置继续严格 admin-only，包括：
   - `/new`
-  - `/session`
+  - `/threads`
   - `/resume`
-  - `/unsubscribe`
+  - `/release-runtime`
   - `/reset-backend`
   - `/profile`
   - `/approval`

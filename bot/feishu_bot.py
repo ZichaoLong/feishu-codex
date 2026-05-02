@@ -94,7 +94,7 @@ _DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES = {"image", "file", "audio", "media"}
 _UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES = {"folder", "sticker"}
 _ATTACHMENT_MESSAGE_TYPES = _DOWNLOADABLE_ATTACHMENT_MESSAGE_TYPES | _UNSUPPORTED_ATTACHMENT_MESSAGE_TYPES
 # 普通非管理员私聊默认拒绝；仅保留显式 bootstrap / identity 命令作为例外。
-_NON_ADMIN_P2P_BOOTSTRAP_COMMANDS = frozenset({"/whoami", "/whoareyou", "/init"})
+_NON_ADMIN_P2P_BOOTSTRAP_COMMANDS = frozenset({"/whoami", "/bot-status", "/init"})
 
 
 def _non_negative_int(value: Any, default: int) -> int:
@@ -857,7 +857,7 @@ class FeishuBot(ABC):
         self._forward_aggregator.on_forward_timeout(sender_id, chat_id)
 
     def _fetch_bot_open_id(self) -> Optional[str]:
-        """调用飞书 API 获取机器人自身的 open_id，仅供 `/whoareyou` 之类的显式探测使用。"""
+        """调用飞书 API 获取机器人自身的 open_id，仅供 `/bot-status` 之类的显式探测使用。"""
         try:
             req = lark.BaseRequest.builder() \
                 .http_method(lark.HttpMethod.GET) \
@@ -896,7 +896,7 @@ class FeishuBot(ABC):
                 logger.error(
                     "未配置 `system.yaml.bot_open_id`，群聊显式 mention 触发已严格失败。"
                     "如需自动写入，可私聊机器人执行 `/init <token>`；"
-                    "如需人工诊断，可先执行 `/whoareyou`。"
+                    "如需人工诊断，可先执行 `/bot-status`。"
                 )
                 self._bot_open_id_error_logged = True
             return False
@@ -1238,7 +1238,7 @@ class FeishuBot(ABC):
                             "- 检查应用是否已开通 `im:message.group_msg`、`im:message:readonly`\n"
                             "- 检查群消息历史是否对机器人可见\n"
                             "- 检查飞书 API / 网络是否异常\n"
-                            "- 如需先继续使用群聊，可临时显式 mention 触发对象后执行 `/groupmode mention-only`"
+                            "- 如需先继续使用群聊，可临时显式 mention 触发对象后执行 `/group-mode mention-only`"
                         ),
                     }
                 ]

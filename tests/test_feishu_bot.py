@@ -471,7 +471,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("仅支持管理员私聊使用", bot.replies[-1][1])
 
     def test_non_admin_p2p_bootstrap_commands_are_forwarded(self) -> None:
-        for text in ("/whoami", "/whoareyou", "/init secret-1"):
+        for text in ("/whoami", "/bot-status", "/init secret-1"):
             with self.subTest(text=text):
                 bot = self._make_bot()
 

@@ -27,7 +27,7 @@ This document only defines the group-chat contract.
 It does not redefine:
 
 - p2p thread lifecycle
-- the shared state vocabulary for `/status`, `/unsubscribe`, and the local
+- the shared state vocabulary for `/status`, `/release-runtime`, and the local
   admin surface
 - `fcodex` wrapper semantics
 
@@ -68,7 +68,7 @@ Those remain owned by their dedicated documents.
 ## 4. Group Modes
 
 - strict explicit-mention matching depends on `system.yaml.bot_open_id`
-- realtime discovery from `/whoareyou` and `/init` is only for diagnostics and
+- realtime discovery from `/bot-status` and `/init` is only for diagnostics and
   bootstrap; it does not replace the runtime value read from
   `system.yaml.bot_open_id`
 - if `system.yaml.trigger_open_ids` is configured, mentions that hit those
@@ -105,7 +105,7 @@ Those remain owned by their dedicated documents.
 - backend input is passed through like p2p by default: no history context and
   no extra `group turn` wrapper
 - has the highest spam risk
-- `/groupmode all` must reject when the currently bound thread is already
+- `/group-mode all` must reject when the currently bound thread is already
   shared by other Feishu chats
 - once a group is in `all` mode, that thread enters the `all`-mode thread
   exclusivity rule and must not be shared with other Feishu chats; for the
@@ -119,16 +119,16 @@ Those remain owned by their dedicated documents.
   explicitly mention a trigger target first
 - in group `all`, admins can send group commands directly
 - "group commands" here includes both group-specific commands such as
-  `/group` and `/groupmode`, and generic Feishu commands triggered from a group
-  context such as `/status`, `/unsubscribe`, and `/reset-backend`
+  `/group` and `/group-mode`, and generic Feishu commands triggered from a group
+  context such as `/status`, `/release-runtime`, and `/reset-backend`
 - group commands do not enter the `assistant` context log and do not advance
   the assistant boundary
 - commands and settings that mutate shared state remain strictly admin-only,
   including:
   - `/new`
-  - `/session`
+  - `/threads`
   - `/resume`
-  - `/unsubscribe`
+  - `/release-runtime`
   - `/reset-backend`
   - `/profile`
   - `/approval`

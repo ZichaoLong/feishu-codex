@@ -34,7 +34,7 @@ from bot.binding_runtime_manager import BindingRuntimeManager, ResolvedRuntimeBi
 from bot.config import load_config_file
 from bot.constants import (
     DEFAULT_HISTORY_PREVIEW_ROUNDS,
-    DEFAULT_SESSION_RECENT_LIMIT,
+    DEFAULT_THREADS_INITIAL_LIMIT,
     DEFAULT_STREAM_PATCH_INTERVAL_MS,
     DEFAULT_THREAD_LIST_QUERY_LIMIT,
     GROUP_SHARED_BINDING_OWNER_ID,
@@ -49,7 +49,7 @@ from bot.stores.instance_registry_store import InstanceRegistryStore, build_inst
 from bot.codex_protocol.client import CodexRpcError
 from bot.codex_group_domain import CodexGroupDomain, GroupDomainPorts
 from bot.codex_help_domain import CodexHelpDomain
-from bot.codex_session_ui_domain import CodexSessionUiDomain, SessionUiRuntimePorts
+from bot.codex_threads_ui_domain import CodexThreadsUiDomain, ThreadsUiRuntimePorts
 from bot.codex_settings_domain import CodexSettingsDomain, SettingsDomainPorts
 from bot.profile_resolution import DefaultProfileResolution, resolve_local_default_profile
 from bot.reason_codes import ReasonedCheck
@@ -85,7 +85,7 @@ from bot.runtime_state import (
 )
 from bot.runtime_view import RuntimeView
 from bot.service_control_plane import ServiceControlPlane
-from bot.session_resolution import (
+from bot.thread_resolution import (
     list_current_dir_threads,
     list_global_threads,
     looks_like_thread_id,
@@ -190,7 +190,7 @@ class CodexHandler(BotHandler):
         self._default_working_dir = resolve_working_dir(
             str(cfg.get("default_working_dir", "")),
         )
-        self._session_recent_limit = int(cfg.get("session_recent_limit", DEFAULT_SESSION_RECENT_LIMIT))
+        self._threads_initial_limit = int(cfg.get("threads_initial_limit", DEFAULT_THREADS_INITIAL_LIMIT))
         self._thread_list_query_limit = int(cfg.get("thread_list_query_limit", DEFAULT_THREAD_LIST_QUERY_LIMIT))
         self._history_preview_rounds = int(cfg.get("history_preview_rounds", DEFAULT_HISTORY_PREVIEW_ROUNDS))
         self._stream_patch_interval_ms = int(
@@ -380,9 +380,9 @@ class CodexHandler(BotHandler):
         self._help_domain = CodexHelpDomain(
             local_thread_safety_rule=_LOCAL_THREAD_SAFETY_RULE,
         )
-        self._session_ui_domain = CodexSessionUiDomain(
+        self._threads_ui_domain = CodexThreadsUiDomain(
             self,
-            runtime_ports=SessionUiRuntimePorts(
+            runtime_ports=ThreadsUiRuntimePorts(
                 submit_to_runtime=self._runtime_submit,
                 resume_thread_on_runtime=self._resume_thread_on_runtime,
             ),
@@ -528,7 +528,7 @@ class CodexHandler(BotHandler):
             is_group_admin_actor=self._is_group_admin_actor,
             is_group_turn_actor=self._is_group_turn_actor,
             is_group_request_actor_or_admin=self._is_group_request_actor_or_admin,
-            handle_rename_form_fallback=self._session_ui_domain.handle_rename_form_fallback,
+            handle_rename_form_fallback=self._threads_ui_domain.handle_rename_form_fallback,
             handle_user_input_form_fallback=self._handle_user_input_form_fallback,
         )
         self._inbound_surface.install_routes(
@@ -1320,8 +1320,8 @@ class CodexHandler(BotHandler):
                     message_id=message_id,
                 ),
             ),
-            "/unsubscribe": CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._handle_unsubscribe_command(
+            "/release-runtime": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._handle_release_runtime_command(
                     sender_id,
                     chat_id,
                     arg,
@@ -1335,8 +1335,8 @@ class CodexHandler(BotHandler):
                 scope="p2p",
                 scope_denied_text="请私聊机器人执行 `/whoami`。",
             ),
-            "/whoareyou": CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_botinfo_command(
+            "/bot-status": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_bot_status_command(
                     chat_id, message_id=message_id
                 ),
             ),
@@ -1362,13 +1362,13 @@ class CodexHandler(BotHandler):
                     text=self._cancel_current_turn(sender_id, chat_id, message_id=message_id)[1],
                 ),
             ),
-            "/session": CommandRoute(
+            "/threads": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: (
                     CommandResult(
-                        text="用法：`/session`\n说明：该命令不接受额外参数；发送 `/help thread` 查看线程相关操作。"
+                        text="用法：`/threads`\n说明：该命令不接受额外参数；发送 `/help thread` 查看线程相关操作。"
                     )
                     if arg.strip()
-                    else self._session_ui_domain.handle_session_command(
+                    else self._threads_ui_domain.handle_threads_command(
                         sender_id,
                         chat_id,
                         message_id=message_id,
@@ -1376,13 +1376,13 @@ class CodexHandler(BotHandler):
                 ),
             ),
             "/resume": CommandRoute(
-                handler=self._session_ui_domain.handle_resume_command,
+                handler=self._threads_ui_domain.handle_resume_command,
             ),
-            "/rm": CommandRoute(
-                handler=self._session_ui_domain.handle_rm_command,
+            "/archive": CommandRoute(
+                handler=self._threads_ui_domain.handle_archive_command,
             ),
             "/rename": CommandRoute(
-                handler=self._session_ui_domain.handle_rename_command,
+                handler=self._threads_ui_domain.handle_rename_command,
             ),
             "/approval": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_approval_command(
@@ -1399,13 +1399,13 @@ class CodexHandler(BotHandler):
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/mode": CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_mode_command(
+            "/collab-mode": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_collab_mode_command(
                     sender_id, chat_id, arg, message_id=message_id
                 ),
             ),
-            "/groupmode": CommandRoute(
-                handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_groupmode_command(
+            "/group-mode": CommandRoute(
+                handler=lambda sender_id, chat_id, arg, message_id: self._group_domain.handle_group_mode_command(
                     chat_id,
                     arg,
                     sender_id,
@@ -1433,19 +1433,19 @@ class CodexHandler(BotHandler):
                 group_guard="turn_actor",
             ),
             "resume_thread": ActionRoute(
-                handler=self._session_ui_domain.handle_resume_thread_action,
+                handler=self._threads_ui_domain.handle_resume_thread_action,
                 group_guard="group_admin",
             ),
-            "show_more_sessions": ActionRoute(
-                handler=self._session_ui_domain.handle_show_more_sessions_action,
+            "show_more_threads": ActionRoute(
+                handler=self._threads_ui_domain.handle_show_more_threads_action,
                 group_guard="group_admin",
             ),
-            "close_sessions_card": ActionRoute(
-                handler=self._session_ui_domain.handle_close_sessions_card_action,
+            "close_threads_card": ActionRoute(
+                handler=self._threads_ui_domain.handle_close_threads_card_action,
                 group_guard="group_admin",
             ),
-            "reopen_sessions_card": ActionRoute(
-                handler=self._session_ui_domain.handle_reopen_sessions_card_action,
+            "reopen_threads_card": ActionRoute(
+                handler=self._threads_ui_domain.handle_reopen_threads_card_action,
                 group_guard="group_admin",
             ),
             "show_help_page": ActionRoute(
@@ -1458,19 +1458,19 @@ class CodexHandler(BotHandler):
                 handler=self._inbound_surface.handle_help_submit_command_action,
             ),
             "archive_thread": ActionRoute(
-                handler=self._session_ui_domain.handle_archive_thread_action,
+                handler=self._threads_ui_domain.handle_archive_thread_action,
                 group_guard="group_admin",
             ),
             "show_rename_form": ActionRoute(
-                handler=self._session_ui_domain.handle_show_rename_action,
+                handler=self._threads_ui_domain.handle_show_rename_action,
                 group_guard="group_admin",
             ),
             "rename_thread": ActionRoute(
-                handler=self._session_ui_domain.handle_rename_submit_action,
+                handler=self._threads_ui_domain.handle_rename_submit_action,
                 group_guard="group_admin",
             ),
             "cancel_rename": ActionRoute(
-                handler=self._session_ui_domain.handle_cancel_rename_action,
+                handler=self._threads_ui_domain.handle_cancel_rename_action,
                 group_guard="group_admin",
             ),
             "set_approval_policy": ActionRoute(
@@ -1761,7 +1761,7 @@ class CodexHandler(BotHandler):
         binding = self._chat_binding_key(sender_id, chat_id, message_id)
         return self._runtime_admin.handle_preflight_command(binding, arg)
 
-    def _handle_unsubscribe_command(
+    def _handle_release_runtime_command(
         self,
         sender_id: str,
         chat_id: str,
@@ -1770,7 +1770,7 @@ class CodexHandler(BotHandler):
         message_id: str = "",
     ) -> CommandResult:
         binding = self._chat_binding_key(sender_id, chat_id, message_id)
-        return self._runtime_admin.handle_unsubscribe_command(binding, arg)
+        return self._runtime_admin.handle_release_runtime_command(binding, arg)
 
     def _unsubscribe_feishu_runtime_by_thread_id(self, thread_id: str) -> dict[str, Any]:
         return self._runtime_admin.unsubscribe_feishu_runtime_by_thread_id(thread_id)
@@ -1801,8 +1801,8 @@ class CodexHandler(BotHandler):
     def _interrupt_running_turn(self, *, thread_id: str, turn_id: str) -> None:
         self._adapter.interrupt_turn(thread_id=thread_id, turn_id=turn_id)
 
-    def _refresh_sessions_card_message(self, sender_id: str, chat_id: str, message_id: str) -> None:
-        self._session_ui_domain.refresh_sessions_card_message(sender_id, chat_id, message_id)
+    def _refresh_threads_card_message(self, sender_id: str, chat_id: str, message_id: str) -> None:
+        self._threads_ui_domain.refresh_threads_card_message(sender_id, chat_id, message_id)
 
     def _handle_approval_card_action(self, action_value: dict) -> P2CardActionTriggerResponse:
         return self._interaction_requests.handle_approval_card_action(action_value)
@@ -1819,7 +1819,7 @@ class CodexHandler(BotHandler):
         original_arg: str | None = None,
         summary: ThreadSummary | None = None,
         message_id: str = "",
-        refresh_session_message_id: str = "",
+        refresh_threads_message_id: str = "",
     ) -> None:
         state = self._get_runtime_state(sender_id, chat_id, message_id)
         all_mode_exclusivity_violation = self._thread_access_policy.all_mode_thread_exclusivity_violation(
@@ -1829,8 +1829,8 @@ class CodexHandler(BotHandler):
         )
         if all_mode_exclusivity_violation:
             self._reply_text(chat_id, all_mode_exclusivity_violation, message_id=message_id)
-            if refresh_session_message_id:
-                self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
+            if refresh_threads_message_id:
+                self._refresh_threads_card_message(sender_id, chat_id, refresh_threads_message_id)
             return
         try:
             snapshot = self._resume_snapshot_by_id(
@@ -1841,18 +1841,18 @@ class CodexHandler(BotHandler):
         except Exception as exc:
             logger.exception("恢复线程失败")
             self._reply_text(chat_id, f"恢复线程失败：{exc}", message_id=message_id)
-            if refresh_session_message_id:
-                self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
+            if refresh_threads_message_id:
+                self._refresh_threads_card_message(sender_id, chat_id, refresh_threads_message_id)
             return
         with self._lock:
             if state["running"]:
                 self._reply_text(chat_id, "当前线程仍在执行，暂不切换。", message_id=message_id)
-                if refresh_session_message_id:
-                    self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
+                if refresh_threads_message_id:
+                    self._refresh_threads_card_message(sender_id, chat_id, refresh_threads_message_id)
                 return
         self._bind_thread(sender_id, chat_id, snapshot.summary, message_id=message_id)
-        if refresh_session_message_id:
-            self._refresh_sessions_card_message(sender_id, chat_id, refresh_session_message_id)
+        if refresh_threads_message_id:
+            self._refresh_threads_card_message(sender_id, chat_id, refresh_threads_message_id)
         summary = (
             f"**已切换到线程**\n"
             f"thread：`{snapshot.summary.thread_id[:8]}…`\n"

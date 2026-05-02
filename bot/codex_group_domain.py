@@ -88,7 +88,7 @@ class CodexGroupDomain:
             can_manage=self._ports.is_group_admin(open_id),
         )
 
-    def handle_groupmode_command(
+    def handle_group_mode_command(
         self,
         chat_id: str,
         arg: str,

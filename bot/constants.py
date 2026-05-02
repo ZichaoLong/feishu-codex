@@ -13,7 +13,7 @@ BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 BOT_DIR = pathlib.Path(__file__).parent
 
 DEFAULT_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer"]
-DEFAULT_SESSION_RECENT_LIMIT = 5
+DEFAULT_THREADS_INITIAL_LIMIT = 5
 DEFAULT_THREAD_LIST_QUERY_LIMIT = 100
 DEFAULT_HISTORY_PREVIEW_ROUNDS = 3
 DEFAULT_STREAM_PATCH_INTERVAL_MS = 700

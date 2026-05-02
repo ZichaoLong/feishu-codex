@@ -15,7 +15,7 @@ from bot.constants import display_path
 from bot.env_file import load_env_file
 from bot.instance_resolution import list_running_instances, resolve_cli_instance_target, resolve_running_instance_app_server_url
 from bot.platform_paths import default_data_root
-from bot.session_resolution import list_current_dir_threads, list_global_threads
+from bot.thread_resolution import list_current_dir_threads, list_global_threads
 from bot.service_control_plane import ServiceControlError, control_request
 from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_effective_app_server_url
 from bot.stores.service_instance_lease import ServiceInstanceLease

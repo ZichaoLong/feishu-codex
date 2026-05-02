@@ -22,7 +22,7 @@ from bot.instance_layout import DEFAULT_INSTANCE_NAME, global_data_dir, validate
 from bot.instance_resolution import CliRuntimeTarget, current_cli_instance_name, resolve_cli_runtime_target
 from bot.platform_paths import default_data_root, is_windows
 from bot.profile_resolution import resolve_local_default_profile_via_remote_backend
-from bot.session_resolution import (
+from bot.thread_resolution import (
     looks_like_thread_id,
     resolve_resume_name_via_remote_backend,
 )
@@ -56,10 +56,10 @@ _OPTIONS_WITH_VALUE = {
 
 _REMOVED_WRAPPER_COMMAND_HINTS = {
     "/help": "本地查看/管理请改用 `feishu-codexctl`；进入 TUI 后再使用 upstream `/help`。",
-    "/session": "本地看线程请改用 `feishu-codexctl thread list --scope cwd` 或 `feishu-codexctl thread list --scope global`。",
+    "/threads": "本地看线程请改用 `feishu-codexctl thread list --scope cwd` 或 `feishu-codexctl thread list --scope global`。",
     "/resume": "请改用 `fcodex resume <thread_id|thread_name>`。",
     "/profile": "请改用启动时显式传 `fcodex -p <profile>`。",
-    "/rm": "请在飞书侧用 `/rm`，或进入 Codex TUI 后使用 upstream `/rm`。",
+    "/archive": "请在飞书侧用 `/archive`，或进入 Codex TUI 后使用 upstream `/rm`。",
 }
 
 

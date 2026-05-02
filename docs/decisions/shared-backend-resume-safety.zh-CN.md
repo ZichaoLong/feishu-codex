@@ -5,8 +5,8 @@
 另见：
 
 - `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`：当前 shared backend 与 wrapper 的运行时模型
-- `docs/contracts/runtime-control-surface.zh-CN.md`：`/status`、`/unsubscribe` 与本地管理面的共享状态词汇
-- `docs/contracts/session-profile-semantics.zh-CN.md`：精确的命令与 wrapper 语义
+- `docs/contracts/runtime-control-surface.zh-CN.md`：`/status`、`/release-runtime` 与本地管理面的共享状态词汇
+- `docs/contracts/thread-profile-semantics.zh-CN.md`：精确的命令与 wrapper 语义
 - `docs/architecture/feishu-codex-design.zh-CN.md`：架构与仓库边界
 
 ## 1. 上游基线
@@ -161,7 +161,7 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 多实例模式不再额外引入一层 thread admission 过滤：
 
 - 所有实例都从同一套共享 persisted thread 命名空间解析目标
-- 飞书 `/session` 与 `feishu-codexctl thread list --scope cwd` 都是在这套命名空间上的当前目录视图
+- 飞书 `/threads` 与 `feishu-codexctl thread list --scope cwd` 都是在这套命名空间上的当前目录视图
 - 但一旦真的要 live attach，所有路径仍统一服从 `ThreadRuntimeLease`
 
 ## 7. 来源展示与对称风险
@@ -225,6 +225,6 @@ shared backend 与 `fcodex` wrapper 具体如何实现，见 `docs/architecture/
 
 ## 9. 相关文档
 
-- `docs/contracts/session-profile-semantics.zh-CN.md`：`/session`、`/resume`、`fcodex` 与 profile 的精确命令语义
+- `docs/contracts/thread-profile-semantics.zh-CN.md`：`/threads`、`/resume`、`fcodex` 与 profile 的精确命令语义
 - `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`：shared backend、动态端口发现、cwd 代理与 wrapper 运行时行为
 - `docs/architecture/feishu-codex-design.zh-CN.md`：架构、设计约束与当前仓库结构

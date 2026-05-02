@@ -13,7 +13,7 @@ This document explains the implementation model behind:
 
 See also:
 
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 - `docs/decisions/shared-backend-resume-safety.md`
 - `docs/architecture/feishu-codex-design.md`
 
@@ -193,7 +193,7 @@ By default:
 
 Here "shared backend" always means the selected instance backend.
 The shell layer no longer exposes wrapper slash commands such as
-`fcodex /session`; local thread discovery now belongs to
+`fcodex /threads`; local thread discovery now belongs to
 `feishu-codexctl thread list`.
 
 ## 9. Explicit `--remote` Is a Special Case
@@ -252,7 +252,7 @@ safe.
 
 Inside the TUI, `/resume` picker behavior remains upstream and may differ from:
 
-- Feishu `/session`
+- Feishu `/threads`
 - `feishu-codexctl thread list`
 - `fcodex resume <thread_name>`
 
@@ -274,4 +274,4 @@ Relevant implementation files:
   - `bot/codex_handler.py`
   - `bot/adapters/codex_app_server.py`
 - shared discovery logic:
-  - `bot/session_resolution.py`
+  - `bot/thread_resolution.py`

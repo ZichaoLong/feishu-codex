@@ -13,13 +13,13 @@ It answers five questions:
 - what `/status` is actually describing
 - what `/preflight` may dry-run and must not mutate
 - what Feishu `/reset-backend` may reset and what it must not overwrite
-- what `/unsubscribe` releases and does not release
+- what `/release-runtime` releases and does not release
 - why local runtime-release actions must go through the running `feishu-codex` service rather than directly calling app-server from a separate CLI connection
 
 See also:
 
 - `docs/contracts/feishu-thread-lifecycle.md`
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 - `docs/decisions/shared-backend-resume-safety.md`
 
 ## 1. Upstream Baseline
@@ -172,7 +172,7 @@ The table below is authoritative for Feishu-facing state transitions.
 | `unbound` | `not-applicable` | any | `/resume <thread>` | target resolved and allowed | `bound` | `attached` | usually `idle` | Binds the chat to the resumed thread |
 | `bound` | `attached` | `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Acquires the interaction owner for the turn |
 | `bound` | `attached` | `active` | turn terminal event | none | `bound` | `attached` | usually `idle` | Clears the interaction owner; binding and attachment remain |
-| `bound` | `attached` | `idle` or `active` | `/unsubscribe` | no Feishu in-flight turn and no pending Feishu approval / input | `bound` | `released` | `notLoaded`, `idle`, or `active` | Unsubscribe releases Feishu residency across the whole running service |
+| `bound` | `attached` | `idle` or `active` | `/release-runtime` | no Feishu in-flight turn and no pending Feishu approval / input | `bound` | `released` | `notLoaded`, `idle`, or `active` | `/release-runtime` releases Feishu residency across the whole running service |
 | `bound` | `released` | `notLoaded` or `idle` | ordinary prompt | prompt preflight passes | `bound` | `attached` | `active` | Feishu reattaches / resumes first, then starts the turn; accepted here also means machine-global live-runtime admission passes |
 | `bound` | `released` | any | ordinary prompt | prompt preflight denied | unchanged | unchanged | unchanged | Pure reject: no resume, no subscriber add, no `released -> attached` flip |
 | `bound` | `attached` or `released` | any | `/new` or `/resume <other>` | accepted | `bound` to another thread | `attached` | usually `idle` | Replaces the current binding with the new target |
@@ -190,7 +190,7 @@ The table below is authoritative for Feishu-facing state transitions.
   The path must also pass machine-global live-runtime admission:
   if another instance still owns `ThreadRuntimeLease` and cannot release it
   immediately, the prompt must be a pure reject.
-- Releasing Feishu runtime drops Feishu residency and clears the interaction owner when Feishu currently owns it, but
+- `/release-runtime` drops Feishu residency and clears the interaction owner when Feishu currently owns it, but
   it does not erase the chat's binding bookmark.
 
 ## 4. `/status` Contract
@@ -221,7 +221,7 @@ be rendered directly by Feishu `/status`:
 - `backend running turn`
 - `interaction owner`
 - `re-profile possible`
-- whether `/unsubscribe` is currently allowed
+- whether `/release-runtime` is currently allowed
 - whether the next ordinary prompt would currently be accepted or blocked
 
 Those details should be obtained through:
@@ -255,7 +255,7 @@ it must not:
 - clear or write local profile state
 
 It reuses the same prompt preflight checks as ordinary prompts and the same
-availability checks as `/unsubscribe`. When it renders a deny /
+availability checks as `/release-runtime`. When it renders a deny /
 blocked result, it may expose the same stable `reason_code` plus human-facing
 text.
 
@@ -318,11 +318,11 @@ It must not overwrite:
 - thread-wise profile / provider state
 - other persisted user configuration or data
 
-## 5. Exact Contract of `/unsubscribe`
+## 5. Exact Contract of `/release-runtime`
 
 ### 5.1 Scope
 
-Feishu `/unsubscribe`:
+Feishu `/release-runtime`:
 
 - takes no arguments
 - targets the current chat’s bound thread
@@ -342,7 +342,7 @@ On success it:
 - keeps all Feishu bindings that point to that thread
 - clears the Feishu interaction owner for that thread when Feishu currently owns it
 - flips all still-`attached` Feishu bindings on that thread to `released`
-- makes the running `feishu-codex` service unsubscribe its own app-server connection from that thread
+- makes the running `feishu-codex` service release its own app-server connection from that thread via `thread/unsubscribe`
 
 ### 5.3 What it does not do
 
@@ -390,7 +390,7 @@ the next ordinary prompt in that chat:
 
 This document owns the runtime-admission and pure-reject rule only.
 If the accepted path hits an unloaded thread, profile / provider resolution is
-owned by `docs/contracts/session-profile-semantics.md`.
+owned by `docs/contracts/thread-profile-semantics.md`.
 
 ## 6. Local Admin Surface: `feishu-codexctl`
 
@@ -491,7 +491,7 @@ especially for:
 The formal contract is:
 
 - this is a `binding`-layer action, not a `thread runtime` action
-- it is not the same thing as `/unsubscribe`
+- it is not the same thing as `/release-runtime`
 - its formal surface belongs to `feishu-codexctl`
 
 So the formal admin surface is:
@@ -510,12 +510,12 @@ They do not mean:
 
 - delete a Codex thread
 - archive a thread
-- replace `/unsubscribe`
+- replace `/release-runtime`
 - replace thread-level admin commands
 
 The distinction is intentional:
 
-- `/unsubscribe`
+- `/release-runtime`
   - releases Feishu runtime residency for a thread
   - does not clear the binding bookmark
 - `binding clear/clear-all`
@@ -601,7 +601,7 @@ In multi-instance mode, `feishu-codexctl` deliberately splits into two scopes:
 The formal contract for multi-instance thread visibility is:
 
 - `default` and named instances share the same persisted thread namespace
-- Feishu `/session` and `feishu-codexctl thread list --scope cwd` are
+- Feishu `/threads` and `feishu-codexctl thread list --scope cwd` are
   current-directory views over that namespace
 - Feishu `/resume`, `fcodex resume <thread_name>`, and thread-targeted control
   plane commands resolve against the same global persisted thread set

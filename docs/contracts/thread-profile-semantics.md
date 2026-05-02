@@ -1,6 +1,6 @@
-# Session, Resume, and Profile Semantics
+# Threads, Resume, and Profile Semantics
 
-Chinese original: `docs/contracts/session-profile-semantics.zh-CN.md`
+Chinese original: `docs/contracts/thread-profile-semantics.zh-CN.md`
 
 See also:
 
@@ -18,7 +18,7 @@ If older docs still describe `fcodex` shell slash self-commands, this document w
 
 ## 1. Feishu Semantics
 
-### `/session`
+### `/threads`
 
 - scope: current directory
 - provider behavior: cross-provider aggregation
@@ -62,7 +62,7 @@ If older docs still describe `fcodex` shell slash self-commands, this document w
 - exists so operators can clear stale loaded / pending runtime state even when
   they are not currently changing a thread profile
 
-### `/unsubscribe`
+### `/release-runtime`
 
 - target: the thread currently bound by the chat
 - releases Feishu-side runtime residency on that thread
@@ -83,9 +83,9 @@ The repository-specific surface it still owns is limited to:
 That means shell-level support is removed for:
 
 - `fcodex /help`
-- `fcodex /session`
+- `fcodex /threads`
 - `fcodex /profile`
-- `fcodex /rm`
+- `fcodex /archive`
 - `fcodex /resume`
 - `fcodex --dry-run ...`
 
@@ -114,7 +114,9 @@ That means shell-level support is removed for:
   - then resume it
 - otherwise:
   - reject directly
-  - tell the user to `unsubscribe` and close any other open `fcodex` TUIs on that thread
+  - tell the user to run Feishu `/release-runtime` or local
+    `feishu-codexctl thread unsubscribe`
+  - and close any other open `fcodex` TUIs on that thread
 
 ### `fcodex resume <thread>` without explicit `-p`
 
@@ -174,6 +176,6 @@ The active model is:
 ## 5. Multi-Instance Visibility
 
 - all instances share one persisted thread namespace
-- Feishu `/session` and `feishu-codexctl thread list --scope cwd` are current-directory views over that namespace
+- Feishu `/threads` and `feishu-codexctl thread list --scope cwd` are current-directory views over that namespace
 - Feishu `/resume`, `fcodex resume <thread_name>`, and thread-targeted local admin commands resolve against the same global persisted thread set
 - runtime-lease routing and transfer safety are defined in `docs/decisions/shared-backend-resume-safety.md`

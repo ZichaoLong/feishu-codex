@@ -5,8 +5,8 @@ See also:
 - `docs/architecture/fcodex-shared-backend-runtime.md` for the current shared-backend and
   wrapper runtime model
 - `docs/contracts/runtime-control-surface.md` for the shared state vocabulary used by
-  `/status`, `/unsubscribe`, and the local admin surface
-- `docs/contracts/session-profile-semantics.md` for exact command and wrapper semantics
+  `/status`, `/release-runtime`, and the local admin surface
+- `docs/contracts/thread-profile-semantics.md` for exact command and wrapper semantics
 - `docs/architecture/feishu-codex-design.md` for architecture and repository boundaries
 
 ## 1. Upstream Baseline
@@ -200,7 +200,7 @@ a UI-enforced guard.
 Multi-instance mode no longer adds a separate thread-admission filter:
 
 - all instances resolve persisted threads from the same shared namespace
-- Feishu `/session` and `feishu-codexctl thread list --scope cwd` are
+- Feishu `/threads` and `feishu-codexctl thread list --scope cwd` are
   current-directory views over that namespace
 - once a path actually wants live runtime residency, all of them still obey
   the same `ThreadRuntimeLease`
@@ -279,7 +279,7 @@ So the decision at this layer is:
 
 ## 9. Related Documents
 
-- `docs/contracts/session-profile-semantics.md`: exact command semantics for `/session`,
+- `docs/contracts/thread-profile-semantics.md`: exact command semantics for `/threads`,
   `/resume`, `fcodex`, and profile handling
 - `docs/architecture/fcodex-shared-backend-runtime.md`: shared backend, dynamic port
   discovery, cwd proxy, and wrapper runtime behavior

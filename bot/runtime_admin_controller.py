@@ -629,9 +629,9 @@ class RuntimeAdminController:
             toast_type="success",
         )
 
-    def handle_unsubscribe_command(self, binding: ChatBindingKey, arg: str) -> CommandResult:
+    def handle_release_runtime_command(self, binding: ChatBindingKey, arg: str) -> CommandResult:
         if str(arg or "").strip():
-            return CommandResult(text="用法：`/unsubscribe`")
+            return CommandResult(text="用法：`/release-runtime`")
         snapshot = self.binding_status_snapshot(binding)
         thread_id = str(snapshot["thread_id"] or "").strip()
         if not thread_id:
@@ -655,7 +655,7 @@ class RuntimeAdminController:
             body.append("说明：Feishu 已释放自己对该 thread 的 runtime 持有；绑定关系仍保留，之后可继续 resume。")
         return CommandResult(
             card=build_markdown_card(
-                "Codex 已取消 Feishu 订阅",
+                "Codex 已释放 Feishu Runtime",
                 "\n".join(body),
                 template="green" if result["changed"] else "blue",
             )

@@ -38,15 +38,15 @@ _SHARED_COMMAND_SPECS = (
         feishu_summary="预览并重置当前实例 backend。",
     ),
     SharedCommandSpec(
-        key="rm",
-        slash_name="/rm",
-        feishu_usage="/rm [thread_id|thread_name]",
+        key="archive",
+        slash_name="/archive",
+        feishu_usage="/archive [thread_id|thread_name]",
         feishu_summary="归档当前线程或指定线程。",
     ),
     SharedCommandSpec(
-        key="session",
-        slash_name="/session",
-        feishu_usage="/session",
+        key="threads",
+        slash_name="/threads",
+        feishu_usage="/threads",
         feishu_summary="查看当前目录线程。",
     ),
     SharedCommandSpec(
@@ -62,9 +62,9 @@ _SHARED_COMMAND_SPECS = (
         feishu_summary="恢复指定线程。",
     ),
     SharedCommandSpec(
-        key="unsubscribe",
-        slash_name="/unsubscribe",
-        feishu_usage="/unsubscribe",
+        key="release-runtime",
+        slash_name="/release-runtime",
+        feishu_usage="/release-runtime",
         feishu_summary="释放当前绑定 thread 的 Feishu runtime 附着。",
     ),
 )

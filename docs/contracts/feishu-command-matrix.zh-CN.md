@@ -5,7 +5,7 @@
 另见：
 
 - `docs/contracts/feishu-help-navigation.zh-CN.md`
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 - `docs/contracts/runtime-control-surface.zh-CN.md`
 - `docs/contracts/group-chat-contract.zh-CN.md`
 
@@ -31,8 +31,8 @@
 本文不重新定义：
 
 - 线程生命周期
-- `/status`、`/preflight`、`/unsubscribe` 的底层状态语义
-- `/session`、`/resume`、`/profile` 的线程语义
+- `/status`、`/preflight`、`/release-runtime` 的底层状态语义
+- `/threads`、`/resume`、`/profile` 的线程语义
 - 进入 `fcodex` TUI 后的 upstream Codex 命令
 
 这些内容分别以相关专题文档为准。
@@ -84,15 +84,15 @@
 | `/h` | `/help` 的文字别名 | 否 | 仅管理员 | 仅管理员 | 无 | 无 |
 | `/pwd` | 查看当前工作目录 | 否 | 仅管理员 | 仅管理员 | 无 | 无 |
 | `/status` | 查看当前 chat binding 的简明状态摘要 | 是；`/help -> chat` | 仅管理员 | 仅管理员 | 无 | `feishu-codexctl binding status <binding_id>` 可看更细状态；`feishu-codex` 无对应 |
-| `/preflight` | dry-run 下一条普通消息与 `unsubscribe` 可用性 | 是；`/help -> chat` | 仅管理员 | 仅管理员 | 无 | 无一条完全等价命令；`feishu-codexctl binding status <binding_id>` 可看更细诊断 |
+| `/preflight` | dry-run 下一条普通消息与 `/release-runtime` 可用性 | 是；`/help -> chat` | 仅管理员 | 仅管理员 | 无 | 无一条完全等价命令；`feishu-codexctl binding status <binding_id>` 可看更细诊断 |
 | `/cd [path]` | 无参数时显示当前目录；有参数时切目录并清空当前线程绑定 | 是；`/help -> chat` 表单 | 仅管理员 | 仅管理员 | help 表单提交 | 无 |
 | `/new` | 立即创建新 thread，并切到当前 chat binding | 是；`/help -> thread` | 仅管理员 | 仅管理员 | 无 | 无 |
-| `/session` | 查看当前目录线程列表 | 是；`/help -> thread` | 仅管理员 | 仅管理员 | 列表卡按钮：`恢复/当前`、`归档`、`更多`、`收起`、`展开会话列表` | `feishu-codexctl thread list --scope cwd` 最接近；`feishu-codex` 无对应 |
-| `/resume <thread_id\|thread_name>` | 精确恢复指定 thread 到当前 chat | 是；`/help -> thread` 表单 | 仅管理员 | 仅管理员 | help 表单提交；`/session` 卡片中的 `恢复` 也走同一语义 | `feishu-codexctl` / `feishu-codex` 无对应；本地继续同一线程应使用 `fcodex resume <thread_id\|thread_name>` |
+| `/threads` | 查看当前目录线程列表 | 是；`/help -> thread` | 仅管理员 | 仅管理员 | 列表卡按钮：`恢复/当前`、`归档`、`更多`、`收起`、`展开线程列表` | `feishu-codexctl thread list --scope cwd` 最接近；`feishu-codex` 无对应 |
+| `/resume <thread_id\|thread_name>` | 精确恢复指定 thread 到当前 chat | 是；`/help -> thread` 表单 | 仅管理员 | 仅管理员 | help 表单提交；`/threads` 卡片中的 `恢复` 也走同一语义 | `feishu-codexctl` / `feishu-codex` 无对应；本地继续同一线程应使用 `fcodex resume <thread_id\|thread_name>` |
 | `/profile [name]` | 查看或切换当前绑定 thread 的 thread-wise resume profile | 是；`/help -> thread -> 当前线程` | 仅管理员 | 仅管理员 | profile 名按钮；必要时附带 `应用并重置 backend` / `强制应用并重置 backend` | `feishu-codexctl` / `feishu-codex` 无直接对应；本地相关入口是 `fcodex -p <profile>` |
 | `/rename <title>` | 重命名当前绑定 thread | 是；`/help -> thread -> 当前线程` 表单 | 仅管理员 | 仅管理员 | help 表单提交 | `feishu-codexctl` / `feishu-codex` 无对应 |
-| `/rm [thread_id\|thread_name]` | 归档当前 thread，或归档指定 thread | 是；`/help -> thread -> 当前线程`，也可经 `/session` 列表卡 | 仅管理员 | 仅管理员 | `/session` 列表卡里的 `归档`；当前线程页也可直接执行 `/rm` | `feishu-codexctl` / `feishu-codex` 无对应 |
-| `/unsubscribe` | 释放当前绑定 thread 的 Feishu runtime residency，但保留 binding | 否 | 仅管理员 | 仅管理员 | 无 | `feishu-codexctl thread unsubscribe --thread-id/--thread-name`；`feishu-codex` 无对应 |
+| `/archive [thread_id\|thread_name]` | 归档当前 thread，或归档指定 thread | 是；`/help -> thread -> 当前线程`，也可经 `/threads` 列表卡 | 仅管理员 | 仅管理员 | `/threads` 列表卡里的 `归档`；当前线程页也可直接执行 `/archive` | `feishu-codexctl` / `feishu-codex` 无对应 |
+| `/release-runtime` | 释放当前绑定 thread 的 Feishu runtime residency，但保留 binding | 否 | 仅管理员 | 仅管理员 | 无 | `feishu-codexctl thread unsubscribe --thread-id/--thread-name`；`feishu-codex` 无对应 |
 | `/cancel` | 停止当前执行中的 turn | 否 | 仅管理员 | 仅管理员 | 执行卡片内有主入口按钮 `取消执行` | 无 |
 
 ### 3.2 运行时与身份类
@@ -103,9 +103,9 @@
 | `/permissions [read-only\|default\|full-access]` | 同时设置审批策略与沙箱策略 | 是；`/help -> runtime` | 仅管理员 | 仅管理员 | `read-only`、`default`、`full-access` | 无 |
 | `/approval [untrusted\|on-request\|never]` | 单独设置审批策略 | 是；`/help -> runtime` | 仅管理员 | 仅管理员 | `untrusted`、`on-request`、`never` | 无 |
 | `/sandbox [read-only\|workspace-write\|danger-full-access]` | 单独设置沙箱策略 | 是；`/help -> runtime` | 仅管理员 | 仅管理员 | `read-only`、`workspace-write`、`danger-full-access` | 无 |
-| `/mode [default\|plan]` | 设置当前飞书会话后续 turn 的 Codex 协作模式 | 是；`/help -> runtime` | 仅管理员 | 仅管理员 | `default`、`plan` | 无 |
+| `/collab-mode [default\|plan]` | 设置当前飞书会话后续 turn 的 Codex 协作模式 | 是；`/help -> runtime` | 仅管理员 | 仅管理员 | `default`、`plan` | 无 |
 | `/whoami` | 查看自己的身份信息 | 是；`/help -> identity` | 任何人 | 不支持 | 无 | 无 |
-| `/whoareyou` | 查看机器人身份、配置值与实时探测结果 | 是；`/help -> identity` | 任何人 | 仅管理员 | 无 | 无 |
+| `/bot-status` | 查看机器人身份、配置值与实时探测结果 | 是；`/help -> identity` | 任何人 | 仅管理员 | 无 | 无 |
 | `/init <token>` | 初始化管理员与 `bot_open_id` | 是；`/help -> identity` 表单 | 任何人 | 不支持 | help 表单提交 | `feishu-codex config init-token` 只能查看 token，不等价于执行 `/init` |
 | `/debug-contact <open_id>` | 排查通讯录名字解析、缓存命中与 fallback 原因 | 否 | 仅管理员 | 不支持 | 无 | 无 |
 
@@ -116,10 +116,10 @@
 | `/group` | 查看当前群是否已激活 | 是；`/help -> group` | 不支持 | 仅管理员 | 状态卡中可出现 `激活当前群`、`停用当前群` | `feishu-codexctl` / `feishu-codex` 无对应 |
 | `/group activate` | 激活当前群聊 | 是；`/help -> group -> /group` 状态卡 | 不支持 | 仅管理员 | `/group` 卡片按钮 `激活当前群` | 无 |
 | `/group deactivate` | 停用当前群聊 | 是；`/help -> group -> /group` 状态卡 | 不支持 | 仅管理员 | `/group` 卡片按钮 `停用当前群` | 无 |
-| `/groupmode` | 查看当前群聊工作态 | 是；`/help -> group` | 不支持 | 仅管理员 | 状态卡中可出现工作态切换按钮 | 无 |
-| `/groupmode assistant` | 切到 `assistant` | 是；`/help -> group -> /groupmode` 状态卡 | 不支持 | 仅管理员 | `/groupmode` 卡片按钮 `assistant` | 无 |
-| `/groupmode all` | 切到 `all` | 是；`/help -> group -> /groupmode` 状态卡 | 不支持 | 仅管理员 | `/groupmode` 卡片按钮 `all` | 无 |
-| `/groupmode mention-only` | 切到 `mention-only` | 是；`/help -> group -> /groupmode` 状态卡 | 不支持 | 仅管理员 | `/groupmode` 卡片按钮 `mention-only` | 无 |
+| `/group-mode` | 查看当前群聊工作态 | 是；`/help -> group` | 不支持 | 仅管理员 | 状态卡中可出现工作态切换按钮 | 无 |
+| `/group-mode assistant` | 切到 `assistant` | 是；`/help -> group -> /group-mode` 状态卡 | 不支持 | 仅管理员 | `/group-mode` 卡片按钮 `assistant` | 无 |
+| `/group-mode all` | 切到 `all` | 是；`/help -> group -> /group-mode` 状态卡 | 不支持 | 仅管理员 | `/group-mode` 卡片按钮 `all` | 无 |
+| `/group-mode mention-only` | 切到 `mention-only` | 是；`/help -> group -> /group-mode` 状态卡 | 不支持 | 仅管理员 | `/group-mode` 卡片按钮 `mention-only` | 无 |
 
 ## 4. 刻意保留为纯文字命令的项目
 
@@ -128,7 +128,7 @@
 - `/h`
 - `/pwd`
 - `/cancel`
-- `/unsubscribe`
+- `/release-runtime`
 - `/debug-contact <open_id>`
 
 原因分别是：
@@ -136,7 +136,7 @@
 - `/h` 只是 `/help` 别名
 - `/pwd` 已基本被“无参数 `/cd`”覆盖
 - `/cancel` 的主入口是执行卡片里的 `取消执行`
-- `/unsubscribe` 已被刻意弱化；面向用户的主路径应优先走 `/profile`
+- `/release-runtime` 已被刻意弱化；面向用户的主路径应优先走 `/profile`
 - `/debug-contact` 是排障命令，不属于常用导航面
 
 ## 5. 非 slash、但属于一等用户表面的卡片动作
@@ -167,8 +167,8 @@
 因此，下列期待当前不成立：
 
 - 不能把 `feishu-codex status` 理解成飞书 `/status`
-- 不能把 `feishu-codexctl` 理解成飞书 `/session` 的等价 UI
-- 不能期待 `feishu-codex` 或 `feishu-codexctl` 提供飞书 `/new`、`/rename`、`/rm` 这类 chat-scoped 交互命令
+- 不能把 `feishu-codexctl` 理解成飞书 `/threads` 的等价 UI
+- 不能期待 `feishu-codex` 或 `feishu-codexctl` 提供飞书 `/new`、`/rename`、`/archive` 这类 chat-scoped 交互命令
 
 ## 7. 关联事实源
 
@@ -177,7 +177,7 @@
 - `bot/codex_handler.py`
 - `bot/inbound_surface_controller.py`
 - `bot/codex_help_domain.py`
-- `bot/codex_session_ui_domain.py`
+- `bot/codex_threads_ui_domain.py`
 - `bot/codex_settings_domain.py`
 - `bot/codex_group_domain.py`
 - `bot/cards.py`

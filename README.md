@@ -122,7 +122,7 @@
 | `im:message:readonly` | 读取消息详情 |
 | `im:message:send_as_bot` | 以应用身份发送文本和卡片 |
 | `im:message:update` | 更新执行中的卡片 |
-| `application:application:self_manage` | `/init`、`/whoareyou` 自动探测机器人身份 |
+| `application:application:self_manage` | `/init`、`/bot-status` 自动探测机器人身份 |
 | `contact:contact.base:readonly` | 解析用户名 |
 | `contact:user.base:readonly` | `/whoami`、群授权卡片、群上下文显示名字 |
 | `contact:user.employee_id:readonly` | `/whoami` 返回 `user_id` 供排障 |
@@ -357,15 +357,15 @@ feishu-codex purge
 - `/help`
 - `/status`
 - `/preflight`
-- `/session`
+- `/threads`
 - `/resume <thread_id|thread_name>`
 - `/new`
-- `/unsubscribe`
+- `/release-runtime`
 - `/cd <path>`、`/pwd`、`/cancel`
-- `/rename <title>`、`/rm [thread_id|thread_name]`
+- `/rename <title>`、`/archive [thread_id|thread_name]`
 - `/profile [name]`
-- `/permissions`、`/approval`、`/sandbox`、`/mode`
-- `/whoami`、`/whoareyou`、`/init <token>`
+- `/permissions`、`/approval`、`/sandbox`、`/collab-mode`
+- `/whoami`、`/bot-status`、`/init <token>`
 
 ### 群聊
 
@@ -389,10 +389,10 @@ feishu-codex purge
 @机器人 /group
 @机器人 /group activate
 @机器人 /group deactivate
-@机器人 /groupmode
-@机器人 /groupmode assistant
-@机器人 /groupmode mention-only
-@机器人 /groupmode all
+@机器人 /group-mode
+@机器人 /group-mode assistant
+@机器人 /group-mode mention-only
+@机器人 /group-mode all
 ```
 
 ### 本地继续与本地管理
@@ -416,7 +416,7 @@ fcodex -p <profile> resume <thread_id|thread_name>
 
 - `fcodex`、`fcodex <prompt>`、`fcodex resume <thread_id>` 仍是 upstream Codex CLI，只是默认连到 shared backend
 - `fcodex resume <thread_name>` 会做跨 provider 的精确名字匹配，再按 thread id 恢复
-- `fcodex` shell 层不再支持 `/help`、`/session`、`/profile`、`/rm`、`/resume`
+- `fcodex` shell 层不再支持 `/help`、`/threads`、`/profile`、`/archive`、`/resume`
 - `fcodex` 也不再提供 `--dry-run` wrapper 入口
 - 一旦进入 TUI，里面的 `/help`、`/resume`、`/new` 等都回到 upstream Codex 语义
 
@@ -448,7 +448,7 @@ feishu-codexctl thread unsubscribe --thread-name <name>
 
 - `thread list` 默认 `--scope cwd`，也支持 `--cwd /path/to/project`
 - 线程目标必须显式写成 `--thread-id` 或 `--thread-name`
-- `binding clear` / `clear-all` 清的是 Feishu 本地 bookmark，不是删线程，也不等于 `unsubscribe`
+- `binding clear` / `clear-all` 清的是 Feishu 本地 bookmark，不是删线程，也不等于 `thread unsubscribe`
 
 ## 进阶使用
 
@@ -478,7 +478,7 @@ feishu-codexctl thread unsubscribe --thread-name <name>
 
 1. 飞书里操作某 thread
 2. 需要本地接手时，用 `fcodex` 连到同一实例 backend
-3. 需要让 Feishu 释放 runtime residency 时，用 `/unsubscribe` 或 `feishu-codexctl thread unsubscribe`
+3. 需要让 Feishu 释放 runtime residency 时，用 `/release-runtime` 或 `feishu-codexctl thread unsubscribe`
 
 不推荐路径：
 
@@ -504,7 +504,7 @@ feishu-codexctl thread unsubscribe --thread-name <name>
 
 - `fcodex -p <profile>`：给这次启动将创建的**第一个新 thread**做一次性 seed
 - `fcodex -p <profile> resume <thread>`：只有 thread **可验证地 globally unloaded** 时才允许；成功后会写入该 thread 的持久化 resume profile
-- 如果目标 thread 仍 loaded，会直接拒绝，并提示先 `unsubscribe`、再关闭其他打开该 thread 的 `fcodex` TUI
+- 如果目标 thread 仍 loaded，会直接拒绝，并提示先 `/release-runtime` 或 `feishu-codexctl thread unsubscribe`，再关闭其他打开该 thread 的 `fcodex` TUI
 
 ### Sandbox / approval / permissions
 
@@ -524,12 +524,12 @@ feishu-codexctl thread unsubscribe --thread-name <name>
 ### 避坑速记
 
 - `/new` 会立即创建新线程并切换当前 binding
-- `/rm` 实际调用的是 Codex archive，不是硬删除
-- `unsubscribe` 释放的是 Feishu runtime residency，不会清 binding，也不会删线程
-- `/profile` 改不了时，通常先 `/unsubscribe`，再关闭其他打开同一 thread 的 `fcodex` TUI
+- `/archive` 实际调用的是 Codex archive，不是硬删除
+- `/release-runtime` 释放的是 Feishu runtime residency，不会清 binding，也不会删线程
+- `/profile` 改不了时，通常先 `/release-runtime`，再关闭其他打开同一 thread 的 `fcodex` TUI
 - `folder`、`sticker`、`merge_forward` 子附件、`interactive` 卡片资源，当前不作为附件输入
 - `fcodex resume <name>` 与 TUI 内 `/resume` 不是一回事
-- 本地查线程请用 `feishu-codexctl thread list`，不要再找 `fcodex /session`
+- 本地查线程请用 `feishu-codexctl thread list`，不要再找 `fcodex /threads`
 - 本地切换 profile 请用 `-p/--profile`；不要再找 `fcodex /profile`
 
 ## 按问题查文档
@@ -537,9 +537,9 @@ feishu-codexctl thread unsubscribe --thread-name <name>
 | 你想确认什么 | 先看哪里 |
 | --- | --- |
 | 当前总体架构、模块边界、仓库结构 | `docs/architecture/feishu-codex-design.zh-CN.md` |
-| 飞书 `/session`、`/resume`、`/profile`，以及 `fcodex` / `feishu-codexctl` 的当前语义 | `docs/contracts/session-profile-semantics.zh-CN.md` |
-| `unsubscribe`、`fcodex` / `feishu-codexctl` 分工、thread-wise profile/provider 的正式合同 | `docs/contracts/local-command-and-thread-profile-contract.zh-CN.md` |
-| `/status`、`/preflight`、`/unsubscribe`、`feishu-codexctl` 的共享状态词汇 | `docs/contracts/runtime-control-surface.zh-CN.md` |
+| 飞书 `/threads`、`/resume`、`/profile`，以及 `fcodex` / `feishu-codexctl` 的当前语义 | `docs/contracts/thread-profile-semantics.zh-CN.md` |
+| `/release-runtime`、`fcodex` / `feishu-codexctl` 分工、thread-wise profile/provider 的正式合同 | `docs/contracts/local-command-and-thread-profile-contract.zh-CN.md` |
+| `/status`、`/preflight`、`/release-runtime`、`feishu-codexctl` 的共享状态词汇 | `docs/contracts/runtime-control-surface.zh-CN.md` |
 | 群激活、群聊模式、历史回捞、触发规则 | `docs/contracts/group-chat-contract.zh-CN.md` |
 | `approval`、`sandbox`、`permissions` 的语义 | `docs/contracts/codex-permissions-model.zh-CN.md` |
 | `fcodex`、shared backend、动态端口、cwd 代理 | `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md` |

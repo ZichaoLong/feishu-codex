@@ -1095,16 +1095,16 @@ def build_ask_user_answered_card(
     }
 
 
-def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
+def build_thread_row(thread: dict, current_thread_id: str) -> list[dict]:
     """构造单个线程行。"""
-    thread_id = session["thread_id"]
+    thread_id = thread["thread_id"]
     current = thread_id == current_thread_id
-    title = session.get("title", "（无标题）")
+    title = thread.get("title", "（无标题）")
 
-    summary_parts = [f"**{thread_id[:8]}…**", f"`{display_path(session.get('cwd', ''))}`"]
-    if session.get("model_provider"):
-        summary_parts.append(f"`{session['model_provider']}`")
-    summary_parts.append(format_timestamp(session.get("updated_at")))
+    summary_parts = [f"**{thread_id[:8]}…**", f"`{display_path(thread.get('cwd', ''))}`"]
+    if thread.get("model_provider"):
+        summary_parts.append(f"`{thread['model_provider']}`")
+    summary_parts.append(format_timestamp(thread.get("updated_at")))
     line = " | ".join(summary_parts) + f"\n{shorten(title, 120)}"
 
     return [
@@ -1141,8 +1141,8 @@ def build_session_row(session: dict, current_thread_id: str) -> list[dict]:
     ]
 
 
-def build_sessions_card(
-    sessions: list[dict],
+def build_threads_card(
+    threads: list[dict],
     current_thread_id: str,
     working_dir: str,
     total_count: int,
@@ -1169,25 +1169,25 @@ def build_sessions_card(
     ]
 
     if expanded or total_count <= shown_count:
-        display_sessions = sessions
+        display_threads = threads
     else:
-        display_sessions = sessions[:shown_count]
+        display_threads = threads[:shown_count]
 
-    for session in display_sessions:
-        elements.extend(build_session_row(session, current_thread_id))
+    for thread in display_threads:
+        elements.extend(build_thread_row(thread, current_thread_id))
 
-    if not sessions:
+    if not threads:
         elements.append({"tag": "markdown", "content": "*当前目录下暂无可恢复线程。*"})
 
     bottom_actions: list[dict] = []
-    if not expanded and total_count > shown_count and sessions:
+    if not expanded and total_count > shown_count and threads:
         bottom_actions.append(
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "更多"},
                 "type": "default",
                 "value": {
-                    "action": "show_more_sessions",
+                    "action": "show_more_threads",
                 },
             }
         )
@@ -1197,7 +1197,7 @@ def build_sessions_card(
             "text": {"tag": "plain_text", "content": "收起"},
             "type": "default",
             "value": {
-                "action": "close_sessions_card",
+                "action": "close_threads_card",
             },
         }
     )
@@ -1213,7 +1213,7 @@ def build_sessions_card(
     }
 
 
-def build_sessions_closed_card() -> dict:
+def build_threads_closed_card() -> dict:
     return {
         "config": _card_config(),
         "header": {
@@ -1226,10 +1226,10 @@ def build_sessions_closed_card() -> dict:
                 "actions": [
                     {
                         "tag": "button",
-                        "text": {"tag": "plain_text", "content": "展开会话列表"},
+                        "text": {"tag": "plain_text", "content": "展开线程列表"},
                         "type": "primary",
                         "value": {
-                            "action": "reopen_sessions_card",
+                            "action": "reopen_threads_card",
                         },
                     }
                 ],
@@ -1238,7 +1238,7 @@ def build_sessions_closed_card() -> dict:
     }
 
 
-def build_sessions_pending_card(thread_id: str, *, title: str) -> dict:
+def build_threads_pending_card(thread_id: str, *, title: str) -> dict:
     return {
         "config": _card_config(),
         "header": {
@@ -1250,7 +1250,7 @@ def build_sessions_pending_card(thread_id: str, *, title: str) -> dict:
                 "tag": "markdown",
                 "content": (
                     f"正在恢复线程：`{thread_id[:8]}…` {shorten(title or '（无标题）', 120)}\n"
-                    "完成后会自动刷新当前会话列表。"
+                    "完成后会自动刷新当前线程列表。"
                 ),
             }
         ],

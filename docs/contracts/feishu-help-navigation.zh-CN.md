@@ -96,7 +96,7 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 它必须让下列能力可达：
 
 - `/group`
-- `/groupmode`
+- `/group-mode`
 
 `group` 页的文字说明应覆盖：
 
@@ -105,8 +105,8 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 - `assistant`、`mention-only`、`all` 三种群聊工作态
 - 群成员日常使用、共享状态管理、审批卡片处理三者的权限边界
 
-如果实现保留 `/group` 状态卡和 `/groupmode` 状态卡上的后续按钮，
-那么 `/group activate`、`/group deactivate`、`/groupmode <mode>` 也属于
+如果实现保留 `/group` 状态卡和 `/group-mode` 状态卡上的后续按钮，
+那么 `/group activate`、`/group deactivate`、`/group-mode <mode>` 也属于
 “从 `/help` 可达”的能力，只是它们不要求直接铺在 help 页面上。
 
 ## 7. 线程面
@@ -115,7 +115,7 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 
 它必须让下列能力可达：
 
-- `/session`
+- `/threads`
 - `/new`
 - `/resume <thread_id|thread_name>`，通过表单
 - 一个“当前线程”页面，用于当前绑定 thread 的操作
@@ -124,13 +124,13 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 
 - `/profile [name]`
 - 当前线程的 `/rename <title>`，通过表单
-- 当前线程的 `/rm`
+- 当前线程的 `/archive`
 
 这里的“当前线程”页，仍然是**当前绑定 thread** 的操作入口，不是全局 thread 管理页。
 
-现有 `/session` 卡片继续作为“当前目录线程浏览 + 已列线程的 resume / archive 入口”。
+现有 `/threads` 卡片继续作为“当前目录线程浏览 + 已列线程的 resume / archive 入口”。
 
-`/unsubscribe` 当前明确不要求从 `/help` 作为一等导航能力暴露：
+`/release-runtime` 当前明确不要求从 `/help` 作为一等导航能力暴露：
 
 - re-profile 的主路径应由 `/profile [name]` 承担
 - 如需排障或本地管理，可以在文字说明中提示 `feishu-codexctl`，但不要求独立 help 按钮
@@ -144,7 +144,7 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 - `/permissions`
 - `/approval`
 - `/sandbox`
-- `/mode`
+- `/collab-mode`
 - `/reset-backend`
 
 `/profile` 不属于这一层。它是当前 thread 的属性，必须留在“线程 -> 当前线程”路径下。
@@ -156,7 +156,7 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 它必须让下列能力可达：
 
 - `/whoami`
-- `/whoareyou`
+- `/bot-status`
 - `/init <token>`，通过表单
 
 `/debug-contact <open_id>` 不属于常规 help 导航面，不要求从 `/help` 可达。
@@ -168,7 +168,7 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 - `/h`
 - `/cancel`
 - `/pwd`
-- `/unsubscribe`
+- `/release-runtime`
 - `/debug-contact <open_id>`
 - 本地 `fcodex` wrapper 命令
 
@@ -177,7 +177,7 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 - `/h` 只是 `/help` 别名
 - `/cancel` 已经有执行卡片上的主入口
 - `/pwd` 的信息基本已被“无参数 `/cd`”覆盖
-- `/unsubscribe` 已被刻意弱化；面向用户的主路径应优先走 `/profile`
+- `/release-runtime` 已被刻意弱化；面向用户的主路径应优先走 `/profile`
 - `/debug-contact` 是排障命令，不属于常用导航面
 - 本地 wrapper 用法应留在本地 help，不属于飞书 help
 
@@ -191,7 +191,7 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 - 仅群聊命令
 - 群管理员限制
 - 非管理员普通私聊默认拒绝
-- 但 `/whoami`、`/whoareyou`、`/init <token>` 作为身份 / bootstrap 命令，必须仍可在私聊直接触发，不能先被通用“仅管理员私聊”守卫吞掉
+- 但 `/whoami`、`/bot-status`、`/init <token>` 作为身份 / bootstrap 命令，必须仍可在私聊直接触发，不能先被通用“仅管理员私聊”守卫吞掉
 
 如果某个 slash 命令在当前上下文下会被拒绝，那么通过 `/help` 触发同一操作时，也必须被拒绝。
 
@@ -199,6 +199,6 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 
 相关合同见：
 
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 - `docs/contracts/runtime-control-surface.zh-CN.md`
 - `docs/contracts/feishu-thread-lifecycle.zh-CN.md`

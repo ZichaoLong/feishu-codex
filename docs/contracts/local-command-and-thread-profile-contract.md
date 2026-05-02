@@ -4,7 +4,7 @@ Chinese original: `docs/contracts/local-command-and-thread-profile-contract.zh-C
 
 See also:
 
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 - `docs/contracts/runtime-control-surface.md`
 - `docs/architecture/fcodex-shared-backend-runtime.md`
 - `docs/decisions/shared-backend-resume-safety.md`
@@ -14,7 +14,7 @@ that has already been discussed and accepted.
 
 It answers five questions:
 
-- why Feishu uses `unsubscribe` as the unified term
+- why Feishu uses `/release-runtime` while local surfaces still keep `thread unsubscribe`
 - what shape `fcodex` now has as a thin wrapper
 - how `feishu-codexctl` and `fcodex` are split
 - what the formal thread-wise `profile/provider` contract is
@@ -28,13 +28,13 @@ contract gap and tighten the code, the docs, or both.
 This document only covers:
 
 - the local `fcodex` / `feishu-codexctl` command-surface split
-- the Feishu-side `unsubscribe` naming and semantics
+- the Feishu-side `/release-runtime` plus local `thread unsubscribe` naming and semantics
 - the active contract for thread-wise `profile/provider`
 - the Feishu-vs-`fcodex` boundary for `sandbox/approval`
 
 For these topics, if this document conflicts with older wording in:
 
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 - `docs/contracts/runtime-control-surface.md`
 
 this document wins.
@@ -42,21 +42,23 @@ this document wins.
 Those older docs should later be merged forward so the repository does not keep
 conflicting active contracts indefinitely.
 
-## 2. Feishu `unsubscribe`
+## 2. Feishu `/release-runtime` And Local `thread unsubscribe`
 
 ### 2.1 Naming
 
 The Feishu-side surface uses:
 
-- Feishu command: `/unsubscribe`
+- Feishu command: `/release-runtime`
 - local admin CLI: `feishu-codexctl thread unsubscribe`
 
-The previous name was `/release-feishu-runtime`. The active contract now uses
-`unsubscribe` because it matches the underlying action.
+The previous name was `/release-feishu-runtime`. The active contract is now:
+
+- Feishu public command name: `/release-runtime`
+- local CLI and low-level protocol: `thread unsubscribe` / `thread/unsubscribe`
 
 ### 2.2 Semantics
 
-`unsubscribe` means:
+`/release-runtime` means:
 
 - target: the thread currently bound by the chat
 - actual action: release `feishu-codex`'s Feishu-side runtime residency on that
@@ -67,7 +69,7 @@ The previous name was `/release-feishu-runtime`. The active contract now uses
 
 ### 2.3 What It Does Not Do
 
-`unsubscribe` does not:
+`/release-runtime` does not:
 
 - delete the thread
 - archive the thread
@@ -77,7 +79,7 @@ The previous name was `/release-feishu-runtime`. The active contract now uses
 
 Therefore:
 
-- a successful `unsubscribe` may still leave the thread loaded
+- a successful `/release-runtime` may still leave the thread loaded
 - the most common reason is that local `fcodex` is still subscribed
 
 ## 3. Active Shape Of `fcodex`
@@ -99,7 +101,7 @@ In other words:
 
 ### 3.2 Command Surface
 
-`fcodex` no longer keeps slash self-commands such as `/help`, `/session`, `/rm`,
+`fcodex` no longer keeps slash self-commands such as `/help`, `/threads`, `/archive`,
 or `/profile`.
 
 It retains only two repository-specific capabilities:
@@ -144,7 +146,7 @@ Capabilities that primarily live in `feishu-codexctl` include:
 
 - thread and binding inspection
 - local discovery and diagnosis
-- `unsubscribe`
+- `thread unsubscribe`
 - other thread-scoped or binding-scoped admin actions
 
 This means:
@@ -285,8 +287,8 @@ The system must not:
 - silently record a future change to take effect later
 - perform a best-effort live rewrite of the current runtime
 
-So Feishu is no longer limited to a pure “reject and tell the user to
-unsubscribe” path.
+So Feishu is no longer limited to a pure “reject and tell the user to run
+`/release-runtime`” path.
 For loaded state that is still under the current instance's control, the formal
 path is “explicit backend reset, then write”.
 Only when the current instance does not have enough control, or backend reset is
@@ -350,7 +352,7 @@ Therefore:
 - `/new` and “send the first prompt directly” must not create two different new
   thread profile semantics
 - if the user later wants to switch that thread's profile, they should still go
-  through `unsubscribe` / `/profile <name>` / `resume`
+  through `/release-runtime` / `/profile <name>` / `resume`
 
 ### 5.8 `fcodex resume -p <profile>`
 

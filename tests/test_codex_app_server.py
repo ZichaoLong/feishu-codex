@@ -42,7 +42,7 @@ from bot.stores.app_server_runtime_store import AppServerRuntimeStore, resolve_e
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
 from bot.stores.thread_resume_profile_store import ThreadResumeProfileStore
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLease
-from bot.session_resolution import (
+from bot.thread_resolution import (
     format_thread_match,
     looks_like_thread_id,
     resolve_resume_target_by_name,
@@ -1056,7 +1056,7 @@ class FCodexTests(unittest.TestCase):
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
-                with patch("sys.argv", ["fcodex", "/session"]):
+                with patch("sys.argv", ["fcodex", "/threads"]):
                     with self.assertRaises(SystemExit) as exc:
                         fcodex_main()
         self.assertEqual(exc.exception.code, 2)
@@ -1088,11 +1088,11 @@ class FCodexTests(unittest.TestCase):
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
-                with patch("sys.argv", ["fcodex", "/rm", "thread-1"]):
+                with patch("sys.argv", ["fcodex", "/archive", "thread-1"]):
                     with self.assertRaises(SystemExit) as exc:
                         fcodex_main()
         self.assertEqual(exc.exception.code, 2)
-        self.assertIn("请在飞书侧用 `/rm`", stderr.getvalue())
+        self.assertIn("请在飞书侧用 `/archive`", stderr.getvalue())
 
     def test_fcodex_rejects_removed_slash_resume_command(self) -> None:
         stderr = StringIO()
@@ -1108,7 +1108,7 @@ class FCodexTests(unittest.TestCase):
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
-                with patch("sys.argv", ["fcodex", "--dry-run", "/session"]):
+                with patch("sys.argv", ["fcodex", "--dry-run", "/threads"]):
                     with self.assertRaises(SystemExit) as exc:
                         fcodex_main()
         self.assertEqual(exc.exception.code, 2)
@@ -1135,7 +1135,7 @@ class FCodexTests(unittest.TestCase):
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
-                with patch("sys.argv", ["fcodex", "--cd", "/tmp/project", "/session"]):
+                with patch("sys.argv", ["fcodex", "--cd", "/tmp/project", "/threads"]):
                     with self.assertRaises(SystemExit) as exc:
                         fcodex_main()
         self.assertEqual(exc.exception.code, 2)

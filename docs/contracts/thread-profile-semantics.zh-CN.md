@@ -1,6 +1,6 @@
-# Session、Resume 与 Profile 语义
+# Threads、Resume 与 Profile 语义
 
-英文原文：`docs/contracts/session-profile-semantics.md`
+英文原文：`docs/contracts/thread-profile-semantics.md`
 
 另见：
 
@@ -18,7 +18,7 @@
 
 ## 1. 飞书侧语义
 
-### `/session`
+### `/threads`
 
 - 作用范围：当前目录
 - provider：跨 provider 聚合
@@ -55,7 +55,7 @@
 - 与 `/profile` 触发的 re-profile 恢复路径，共享同一套实例级 backend-reset 语义
 - 它存在的原因是：即使当前并不是为了切 profile，操作者也仍可能需要清理卡住的 loaded / pending runtime 状态
 
-### `/unsubscribe`
+### `/release-runtime`
 
 - 作用对象：当前 chat binding 指向的 thread
 - 释放的是 Feishu 对该 thread 的 runtime residency
@@ -76,9 +76,9 @@
 这意味着：
 
 - 不再支持 `fcodex /help`
-- 不再支持 `fcodex /session`
+- 不再支持 `fcodex /threads`
 - 不再支持 `fcodex /profile`
-- 不再支持 `fcodex /rm`
+- 不再支持 `fcodex /archive`
 - 不再支持 `fcodex /resume`
 - 不再支持 `fcodex --dry-run ...`
 
@@ -107,7 +107,8 @@
   - 然后再恢复该 thread
 - 否则：
   - 直接拒绝
-  - 提示先 `unsubscribe`，并关闭其他打开该 thread 的 `fcodex` TUI
+  - 提示先执行飞书 `/release-runtime`，或本地 `feishu-codexctl thread unsubscribe`
+  - 并关闭其他打开该 thread 的 `fcodex` TUI
 
 ### `fcodex resume <thread>`（未显式 `-p`）
 
@@ -163,6 +164,6 @@
 ## 5. 多实例与可见性
 
 - 所有实例共享同一套 persisted thread 命名空间
-- 飞书 `/session` 与 `feishu-codexctl thread list --scope cwd` 都是在该命名空间上的当前目录视图
+- 飞书 `/threads` 与 `feishu-codexctl thread list --scope cwd` 都是在该命名空间上的当前目录视图
 - 飞书 `/resume`、`fcodex resume <thread_name>` 与按 thread 定位的本地管理命令，都针对同一套全局 persisted thread 集合解析目标
 - runtime lease、实例选择与转移安全边界，见 `docs/decisions/shared-backend-resume-safety.zh-CN.md`

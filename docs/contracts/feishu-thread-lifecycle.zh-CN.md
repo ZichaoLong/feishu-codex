@@ -10,7 +10,7 @@
 - `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`
 - `docs/contracts/runtime-control-surface.zh-CN.md`
 - `docs/decisions/shared-backend-resume-safety.zh-CN.md`
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 
 ## 1. 上游基线
 
@@ -74,7 +74,7 @@ flowchart TD
     B -->|发送 prompt| C[已绑定 thread, loaded, running]
     C -->|turn completed / idle status / thread closed| B
 
-    B -->|unsubscribe、连接断开、最后订阅者离开| D[已绑定 thread, unloaded]
+    B -->|/release-runtime、连接断开、最后订阅者离开| D[已绑定 thread, unloaded]
     C -->|连接断开或漏掉终态通知| D
 
     D -->|下一条消息 turn/start 直接成功| C
@@ -191,7 +191,7 @@ flowchart TD
 下列规则虽然和生命周期紧密相关，但正式归属不在本文：
 
 - `bound + released` 下 prompt 的 pure reject / 重新附着规则：见 `docs/contracts/runtime-control-surface.zh-CN.md`
-- unloaded thread 恢复路径上的 profile / provider 解析合同：见 `docs/contracts/session-profile-semantics.zh-CN.md`
+- unloaded thread 恢复路径上的 profile / provider 解析合同：见 `docs/contracts/thread-profile-semantics.zh-CN.md`
 - 群聊按 `chat_id` 共享 binding 以及群会话范围规则：见 `docs/contracts/group-chat-contract.zh-CN.md`
 
 ## 8. 相关实现文件

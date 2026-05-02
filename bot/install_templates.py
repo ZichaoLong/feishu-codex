@@ -17,7 +17,7 @@ app_secret: "your_cc_bot_app_secret"
 # request_timeout_seconds: 5
 
 # 群聊管理员 open_id 列表；这些人始终具备群聊触发资格，并可使用
-# 所有群里的 `/` 命令（包括 `/group`、`/groupmode`、`/new`、`/session` 等）。
+# 所有群里的 `/` 命令（包括 `/group`、`/group-mode`、`/new`、`/threads` 等）。
 # 若群工作态是 `assistant` 或 `mention-only`，他们仍需先显式 mention
 # 触发对象，才会触发对话或群命令。
 # 也可在服务启动后，私聊机器人执行 `/init <token>` 自动写入。
@@ -109,19 +109,19 @@ CODEX_YAML_TEMPLATE = """# 默认工作目录；默认值：进程当前目录
 
 # 协作模式；默认值：default
 # 说明：设为 plan 时，会在 turn/start 中启用 Codex 原生 collaborationMode，并解锁原生 requestUserInput。
-# 说明：这只是当前飞书会话的默认值；运行中可用 /mode 临时切到 plan 或 default。
+# 说明：这只是当前飞书会话的默认值；运行中可用 /collab-mode 临时切到 plan 或 default。
 # collaboration_mode: default
 
-# /session 与 /resume 查询时显式纳入的线程来源；默认值：["cli", "vscode", "exec", "appServer"]
+# /threads 与 /resume 查询时显式纳入的线程来源；默认值：["cli", "vscode", "exec", "appServer"]
 # source_kinds:
 #   - cli
 #   - vscode
 #   - exec
 #   - appServer
 
-# /session 初始展示的线程数量上限；默认值：5
+# /threads 初始展示的线程数量上限；默认值：5
 # 说明：点击卡片里的“更多”后会展开全部线程。
-# session_recent_limit: 5
+# threads_initial_limit: 5
 
 # 单次 thread/list 聚合查询的最大线程数；默认值：100
 # thread_list_query_limit: 100

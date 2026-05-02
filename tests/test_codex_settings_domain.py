@@ -377,7 +377,7 @@ class CodexSettingsDomainTests(unittest.TestCase):
         stub = _SettingsPortsStub()
         domain = _make_domain(stub)
 
-        result = domain.handle_mode_command("ou_user", "chat-a", "plan", message_id="msg-1")
+        result = domain.handle_collab_mode_command("ou_user", "chat-a", "plan", message_id="msg-1")
 
         self.assertIn("已切换协作模式：`plan`", result.text)
         self.assertEqual(

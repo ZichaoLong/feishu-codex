@@ -253,7 +253,7 @@ class CodexSettingsDomain:
         )
         return CommandResult(text="\n".join(lines))
 
-    def handle_botinfo_command(self, chat_id: str, *, message_id: str = "") -> CommandResult:
+    def handle_bot_status_command(self, chat_id: str, *, message_id: str = "") -> CommandResult:
         del chat_id, message_id
         identity = self._ports.get_bot_identity_snapshot()
         configured_open_id = str(identity.get("configured_open_id", "") or "").strip()
@@ -289,9 +289,9 @@ class CodexSettingsDomain:
                     (
                         f"- 直接执行 `/init <token>` 自动写入，或手动把 `{discovered_open_id}` 写进 `system.yaml.bot_open_id`"
                         if discovered_open_id
-                        else "- 先让 `/whoareyou` 能看到 `discovered open_id`，再手动写入 `system.yaml.bot_open_id`；如需自动写入，再执行 `/init <token>`"
+                        else "- 先让 `/bot-status` 能看到 `discovered open_id`，再手动写入 `system.yaml.bot_open_id`；如需自动写入，再执行 `/init <token>`"
                     ),
-                    "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/whoareyou` 的实时探测结果不会自动生效。",
+                    "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/bot-status` 的实时探测结果不会自动生效。",
                     "- 如需让“别人 @你本人时由机器人代答”，再把对应人的 open_id 写进 `system.yaml.trigger_open_ids`",
                     "- 如果 `discovered open_id` 为空，检查 `application:application:self_manage` 权限",
                 ]
@@ -755,7 +755,7 @@ class CodexSettingsDomain:
             running=runtime.running,
         ))
 
-    def handle_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
+    def handle_collab_mode_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         runtime = self._runtime_view(sender_id, chat_id, message_id)
         if arg:
             mode = arg.strip().lower()

@@ -105,7 +105,7 @@ The `group` branch of `/help` owns group-only operating rules and controls.
 It must make the following capabilities reachable:
 
 - `/group`
-- `/groupmode`
+- `/group-mode`
 
 The page text should cover:
 
@@ -115,9 +115,9 @@ The page text should cover:
 - the permission boundary between daily group usage, shared-state management,
   and approval-card handling
 
-If the implementation keeps follow-up buttons on the `/group` and `/groupmode`
+If the implementation keeps follow-up buttons on the `/group` and `/group-mode`
 state cards, then `/group activate`, `/group deactivate`, and
-`/groupmode <mode>` are also considered reachable from `/help`, even though
+`/group-mode <mode>` are also considered reachable from `/help`, even though
 they are not flattened onto the help page itself.
 
 ## 7. Thread Surface
@@ -127,7 +127,7 @@ current-thread management.
 
 It must make the following capabilities reachable:
 
-- `/session`
+- `/threads`
 - `/new`
 - `/resume <thread_id|thread_name>` via a form
 - a current-thread page for the currently bound thread
@@ -136,15 +136,15 @@ The current-thread page should cover:
 
 - `/profile [name]`
 - `/rename <title>` for the current thread, via a form
-- `/rm` for the current thread
+- `/archive` for the current thread
 
 That current-thread page is still an entry for the **currently bound thread**,
 not a global thread-admin surface.
 
-The existing `/session` card remains the current-directory thread browser and
+The existing `/threads` card remains the current-directory thread browser and
 archive/resume surface for listed threads.
 
-`/unsubscribe` is intentionally not a first-class help-navigation capability:
+`/release-runtime` is intentionally not a first-class help-navigation capability:
 
 - the main user-facing re-profile path should flow through `/profile [name]`
 - if needed, help text may point users to `feishu-codexctl` for local
@@ -160,7 +160,7 @@ It must make the following capabilities reachable:
 - `/permissions`
 - `/approval`
 - `/sandbox`
-- `/mode`
+- `/collab-mode`
 - `/reset-backend`
 
 `/profile` does not belong here. It is a property of the current thread and
@@ -173,7 +173,7 @@ The `identity` branch of `/help` owns identity and bootstrap.
 It must make the following capabilities reachable:
 
 - `/whoami`
-- `/whoareyou`
+- `/bot-status`
 - `/init <token>` via a form
 
 `/debug-contact <open_id>` is not part of the normal help navigation surface
@@ -187,7 +187,7 @@ Feishu `/help`:
 - `/h`
 - `/cancel`
 - `/pwd`
-- `/unsubscribe`
+- `/release-runtime`
 - `/debug-contact <open_id>`
 - `fcodex` local-wrapper commands
 
@@ -196,7 +196,7 @@ Specific rationale:
 - `/h` is only an alias for `/help`
 - `/cancel` already has a primary action on the execution card
 - `/pwd` is effectively subsumed by `/cd` with no argument
-- `/unsubscribe` is intentionally weakened in favor of `/profile`
+- `/release-runtime` is intentionally weakened in favor of `/profile`
 - `/debug-contact` is a troubleshooting surface, not a normal navigation topic
 - local wrapper usage belongs to local help, not Feishu help
 
@@ -210,7 +210,7 @@ That includes:
 - group-only commands
 - group admin restrictions
 - ordinary non-admin private chats remaining denied by default
-- `/whoami`, `/whoareyou`, and `/init <token>` remaining directly reachable in private chat as identity/bootstrap commands, rather than being swallowed by a generic "admin private chat only" guard first
+- `/whoami`, `/bot-status`, and `/init <token>` remaining directly reachable in private chat as identity/bootstrap commands, rather than being swallowed by a generic "admin private chat only" guard first
 
 If a slash command would be rejected in the current scope, the same operation
 triggered from `/help` must also be rejected.
@@ -219,6 +219,6 @@ triggered from `/help` must also be rejected.
 
 Related contracts:
 
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 - `docs/contracts/runtime-control-surface.md`
 - `docs/contracts/feishu-thread-lifecycle.md`

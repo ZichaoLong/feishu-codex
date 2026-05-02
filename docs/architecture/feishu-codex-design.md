@@ -2,7 +2,7 @@
 
 See also:
 
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 - `docs/architecture/fcodex-shared-backend-runtime.md`
 - `docs/decisions/shared-backend-resume-safety.md`
 - `docs/archive/codex-handler-decomposition-plan.md`
@@ -152,7 +152,7 @@ Current module split:
   execution-card publishing, terminal-result delivery, and watchdog /
   reconcile / degraded-channel handling
 - `bot/runtime_admin_controller.py`: `/status`,
-  `/unsubscribe`, and control-plane status/admin management
+  `/release-runtime`, and control-plane status/admin management
 - `bot/inbound_surface_controller.py`: inbound command surface, card-action
   routing, and help-card command reuse
 - `bot/forward_aggregator.py`: merged-forward buffering, timeout dispatch, and
@@ -169,11 +169,11 @@ Current module split:
   interpretation, and downstream dispatch
 - `bot/interaction_request_controller.py`: owns pending approval / user-input
   request state and fail-closed handling for interactive requests
-- `bot/codex_session_ui_domain.py`: owns session-card UI flows, including
+- `bot/codex_threads_ui_domain.py`: owns thread-list card UI flows, including
   transient rename-form state and RuntimeLoop-submitted resume target resolution
 - `bot/codex_settings_domain.py`: owns user-facing settings and identity
   commands such as `/profile`, `/approval`, `/sandbox`, `/permissions`,
-  `/mode`, `/whoami`, and `/init`; it crosses bot/runtime/profile boundaries
+  `/collab-mode`, `/whoami`, and `/init`; it crosses bot/runtime/profile boundaries
   through explicit `SettingsDomainPorts` rather than retaining a handler owner
 - `bot/execution_transcript.py`: an internal transcript assembler for execution-card
   presentation; it builds display-only `reply_segments` / `process_log`
@@ -251,7 +251,7 @@ Concurrency ownership should also remain explicit:
   long-term goal should be reducing the amount of state that must be shared at
   all, rather than first splitting that lock into smaller locks
 
-This split is no longer only a "move help/settings/group/session/file out of one
+This split is no longer only a "move help/settings/group/thread/file out of one
 large flow" exercise. The ownership-decomposition direction described in the
 historical plan has now largely landed:
 
@@ -363,8 +363,8 @@ So:
 
 Exact command semantics are documented outside this design document:
 
-- `docs/contracts/session-profile-semantics.md` covers `/session`, `/resume`, `/profile`,
-  `/rm`, and wrapper semantics
+- `docs/contracts/thread-profile-semantics.md` covers `/threads`, `/resume`, `/profile`,
+  `/archive`, and wrapper semantics
 - `docs/decisions/shared-backend-resume-safety.md` covers current `/resume` semantics and
   backend safety rules
 
@@ -421,7 +421,7 @@ full-tree dump.
     `handler.py`, `feishu_bot.py`
   - top-level orchestration and user-facing domains:
     `codex_handler.py`, `codex_group_domain.py`, `codex_help_domain.py`,
-    `codex_session_ui_domain.py`, `codex_settings_domain.py`,
+    `codex_threads_ui_domain.py`, `codex_settings_domain.py`,
     `file_message_domain.py`, `inbound_surface_controller.py`
   - runtime state, execution flow, and coordination:
     `runtime_loop.py`, `runtime_state.py`, `runtime_view.py`,
@@ -440,7 +440,7 @@ full-tree dump.
     `shared_command_surface.py`, `feishu_types.py`, `codex_config_reader.py`
   - wrapper and service-admin path: `fcodex.py`, `fcodex_proxy.py`,
     `feishu_codexctl.py`, `service_control_plane.py`, `instance_layout.py`,
-    `instance_resolution.py`, `profile_resolution.py`, `session_resolution.py`,
+    `instance_resolution.py`, `profile_resolution.py`, `thread_resolution.py`,
     `binding_identity.py`
   - Codex adapter / protocol boundary:
     `adapters/base.py`, `adapters/codex_app_server.py`,

@@ -4,7 +4,7 @@
 
 另见：
 
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 - `docs/contracts/runtime-control-surface.zh-CN.md`
 - `docs/architecture/fcodex-shared-backend-runtime.zh-CN.md`
 - `docs/decisions/shared-backend-resume-safety.zh-CN.md`
@@ -13,7 +13,7 @@
 
 它回答 5 件事：
 
-- 飞书侧为何统一使用 `unsubscribe`
+- 飞书侧为何使用 `/release-runtime`，而本地仍保留 `thread unsubscribe`
 - `fcodex` 作为 thin wrapper 的当前正式形状是什么
 - `feishu-codexctl` 与 `fcodex` 当前如何分工
 - thread-wise `profile/provider` 的正式状态与拒绝规则是什么
@@ -26,31 +26,34 @@
 本文只覆盖以下主题：
 
 - 本地 `fcodex` / `feishu-codexctl` 命令面重划
-- 飞书侧 `unsubscribe` 的命名与语义
+- 飞书侧 `/release-runtime` 与本地 `thread unsubscribe` 的命名与语义
 - thread-wise `profile/provider` 的当前正式合同
 - 飞书侧与 `fcodex` 的 `sandbox/approval` 设置边界
 
 对这些主题，若本文与下列文档中的旧表述冲突，以本文为准：
 
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 - `docs/contracts/runtime-control-surface.zh-CN.md`
 
 这些旧文档后续应被合并更新，不应长期与本文并存冲突表述。
 
-## 2. 飞书侧 `unsubscribe`
+## 2. 飞书侧 `/release-runtime` 与本地 `thread unsubscribe`
 
 ### 2.1 命名
 
 飞书侧统一使用：
 
-- 飞书命令：`/unsubscribe`
+- 飞书命令：`/release-runtime`
 - 本地管理 CLI：`feishu-codexctl thread unsubscribe`
 
-此前旧名为 `/release-feishu-runtime`；当前正式合同统一使用 `unsubscribe`。
+此前旧名为 `/release-feishu-runtime`；当前正式合同是：
+
+- 飞书公开命令名使用 `/release-runtime`
+- 本地 CLI 与底层协议仍保留 `thread unsubscribe` / `thread/unsubscribe`
 
 ### 2.2 语义
 
-`unsubscribe` 的语义是：
+`/release-runtime` 的语义是：
 
 - 作用对象：当前 chat binding 所指向的 thread
 - 实际动作：`feishu-codex` 服务实例对该 thread 释放自己的 Feishu-side runtime residency，并执行 `thread/unsubscribe`
@@ -60,7 +63,7 @@
 
 ### 2.3 它不做什么
 
-`unsubscribe` 不会：
+`/release-runtime` 不会：
 
 - 删除 thread
 - archive thread
@@ -70,7 +73,7 @@
 
 因此：
 
-- `unsubscribe` 成功后，thread 仍可能保持 loaded
+- `/release-runtime` 成功后，thread 仍可能保持 loaded
 - 最常见原因是本地 `fcodex` 仍在订阅这个 thread
 
 ## 3. `fcodex` 的当前正式形状
@@ -90,7 +93,7 @@
 
 ### 3.2 命令面
 
-`fcodex` 不再保留 `/help`、`/session`、`/rm`、`/profile` 这类 slash 自命令。
+`fcodex` 不再保留 `/help`、`/threads`、`/archive`、`/profile` 这类 slash 自命令。
 
 `fcodex` 只保留两类与本仓库直接相关的能力：
 
@@ -131,7 +134,7 @@
 
 - thread / binding 查看
 - thread 发现与本地诊断
-- `unsubscribe`
+- `thread unsubscribe`
 - 其他 thread-scoped / binding-scoped 管理动作
 
 这意味着：
@@ -306,7 +309,7 @@ thread-wise store 至少应保存：
 因此：
 
 - `/new` 与“直接发第一条消息”不应形成两套不同的新 thread profile 语义
-- 若后续要切换该 thread 的 profile，仍应走 `unsubscribe` / `/profile <name>` / `resume`
+- 若后续要切换该 thread 的 profile，仍应走 `/release-runtime` / `/profile <name>` / `resume`
 
 ## 5.8 `fcodex resume -p <profile>`
 

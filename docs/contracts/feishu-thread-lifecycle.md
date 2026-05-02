@@ -11,7 +11,7 @@ See also:
 - `docs/architecture/fcodex-shared-backend-runtime.md`
 - `docs/contracts/runtime-control-surface.md`
 - `docs/decisions/shared-backend-resume-safety.md`
-- `docs/contracts/session-profile-semantics.md`
+- `docs/contracts/thread-profile-semantics.md`
 
 ## 1. Verified Baseline
 
@@ -79,7 +79,7 @@ flowchart TD
     B -->|send prompt| C[Bound thread, loaded, running]
     C -->|turn completed / idle status / thread closed| B
 
-    B -->|unsubscribe, connection loss, last subscriber leaves| D[Bound thread, unloaded]
+    B -->|/release-runtime, connection loss, last subscriber leaves| D[Bound thread, unloaded]
     C -->|connection loss or missed terminal events| D
 
     D -->|next prompt -> turn/start succeeds| C
@@ -232,7 +232,7 @@ elsewhere:
 - pure-reject / reattach rules for prompts on `bound + released` bindings:
   `docs/contracts/runtime-control-surface.md`
 - profile / provider resolution on unloaded-thread restore paths:
-  `docs/contracts/session-profile-semantics.md`
+  `docs/contracts/thread-profile-semantics.md`
 - group-chat binding-by-`chat_id` and group session-scope rules:
   `docs/contracts/group-chat-contract.md`
 

@@ -13,7 +13,7 @@
 
 另见：
 
-- `docs/contracts/session-profile-semantics.zh-CN.md`
+- `docs/contracts/thread-profile-semantics.zh-CN.md`
 - `docs/decisions/shared-backend-resume-safety.zh-CN.md`
 - `docs/architecture/feishu-codex-design.zh-CN.md`
 
@@ -166,7 +166,7 @@ fcodex shell wrapper
 - `fcodex resume <thread_name>` 在 wrapper 侧解析完成之后
 
 这里的“shared backend”都指所选实例 backend。
-当前 shell 层已不再提供 `fcodex /session` 这类 wrapper slash 自命令；本地线程发现改由 `feishu-codexctl thread list` 负责。
+当前 shell 层已不再提供 `fcodex /threads` 这类 wrapper slash 自命令；本地线程发现改由 `feishu-codexctl thread list` 负责。
 
 ## 9. 显式 `--remote` 是特例
 
@@ -216,7 +216,7 @@ wrapper 可能需要跟着调整。相关上游实现与变更历史，应以 [`
 
 在 TUI 里，`/resume` 的 picker 行为仍然由 upstream 决定，它可能不同于：
 
-- 飞书 `/session`
+- 飞书 `/threads`
 - `feishu-codexctl thread list`
 - `fcodex resume <thread_name>`
 
@@ -236,4 +236,4 @@ wrapper 可能需要跟着调整。相关上游实现与变更历史，应以 [`
   - `bot/codex_handler.py`
   - `bot/adapters/codex_app_server.py`
 - shared discovery 逻辑：
-  - `bot/session_resolution.py`
+  - `bot/thread_resolution.py`

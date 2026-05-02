@@ -34,7 +34,7 @@ system.yaml,codex.yaml,init.token,api key env 等
 ## 进阶使用
 - 多目录、项目飞书操控：开启多个群聊会话，每个会话里只有用户本人和机器人，不同会话绑定不同项目
 - 飞书侧与本地共同操作同一个 thread。安全机制：多订阅 + 单交互租约，可以飞书与本地 fcodex 协作，谁发起当前 turn，谁就获得当前的交互租约，任何交互请求不会路由到其他会话或 fcodex TUI，turn 结束时（我印象中主要判定依据是 app server 的 turn/completed 事件，另有几种保底 thread 状态查询判断）释放 interaction owner，并把 turn 终态结果推送会推送至每个前端。不建议跨实例操作同一个 thread（有ThreadRuntimeLease保护，但当前不推荐强行使用）。
-- 裸 codex 内部的 /resume 不会跨 provider 搜索，飞书、feishu-codexctl可跨 provider 搜索 thread。fcodex resume 可跨 provider 恢复。【注】：把 fcodex slash命令去掉/符号，纯做wrapper，与 codex 保持最一致的使用方式，去掉原来的 fcodex /resume 不能再接受其他参数的限制。fcodex /session, fcodex /rm, fcodex /profile, fcodex /help 等移动到 feishu-codexctl下更好？
+- 裸 codex 内部的 /resume 不会跨 provider 搜索，飞书、feishu-codexctl可跨 provider 搜索 thread。fcodex resume 可跨 provider 恢复。【注】：把 fcodex slash命令去掉/符号，纯做wrapper，与 codex 保持最一致的使用方式，去掉原来的 fcodex /resume 不能再接受其他参数的限制。fcodex /threads, fcodex /archive, fcodex /profile, fcodex /help 等移动到 feishu-codexctl下更好？
 - 本地管理命令
 - 飞书及本地的 debug 能力
 
@@ -60,7 +60,7 @@ system.yaml,codex.yaml,init.token,api key env 等
 
 ## 避坑速记
 - /new 会创建新线程，取消旧绑定，但 app server 中可能尚未特化此线程，发起消息后真正特化
-- /rm 实际时 Codex archive，从常规列表里隐藏，不是硬删除
+- /archive 实际时 Codex archive，从常规列表里隐藏，不是硬删除
 - fcodex 打开后，连接共享 app server，本项目 proxy 层根据 interaction owner 持有情况决定是否路由 app server 发起的交互请求，其他前端 TUI 行为遵从上游设计
 
 更进一步，查看 docs/...
