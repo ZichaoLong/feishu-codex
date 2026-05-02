@@ -71,12 +71,13 @@ class SharedCommandSurfaceTests(unittest.TestCase):
 
         self.assertTrue(handler._inbound_surface.has_command_route("/preflight"))
 
-    def test_help_and_session_cards_reuse_shared_command_specs(self) -> None:
+    def test_help_thread_and_session_cards_reuse_shared_command_specs(self) -> None:
+        session_command = get_shared_command("session")
         resume_command = get_shared_command("resume")
         help_domain = CodexHelpDomain(local_thread_safety_rule="测试规则")
 
         overview = help_domain.reply_help("chat-1").card
-        session = help_domain.reply_help("chat-1", "session").card
+        thread_help = help_domain.reply_help("chat-1", "thread").card
         sessions_card = build_sessions_card(
             sessions=[
                 {
@@ -97,13 +98,14 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         execution_card = build_execution_card("log", [], running=True)
 
         overview_markdown = overview["elements"][0]["content"]
-        session_markdown = session["elements"][0]["content"]
+        thread_markdown = thread_help["elements"][0]["content"]
         sessions_markdown = sessions_card["elements"][0]["content"]
 
         self.assertIn("`fcodex resume <thread_id|thread_name>`", overview_markdown)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", overview_markdown)
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", session_markdown)
-        self.assertIn(f"`{resume_command.feishu_usage}`", session_markdown)
+        self.assertIn(f"`{session_command.feishu_usage}`", thread_markdown)
+        self.assertIn(f"`{resume_command.feishu_usage}`", thread_markdown)
+        self.assertIn("`fcodex resume <thread_id|thread_name>`", thread_markdown)
         self.assertIn("`fcodex resume <thread_id|thread_name>`", sessions_markdown)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", sessions_markdown)
         self.assertIn(f"`{resume_command.feishu_usage}`", sessions_markdown)
@@ -114,7 +116,7 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         help_domain = CodexHelpDomain(local_thread_safety_rule="测试规则")
         cards = [
             help_domain.reply_help("chat-1").card,
-            help_domain.reply_help("chat-1", "session").card,
+            help_domain.reply_help("chat-1", "thread").card,
             build_profile_card(content="切换 profile", profile_names=["p1"], current_profile="p1"),
             build_backend_reset_card(content="预览", force=False),
             build_execution_card("log", [], running=True),
