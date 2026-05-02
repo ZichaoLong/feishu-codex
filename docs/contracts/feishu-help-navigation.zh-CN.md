@@ -29,21 +29,23 @@
 
 飞书 `/help` 是导航入口，不是平铺所有命令的总清单。
 
-`/help` 根卡片必须只暴露三个一级入口：
+`/help` 根卡片必须按如下顺序暴露五个一级入口：
 
-- `session`
-- `settings`
-- `group`
+- `当前会话`，对应文字主题 `chat`
+- `群聊`，对应文字主题 `group`
+- `线程`，对应文字主题 `thread`
+- `运行时`，对应文字主题 `runtime`
+- `身份`，对应文字主题 `identity`
 
-根卡片可以为这三个入口提供简短说明，但不应在根卡片上平铺全部命令。
+根卡片可以为这五个入口提供简短说明，但不应在根卡片上平铺全部命令。
 
-本地 `fcodex` 用法不属于飞书 `/help` 面。
+本地 `fcodex` 用法不属于飞书 `/help` 的独立页面；如有必要，只能在概览页或线程页里作为文字提示出现。
 
 ## 3. 导航可达性的定义
 
 “从 `/help` 可达”指的是：进入 `/help` 后，可以经过一级或多级按钮到达某个能力。
 
-它不要求每个命令都直接出现在根卡片。
+它不要求每个命令都直接出现在 `/help` 根卡片。
 
 当多级导航能显著减少拥挤、澄清职责时，应优先采用多级导航。
 
@@ -70,54 +72,24 @@ Help 按钮和表单的交互形态可以不同，但行为语义不能另起一
 - payload 里只放目标 action 实际会消费的参数
 - `plugin`、bot keyword 或其他部署标识字段不属于回调合同，路由时不得依赖它们
 
-## 5. Session 面
+## 5. 当前会话面
 
-`/help` 下的 `session` 分支负责线程与工作目录相关能力。
+`/help` 下的 `chat` 分支负责**当前 chat binding** 的状态与目录控制。
 
 它必须让下列能力可达：
-
-- `/session`
-- `/new`
-- `/resume <thread_id|thread_name>`，通过表单
-- `/cd <path>`，通过表单
-- 一个“当前线程”页面，用于当前绑定线程的操作
-
-“当前线程”页面应覆盖：
 
 - `/status`
 - `/preflight`
-- `/unsubscribe`
-- 当前线程的 `/rename <title>`，通过表单
-- 当前线程的 `/rm`
+- `/cd <path>`，通过表单
 
-这里的“当前线程”页，仍然是**当前 chat binding** 的操作入口，不是全局 thread 管理页。
+这个分支可以跳转到“线程”页，但不承担 thread 管理职责。
 
-- `/status`、`/preflight` 与 `/unsubscribe` 即使在群里触发，仍按 chat-scoped 命令解释
-- 如果需要按任意 thread 做 thread-scoped 管理，正式入口属于本地 `feishu-codexctl`
+这里的 `/status` 与 `/preflight` 仍然是 chat-scoped 命令：
 
-Help 面不需要再做一个“全局线程浏览器”或“全局归档表单”。
+- 即使在群里触发，也仍按当前 chat binding 解释
+- 它们不等于全局 thread 管理入口
 
-现有 `/session` 卡片继续作为“当前目录线程浏览 + 已列线程的 resume / archive 入口”。
-
-## 6. Settings 面
-
-`/help` 下的 `settings` 分支负责当前绑定 thread 的 profile 与当前 binding 的运行时设置。
-
-它必须让下列能力可达：
-
-- `/profile`
-- `/permissions`
-- `/approval`
-- `/sandbox`
-- `/mode`
-
-同时应提供一个 identity / admin 子页，让下列能力可达：
-
-- `/whoami`
-- `/whoareyou`
-- `/init <token>`，通过表单
-
-## 7. Group 面
+## 6. 群聊面
 
 `/help` 下的 `group` 分支负责群聊专属规则与控制项。
 
@@ -130,27 +102,86 @@ Help 面不需要再做一个“全局线程浏览器”或“全局归档表单
 
 - 群默认是“未激活”
 - `/group activate` 与 `/group deactivate` 的用途
+- `assistant`、`mention-only`、`all` 三种群聊工作态
 - 群成员日常使用、共享状态管理、审批卡片处理三者的权限边界
 
-群里触发的 `/status`、`/preflight`、`/unsubscribe`、`/profile` 等通用 Feishu 命令，不属于 `group` 分支。
-它们仍分别归属 `session` 或 `settings` 分支；只是当执行上下文在群里时，仍需服从群命令触发规则。
+如果实现保留 `/group` 状态卡和 `/groupmode` 状态卡上的后续按钮，
+那么 `/group activate`、`/group deactivate`、`/groupmode <mode>` 也属于
+“从 `/help` 可达”的能力，只是它们不要求直接铺在 help 页面上。
 
-## 8. 明确不纳入 `/help` 导航的命令
+## 7. 线程面
 
-下列能力当前明确不要求从飞书 `/help` 纯导航到达：
+`/help` 下的 `thread` 分支负责 thread 浏览、创建、恢复与当前线程管理。
+
+它必须让下列能力可达：
+
+- `/session`
+- `/new`
+- `/resume <thread_id|thread_name>`，通过表单
+- 一个“当前线程”页面，用于当前绑定 thread 的操作
+
+“当前线程”页面应覆盖：
+
+- `/profile [name]`
+- 当前线程的 `/rename <title>`，通过表单
+- 当前线程的 `/rm`
+
+这里的“当前线程”页，仍然是**当前绑定 thread** 的操作入口，不是全局 thread 管理页。
+
+现有 `/session` 卡片继续作为“当前目录线程浏览 + 已列线程的 resume / archive 入口”。
+
+`/unsubscribe` 当前明确不要求从 `/help` 作为一等导航能力暴露：
+
+- re-profile 的主路径应由 `/profile [name]` 承担
+- 如需排障或本地管理，可以在文字说明中提示 `feishu-codexctl`，但不要求独立 help 按钮
+
+## 8. 运行时面
+
+`/help` 下的 `runtime` 分支负责当前飞书会话的运行时设置，以及当前实例 backend 的实例级控制。
+
+它必须让下列能力可达：
+
+- `/permissions`
+- `/approval`
+- `/sandbox`
+- `/mode`
+- `/reset-backend`
+
+`/profile` 不属于这一层。它是当前 thread 的属性，必须留在“线程 -> 当前线程”路径下。
+
+## 9. 身份面
+
+`/help` 下的 `identity` 分支负责身份与 bootstrap。
+
+它必须让下列能力可达：
+
+- `/whoami`
+- `/whoareyou`
+- `/init <token>`，通过表单
+
+`/debug-contact <open_id>` 不属于常规 help 导航面，不要求从 `/help` 可达。
+
+## 10. 明确不纳入 `/help` 导航的命令
+
+下列能力当前明确不要求从飞书 `/help` 导航到达：
 
 - `/h`
 - `/cancel`
 - `/pwd`
+- `/unsubscribe`
+- `/debug-contact <open_id>`
 - 本地 `fcodex` wrapper 命令
 
 对应原因：
 
+- `/h` 只是 `/help` 别名
 - `/cancel` 已经有执行卡片上的主入口
 - `/pwd` 的信息基本已被“无参数 `/cd`”覆盖
+- `/unsubscribe` 已被刻意弱化；面向用户的主路径应优先走 `/profile`
+- `/debug-contact` 是排障命令，不属于常用导航面
 - 本地 wrapper 用法应留在本地 help，不属于飞书 help
 
-## 9. 权限与作用域语义
+## 11. 权限与作用域语义
 
 从 `/help` 触发命令时，必须保留与 slash 命令完全一致的访问规则。
 
@@ -164,7 +195,7 @@ Help 面不需要再做一个“全局线程浏览器”或“全局归档表单
 
 如果某个 slash 命令在当前上下文下会被拒绝，那么通过 `/help` 触发同一操作时，也必须被拒绝。
 
-## 10. 关联文档
+## 12. 关联文档
 
 相关合同见：
 

@@ -153,7 +153,7 @@ class CodexSessionUiDomain:
             return CommandResult(text="执行中不能切换线程，请等待结束或先执行 `/cancel`。")
         if not arg:
             return CommandResult(
-                text="用法：`/resume <thread_id 或 thread_name>`\n发送 `/help session` 查看 `/session` 与 `/resume` 的区别。"
+                text="用法：`/resume <thread_id 或 thread_name>`\n发送 `/help thread` 查看 `/session` 与 `/resume` 的区别。"
             )
         target = arg.strip()
         return CommandResult(

@@ -21,11 +21,11 @@ _SHARED_PREFLIGHT_COMMAND = get_shared_command("preflight")
 _SHARED_RM_COMMAND = get_shared_command("rm")
 _SHARED_SESSION_COMMAND = get_shared_command("session")
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
-_SHARED_UNSUBSCRIBE_COMMAND = get_shared_command("unsubscribe")
 
 _LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
 _LOCAL_THREAD_LIST_GLOBAL = "feishu-codexctl thread list --scope global"
 _LOCAL_RESUME_COMMAND = "fcodex resume <thread_id|thread_name>"
+_LOCAL_THREAD_UNSUBSCRIBE = "feishu-codexctl thread unsubscribe --thread-id <thread_id>"
 
 
 @dataclass(frozen=True)
@@ -84,10 +84,12 @@ class CodexHelpDomain:
             "overview": _HelpPageSpec(
                 title="Codex 帮助",
                 markdown=(
-                    "从下面三个入口按场景进入，不需要先记住命令名。\n\n"
-                    "- `session`：线程、恢复、当前线程状态、目录切换\n"
-                    "- `settings`：profile、权限预设、审批、沙箱、协作模式、身份初始化\n"
-                    "- `group`：群聊激活、群聊工作态、群内触发与管理边界\n\n"
+                    "从下面五个入口按作用对象进入，不需要先记住命令名。\n\n"
+                    "- `当前会话`：当前 chat 的状态、预检、目录切换\n"
+                    "- `群聊`：当前群的激活、工作态、管理员边界\n"
+                    "- `线程`：新建、浏览、恢复、当前 thread 管理\n"
+                    "- `运行时`：当前会话设置，以及当前实例 backend reset\n"
+                    "- `身份`：`/whoami`、`/whoareyou`、`/init <token>`\n\n"
                     f"{self._local_thread_safety_rule}\n\n"
                     "本地继续同一线程请用 "
                     f"`{_LOCAL_RESUME_COMMAND}`；"
@@ -97,63 +99,31 @@ class CodexHelpDomain:
                 action_rows=(
                     _HelpActionRowSpec(
                         buttons=(
-                            _HelpPageButtonSpec(label="session", page="session"),
-                            _HelpPageButtonSpec(label="settings", page="settings"),
-                            _HelpPageButtonSpec(label="group", page="group"),
-                        ),
-                        layout="trisection",
-                    ),
-                ),
-            ),
-            "session": _HelpPageSpec(
-                title="Codex 帮助：线程",
-                markdown=(
-                    "**线程与目录**\n"
-                    f"- `{_SHARED_SESSION_COMMAND.feishu_usage}`：浏览当前目录线程\n"
-                    "- `/new`：立即新建线程\n"
-                    f"- `{_SHARED_RESUME_COMMAND.feishu_usage}`：全局精确恢复线程，可填 `thread_id` 或 `thread_name`\n"
-                    "- `/cd <path>`：切换目录并清空当前线程绑定\n"
-                    "- “当前线程”页：查看 `/status`、`/preflight`、释放 runtime、重命名、归档当前绑定线程\n\n"
-                    "**本地继续**\n"
-                    f"- 需要在本地继续同一 live thread 时，使用 `{_LOCAL_RESUME_COMMAND}`\n"
-                    f"- 本地查看当前目录线程请用 `{_LOCAL_THREAD_LIST_CWD}`\n"
-                    f"- 本地全局找线程请用 `{_LOCAL_THREAD_LIST_GLOBAL}`\n\n"
-                    f"{self._local_thread_safety_rule}"
-                ),
-                action_rows=(
-                    _HelpActionRowSpec(
-                        buttons=(
-                            _HelpPageButtonSpec(label="当前线程", page="session-current"),
-                            _HelpCommandButtonSpec(label="/session", command="/session", title="Codex Session"),
-                            _HelpCommandButtonSpec(
-                                label="/new",
-                                command="/new",
-                                title="Codex 新建线程",
-                                button_type="primary",
-                            ),
+                            _HelpPageButtonSpec(label="当前会话", page="chat"),
+                            _HelpPageButtonSpec(label="群聊", page="group"),
+                            _HelpPageButtonSpec(label="线程", page="thread"),
                         ),
                         layout="trisection",
                     ),
                     _HelpActionRowSpec(
                         buttons=(
-                            _HelpPageButtonSpec(label="恢复线程", page="session-resume-form"),
-                            _HelpPageButtonSpec(label="切换目录", page="session-cd-form"),
-                            _HelpPageButtonSpec(label="返回帮助", page="overview"),
+                            _HelpPageButtonSpec(label="运行时", page="runtime"),
+                            _HelpPageButtonSpec(label="身份", page="identity"),
                         ),
-                        layout="trisection",
+                        layout="bisected",
                     ),
                 ),
             ),
-            "session-current": _HelpPageSpec(
-                title="Codex 帮助：当前线程",
+            "chat": _HelpPageSpec(
+                title="Codex 帮助：当前会话",
                 markdown=(
-                    "这些操作都以**当前绑定线程**为目标。\n\n"
-                    "- `/status`：查看当前线程、当前 profile，以及当前飞书会话的权限 / 协作模式设置\n"
-                    f"- `{_SHARED_PREFLIGHT_COMMAND.feishu_usage}`：dry-run 当前 chat 下一条普通消息与 release 操作，不启动 turn、不改 binding\n"
-                    f"- `{_SHARED_UNSUBSCRIBE_COMMAND.feishu_usage}`：低层 release 动作；释放 Feishu 对当前线程的 runtime 持有，但不解绑 thread\n"
-                    "- `/rename <title>`：重命名当前线程\n"
-                    f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
-                    "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。"
+                    "作用对象：**当前 chat binding**。\n\n"
+                    "- `/status`：查看当前目录、当前线程，以及当前会话设置摘要\n"
+                    f"- `{_SHARED_PREFLIGHT_COMMAND.feishu_usage}`：dry-run 下一条普通消息与当前 chat 的 release 可用性，不启动 turn、不改 binding\n"
+                    "- `/cd <path>`：切换当前目录并清空当前线程绑定\n"
+                    "- 无参数 `/cd` 等价于查看当前目录；`/pwd` 不再作为主导航入口\n"
+                    "- 执行中如需停止，直接使用执行卡片里的“取消执行”\n\n"
+                    "线程浏览、新建与恢复，请看“线程”页。"
                 ),
                 action_rows=(
                     _HelpActionRowSpec(
@@ -164,48 +134,20 @@ class CodexHelpDomain:
                                 command=_SHARED_PREFLIGHT_COMMAND.slash_name,
                                 title="Codex Preflight",
                             ),
-                            _HelpCommandButtonSpec(
-                                label="unsubscribe",
-                                command=_SHARED_UNSUBSCRIBE_COMMAND.slash_name,
-                                title="Codex 取消 Feishu 订阅",
-                            ),
+                            _HelpPageButtonSpec(label="切换目录", page="chat-cd-form"),
                         ),
                         layout="trisection",
                     ),
                     _HelpActionRowSpec(
                         buttons=(
-                            _HelpCommandButtonSpec(label="/rm", command="/rm", title="Codex 归档线程"),
-                            _HelpPageButtonSpec(label="重命名", page="session-rename-current-form"),
-                            _HelpPageButtonSpec(label="返回 Session", page="session"),
+                            _HelpPageButtonSpec(label="线程", page="thread"),
+                            _HelpPageButtonSpec(label="返回帮助", page="overview"),
                         ),
-                        layout="trisection",
+                        layout="bisected",
                     ),
                 ),
             ),
-            "session-resume-form": _HelpPageSpec(
-                title="Codex 帮助：恢复线程",
-                markdown=(
-                    f"填写 `{_SHARED_RESUME_COMMAND.feishu_usage}` 里的目标。\n\n"
-                    "- 支持精确 `thread_id`\n"
-                    "- 也支持全局精确 `thread_name`\n"
-                    "- 如果同名命中多个线程，会按 slash 语义报错，不会替你猜"
-                ),
-                form=_HelpFormSpec(
-                    form_name="help_resume_form",
-                    field_name="resume_target",
-                    placeholder="输入 thread_id 或 thread_name",
-                    submit_label="恢复线程",
-                    submit_command="/resume",
-                    submit_title="Codex 恢复线程",
-                    required_text="请输入 thread_id 或 thread_name。",
-                ),
-                action_rows=(
-                    _HelpActionRowSpec(
-                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="session"),),
-                    ),
-                ),
-            ),
-            "session-cd-form": _HelpPageSpec(
+            "chat-cd-form": _HelpPageSpec(
                 title="Codex 帮助：切换目录",
                 markdown=(
                     "填写目标目录并提交，相当于执行 `/cd <path>`。\n\n"
@@ -223,124 +165,7 @@ class CodexHelpDomain:
                 ),
                 action_rows=(
                     _HelpActionRowSpec(
-                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="session"),),
-                    ),
-                ),
-            ),
-            "session-rename-current-form": _HelpPageSpec(
-                title="Codex 帮助：重命名当前线程",
-                markdown=(
-                    "填写新标题并提交，相当于执行 `/rename <title>`。\n\n"
-                    "该操作只针对当前绑定线程。"
-                ),
-                form=_HelpFormSpec(
-                    form_name="help_rename_current_form",
-                    field_name="rename_title",
-                    placeholder="输入新标题",
-                    submit_label="确认重命名",
-                    submit_command="/rename",
-                    submit_title="Codex 重命名结果",
-                    required_text="请输入新标题。",
-                ),
-                action_rows=(
-                    _HelpActionRowSpec(
-                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="session-current"),),
-                    ),
-                ),
-            ),
-            "settings": _HelpPageSpec(
-                title="Codex 帮助：设置",
-                markdown=(
-                    "**当前 thread profile 与当前会话设置**\n"
-                    f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前绑定 thread 的 resume profile；必要时会提供 reset backend 路径\n"
-                    f"- `{_SHARED_RESET_BACKEND_COMMAND.feishu_usage}`：管理员预览并重置当前实例 backend；适合清理卡住的 loaded / pending 状态\n"
-                    "- 推荐先用 `/permissions`；它会同时设置审批策略与沙箱\n"
-                    "- `/approval`、`/sandbox`：单独调整审批或沙箱\n"
-                    "- `/mode`：切换当前飞书会话后续 turn 的协作模式\n"
-                    "- 如果当前正在执行，新设置从下一轮生效。\n\n"
-                    "**身份与初始化**\n"
-                    "- `/whoami`、`/whoareyou`、`/init <token>` 在单独子页里"
-                ),
-                action_rows=(
-                    _HelpActionRowSpec(
-                        buttons=(
-                            _HelpCommandButtonSpec(label="/profile", command="/profile", title="Codex Thread Profile"),
-                            _HelpCommandButtonSpec(
-                                label="/permissions",
-                                command="/permissions",
-                                title="Codex 权限预设",
-                            ),
-                            _HelpCommandButtonSpec(label="/approval", command="/approval", title="Codex 审批策略"),
-                        ),
-                        layout="trisection",
-                    ),
-                    _HelpActionRowSpec(
-                        buttons=(
-                            _HelpCommandButtonSpec(label="/sandbox", command="/sandbox", title="Codex 沙箱策略"),
-                            _HelpCommandButtonSpec(label="/mode", command="/mode", title="Codex 协作模式"),
-                            _HelpCommandButtonSpec(
-                                label="/reset-backend",
-                                command="/reset-backend",
-                                title="Codex Backend Reset",
-                            ),
-                        ),
-                        layout="trisection",
-                    ),
-                    _HelpActionRowSpec(
-                        buttons=(
-                            _HelpPageButtonSpec(label="身份与初始化", page="settings-identity"),
-                            _HelpPageButtonSpec(label="返回帮助", page="overview"),
-                        ),
-                    ),
-                ),
-            ),
-            "settings-identity": _HelpPageSpec(
-                title="Codex 帮助：身份与初始化",
-                markdown=(
-                    "- `/whoami`：私聊查看自己的 `open_id` 等身份信息\n"
-                    "- `/whoareyou`：查看机器人的 `app_id`、配置的 `bot_open_id`、实时探测结果\n"
-                    "- `/debug-contact <open_id>`：私聊排查通讯录名字解析、缓存命中与 fallback 原因\n"
-                    "- `/init <token>`：私聊初始化管理员与 `bot_open_id`\n\n"
-                    "注意：`/whoami` 与 `/init` 只支持私聊；如果在群里触发，会按 slash 语义拒绝。"
-                ),
-                action_rows=(
-                    _HelpActionRowSpec(
-                        buttons=(
-                            _HelpCommandButtonSpec(label="/whoami", command="/whoami", title="Codex 身份信息"),
-                            _HelpCommandButtonSpec(
-                                label="/whoareyou",
-                                command="/whoareyou",
-                                title="Codex 机器人身份",
-                            ),
-                            _HelpPageButtonSpec(label="初始化", page="settings-init-form"),
-                        ),
-                        layout="trisection",
-                    ),
-                    _HelpActionRowSpec(
-                        buttons=(_HelpPageButtonSpec(label="返回 Settings", page="settings"),),
-                    ),
-                ),
-            ),
-            "settings-init-form": _HelpPageSpec(
-                title="Codex 帮助：初始化",
-                markdown=(
-                    "填写初始化 token 并提交，相当于执行 `/init <token>`。\n\n"
-                    "- 仅支持私聊\n"
-                    "- 会把当前发送者加入 `admin_open_ids`\n"
-                    "- 会尽量自动写入 `bot_open_id`"
-                ),
-                form=_HelpFormSpec(
-                    form_name="help_init_form",
-                    field_name="init_token",
-                    placeholder="输入 init token",
-                    submit_label="执行初始化",
-                    submit_command="/init",
-                    submit_title="Codex 初始化结果",
-                    required_text="请输入 init token。",
-                ),
-                action_rows=(
-                    _HelpActionRowSpec(
-                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="settings-identity"),),
+                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="chat"),),
                     ),
                 ),
             ),
@@ -354,6 +179,9 @@ class CodexHelpDomain:
                     "- 未激活群里，非管理员不能使用机器人\n\n"
                     "**群聊工作态**\n"
                     "- `/groupmode`：查看或切换当前群聊工作态\n"
+                    "- `assistant`：默认；只在有效 mention 时回复，并附带群上下文\n"
+                    "- `mention-only`：只在有效 mention 时触发，不带群历史上下文\n"
+                    "- `all`：允许成员直接发普通消息触发；风险最高，且当前 thread 进入 `all` 独占规则\n"
                     "- 这是群聊专属能力；在私聊中触发会按 slash 语义拒绝\n\n"
                     "**权限边界**\n"
                     "- 激活后的群成员可日常对话，并处理自己发起 turn 的审批或补充输入\n"
@@ -374,22 +202,206 @@ class CodexHelpDomain:
                             ),
                             _HelpPageButtonSpec(label="返回帮助", page="overview"),
                         ),
+                        layout="trisection",
                     ),
                 ),
             ),
-            "local-wrapper-redirect": _HelpPageSpec(
-                title="Codex 帮助：本地命令",
+            "thread": _HelpPageSpec(
+                title="Codex 帮助：线程",
                 markdown=(
-                    f"本地继续同一线程请用 `{_LOCAL_RESUME_COMMAND}`。\n\n"
-                    "本地查看/管理请用：\n"
-                    f"- `{_LOCAL_THREAD_LIST_CWD}`\n"
-                    f"- `{_LOCAL_THREAD_LIST_GLOBAL}`\n"
-                    "- `feishu-codexctl thread status --thread-id <thread_id>`\n"
-                    "- `feishu-codexctl thread bindings --thread-id <thread_id>`"
+                    "作用对象：**当前或目标 thread**。\n\n"
+                    f"- `{_SHARED_SESSION_COMMAND.feishu_usage}`：浏览当前目录线程\n"
+                    "- `/new`：立即新建线程\n"
+                    f"- `{_SHARED_RESUME_COMMAND.feishu_usage}`：全局精确恢复线程，可填 `thread_id` 或 `thread_name`\n"
+                    "- “当前线程”页：查看 `/profile`、重命名、归档当前绑定 thread\n\n"
+                    "**本地继续**\n"
+                    f"- 需要在本地继续同一 live thread 时，使用 `{_LOCAL_RESUME_COMMAND}`\n"
+                    f"- 本地查看当前目录线程请用 `{_LOCAL_THREAD_LIST_CWD}`\n"
+                    f"- 本地全局找线程请用 `{_LOCAL_THREAD_LIST_GLOBAL}`\n\n"
+                    "当前 chat 的状态、预检与目录切换，请看“当前会话”页。"
                 ),
                 action_rows=(
                     _HelpActionRowSpec(
+                        buttons=(
+                            _HelpCommandButtonSpec(label="/session", command="/session", title="Codex Session"),
+                            _HelpCommandButtonSpec(
+                                label="/new",
+                                command="/new",
+                                title="Codex 新建线程",
+                                button_type="primary",
+                            ),
+                            _HelpPageButtonSpec(label="恢复线程", page="thread-resume-form"),
+                        ),
+                        layout="trisection",
+                    ),
+                    _HelpActionRowSpec(
+                        buttons=(
+                            _HelpPageButtonSpec(label="当前线程", page="thread-current"),
+                            _HelpPageButtonSpec(label="返回帮助", page="overview"),
+                        ),
+                        layout="bisected",
+                    ),
+                ),
+            ),
+            "thread-current": _HelpPageSpec(
+                title="Codex 帮助：当前线程",
+                markdown=(
+                    "作用对象：**当前绑定 thread**。\n\n"
+                    f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前 thread 的 resume profile；必要时会提供 reset backend 路径\n"
+                    "- `/rename <title>`：重命名当前线程\n"
+                    f"- `{_SHARED_RM_COMMAND.slash_name}`：归档当前线程\n\n"
+                    "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。\n\n"
+                    "通常不需要在飞书侧主动理解 `/unsubscribe`。\n"
+                    "如果只是为了 re-profile，优先直接使用 `/profile <name>` 走现有路径；"
+                    "需要排障或本地管理时，再用 "
+                    f"`{_LOCAL_THREAD_UNSUBSCRIBE}`。"
+                ),
+                action_rows=(
+                    _HelpActionRowSpec(
+                        buttons=(
+                            _HelpCommandButtonSpec(
+                                label="/profile",
+                                command="/profile",
+                                title="Codex Thread Profile",
+                            ),
+                            _HelpCommandButtonSpec(label="/rm", command="/rm", title="Codex 归档线程"),
+                            _HelpPageButtonSpec(label="重命名", page="thread-rename-current-form"),
+                        ),
+                        layout="trisection",
+                    ),
+                    _HelpActionRowSpec(
+                        buttons=(_HelpPageButtonSpec(label="返回线程", page="thread"),),
+                    ),
+                ),
+            ),
+            "thread-resume-form": _HelpPageSpec(
+                title="Codex 帮助：恢复线程",
+                markdown=(
+                    f"填写 `{_SHARED_RESUME_COMMAND.feishu_usage}` 里的目标。\n\n"
+                    "- 支持精确 `thread_id`\n"
+                    "- 也支持全局精确 `thread_name`\n"
+                    "- 如果同名命中多个线程，会按 slash 语义报错，不会替你猜"
+                ),
+                form=_HelpFormSpec(
+                    form_name="help_resume_form",
+                    field_name="resume_target",
+                    placeholder="输入 thread_id 或 thread_name",
+                    submit_label="恢复线程",
+                    submit_command="/resume",
+                    submit_title="Codex 恢复线程",
+                    required_text="请输入 thread_id 或 thread_name。",
+                ),
+                action_rows=(
+                    _HelpActionRowSpec(
+                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="thread"),),
+                    ),
+                ),
+            ),
+            "thread-rename-current-form": _HelpPageSpec(
+                title="Codex 帮助：重命名当前线程",
+                markdown=(
+                    "填写新标题并提交，相当于执行 `/rename <title>`。\n\n"
+                    "该操作只针对当前绑定线程。"
+                ),
+                form=_HelpFormSpec(
+                    form_name="help_rename_current_form",
+                    field_name="rename_title",
+                    placeholder="输入新标题",
+                    submit_label="确认重命名",
+                    submit_command="/rename",
+                    submit_title="Codex 重命名结果",
+                    required_text="请输入新标题。",
+                ),
+                action_rows=(
+                    _HelpActionRowSpec(
+                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="thread-current"),),
+                    ),
+                ),
+            ),
+            "runtime": _HelpPageSpec(
+                title="Codex 帮助：运行时",
+                markdown=(
+                    "作用对象：**当前飞书会话** 与 **当前实例 backend**。\n\n"
+                    "- `/profile` 属于当前 thread 管理，入口在“线程 -> 当前线程”\n"
+                    "- 推荐先用 `/permissions`；它会同时设置审批策略与沙箱\n"
+                    "- `/approval`、`/sandbox`：单独调整审批或沙箱\n"
+                    "- `/mode`：切换当前飞书会话后续 turn 的协作模式\n"
+                    f"- `{_SHARED_RESET_BACKEND_COMMAND.feishu_usage}`：管理员预览并重置当前实例 backend；这是实例级管理动作，不是当前 thread 命令\n"
+                    "- 如果当前正在执行，新设置从下一轮生效。"
+                ),
+                action_rows=(
+                    _HelpActionRowSpec(
+                        buttons=(
+                            _HelpCommandButtonSpec(
+                                label="/permissions",
+                                command="/permissions",
+                                title="Codex 权限预设",
+                            ),
+                            _HelpCommandButtonSpec(label="/approval", command="/approval", title="Codex 审批策略"),
+                            _HelpCommandButtonSpec(label="/sandbox", command="/sandbox", title="Codex 沙箱策略"),
+                        ),
+                        layout="trisection",
+                    ),
+                    _HelpActionRowSpec(
+                        buttons=(
+                            _HelpCommandButtonSpec(label="/mode", command="/mode", title="Codex 协作模式"),
+                            _HelpCommandButtonSpec(
+                                label="/reset-backend",
+                                command="/reset-backend",
+                                title="Codex Backend Reset",
+                            ),
+                            _HelpPageButtonSpec(label="返回帮助", page="overview"),
+                        ),
+                        layout="trisection",
+                    ),
+                ),
+            ),
+            "identity": _HelpPageSpec(
+                title="Codex 帮助：身份",
+                markdown=(
+                    "- `/whoami`：私聊查看自己的 `open_id` 等身份信息\n"
+                    "- `/whoareyou`：查看机器人的 `app_id`、配置的 `bot_open_id`、实时探测结果\n"
+                    "- `/init <token>`：私聊初始化管理员与 `bot_open_id`\n\n"
+                    "注意：`/whoami` 与 `/init` 只支持私聊；如果在群里触发，会按 slash 语义拒绝。"
+                ),
+                action_rows=(
+                    _HelpActionRowSpec(
+                        buttons=(
+                            _HelpCommandButtonSpec(label="/whoami", command="/whoami", title="Codex 身份信息"),
+                            _HelpCommandButtonSpec(
+                                label="/whoareyou",
+                                command="/whoareyou",
+                                title="Codex 机器人身份",
+                            ),
+                            _HelpPageButtonSpec(label="初始化", page="identity-init-form"),
+                        ),
+                        layout="trisection",
+                    ),
+                    _HelpActionRowSpec(
                         buttons=(_HelpPageButtonSpec(label="返回帮助", page="overview"),),
+                    ),
+                ),
+            ),
+            "identity-init-form": _HelpPageSpec(
+                title="Codex 帮助：初始化",
+                markdown=(
+                    "填写初始化 token 并提交，相当于执行 `/init <token>`。\n\n"
+                    "- 仅支持私聊\n"
+                    "- 会把当前发送者加入 `admin_open_ids`\n"
+                    "- 会尽量自动写入 `bot_open_id`"
+                ),
+                form=_HelpFormSpec(
+                    form_name="help_init_form",
+                    field_name="init_token",
+                    placeholder="输入 init token",
+                    submit_label="执行初始化",
+                    submit_command="/init",
+                    submit_title="Codex 初始化结果",
+                    required_text="请输入 init token。",
+                ),
+                action_rows=(
+                    _HelpActionRowSpec(
+                        buttons=(_HelpPageButtonSpec(label="返回上一页", page="identity"),),
                     ),
                 ),
             ),
@@ -399,27 +411,12 @@ class CodexHelpDomain:
     def _build_page_aliases() -> dict[str, str]:
         return {
             "": "overview",
-            "basic": "overview",
-            "basics": "overview",
             "overview": "overview",
-            "session": "session",
-            "sessions": "session",
-            "resume": "session",
-            "thread": "session",
-            "threads": "session",
-            "settings": "settings",
-            "permission": "settings",
-            "permissions": "settings",
-            "approval": "settings",
-            "sandbox": "settings",
-            "mode": "settings",
-            "advanced": "settings",
+            "chat": "chat",
             "group": "group",
-            "groups": "group",
-            "acl": "group",
-            "local": "local-wrapper-redirect",
-            "fcodex": "local-wrapper-redirect",
-            "wrapper": "local-wrapper-redirect",
+            "thread": "thread",
+            "runtime": "runtime",
+            "identity": "identity",
         }
 
     def _resolve_page_id(self, page_or_alias: str) -> str:
@@ -535,4 +532,9 @@ class CodexHelpDomain:
         card = self._build_help_card(topic)
         if card is not None:
             return CommandResult(card=card)
-        return CommandResult(text="帮助主题仅支持：`session`、`settings`、`group`。\n发送 `/help` 查看导航入口。")
+        return CommandResult(
+            text=(
+                "帮助主题仅支持：`chat`、`group`、`thread`、`runtime`、`identity`。\n"
+                "发送 `/help` 查看导航入口。"
+            )
+        )

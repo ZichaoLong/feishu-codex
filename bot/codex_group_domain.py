@@ -141,19 +141,6 @@ class CodexGroupDomain:
             )
         return CommandResult(text="用法：`/group`、`/group activate`、`/group deactivate`")
 
-    def handle_show_group_mode_card_action(
-        self,
-        chat_id: str,
-        message_id: str,
-        action_value: dict[str, Any],
-    ) -> P2CardActionTriggerResponse:
-        if not self._ports.is_group_chat(chat_id, message_id):
-            return make_card_response(toast="该命令仅支持群聊使用。", toast_type="warning")
-        operator_open_id = str(action_value.get("_operator_open_id", "")).strip()
-        return make_card_response(
-            card=self._group_mode_card(chat_id, open_id=operator_open_id)
-        )
-
     def handle_set_group_mode_action(
         self,
         chat_id: str,

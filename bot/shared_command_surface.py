@@ -22,7 +22,7 @@ _SHARED_COMMAND_SPECS = (
     SharedCommandSpec(
         key="help",
         slash_name="/help",
-        feishu_usage="/help [session|settings|group]",
+        feishu_usage="/help [chat|group|thread|runtime|identity]",
         feishu_summary="查看帮助概览与主题入口。",
     ),
     SharedCommandSpec(

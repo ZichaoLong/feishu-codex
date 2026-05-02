@@ -891,35 +891,6 @@ class CodexSettingsDomain:
             toast_type="success",
         )
 
-    def handle_show_permissions_card_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-    ) -> P2CardActionTriggerResponse:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
-        return make_card_response(
-            card=build_permissions_preset_card(
-                runtime.approval_policy,
-                runtime.sandbox,
-                running=runtime.running,
-            )
-        )
-
-    def handle_show_mode_card_action(
-        self,
-        sender_id: str,
-        chat_id: str,
-        message_id: str,
-    ) -> P2CardActionTriggerResponse:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
-        return make_card_response(
-            card=build_collaboration_mode_card(
-                runtime.collaboration_mode,
-                running=runtime.running,
-            )
-        )
-
     def handle_set_profile(
         self,
         sender_id: str,

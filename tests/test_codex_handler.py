@@ -4332,22 +4332,54 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 帮助")
         content = card["elements"][0]["content"]
-        self.assertIn("`session`", content)
-        self.assertIn("`settings`", content)
-        self.assertIn("`group`", content)
+        self.assertIn("`当前会话`", content)
+        self.assertIn("`群聊`", content)
+        self.assertIn("`线程`", content)
+        self.assertIn("`运行时`", content)
+        self.assertIn("`身份`", content)
         self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
-        self.assertNotIn("/help local", content)
         self.assertIn("同一线程允许多端订阅观察", content)
         self.assertIn("同一 live turn 只有一个交互 owner", content)
-        action = self._first_action(card)
-        self.assertEqual(action["layout"], "trisection")
-        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["session", "settings", "group"])
+        action_elements = self._action_elements(card)
+        self.assertEqual(action_elements[0]["layout"], "trisection")
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[0]["actions"]],
+            ["当前会话", "群聊", "线程"],
+        )
+        self.assertEqual(action_elements[1]["layout"], "bisected")
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[1]["actions"]],
+            ["运行时", "身份"],
+        )
 
-    def test_help_session_mentions_resume_scope_and_new_semantics(self) -> None:
+    def test_help_chat_page_mentions_status_preflight_and_cd(self) -> None:
         handler, bot = self._make_handler()
 
-        handler.handle_message("ou_user", "c1", "/help session")
+        handler.handle_message("ou_user", "c1", "/help chat")
+
+        self.assertEqual(len(bot.cards), 1)
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：当前会话")
+        content = card["elements"][0]["content"]
+        self.assertIn("`/status`", content)
+        self.assertIn("`/preflight`", content)
+        self.assertIn("`/cd <path>`", content)
+        self.assertIn("`/pwd` 不再作为主导航入口", content)
+        action_elements = self._action_elements(card)
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[0]["actions"]],
+            ["/status", "/preflight", "切换目录"],
+        )
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[1]["actions"]],
+            ["线程", "返回帮助"],
+        )
+
+    def test_help_thread_page_mentions_resume_scope_and_local_resume(self) -> None:
+        handler, bot = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "/help thread")
 
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[-1]
@@ -4356,48 +4388,43 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`/session`", content)
         self.assertIn("`/resume <thread_id|thread_name>`", content)
         self.assertIn("`/new`", content)
-        self.assertIn("`/cd <path>`", content)
+        self.assertIn("当前线程", content)
         self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
         action_elements = self._action_elements(card)
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["当前线程", "/session", "/new"],
+            ["/session", "/new", "恢复线程"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
-            ["恢复线程", "切换目录", "返回帮助"],
+            ["当前线程", "返回帮助"],
         )
 
-    def test_help_settings_mentions_permissions_as_recommended_entry(self) -> None:
+    def test_help_runtime_mentions_permissions_as_recommended_entry(self) -> None:
         handler, bot = self._make_handler()
 
-        handler.handle_message("ou_user", "c1", "/help settings")
+        handler.handle_message("ou_user", "c1", "/help runtime")
 
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[-1]
-        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：设置")
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：运行时")
         content = card["elements"][0]["content"]
-        self.assertIn("`/profile [name]`", content)
+        self.assertIn("`/profile` 属于当前 thread 管理", content)
         self.assertIn("推荐先用 `/permissions`", content)
         self.assertIn("`/approval`", content)
         self.assertIn("`/sandbox`", content)
         self.assertIn("`/mode`", content)
         self.assertIn("`/reset-backend`", content)
-        self.assertIn("身份与初始化", content)
         self.assertIn("如果当前正在执行，新设置从下一轮生效。", content)
         action_elements = self._action_elements(card)
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/profile", "/permissions", "/approval"],
+            ["/permissions", "/approval", "/sandbox"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
-            ["/sandbox", "/mode", "/reset-backend"],
-        )
-        self.assertEqual(
-            [item["text"]["content"] for item in action_elements[2]["actions"]],
-            ["身份与初始化", "返回帮助"],
+            ["/mode", "/reset-backend", "返回帮助"],
         )
 
     def test_help_group_card_has_shortcuts(self) -> None:
@@ -4409,39 +4436,54 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：群聊")
         self.assertIn("/group activate", card["elements"][0]["content"])
+        self.assertIn("`assistant`", card["elements"][0]["content"])
+        self.assertIn("`mention-only`", card["elements"][0]["content"])
+        self.assertIn("`all`", card["elements"][0]["content"])
         self.assertIn("自己发起 turn 的审批", card["elements"][0]["content"])
         action = self._first_action(card)
         self.assertEqual([item["text"]["content"] for item in action["actions"]], ["/group", "/groupmode", "返回帮助"])
 
-    def test_help_local_alias_resolves_to_redirect_page(self) -> None:
+    def test_help_identity_page_has_bootstrap_shortcuts(self) -> None:
         handler, bot = self._make_handler()
 
-        handler.handle_message("ou_user", "c1", "/help local")
+        handler.handle_message("ou_user", "c1", "/help identity")
 
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[-1]
-        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：本地命令")
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", card["elements"][0]["content"])
-        self.assertIn("`feishu-codexctl thread list --scope cwd`", card["elements"][0]["content"])
+        self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：身份")
+        content = card["elements"][0]["content"]
+        self.assertIn("`/whoami`", content)
+        self.assertIn("`/whoareyou`", content)
+        self.assertIn("`/init <token>`", content)
+        self.assertNotIn("/debug-contact", content)
+        action_elements = self._action_elements(card)
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[0]["actions"]],
+            ["/whoami", "/whoareyou", "初始化"],
+        )
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[1]["actions"]],
+            ["返回帮助"],
+        )
 
-    def test_help_page_action_returns_settings_card(self) -> None:
+    def test_help_page_action_returns_runtime_card(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
-            {"action": "show_help_page", "page": "settings"},
+            {"action": "show_help_page", "page": "runtime"},
         ))
 
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：设置")
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：运行时")
         self.assertEqual(
             [item["text"]["content"] for item in self._action_elements(response["card"])[0]["actions"]],
-            ["/profile", "/permissions", "/approval"],
+            ["/permissions", "/approval", "/sandbox"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in self._action_elements(response["card"])[1]["actions"]],
-            ["/sandbox", "/mode", "/reset-backend"],
+            ["/mode", "/reset-backend", "返回帮助"],
         )
 
     def test_reset_backend_command_returns_preview_card(self) -> None:
@@ -4467,43 +4509,6 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "warning")
         self.assertEqual(response["toast"], "仅管理员可操作群共享会话或群设置。")
 
-    def test_help_settings_shortcut_can_open_permissions_card(self) -> None:
-        handler, _ = self._make_handler()
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-help",
-            {"action": "show_permissions_card"},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 权限预设")
-
-    def test_help_settings_shortcut_can_open_mode_card(self) -> None:
-        handler, _ = self._make_handler()
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "c1",
-            "msg-help",
-            {"action": "show_mode_card"},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 协作模式")
-
-    def test_help_group_shortcut_can_open_groupmode_card(self) -> None:
-        handler, _ = self._make_handler()
-        handler.bot.message_contexts["msg-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
-
-        response = self._unpack_card_response(handler.handle_card_action(
-            "ou_user",
-            "chat-group",
-            "msg-group",
-            {"action": "show_group_mode_card", "_operator_open_id": "ou_admin"},
-        ))
-
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊工作态")
-
     def test_help_page_action_returns_overview_dashboard(self) -> None:
         handler, _ = self._make_handler()
 
@@ -4515,9 +4520,16 @@ class CodexHandlerTests(unittest.TestCase):
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助")
-        action = self._first_action(response["card"])
-        self.assertEqual(action["layout"], "trisection")
-        self.assertEqual([item["text"]["content"] for item in action["actions"]], ["session", "settings", "group"])
+        action_elements = self._action_elements(response["card"])
+        self.assertEqual(action_elements[0]["layout"], "trisection")
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[0]["actions"]],
+            ["当前会话", "群聊", "线程"],
+        )
+        self.assertEqual(
+            [item["text"]["content"] for item in action_elements[1]["actions"]],
+            ["运行时", "身份"],
+        )
 
     def test_help_navigation_actions_are_not_group_admin_only(self) -> None:
         handler, _ = self._make_handler()
@@ -4539,88 +4551,92 @@ class CodexHandlerTests(unittest.TestCase):
             "ou_user",
             "c1",
             "msg-help",
-            {"action": "show_help_page", "page": "session-current"},
+            {"action": "show_help_page", "page": "thread-current"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：当前线程")
+        self.assertIn(
+            "feishu-codexctl thread unsubscribe --thread-id <thread_id>",
+            response["card"]["elements"][0]["content"],
+        )
         action_elements = self._action_elements(response["card"])
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
-            ["/status", "/preflight", "unsubscribe"],
+            ["/profile", "/rm", "重命名"],
         )
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[1]["actions"]],
-            ["/rm", "重命名", "返回 Session"],
+            ["返回线程"],
         )
 
-    def test_help_show_page_action_can_open_session_resume_form(self) -> None:
+    def test_help_show_page_action_can_open_thread_resume_form(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
-            {"action": "show_help_page", "page": "session-resume-form"},
+            {"action": "show_help_page", "page": "thread-resume-form"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：恢复线程")
         self.assertTrue(any(element.get("tag") == "form" for element in response["card"]["elements"]))
         self.assertEqual(self._action_elements(response["card"])[0]["actions"][0]["text"]["content"], "返回上一页")
 
-    def test_help_show_page_action_can_open_session_cd_form(self) -> None:
+    def test_help_show_page_action_can_open_chat_cd_form(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
-            {"action": "show_help_page", "page": "session-cd-form"},
+            {"action": "show_help_page", "page": "chat-cd-form"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：切换目录")
         self.assertTrue(any(element.get("tag") == "form" for element in response["card"]["elements"]))
         self.assertIn("/cd <path>", response["card"]["elements"][0]["content"])
 
-    def test_help_show_page_action_can_open_session_rename_current_form(self) -> None:
+    def test_help_show_page_action_can_open_thread_rename_current_form(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
-            {"action": "show_help_page", "page": "session-rename-current-form"},
+            {"action": "show_help_page", "page": "thread-rename-current-form"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：重命名当前线程")
         self.assertTrue(any(element.get("tag") == "form" for element in response["card"]["elements"]))
         self.assertIn("/rename <title>", response["card"]["elements"][0]["content"])
 
-    def test_help_show_page_action_can_open_settings_identity_page(self) -> None:
+    def test_help_show_page_action_can_open_identity_page(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
-            {"action": "show_help_page", "page": "settings-identity"},
+            {"action": "show_help_page", "page": "identity"},
         ))
 
-        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：身份与初始化")
-        self.assertIn("/debug-contact <open_id>", response["card"]["elements"][0]["content"])
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：身份")
+        self.assertNotIn("/debug-contact", response["card"]["elements"][0]["content"])
         action_elements = self._action_elements(response["card"])
         self.assertEqual(
             [item["text"]["content"] for item in action_elements[0]["actions"]],
             ["/whoami", "/whoareyou", "初始化"],
         )
 
-    def test_help_show_page_action_can_open_settings_init_form(self) -> None:
+    def test_help_show_page_action_can_open_identity_init_form(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
             "ou_user",
             "c1",
             "msg-help",
-            {"action": "show_help_page", "page": "settings-init-form"},
+            {"action": "show_help_page", "page": "identity-init-form"},
         ))
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：初始化")

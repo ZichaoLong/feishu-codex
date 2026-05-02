@@ -27,27 +27,38 @@ Those belong to their dedicated docs.
 
 Feishu `/help` is a navigation entry, not a flat command dump.
 
-The root help card must expose exactly three top-level navigation choices:
+The root help card must expose exactly five top-level entries, in this order:
 
-- `session`
-- `settings`
-- `group`
+- `Current Chat`, text topic `chat`
+- `Group`, text topic `group`
+- `Thread`, text topic `thread`
+- `Runtime`, text topic `runtime`
+- `Identity`, text topic `identity`
 
-The root card may include short explanatory text for each choice, but it should not try to list every command inline.
+The button labels may be localized, but the textual `/help <topic>` contract
+must stay explicit and stable.
 
-Local `fcodex` usage is not part of the Feishu `/help` surface.
+The root card may include short explanatory text for these entries, but it
+should not try to list every command inline.
+
+Local `fcodex` usage is not a standalone Feishu `/help` page. If it appears at
+all, it should only appear as brief text guidance on the overview or thread
+pages.
 
 ## 3. Navigation Reachability
 
-“Reachable from `/help`” means reachable through one or more card buttons after entering `/help`.
+“Reachable from `/help`” means reachable through one or more card buttons after
+entering `/help`.
 
 It does not require every command to appear on the root card.
 
-Multi-level navigation is preferred when it reduces clutter and clarifies responsibility.
+Multi-level navigation is preferred when it reduces clutter and clarifies
+responsibility.
 
 ## 4. Semantic Equivalence Rule
 
-Help buttons and forms may differ from slash commands in presentation, but not in behavior.
+Help buttons and forms may differ from slash commands in presentation, but not
+in behavior.
 
 Therefore:
 
@@ -60,7 +71,8 @@ Different response shape is allowed:
 - slash commands may reply with a new message
 - card actions may update the current card or show a toast
 
-But the underlying operation, validation, scope guard, and state transition must remain equivalent.
+But the underlying operation, validation, scope guard, and state transition
+must remain equivalent.
 
 Help/navigation card payloads must also stay minimal and explicit:
 
@@ -68,93 +80,127 @@ Help/navigation card payloads must also stay minimal and explicit:
 - payloads should only carry the parameters the target action actually consumes
 - `plugin`, bot keyword, or other deployment-identifying fields are not part of the callback contract and must not be required for routing
 
-## 5. Session Surface
+## 5. Current-Chat Surface
 
-The `session` branch of `/help` should cover thread and working-directory operations.
+The `chat` branch of `/help` owns **current chat binding** state and working-directory control.
+
+It must make the following capabilities reachable:
+
+- `/status`
+- `/preflight`
+- `/cd <path>` via a form
+
+This branch may link onward to the thread surface, but it does not own thread
+management semantics.
+
+`/status` and `/preflight` remain chat-scoped commands:
+
+- even in group chats, they still describe the current chat binding
+- they are not a global thread-admin surface
+
+## 6. Group Surface
+
+The `group` branch of `/help` owns group-only operating rules and controls.
+
+It must make the following capabilities reachable:
+
+- `/group`
+- `/groupmode`
+
+The page text should cover:
+
+- that groups start deactivated
+- what `/group activate` and `/group deactivate` do
+- the three group modes `assistant`, `mention-only`, and `all`
+- the permission boundary between daily group usage, shared-state management,
+  and approval-card handling
+
+If the implementation keeps follow-up buttons on the `/group` and `/groupmode`
+state cards, then `/group activate`, `/group deactivate`, and
+`/groupmode <mode>` are also considered reachable from `/help`, even though
+they are not flattened onto the help page itself.
+
+## 7. Thread Surface
+
+The `thread` branch of `/help` owns thread browsing, creation, resumption, and
+current-thread management.
 
 It must make the following capabilities reachable:
 
 - `/session`
 - `/new`
 - `/resume <thread_id|thread_name>` via a form
-- `/cd <path>` via a form
-- a current-thread page for current binding operations
+- a current-thread page for the currently bound thread
 
 The current-thread page should cover:
 
-- `/status`
-- `/preflight`
-- `/unsubscribe`
-- `/rename <title>` for the currently bound thread, via a form
-- `/rm` for the currently bound thread
+- `/profile [name]`
+- `/rename <title>` for the current thread, via a form
+- `/rm` for the current thread
 
-That current-thread page is still an entry for the **current chat binding**,
+That current-thread page is still an entry for the **currently bound thread**,
 not a global thread-admin surface.
 
-- `/status`, `/preflight`, and `/unsubscribe` remain chat-scoped
-  even when they are triggered from inside a group chat
-- thread-scoped management for an arbitrary thread belongs to local
-  `feishu-codexctl`
+The existing `/session` card remains the current-directory thread browser and
+archive/resume surface for listed threads.
 
-The help surface does not need a global thread browser or a global archive form.
+`/unsubscribe` is intentionally not a first-class help-navigation capability:
 
-The existing `/session` card remains the current-directory thread browser and archive/resume surface for listed threads.
+- the main user-facing re-profile path should flow through `/profile [name]`
+- if needed, help text may point users to `feishu-codexctl` for local
+  troubleshooting, but no dedicated help button is required
 
-## 6. Settings Surface
+## 8. Runtime Surface
 
-The `settings` branch of `/help` should cover the current bound thread's profile and per-binding runtime settings.
+The `runtime` branch of `/help` owns per-Feishu-binding runtime settings and
+instance-level backend control.
 
 It must make the following capabilities reachable:
 
-- `/profile`
 - `/permissions`
 - `/approval`
 - `/sandbox`
 - `/mode`
+- `/reset-backend`
 
-It should also expose an identity/admin subpage that makes the following reachable:
+`/profile` does not belong here. It is a property of the current thread and
+must remain under `Thread -> Current Thread`.
+
+## 9. Identity Surface
+
+The `identity` branch of `/help` owns identity and bootstrap.
+
+It must make the following capabilities reachable:
 
 - `/whoami`
 - `/whoareyou`
 - `/init <token>` via a form
 
-## 7. Group Surface
+`/debug-contact <open_id>` is not part of the normal help navigation surface
+and is not required to be reachable from `/help`.
 
-The `group` branch of `/help` should cover group-only operating rules.
+## 10. Commands Intentionally Excluded From `/help` Navigation
 
-It must make the following capability reachable:
-
-- `/group`
-- `/groupmode`
-
-The page text should also cover:
-
-- that groups start in a deactivated state
-- what `/group activate` and `/group deactivate` do
-- the permission boundary between daily group usage, shared-state management,
-  and runtime approval handling
-
-Generic Feishu commands triggered in groups, such as `/status`, `/preflight`,
-`/unsubscribe`, and `/profile`, do not belong to the `group`
-branch. They still belong to the `session` or `settings` branches, while group
-execution continues to obey the group-command trigger rules.
-
-## 8. Commands Intentionally Excluded From `/help` Navigation
-
-The following are intentionally not required to be navigation-reachable from Feishu `/help`:
+The following are intentionally not required to be navigation-reachable from
+Feishu `/help`:
 
 - `/h`
 - `/cancel`
 - `/pwd`
+- `/unsubscribe`
+- `/debug-contact <open_id>`
 - `fcodex` local-wrapper commands
 
 Specific rationale:
 
+- `/h` is only an alias for `/help`
 - `/cancel` already has a primary action on the execution card
 - `/pwd` is effectively subsumed by `/cd` with no argument
+- `/unsubscribe` is intentionally weakened in favor of `/profile`
+- `/debug-contact` is a troubleshooting surface, not a normal navigation topic
 - local wrapper usage belongs to local help, not Feishu help
 
-## 9. Guard Semantics
+## 11. Guard Semantics
 
 Help-triggered command execution must preserve the same access rules as slash commands.
 
@@ -164,13 +210,12 @@ That includes:
 - group-only commands
 - group admin restrictions
 - ordinary non-admin private chats remaining denied by default
-- `/whoami`, `/whoareyou`, and `/init <token>` remaining directly reachable in
-  private chat as identity/bootstrap commands, rather than being swallowed by a
-  generic "admin private chat only" guard first
+- `/whoami`, `/whoareyou`, and `/init <token>` remaining directly reachable in private chat as identity/bootstrap commands, rather than being swallowed by a generic "admin private chat only" guard first
 
-If a slash command would be rejected in the current scope, the same operation triggered from `/help` must also be rejected.
+If a slash command would be rejected in the current scope, the same operation
+triggered from `/help` must also be rejected.
 
-## 10. Cross-Reference
+## 12. Cross-Reference
 
 Related contracts:
 

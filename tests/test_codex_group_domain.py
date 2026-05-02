@@ -105,22 +105,6 @@ class CodexGroupDomainTests(unittest.TestCase):
         self.assertEqual(stub.set_mode_calls, [("chat-group", "all")])
         self.assertEqual(result.text, "已切换群聊工作态：`all`")
 
-    def test_show_group_mode_card_action_rejects_non_group_chat(self) -> None:
-        stub = _GroupPortsStub()
-        stub.group_chat = False
-        domain = _make_domain(stub)
-
-        response = self._unpack_response(
-            domain.handle_show_group_mode_card_action(
-                "chat-p2p",
-                "m-group",
-                {"_operator_open_id": "ou_admin"},
-            )
-        )
-
-        self.assertEqual(response["toast"], "该命令仅支持群聊使用。")
-        self.assertEqual(response["toast_type"], "warning")
-
     def test_group_command_activates_group_via_ports(self) -> None:
         stub = _GroupPortsStub()
         domain = _make_domain(stub)

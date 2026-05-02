@@ -1365,7 +1365,7 @@ class CodexHandler(BotHandler):
             "/session": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: (
                     CommandResult(
-                        text="用法：`/session`\n说明：该命令不接受额外参数；发送 `/help session` 查看会话相关操作。"
+                        text="用法：`/session`\n说明：该命令不接受额外参数；发送 `/help thread` 查看线程相关操作。"
                     )
                     if arg.strip()
                     else self._session_ui_domain.handle_session_command(
@@ -1456,26 +1456,6 @@ class CodexHandler(BotHandler):
             ),
             "help_submit_command": ActionRoute(
                 handler=self._inbound_surface.handle_help_submit_command_action,
-            ),
-            "show_permissions_card": ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_show_permissions_card_action(
-                    sender_id, chat_id, message_id
-                ),
-                group_guard="group_admin",
-            ),
-            "show_mode_card": ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_show_mode_card_action(
-                    sender_id, chat_id, message_id
-                ),
-                group_guard="group_admin",
-            ),
-            "show_group_mode_card": ActionRoute(
-                handler=lambda sender_id, chat_id, message_id, action_value: self._group_domain.handle_show_group_mode_card_action(
-                    chat_id,
-                    message_id,
-                    action_value,
-                ),
-                group_guard="group_admin",
             ),
             "archive_thread": ActionRoute(
                 handler=self._session_ui_domain.handle_archive_thread_action,
