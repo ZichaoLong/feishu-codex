@@ -44,6 +44,8 @@ Status guidance:
 
 ### Contracts
 
+- [`feishu-codexctl-command-matrix.md`](./contracts/feishu-codexctl-command-matrix.md)
+- [`feishu-command-matrix.md`](./contracts/feishu-command-matrix.md)
 - [`feishu-thread-lifecycle.md`](./contracts/feishu-thread-lifecycle.md)
 - [`runtime-control-surface.md`](./contracts/runtime-control-surface.md)
 - [`session-profile-semantics.md`](./contracts/session-profile-semantics.md)
@@ -75,6 +77,8 @@ Status guidance:
 
 | Question | Read |
 | --- | --- |
+| What `feishu-codexctl` subcommands exist, which state layer each operates on, which mutate state, what the parameter constraints are, and how they map to the Feishu surface? | [`feishu-codexctl-command-matrix.md`](./contracts/feishu-codexctl-command-matrix.md) |
+| What Feishu slash commands currently exist, which are reachable from `/help`, who may execute them, what buttons belong to them, and how do they map to local CLIs? | [`feishu-command-matrix.md`](./contracts/feishu-command-matrix.md) |
 | What is the current architecture, layering, module split, and repository structure? | [`feishu-codex-design.md`](./architecture/feishu-codex-design.md) |
 | What is the Feishu-side thread lifecycle, and what states must stay distinct? | [`feishu-thread-lifecycle.md`](./contracts/feishu-thread-lifecycle.md) |
 | What shared state vocabulary and admin-surface contract apply to `/status`, `/unsubscribe`, and `feishu-codexctl`? | [`runtime-control-surface.md`](./contracts/runtime-control-surface.md) |
@@ -103,9 +107,15 @@ Status guidance:
   - [`local-command-and-thread-profile-contract.md`](./contracts/local-command-and-thread-profile-contract.md)
   - [`shared-backend-resume-safety.md`](./decisions/shared-backend-resume-safety.md)
 - For group-chat work:
+  - [`feishu-command-matrix.md`](./contracts/feishu-command-matrix.md)
   - [`group-chat-contract.md`](./contracts/group-chat-contract.md)
   - [`feishu-help-navigation.md`](./contracts/feishu-help-navigation.md)
   - [`group-chat-manual-test-checklist.zh-CN.md`](./verification/group-chat-manual-test-checklist.zh-CN.md)
+- For local `feishu-codexctl` inspection / management work:
+  - [`feishu-codexctl-command-matrix.md`](./contracts/feishu-codexctl-command-matrix.md)
+  - [`local-command-and-thread-profile-contract.md`](./contracts/local-command-and-thread-profile-contract.md)
+  - [`runtime-control-surface.md`](./contracts/runtime-control-surface.md)
+  - [`session-profile-semantics.md`](./contracts/session-profile-semantics.md)
 - For wrapper or backend work:
   - [`local-command-and-thread-profile-contract.md`](./contracts/local-command-and-thread-profile-contract.md)
   - [`fcodex-shared-backend-runtime.md`](./architecture/fcodex-shared-backend-runtime.md)
