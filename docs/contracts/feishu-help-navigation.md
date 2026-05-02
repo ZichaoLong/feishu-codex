@@ -18,7 +18,7 @@ It does not redefine:
 
 - thread lifecycle
 - runtime control semantics
-- session/profile semantics
+- thread/profile semantics
 - `fcodex` local-wrapper help
 
 Those belong to their dedicated docs.

@@ -20,7 +20,7 @@
 
 - 线程生命周期
 - runtime 控制面语义
-- session / profile 语义
+- thread / profile 语义
 - 本地 `fcodex` 的 help
 
 这些内容分别以各自专题文档为准。

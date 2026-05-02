@@ -504,7 +504,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler.bot = bot
         return handler, bot
 
-    def test_mode_command_updates_state(self) -> None:
+    def test_collab_mode_command_updates_state(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "/collab-mode plan")
@@ -1852,7 +1852,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("snapshot final answer", card["elements"][-1]["content"])
         self.assertEqual(bot.deletes, [])
 
-    def test_mode_command_without_arg_shows_mode_card(self) -> None:
+    def test_collab_mode_command_without_arg_shows_mode_card(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "/collab-mode")
@@ -1978,7 +1978,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertIn("请私聊机器人执行", bot.replies[-1][1])
 
-    def test_whoareyou_alias_returns_bot_identity(self) -> None:
+    def test_bot_status_command_returns_bot_identity(self) -> None:
         handler, bot = self._make_handler()
         bot.bot_identity = {
             "app_id": "cli_test_app",
@@ -1998,7 +1998,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("trigger_open_ids: `ou_alias_1, ou_alias_2`", reply)
         self.assertIn("system.yaml.bot_open_id", reply)
 
-    def test_whoareyou_reports_missing_bot_open_id(self) -> None:
+    def test_bot_status_reports_missing_bot_open_id(self) -> None:
         handler, bot = self._make_handler()
         bot.bot_identity = {
             "app_id": "cli_test_app",
@@ -2120,7 +2120,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertIn("初始化口令错误", bot.replies[-1][1])
 
-    def test_groupmode_command_without_arg_shows_group_mode_card(self) -> None:
+    def test_group_mode_command_without_arg_shows_group_mode_card(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
 
@@ -2134,7 +2134,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(actions[0]["type"], "primary")
         self.assertEqual(action_elements[-1]["actions"][0]["text"]["content"], "返回帮助")
 
-    def test_groupmode_command_can_use_cached_chat_type_without_message_context(self) -> None:
+    def test_group_mode_command_can_use_cached_chat_type_without_message_context(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
         bot.message_contexts["m-group"] = {"sender_open_id": "ou_admin"}
@@ -2143,7 +2143,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(bot.cards[-1][1]["header"]["title"]["content"], "Codex 群聊工作态")
 
-    def test_groupmode_command_updates_group_mode_for_admin(self) -> None:
+    def test_group_mode_command_updates_group_mode_for_admin(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_admin"}
 
@@ -2152,7 +2152,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(bot.get_group_mode("chat-group"), "assistant")
         self.assertIn("已切换群聊工作态：`assistant`", bot.replies[-1][1])
 
-    def test_groupmode_command_uses_sender_id_fallback_when_message_context_lacks_sender_open_id(self) -> None:
+    def test_group_mode_command_uses_sender_id_fallback_when_message_context_lacks_sender_open_id(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group"}
 
@@ -2161,7 +2161,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(bot.get_group_mode("chat-group"), "all")
         self.assertIn("已切换群聊工作态：`all`", bot.replies[-1][1])
 
-    def test_groupmode_command_rejects_all_when_thread_is_shared(self) -> None:
+    def test_group_mode_command_rejects_all_when_thread_is_shared(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
         bot.chat_types["chat-other"] = "group"
@@ -2185,7 +2185,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`all` 模式", bot.replies[-1][1])
         self.assertIn("不能与其他飞书会话共享", bot.replies[-1][1])
 
-    def test_groupmode_command_rejects_non_admin(self) -> None:
+    def test_group_mode_command_rejects_non_admin(self) -> None:
         handler, bot = self._make_handler()
         bot.message_contexts["m-group"] = {"chat_type": "group", "sender_open_id": "ou_user"}
 
@@ -2231,7 +2231,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertTrue(snapshot["activated"])
         self.assertEqual(snapshot["activated_by"], "ou_admin")
 
-    def test_groupmode_card_action_updates_group_mode(self) -> None:
+    def test_group_mode_card_action_updates_group_mode(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
@@ -2247,7 +2247,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 群聊工作态")
         self.assertEqual(self._action_elements(response["card"])[-1]["actions"][0]["text"]["content"], "返回帮助")
 
-    def test_groupmode_card_action_rejects_all_when_thread_is_shared(self) -> None:
+    def test_group_mode_card_action_rejects_all_when_thread_is_shared(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-group"] = "group"
         bot.chat_types["chat-other"] = "group"
@@ -2406,7 +2406,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("只决定什么时候停下来等你确认", card["elements"][0]["content"])
         self.assertIn("优先使用 `/permissions`", card["elements"][0]["content"])
 
-    def test_mode_card_action_updates_state(self) -> None:
+    def test_collab_mode_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
 
         response = self._unpack_card_response(handler.handle_card_action(
@@ -2616,7 +2616,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertNotIn("unsubscribe：", content)
         self.assertNotIn("当前直接提问：", content)
 
-    def test_unsubscribe_command_releases_all_bound_bindings_but_keeps_binding(self) -> None:
+    def test_release_runtime_command_releases_all_bound_bindings_but_keeps_binding(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -3265,7 +3265,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("用法：`/profile <name>`", bot.replies[-1][1])
         self.assertIn("先发 `/profile` 查看可用 profile。", bot.replies[-1][1])
 
-    def test_rm_command_archives_current_thread_and_clears_binding(self) -> None:
+    def test_archive_command_archives_current_thread_and_clears_binding(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -3821,7 +3821,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler._runtime_call(lambda: None)
         self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
 
-    def test_session_card_mentions_global_resume_scope(self) -> None:
+    def test_threads_card_mentions_global_resume_scope(self) -> None:
         handler, bot = self._make_handler()
         captured_kwargs = {}
 
@@ -3842,7 +3842,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
 
-    def test_session_card_uses_trisection_layout_for_row_actions(self) -> None:
+    def test_threads_card_uses_trisection_layout_for_row_actions(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -3869,7 +3869,7 @@ class CodexHandlerTests(unittest.TestCase):
         bottom_action = action_elements[-1]
         self.assertTrue(any(btn["text"]["content"] == "收起" for btn in bottom_action["actions"]))
 
-    def test_session_card_marks_current_thread_in_button_text(self) -> None:
+    def test_threads_card_marks_current_thread_in_button_text(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -3894,7 +3894,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(row_action["actions"][0]["text"]["content"], "当前")
         self.assertEqual(row_action["actions"][0]["type"], "primary")
 
-    def test_session_command_rejects_extra_args(self) -> None:
+    def test_threads_command_rejects_extra_args(self) -> None:
         handler, bot = self._make_handler()
 
         handler.handle_message("ou_user", "c1", "/threads extra")
@@ -3903,7 +3903,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("用法：`/threads`", bot.replies[-1][1])
         self.assertIn("不接受额外参数", bot.replies[-1][1])
 
-    def test_named_instance_session_shares_global_current_dir_threads(self) -> None:
+    def test_named_instance_threads_command_shares_global_current_dir_threads(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         data_dir = pathlib.Path(tempdir.name)
@@ -3978,7 +3978,7 @@ class CodexHandlerTests(unittest.TestCase):
         action = self._first_action(response["card"])
         self.assertEqual(action["actions"][0]["text"]["content"], "展开线程列表")
 
-    def test_reopen_threads_card_action_returns_sessions_card(self) -> None:
+    def test_reopen_threads_card_action_returns_threads_card(self) -> None:
         handler, _ = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -4056,7 +4056,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
         self.assertEqual(response["toast"], "已展开全部线程。")
 
-    def test_expanded_sessions_card_stays_expanded_after_archive(self) -> None:
+    def test_expanded_threads_card_stays_expanded_after_archive(self) -> None:
         handler, _ = self._make_handler({"threads_initial_limit": 1})
         threads = [
             ThreadSummary(
@@ -4124,7 +4124,7 @@ class CodexHandlerTests(unittest.TestCase):
         bottom_action = self._action_elements(response["card"])[-1]
         self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
 
-    def test_expanded_sessions_card_stays_expanded_after_rename(self) -> None:
+    def test_expanded_threads_card_stays_expanded_after_rename(self) -> None:
         handler, _ = self._make_handler({"threads_initial_limit": 1})
         threads = [
             ThreadSummary(
@@ -4219,7 +4219,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertFalse(any(btn["text"]["content"] == "更多" for btn in bottom_action["actions"]))
         self.assertEqual(response["toast"], "已重命名。")
 
-    def test_resume_thread_on_runtime_submit_refreshes_sessions_card(self) -> None:
+    def test_resume_thread_on_runtime_submit_refreshes_threads_card(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
             thread_id="thread-1",
@@ -4248,7 +4248,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertTrue(any(message_id == "msg-session" for message_id, _ in bot.patches))
 
-    def test_expanded_sessions_card_stays_expanded_after_resume_refresh(self) -> None:
+    def test_expanded_threads_card_stays_expanded_after_resume_refresh(self) -> None:
         handler, bot = self._make_handler({"threads_initial_limit": 1})
         threads = [
             ThreadSummary(
@@ -5005,7 +5005,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("正在恢复线程", response["toast"])
         handler._runtime_call(lambda: None)
 
-    def test_resume_card_action_failure_refreshes_sessions_card(self) -> None:
+    def test_resume_card_action_failure_refreshes_threads_card(self) -> None:
         handler, bot = self._make_handler({"threads_initial_limit": 1})
         thread = ThreadSummary(
             thread_id="thread-1",

@@ -1052,7 +1052,7 @@ class FCodexTests(unittest.TestCase):
             ["codex", "--remote", "ws://127.0.0.1:9100", "--cd", os.getcwd(), "resume", "019d2e94-a475-7bc1-b2f7-a3ce37628ede"],
         )
 
-    def test_fcodex_rejects_removed_slash_session_command(self) -> None:
+    def test_fcodex_rejects_slash_threads_command(self) -> None:
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
@@ -1063,7 +1063,7 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("不再支持 slash 自命令", stderr.getvalue())
         self.assertIn("feishu-codexctl thread list --scope cwd", stderr.getvalue())
 
-    def test_fcodex_rejects_removed_slash_help_command(self) -> None:
+    def test_fcodex_rejects_slash_help_command(self) -> None:
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
@@ -1074,7 +1074,7 @@ class FCodexTests(unittest.TestCase):
         self.assertIn("feishu-codexctl", stderr.getvalue())
         self.assertIn("进入 TUI 后再使用 upstream `/help`", stderr.getvalue())
 
-    def test_fcodex_rejects_removed_slash_profile_command(self) -> None:
+    def test_fcodex_rejects_slash_profile_command(self) -> None:
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
@@ -1084,7 +1084,7 @@ class FCodexTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 2)
         self.assertIn("fcodex -p <profile>", stderr.getvalue())
 
-    def test_fcodex_rejects_removed_slash_rm_command(self) -> None:
+    def test_fcodex_rejects_slash_archive_command(self) -> None:
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):
@@ -1094,7 +1094,7 @@ class FCodexTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 2)
         self.assertIn("请在飞书侧用 `/archive`", stderr.getvalue())
 
-    def test_fcodex_rejects_removed_slash_resume_command(self) -> None:
+    def test_fcodex_rejects_slash_resume_command(self) -> None:
         stderr = StringIO()
         with patch("bot.fcodex.load_config_file", return_value={"codex_command": "codex", "app_server_url": "ws://127.0.0.1:8765"}):
             with patch("bot.fcodex.sys.stderr", stderr):

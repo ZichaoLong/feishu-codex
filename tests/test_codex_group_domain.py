@@ -95,7 +95,7 @@ class CodexGroupDomainTests(unittest.TestCase):
             result["card"] = response.card.data
         return result
 
-    def test_groupmode_command_sets_mode_via_ports(self) -> None:
+    def test_group_mode_command_sets_mode_via_ports(self) -> None:
         stub = _GroupPortsStub()
         domain = _make_domain(stub)
 

@@ -373,7 +373,7 @@ class CodexSettingsDomainTests(unittest.TestCase):
             ],
         )
 
-    def test_mode_command_updates_only_collaboration_mode(self) -> None:
+    def test_collab_mode_command_updates_only_collaboration_mode(self) -> None:
         stub = _SettingsPortsStub()
         domain = _make_domain(stub)
 
