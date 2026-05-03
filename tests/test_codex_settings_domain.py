@@ -5,6 +5,7 @@ from typing import Any
 from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary
 from bot.codex_config_reader import ResolvedProfileConfig
 from bot.codex_settings_domain import CodexSettingsDomain, SettingsDomainPorts
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.profile_resolution import DefaultProfileResolution
 from bot.stores.thread_resume_profile_store import ThreadResumeProfileRecord
 
@@ -28,6 +29,7 @@ _PERMISSIONS_PRESETS = {
         "sandbox": "danger-full-access",
     },
 }
+_DISPLAY_DEBUG_CONTACT_COMMAND = feishu_visible_command_syntax("/debug-contact <open_id>")
 
 
 class _SettingsPortsStub:
@@ -237,7 +239,7 @@ class CodexSettingsDomainTests(unittest.TestCase):
 
         result = domain.handle_debug_contact_command("ou_user", "chat-a", "")
 
-        self.assertIn("/debug-contact <open_id>", result.text)
+        self.assertIn(_DISPLAY_DEBUG_CONTACT_COMMAND, result.text)
 
     def test_profile_command_saves_bound_thread_profile_via_port_and_returns_card(self) -> None:
         stub = _SettingsPortsStub()

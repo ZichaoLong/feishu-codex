@@ -26,6 +26,7 @@ from bot.cards import (
 )
 from bot.config import ensure_init_token, load_system_config_raw, save_system_config
 from bot.codex_config_reader import ResolvedProfileConfig
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.profile_resolution import DefaultProfileResolution
 from bot.runtime_view import RuntimeView
 from bot.stores.thread_resume_profile_store import ThreadResumeProfileRecord
@@ -33,6 +34,9 @@ from bot.stores.thread_resume_profile_store import ThreadResumeProfileRecord
 logger = logging.getLogger(__name__)
 
 _UNSET = object()
+_INIT_COMMAND = feishu_visible_command_syntax("/init <token>")
+_DEBUG_CONTACT_COMMAND = feishu_visible_command_syntax("/debug-contact <open_id>")
+_PROFILE_WITH_NAME_COMMAND = feishu_visible_command_syntax("/profile <name>")
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,7 +118,7 @@ class CodexSettingsDomain:
         context = ports.get_message_context(message_id) if message_id else {}
         provided_token = str(arg or "").strip()
         if not provided_token:
-            return CommandResult(text="用法：`/init <token>`\n`token` 默认保存在本机配置目录的 `init.token` 文件。")
+            return CommandResult(text=f"用法：`{_INIT_COMMAND}`\n`token` 默认保存在本机配置目录的 `init.token` 文件。")
         expected_token = ensure_init_token()
         if not compare_digest(provided_token, expected_token):
             return CommandResult(text="初始化口令错误。请检查本机配置目录中的 `init.token`。")
@@ -176,7 +180,7 @@ class CodexSettingsDomain:
             lines.extend(
                 [
                     "- bot_open_id：未写入",
-                    "- 请检查 `application:application:self_manage` 权限后重试 `/init <token>`，或手动填写 `system.yaml.bot_open_id`。",
+                    f"- 请检查 `application:application:self_manage` 权限后重试 `{_INIT_COMMAND}`，或手动填写 `system.yaml.bot_open_id`。",
                 ]
             )
         lines.append("- 当前命令只会更新管理员和 bot open id，不会改动 `trigger_open_ids`。")
@@ -218,7 +222,7 @@ class CodexSettingsDomain:
         normalized_open_id = str(arg or "").strip()
         if not normalized_open_id:
             return CommandResult(
-                text="用法：`/debug-contact <open_id>`\n用于排查联系人接口名字解析、缓存命中与 fallback 原因。"
+                text=f"用法：`{_DEBUG_CONTACT_COMMAND}`\n用于排查联系人接口名字解析、缓存命中与 fallback 原因。"
             )
         snapshot = self._ports.debug_sender_name_resolution(normalized_open_id)
         cache_state = "hit" if snapshot.get("cache_hit") else "miss"
@@ -287,9 +291,9 @@ class CodexSettingsDomain:
                     "",
                     "建议：",
                     (
-                        f"- 直接执行 `/init <token>` 自动写入，或手动把 `{discovered_open_id}` 写进 `system.yaml.bot_open_id`"
+                        f"- 直接执行 `{_INIT_COMMAND}` 自动写入，或手动把 `{discovered_open_id}` 写进 `system.yaml.bot_open_id`"
                         if discovered_open_id
-                        else "- 先让 `/bot-status` 能看到 `discovered open_id`，再手动写入 `system.yaml.bot_open_id`；如需自动写入，再执行 `/init <token>`"
+                        else f"- 先让 `/bot-status` 能看到 `discovered open_id`，再手动写入 `system.yaml.bot_open_id`；如需自动写入，再执行 `{_INIT_COMMAND}`"
                     ),
                     "- 运行时只有 `system.yaml.bot_open_id` 会参与群聊 mention 判定；`/bot-status` 的实时探测结果不会自动生效。",
                     "- 如需让“别人 @你本人时由机器人代答”，再把对应人的 open_id 写进 `system.yaml.trigger_open_ids`",
@@ -394,34 +398,8 @@ class CodexSettingsDomain:
         )
         if reset_target_profile:
             lines.extend(["", f"目标 profile：`{reset_target_profile}`"])
-        if profile_names:
-            lines.extend(
-                [
-                    "",
-                    "切换方式：发送 `/profile <name>`，或直接点下面按钮。",
-                    "",
-                    "**可用 profile**",
-                ]
-            )
-            for profile_name in profile_names:
-                provider = self._profile_provider_text(
-                    profile_name,
-                    current_record=current_record,
-                    current_profile=current_profile,
-                    profiles=profiles,
-                )
-                marker = " <- 当前 thread" if profile_name == current_profile else ""
-                lines.append(f"- `{profile_name}` -> {provider}{marker}")
-        else:
+        if not profile_names:
             lines.extend(["", "未在当前 Codex 配置中发现可用 profile。"])
-        lines.extend(
-            [
-                "",
-                "**说明**",
-                "作用范围：只影响当前绑定 thread 的下次 resume 配置。",
-                "当前 thread 仍 loaded 时不会热切换；必要时 `/profile <name>` 会转成 reset backend 路径。",
-            ]
-        )
         if plan.status == "direct-write":
             lines.append("当前已满足切换条件：thread globally unloaded。")
         elif plan.status in {"reset-available", "reset-force-only"}:
@@ -493,7 +471,7 @@ class CodexSettingsDomain:
         if target_profile not in profiles:
             return ProfileCommandOutcome(
                 command_result=CommandResult(
-                    text=f"未找到 profile：`{target_profile}`\n用法：`/profile <name>`\n先发 `/profile` 查看可用 profile。"
+                    text=f"未找到 profile：`{target_profile}`\n用法：`{_PROFILE_WITH_NAME_COMMAND}`\n先发 `/profile` 查看可用 profile。"
                 )
             )
 

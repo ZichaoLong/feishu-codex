@@ -26,8 +26,12 @@ from bot.cards import (
     build_threads_pending_card,
     make_card_response,
 )
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.runtime_view import RuntimeView
 logger = logging.getLogger(__name__)
+
+_RESUME_USAGE = feishu_visible_command_syntax("/resume <thread_id|thread_name>")
+_RENAME_USAGE = feishu_visible_command_syntax("/rename <新标题>")
 
 
 class _SubmitToRuntime(Protocol):
@@ -153,7 +157,7 @@ class CodexThreadsUiDomain:
             return CommandResult(text="执行中不能切换线程，请等待结束或先执行 `/cancel`。")
         if not arg:
             return CommandResult(
-                text="用法：`/resume <thread_id 或 thread_name>`\n发送 `/help thread` 查看 `/threads` 与 `/resume` 的区别。"
+                text=f"用法：`{_RESUME_USAGE}`\n发送 `/help thread` 查看 `/threads` 与 `/resume` 的区别。"
             )
         target = arg.strip()
         return CommandResult(
@@ -181,7 +185,7 @@ class CodexThreadsUiDomain:
         if not runtime.current_thread_id:
             return CommandResult(text="当前没有绑定线程，无法重命名。")
         if not arg:
-            return CommandResult(text="用法：`/rename <新标题>`")
+            return CommandResult(text=f"用法：`{_RENAME_USAGE}`")
         try:
             self._owner._adapter.rename_thread(runtime.current_thread_id, arg)
         except Exception as exc:

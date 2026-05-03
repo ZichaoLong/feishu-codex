@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from bot.feishu_command_syntax import feishu_visible_command_syntax
+
 
 @dataclass(frozen=True)
 class SharedCommandSpec:
@@ -58,7 +60,7 @@ _SHARED_COMMAND_SPECS = (
     SharedCommandSpec(
         key="resume",
         slash_name="/resume",
-        feishu_usage="/resume <thread_id|thread_name>",
+        feishu_usage=feishu_visible_command_syntax("/resume <thread_id|thread_name>"),
         feishu_summary="恢复指定线程。",
     ),
     SharedCommandSpec(

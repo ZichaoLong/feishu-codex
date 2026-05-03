@@ -1662,6 +1662,8 @@ class FeishuBot(ABC):
             action_value = data.event.action.value or {}
             if operator_open_id:
                 action_value["_operator_open_id"] = operator_open_id
+            if user_id:
+                action_value["_operator_user_id"] = str(user_id).strip()
             # 表单提交时携带输入框的值，注入 action_value 供处理器读取
             if data.event.action.form_value:
                 action_value["_form_value"] = data.event.action.form_value

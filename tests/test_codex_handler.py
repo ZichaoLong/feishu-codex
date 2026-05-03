@@ -13,9 +13,21 @@ from bot.adapters.base import RuntimeConfigSummary, RuntimeProfileSummary, Threa
 from bot.codex_handler import CodexHandler
 from bot.codex_protocol.client import CodexRpcError
 from bot.execution_transcript import ExecutionReplySegment
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.service_control_plane import ServiceControlError, control_request
 from bot.stores.service_instance_lease import ServiceInstanceLease, ServiceInstanceLeaseError
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
+
+_DISPLAY_INIT_COMMAND = feishu_visible_command_syntax("/init <token>")
+_DISPLAY_DEBUG_CONTACT_COMMAND = feishu_visible_command_syntax("/debug-contact <open_id>")
+_DISPLAY_PROFILE_WITH_NAME_COMMAND = feishu_visible_command_syntax("/profile <name>")
+_DISPLAY_RESUME_COMMAND = feishu_visible_command_syntax("/resume <thread_id|thread_name>")
+_DISPLAY_LOCAL_RESUME_COMMAND = feishu_visible_command_syntax("fcodex resume <thread_id|thread_name>")
+_DISPLAY_CD_COMMAND = feishu_visible_command_syntax("/cd <path>")
+_DISPLAY_RENAME_COMMAND = feishu_visible_command_syntax("/rename <title>")
+_DISPLAY_LOCAL_THREAD_UNSUBSCRIBE = feishu_visible_command_syntax(
+    "feishu-codexctl thread unsubscribe --thread-id <thread_id>"
+)
 
 
 class _FakeAdapter:
@@ -2033,7 +2045,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_admin", "chat-group", "/debug-contact ou_user", message_id="m-group")
 
-        self.assertIn("请私聊机器人执行 `/debug-contact <open_id>`", bot.replies[-1][1])
+        self.assertIn(f"请私聊机器人执行 `{_DISPLAY_DEBUG_CONTACT_COMMAND}`", bot.replies[-1][1])
 
     def test_init_command_requires_p2p(self) -> None:
         handler, bot = self._make_handler()
@@ -2041,7 +2053,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         handler.handle_message("ou_user2", "chat-group", "/init abc", message_id="m-group")
 
-        self.assertIn("请私聊机器人执行 `/init <token>`", bot.replies[-1][1])
+        self.assertIn(f"请私聊机器人执行 `{_DISPLAY_INIT_COMMAND}`", bot.replies[-1][1])
 
     def test_init_command_with_token_updates_admin_and_bot_open_id(self) -> None:
         handler, bot = self._make_handler()
@@ -3097,13 +3109,14 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("当前 thread：`thread-1", content)
         self.assertIn("当前 thread-wise profile：`（未设置）`", content)
         self.assertIn("当前 thread-wise provider：未设置 thread-wise profile", content)
-        self.assertIn("切换方式：发送 `/profile <name>`，或直接点下面按钮。", content)
-        self.assertIn("**可用 profile**", content)
-        self.assertIn("`provider1` -> `provider1_api`", content)
-        self.assertIn("`provider2` -> `provider2_api`", content)
         self.assertIn("当前不能直接写入：当前 thread 尚未满足 verifiably globally unloaded", content)
         self.assertIn("**re-profile 诊断**", content)
         self.assertIn("当前实例：`default`", content)
+        self.assertNotIn("切换方式：发送", content)
+        self.assertNotIn("**可用 profile**", content)
+        self.assertNotIn("**说明**", content)
+        self.assertNotIn("`provider1` -> `provider1_api`", content)
+        self.assertNotIn("`provider2` -> `provider2_api`", content)
         action = self._action_elements(card)[0]
         self.assertNotIn("layout", action)
         self.assertEqual(
@@ -3262,7 +3275,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler.handle_message("ou_user", "c1", "/profile provider9")
 
         self.assertIn("未找到 profile：`provider9`", bot.replies[-1][1])
-        self.assertIn("用法：`/profile <name>`", bot.replies[-1][1])
+        self.assertIn(f"用法：`{_DISPLAY_PROFILE_WITH_NAME_COMMAND}`", bot.replies[-1][1])
         self.assertIn("先发 `/profile` 查看可用 profile。", bot.replies[-1][1])
 
     def test_archive_command_archives_current_thread_and_clears_binding(self) -> None:
@@ -3838,8 +3851,8 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[0]
         content = card["elements"][0]["content"]
         self.assertIn("跨 provider 汇总", content)
-        self.assertIn("`/resume <thread_id|thread_name>`", content)
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
+        self.assertIn(f"`{_DISPLAY_RESUME_COMMAND}`", content)
+        self.assertIn(f"`{_DISPLAY_LOCAL_RESUME_COMMAND}`", content)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
 
     def test_threads_card_uses_trisection_layout_for_row_actions(self) -> None:
@@ -4337,7 +4350,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`线程`", content)
         self.assertIn("`运行时`", content)
         self.assertIn("`身份`", content)
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
+        self.assertIn(f"`{_DISPLAY_LOCAL_RESUME_COMMAND}`", content)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
         self.assertIn("同一线程允许多端订阅观察", content)
         self.assertIn("同一 live turn 只有一个交互 owner", content)
@@ -4364,7 +4377,7 @@ class CodexHandlerTests(unittest.TestCase):
         content = card["elements"][0]["content"]
         self.assertIn("`/status`", content)
         self.assertIn("`/preflight`", content)
-        self.assertIn("`/cd <path>`", content)
+        self.assertIn(f"`{_DISPLAY_CD_COMMAND}`", content)
         self.assertIn("`/pwd` 不再作为主导航入口", content)
         action_elements = self._action_elements(card)
         self.assertEqual(
@@ -4386,10 +4399,10 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(card["header"]["title"]["content"], "Codex 帮助：线程")
         content = card["elements"][0]["content"]
         self.assertIn("`/threads`", content)
-        self.assertIn("`/resume <thread_id|thread_name>`", content)
+        self.assertIn(f"`{_DISPLAY_RESUME_COMMAND}`", content)
         self.assertIn("`/new`", content)
         self.assertIn("当前线程", content)
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", content)
+        self.assertIn(f"`{_DISPLAY_LOCAL_RESUME_COMMAND}`", content)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", content)
         action_elements = self._action_elements(card)
         self.assertEqual(
@@ -4454,7 +4467,7 @@ class CodexHandlerTests(unittest.TestCase):
         content = card["elements"][0]["content"]
         self.assertIn("`/whoami`", content)
         self.assertIn("`/bot-status`", content)
-        self.assertIn("`/init <token>`", content)
+        self.assertIn(f"`{_DISPLAY_INIT_COMMAND}`", content)
         self.assertNotIn("/debug-contact", content)
         action_elements = self._action_elements(card)
         self.assertEqual(
@@ -4556,7 +4569,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：当前线程")
         self.assertIn(
-            "feishu-codexctl thread unsubscribe --thread-id <thread_id>",
+            _DISPLAY_LOCAL_THREAD_UNSUBSCRIBE,
             response["card"]["elements"][0]["content"],
         )
         action_elements = self._action_elements(response["card"])
@@ -4595,7 +4608,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：切换目录")
         self.assertTrue(any(element.get("tag") == "form" for element in response["card"]["elements"]))
-        self.assertIn("/cd <path>", response["card"]["elements"][0]["content"])
+        self.assertIn(_DISPLAY_CD_COMMAND, response["card"]["elements"][0]["content"])
 
     def test_help_show_page_action_can_open_thread_rename_current_form(self) -> None:
         handler, _ = self._make_handler()
@@ -4609,7 +4622,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：重命名当前线程")
         self.assertTrue(any(element.get("tag") == "form" for element in response["card"]["elements"]))
-        self.assertIn("/rename <title>", response["card"]["elements"][0]["content"])
+        self.assertIn(_DISPLAY_RENAME_COMMAND, response["card"]["elements"][0]["content"])
 
     def test_help_show_page_action_can_open_identity_page(self) -> None:
         handler, _ = self._make_handler()
@@ -4641,7 +4654,7 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 帮助：初始化")
         self.assertTrue(any(element.get("tag") == "form" for element in response["card"]["elements"]))
-        self.assertIn("/init <token>", response["card"]["elements"][0]["content"])
+        self.assertIn(_DISPLAY_INIT_COMMAND, response["card"]["elements"][0]["content"])
 
     def test_help_show_page_action_returns_warning_for_unknown_page(self) -> None:
         handler, _ = self._make_handler()
@@ -4700,6 +4713,27 @@ class CodexHandlerTests(unittest.TestCase):
 
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 当前目录线程")
 
+    def test_help_execute_whoami_action_uses_operator_identity_context(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "chat-p2p",
+            "msg-help",
+            {
+                "action": "help_execute_command",
+                "command": "/whoami",
+                "title": "Codex 身份信息",
+                "_operator_open_id": "ou_user",
+                "_operator_user_id": "u2",
+            },
+        ))
+
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 身份信息")
+        content = response["card"]["elements"][0]["content"]
+        self.assertIn("user_id: `u2`", content)
+        self.assertIn("open_id: `ou_user`", content)
+
     def test_help_submit_resume_command_reuses_resume_handler(self) -> None:
         handler, _ = self._make_handler()
         thread = ThreadSummary(
@@ -4731,6 +4765,48 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 正在恢复线程")
         handler._runtime_call(lambda: None)
         self.assertEqual(handler._adapter.resume_thread_calls[-1]["thread_id"], "thread-1")
+
+    def test_help_submit_init_command_uses_operator_identity_context(self) -> None:
+        handler, bot = self._make_handler()
+        bot.bot_identity = {
+            "app_id": "cli_test_app",
+            "open_id": "ou_bot_new",
+            "source": "auto-discovered",
+            "configured_open_id": "",
+            "discovered_open_id": "ou_bot_new",
+            "trigger_open_ids": "",
+        }
+
+        with patch("bot.codex_settings_domain.ensure_init_token", return_value="secret-1"), patch(
+            "bot.codex_settings_domain.load_system_config_raw",
+            return_value={
+                "app_id": "cli_test_app",
+                "app_secret": "secret",
+                "admin_open_ids": ["ou_admin"],
+            },
+        ), patch("bot.codex_settings_domain.save_system_config") as save_config:
+            response = self._unpack_card_response(handler.handle_card_action(
+                "ou_user2",
+                "chat-p2p",
+                "msg-help-init",
+                {
+                    "action": "help_submit_command",
+                    "command": "/init",
+                    "field_name": "init_token",
+                    "title": "Codex 初始化结果",
+                    "_form_value": {"init_token": "secret-1"},
+                    "_operator_open_id": "ou_user2",
+                    "_operator_user_id": "u2",
+                },
+            ))
+
+        saved = save_config.call_args.args[0]
+        self.assertEqual(saved["admin_open_ids"], ["ou_admin", "ou_user2"])
+        self.assertEqual(saved["bot_open_id"], "ou_bot_new")
+        self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 初始化结果")
+        content = response["card"]["elements"][0]["content"]
+        self.assertIn("已加入 `Alice`", content)
+        self.assertIn("`ou_bot_new`", content)
 
     def test_help_submit_cd_command_reuses_cd_handler(self) -> None:
         handler, _ = self._make_handler()
@@ -4780,7 +4856,7 @@ class CodexHandlerTests(unittest.TestCase):
             },
         ))
 
-        self.assertEqual(response["toast"], "请私聊机器人执行 `/init <token>`。")
+        self.assertEqual(response["toast"], f"请私聊机器人执行 `{_DISPLAY_INIT_COMMAND}`。")
         self.assertEqual(response["toast_type"], "warning")
 
     def test_new_command_reply_focuses_on_next_step(self) -> None:

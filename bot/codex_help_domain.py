@@ -12,6 +12,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.cards import CommandResult, make_card_response
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.shared_command_surface import get_shared_command
 
 
@@ -24,8 +25,14 @@ _SHARED_RESUME_COMMAND = get_shared_command("resume")
 
 _LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
 _LOCAL_THREAD_LIST_GLOBAL = "feishu-codexctl thread list --scope global"
-_LOCAL_RESUME_COMMAND = "fcodex resume <thread_id|thread_name>"
-_LOCAL_THREAD_UNSUBSCRIBE = "feishu-codexctl thread unsubscribe --thread-id <thread_id>"
+_LOCAL_RESUME_COMMAND = feishu_visible_command_syntax("fcodex resume <thread_id|thread_name>")
+_LOCAL_THREAD_UNSUBSCRIBE = feishu_visible_command_syntax(
+    "feishu-codexctl thread unsubscribe --thread-id <thread_id>"
+)
+_INIT_COMMAND = feishu_visible_command_syntax("/init <token>")
+_CD_COMMAND = feishu_visible_command_syntax("/cd <path>")
+_RENAME_COMMAND = feishu_visible_command_syntax("/rename <title>")
+_PROFILE_WITH_NAME_COMMAND = feishu_visible_command_syntax("/profile <name>")
 
 
 @dataclass(frozen=True)
@@ -84,12 +91,12 @@ class CodexHelpDomain:
             "overview": _HelpPageSpec(
                 title="Codex 帮助",
                 markdown=(
-                    "从下面五个入口按作用对象进入，不需要先记住命令名。\n\n"
+                    # "从下面五个入口按作用对象进入，不需要先记住命令名。\n\n"
                     "- `当前会话`：当前 chat 的状态、预检、目录切换\n"
                     "- `群聊`：当前群的激活、工作态、管理员边界\n"
                     "- `线程`：新建、浏览、恢复、当前 thread 管理\n"
                     "- `运行时`：当前会话设置，以及当前实例 backend reset\n"
-                    "- `身份`：`/whoami`、`/bot-status`、`/init <token>`\n\n"
+                    f"- `身份`：`/whoami`、`/bot-status`、`{_INIT_COMMAND}`\n\n"
                     f"{self._local_thread_safety_rule}\n\n"
                     "本地继续同一线程请用 "
                     f"`{_LOCAL_RESUME_COMMAND}`；"
@@ -120,7 +127,7 @@ class CodexHelpDomain:
                     "作用对象：**当前 chat binding**。\n\n"
                     "- `/status`：查看当前目录、当前线程，以及当前会话设置摘要\n"
                     f"- `{_SHARED_PREFLIGHT_COMMAND.feishu_usage}`：dry-run 下一条普通消息与当前 chat 的 release 可用性，不启动 turn、不改 binding\n"
-                    "- `/cd <path>`：切换当前目录并清空当前线程绑定\n"
+                    f"- `{_CD_COMMAND}`：切换当前目录并清空当前线程绑定\n"
                     "- 无参数 `/cd` 等价于查看当前目录；`/pwd` 不再作为主导航入口\n"
                     "- 执行中如需停止，直接使用执行卡片里的“取消执行”\n\n"
                     "线程浏览、新建与恢复，请看“线程”页。"
@@ -150,7 +157,7 @@ class CodexHelpDomain:
             "chat-cd-form": _HelpPageSpec(
                 title="Codex 帮助：切换目录",
                 markdown=(
-                    "填写目标目录并提交，相当于执行 `/cd <path>`。\n\n"
+                    f"填写目标目录并提交，相当于执行 `{_CD_COMMAND}`。\n\n"
                     "- 成功后会清空当前线程绑定\n"
                     "- 之后直接发送普通文本，会在新目录自动新建线程"
                 ),
@@ -228,7 +235,7 @@ class CodexHelpDomain:
                                 label="/new",
                                 command="/new",
                                 title="Codex 新建线程",
-                                button_type="primary",
+                                # button_type="primary",
                             ),
                             _HelpPageButtonSpec(label="恢复线程", page="thread-resume-form"),
                         ),
@@ -248,11 +255,11 @@ class CodexHelpDomain:
                 markdown=(
                     "作用对象：**当前绑定 thread**。\n\n"
                     f"- `{_SHARED_PROFILE_COMMAND.feishu_usage}`：查看或切换当前 thread 的 resume profile；必要时会提供 reset backend 路径\n"
-                    "- `/rename <title>`：重命名当前线程\n"
+                    f"- `{_RENAME_COMMAND}`：重命名当前线程\n"
                     f"- `{_SHARED_ARCHIVE_COMMAND.slash_name}`：归档当前线程\n\n"
                     "如果当前没有绑定线程，相关命令会按 slash 语义返回明确提示。\n\n"
                     "通常不需要在飞书侧主动理解 `/release-runtime`。\n"
-                    "如果只是为了 re-profile，优先直接使用 `/profile <name>` 走现有路径；"
+                    f"如果只是为了 re-profile，优先直接使用 `{_PROFILE_WITH_NAME_COMMAND}` 走现有路径；"
                     "需要排障或本地管理时，再用 "
                     f"`{_LOCAL_THREAD_UNSUBSCRIBE}`。"
                 ),
@@ -304,7 +311,7 @@ class CodexHelpDomain:
             "thread-rename-current-form": _HelpPageSpec(
                 title="Codex 帮助：重命名当前线程",
                 markdown=(
-                    "填写新标题并提交，相当于执行 `/rename <title>`。\n\n"
+                    f"填写新标题并提交，相当于执行 `{_RENAME_COMMAND}`。\n\n"
                     "该操作只针对当前绑定线程。"
                 ),
                 form=_HelpFormSpec(
@@ -369,7 +376,7 @@ class CodexHelpDomain:
                 markdown=(
                     "- `/whoami`：私聊查看自己的 `open_id` 等身份信息\n"
                     "- `/bot-status`：查看机器人的 `app_id`、配置的 `bot_open_id`、实时探测结果\n"
-                    "- `/init <token>`：私聊初始化管理员与 `bot_open_id`\n\n"
+                    f"- `{_INIT_COMMAND}`：私聊初始化管理员与 `bot_open_id`\n\n"
                     "注意：`/whoami` 与 `/init` 只支持私聊；如果在群里触发，会按 slash 语义拒绝。"
                 ),
                 action_rows=(
@@ -393,7 +400,7 @@ class CodexHelpDomain:
             "identity-init-form": _HelpPageSpec(
                 title="Codex 帮助：初始化",
                 markdown=(
-                    "填写初始化 token 并提交，相当于执行 `/init <token>`。\n\n"
+                    f"填写初始化 token 并提交，相当于执行 `{_INIT_COMMAND}`。\n\n"
                     "- 仅支持私聊\n"
                     "- 会把当前发送者加入 `admin_open_ids`\n"
                     "- 会尽量自动写入 `bot_open_id`"

@@ -62,6 +62,7 @@ from bot.execution_recovery_controller import (
     TerminalReconcileTarget,
 )
 from bot.file_message_domain import FileMessageDomain, FileMessagePorts, IncomingAttachmentMessage
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.interaction_request_controller import InteractionRequestController
 from bot.interaction_request_controller import PendingRequestStateDict
 from bot.inbound_surface_controller import ActionRoute, CommandRoute, InboundSurfaceController
@@ -128,6 +129,8 @@ _SANDBOX_POLICIES = {"read-only", "workspace-write", "danger-full-access"}
 _LOCAL_THREAD_SAFETY_RULE = (
     "同一线程允许多端订阅观察，但同一 live turn 只有一个交互 owner；非 owner 只能看，不能写或处理审批。"
 )
+_INIT_COMMAND = feishu_visible_command_syntax("/init <token>")
+_DEBUG_CONTACT_COMMAND = feishu_visible_command_syntax("/debug-contact <open_id>")
 ChatBindingKey: TypeAlias = tuple[str, str]
 _PERMISSIONS_PRESETS: dict[str, dict[str, str]] = {
     "read-only": {
@@ -722,6 +725,69 @@ class CodexHandler(BotHandler):
             action_value,
         )
 
+    def _seed_help_action_actor_context(self, chat_id: str, message_id: str, action_value: dict) -> None:
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return
+        operator_open_id = str(action_value.get("_operator_open_id", "") or "").strip()
+        operator_user_id = str(action_value.get("_operator_user_id", "") or "").strip()
+        if not operator_open_id and not operator_user_id:
+            return
+        current_context = self.bot.get_message_context(normalized_message_id)
+        merged_context = dict(current_context)
+        changed = False
+        if operator_open_id and not str(merged_context.get("sender_open_id", "") or "").strip():
+            merged_context["sender_open_id"] = operator_open_id
+            changed = True
+        if operator_user_id and not str(merged_context.get("sender_user_id", "") or "").strip():
+            merged_context["sender_user_id"] = operator_user_id
+            changed = True
+        if "sender_type" not in merged_context or not str(merged_context.get("sender_type", "") or "").strip():
+            merged_context["sender_type"] = "user"
+            changed = True
+        if "chat_type" not in merged_context or not str(merged_context.get("chat_type", "") or "").strip():
+            merged_context["chat_type"] = self._resolve_chat_type(chat_id, normalized_message_id)
+            changed = True
+        if not changed:
+            return
+        remember_message_context = getattr(self.bot, "_remember_message_context", None)
+        if callable(remember_message_context):
+            remember_message_context(normalized_message_id, merged_context)
+            return
+        message_contexts = getattr(self.bot, "message_contexts", None)
+        if isinstance(message_contexts, dict):
+            message_contexts[normalized_message_id] = merged_context
+
+    def _handle_help_execute_command_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse:
+        self._seed_help_action_actor_context(chat_id, message_id, action_value)
+        return self._inbound_surface.handle_help_execute_command_action(
+            sender_id,
+            chat_id,
+            message_id,
+            action_value,
+        )
+
+    def _handle_help_submit_command_action(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict[str, Any],
+    ) -> P2CardActionTriggerResponse:
+        self._seed_help_action_actor_context(chat_id, message_id, action_value)
+        return self._inbound_surface.handle_help_submit_command_action(
+            sender_id,
+            chat_id,
+            message_id,
+            action_value,
+        )
+
     def handle_attachment_message(
         self,
         sender_id: str,
@@ -1290,7 +1356,7 @@ class CodexHandler(BotHandler):
                     sender_id, chat_id, arg, message_id=message_id
                 ),
                 scope="p2p",
-                scope_denied_text="请私聊机器人执行 `/init <token>`。",
+                scope_denied_text=f"请私聊机器人执行 `{_INIT_COMMAND}`。",
             ),
             "/pwd": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: CommandResult(
@@ -1345,7 +1411,7 @@ class CodexHandler(BotHandler):
                     sender_id, chat_id, arg, message_id=message_id
                 ),
                 scope="p2p",
-                scope_denied_text="请私聊机器人执行 `/debug-contact <open_id>`。",
+                scope_denied_text=f"请私聊机器人执行 `{_DEBUG_CONTACT_COMMAND}`。",
             ),
             "/profile": CommandRoute(
                 handler=lambda sender_id, chat_id, arg, message_id: self._settings_domain.handle_profile_command(
@@ -1452,10 +1518,10 @@ class CodexHandler(BotHandler):
                 handler=self._help_domain.handle_show_help_page_action,
             ),
             "help_execute_command": ActionRoute(
-                handler=self._inbound_surface.handle_help_execute_command_action,
+                handler=self._handle_help_execute_command_action,
             ),
             "help_submit_command": ActionRoute(
-                handler=self._inbound_surface.handle_help_submit_command_action,
+                handler=self._handle_help_submit_command_action,
             ),
             "archive_thread": ActionRoute(
                 handler=self._threads_ui_domain.handle_archive_thread_action,

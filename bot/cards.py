@@ -20,6 +20,7 @@ from bot.card_text_projection import (
 )
 from bot.constants import display_path, format_timestamp, shorten
 from bot.execution_transcript import ExecutionReplySegment
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.feishu_bot import _MAX_CARD_TABLES, count_card_tables, limit_card_tables
 from bot.shared_command_surface import get_shared_command
 
@@ -56,7 +57,7 @@ _PLAN_CONTENT_MAX = 4000
 _SHARED_RESUME_COMMAND = get_shared_command("resume")
 _SHARED_RESET_BACKEND_COMMAND = get_shared_command("reset-backend")
 _LOCAL_THREAD_LIST_CWD = "feishu-codexctl thread list --scope cwd"
-_LOCAL_RESUME_COMMAND = "fcodex resume <thread_id|thread_name>"
+_LOCAL_RESUME_COMMAND = feishu_visible_command_syntax("fcodex resume <thread_id|thread_name>")
 
 
 def _card_config() -> dict:

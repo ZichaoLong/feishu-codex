@@ -21,7 +21,10 @@ from bot.cards import (
 )
 from bot.codex_handler import CodexHandler
 from bot.codex_help_domain import CodexHelpDomain
+from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.shared_command_surface import get_shared_command, iter_shared_commands
+
+_DISPLAY_LOCAL_RESUME_COMMAND = feishu_visible_command_syntax("fcodex resume <thread_id|thread_name>")
 
 
 class _StubAdapter:
@@ -101,12 +104,12 @@ class SharedCommandSurfaceTests(unittest.TestCase):
         thread_markdown = thread_help["elements"][0]["content"]
         threads_markdown = threads_card["elements"][0]["content"]
 
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", overview_markdown)
+        self.assertIn(f"`{_DISPLAY_LOCAL_RESUME_COMMAND}`", overview_markdown)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", overview_markdown)
         self.assertIn(f"`{threads_command.feishu_usage}`", thread_markdown)
         self.assertIn(f"`{resume_command.feishu_usage}`", thread_markdown)
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", thread_markdown)
-        self.assertIn("`fcodex resume <thread_id|thread_name>`", threads_markdown)
+        self.assertIn(f"`{_DISPLAY_LOCAL_RESUME_COMMAND}`", thread_markdown)
+        self.assertIn(f"`{_DISPLAY_LOCAL_RESUME_COMMAND}`", threads_markdown)
         self.assertIn("`feishu-codexctl thread list --scope cwd`", threads_markdown)
         self.assertIn(f"`{resume_command.feishu_usage}`", threads_markdown)
         self.assertEqual(execution_card["header"]["title"]["content"], "Codex 执行过程（执行中）")
