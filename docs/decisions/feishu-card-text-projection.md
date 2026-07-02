@@ -231,11 +231,18 @@ The current fixed rules are:
 - when an outer code block demonstrates an inner fenced code block, the outer
   fence may be upgraded to a longer standard Markdown fence, for example four
   backticks wrapping an inner triple-backtick block, or five wrapping four
-- indented continuation lines after the first line of a list item may receive an
-  explicit `<br>` so Feishu cards do not render the in-list soft break on the
-  same line; this rule only applies outside fenced code blocks, does not treat a
-  nested list marker as an ordinary continuation line, and does not treat a
-  four-space indented code block outside list context as a list-item opener
+- indented continuation lines after the first line of a list item, and line
+  breaks before a nested list following a list item or list-item continuation,
+  may receive an explicit `<br>` so Feishu cards do not render the in-list soft
+  break on the same line; the same hard break may be inserted when a deeper
+  nested list item is followed by an ancestor list-item continuation
+- if an outermost parent list-item continuation appears after a nested list, the
+  sender's display projection may remove the parent-item indentation so it
+  renders after the nested list instead of being hoisted back onto the parent
+  item's first line by Feishu; nested ancestor continuations keep their
+  indentation. These rules only apply outside fenced code blocks and do not
+  treat a four-space indented code block outside list context as a list-item
+  opener
 
 This normalization applies only to the **Feishu card display projection** and
 must not alter the authoritative `final_reply_text`:

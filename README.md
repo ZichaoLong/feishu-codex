@@ -84,6 +84,8 @@ bash install.sh --migrate-from-feishu-codex
       - `contact:contact.base:readonly`
       - `contact:user.base:readonly`
       - `contact:user.employee_id:readonly`
+  - 群聊名称读取: `focusctl binding list --refresh-names` 刷新 `CHAT` 列群名缓存
+      - `im:chat:readonly`
   - 接收单聊与群聊消息
       - `im:message.p2p_msg:readonly`
       - `im:message.group_at_msg:readonly`
@@ -109,6 +111,7 @@ bash install.sh --migrate-from-feishu-codex
       "contact:contact.base:readonly",
       "contact:user.base:readonly",
       "contact:user.employee_id:readonly",
+      "im:chat:readonly",
       "im:message",
       "im:message.group_at_msg:readonly",
       "im:message.group_msg",

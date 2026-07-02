@@ -371,6 +371,9 @@ class _FakeBot:
         self.group_activations: dict[str, dict] = {}
         self.chat_types: dict[str, str] = {}
         self.fetched_chat_types: dict[str, str] = {}
+        self.cached_sender_names: dict[str, str] = {}
+        self.chat_display_names: dict[str, str] = {}
+        self.refreshed_chat_display_names: list[str] = []
         self.reserved_execution_cards: dict[str, str] = {}
         self.admin_open_ids = {"ou_admin"}
         self.bot_identity = {
@@ -521,10 +524,25 @@ class _FakeBot:
         if sender_type == "app":
             return f"机器人:{(open_id or user_id or 'unknown')[:8]}"
         if open_id:
-            return {"ou_admin": "Admin", "ou_user": "User", "ou_user2": "Alice"}.get(open_id, open_id[:8])
+            resolved = {"ou_admin": "Admin", "ou_user": "User", "ou_user2": "Alice"}.get(open_id, open_id[:8])
+            self.cached_sender_names[open_id] = resolved
+            return resolved
         if user_id:
             return user_id[:8]
         return "unknown"
+
+    def lookup_cached_sender_name(self, sender_id: str) -> str:
+        return self.cached_sender_names.get(sender_id, "")
+
+    def lookup_chat_display_name(self, chat_id: str) -> str:
+        return self.chat_display_names.get(chat_id, "")
+
+    def get_chat_display_name(self, chat_id: str) -> str:
+        return self.lookup_chat_display_name(chat_id)
+
+    def refresh_chat_display_name(self, chat_id: str) -> str:
+        self.refreshed_chat_display_names.append(chat_id)
+        return self.chat_display_names.get(chat_id, "")
 
     def debug_sender_name_resolution(self, open_id: str) -> dict[str, object]:
         resolved_name = self.get_sender_display_name(open_id=open_id)
@@ -4633,6 +4651,62 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(result["thread_title"], "demo")
         self.assertEqual(result["bindings"], [{"binding_id": "p2p:ou_user:c1", "feishu_runtime_state": "attached"}])
 
+    def test_service_control_plane_binding_list_uses_group_chat_display_name_cache(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        bot.chat_types["oc_group"] = "group"
+        bot.chat_display_names["oc_group"] = "Project Group"
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "oc_group", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        result = control_request(data_dir, "binding/list")
+
+        self.assertEqual(result["chat_display_name_cache_miss_count"], 0)
+        self.assertEqual(result["bindings"][0]["binding_id"], "group:oc_group")
+        self.assertEqual(result["bindings"][0]["chat_display_name"], "Project Group")
+        self.assertEqual(bot.refreshed_chat_display_names, [])
+
+    def test_service_control_plane_binding_list_refreshes_group_chat_display_name_on_request(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        bot.chat_types["oc_group"] = "group"
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="hello",
+            created_at=0,
+            updated_at=0,
+            source="appServer",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "oc_group", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+        bot.chat_display_names["oc_group"] = "Project Group"
+
+        result = control_request(data_dir, "binding/list", {"refresh_names": True})
+
+        self.assertEqual(result["chat_display_name_cache_miss_count"], 0)
+        self.assertEqual(result["bindings"][0]["binding_id"], "group:oc_group")
+        self.assertEqual(result["bindings"][0]["chat_display_name"], "Project Group")
+        self.assertEqual(bot.refreshed_chat_display_names, ["oc_group"])
+
     def test_service_control_plane_binding_clear_removes_runtime_state_and_persistence(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -7562,6 +7636,34 @@ class CodexHandlerTests(unittest.TestCase):
         _, card = bot.cards[-1]
         self.assertEqual(card["header"]["title"]["content"], "Codex 目录已切换")
         self.assertIn("当前线程绑定已清空。", card["elements"][0]["content"])
+
+    def test_cd_command_expands_home_directory(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        home = pathlib.Path(tempdir.name) / "home"
+        project = home / "project"
+        project.mkdir(parents=True)
+        handler, bot = self._make_handler({"default_working_dir": str(home)})
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd=str(home),
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            handler.handle_message("ou_user", "c1", "/cd ~/project")
+
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["working_dir"], str(project))
+        self.assertEqual(handler._get_runtime_state("ou_user", "c1")["current_thread_id"], "")
+        _, card = bot.cards[-1]
+        self.assertEqual(card["header"]["title"]["content"], "Codex 目录已切换")
+        self.assertIn("目录：`~/project`", card["elements"][0]["content"])
 
     def test_cd_command_invalidates_pending_attachments_in_current_scope(self) -> None:
         tempdir = tempfile.TemporaryDirectory()

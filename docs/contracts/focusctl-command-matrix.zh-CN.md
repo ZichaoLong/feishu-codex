@@ -126,7 +126,7 @@ control plane 不可达；命令不会把它改写成 `service: stopped`。
 
 | 命令 | 作用 | 类型 | 飞书对应 |
 | --- | --- | --- | --- |
-| `focusctl [--instance <name>] binding list` | 列出当前实例可见 binding | 只读 | 无 |
+| `focusctl [--instance <name>] binding list [--refresh-names]` | 列出当前实例可见 binding，并显示缓存中的 chat 名称和存在时的权威 raw thread name；`--refresh-names` 显式刷新 chat display-name 缓存 | 默认只读；`--refresh-names` 可能调用飞书 / 联系人 API 并更新本地内存名称缓存 | 无 |
 | `focusctl [--instance <name>] binding status <binding_id>` | 查看单个 binding 的 chat、thread、推送状态、next prompt、当前实例 interaction owner、会话设置 | 只读 | 飞书 `/status`、`/preflight` 的底层诊断面 |
 | `focusctl [--instance <name>] binding attach <binding_id>` | 恢复单个 binding 的飞书推送 | 变更 | 飞书 `/attach binding` |
 | `focusctl [--instance <name>] binding detach <binding_id>` | 暂停单个 binding 的飞书推送，但保留 binding 记录 | 变更 | 飞书 `/detach` 的 binding 级对应 |
@@ -138,6 +138,25 @@ control plane 不可达；命令不会把它改写成 `service: stopped`。
 
 - `clear` 删除的是本地 binding 记录，包括其中保存的 thread 指向和 binding-local 设置
 - `detach` 清的是当前飞书推送附着状态
+
+`binding list` 是紧凑 inventory 视图。默认情况下，`CHAT` 列只使用本地
+display-name 缓存；缓存未命中时回退短 id，不在默认 inventory 路径里调用飞书 /
+联系人 API。若存在未命中，CLI 会提示可执行
+`focusctl binding list --refresh-names` 手动刷新。
+
+`--refresh-names` 会显式刷新这些缓存。单次请求内会按 chat/user 目标去重，然后
+best-effort 调用对应飞书 / 联系人 API。群名读取要求飞书应用具备
+`im:chat:readonly` 或等价 chat 读取权限；缺少时 group binding 会按预期显示短
+chat id。
+
+CLI 等待时间中的“刷新目标”指唯一外部查询目标：group binding 使用
+`group:<chat_id>`，direct-chat binding 使用 `p2p:<sender_id>`。多个 binding
+共享同一目标时只计一次。发起刷新请求前，CLI 会先取一次 cache-only 快照估算目标数，
+再根据系统配置里的飞书 `request_timeout_seconds` 和少量本地余量计算 control-plane
+等待预算。
+
+`THREAD` 列显示短 thread id，并在存在时追加 app-server 的 raw `thread.name`；它不会回退到
+binding-local `current_thread_title`，也不会显示 thread preview。
 
 `binding clear-stale` 是保留逻辑，事实源是 cleanup 专用的 thread 可操作性检查，而不是普通状态展示：
 

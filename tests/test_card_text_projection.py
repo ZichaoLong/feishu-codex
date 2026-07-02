@@ -234,6 +234,19 @@ class CardTextProjectionTests(unittest.TestCase):
         self.assertIn('{"open_timeout": ..., "max_size": None, "proxy": None}\n', content)
         self.assertIn("```\n\n继续说明", content)
 
+    def test_terminal_result_card_hardens_nested_list_order_for_feishu(self) -> None:
+        card = build_terminal_result_card(
+            "2. xxxx：\n"
+            "   - yyyy\n"
+            "\n"
+            "   zzzz\n"
+            "3. next"
+        )
+
+        content = card["body"]["elements"][-1]["content"]
+
+        self.assertIn("2. xxxx：<br>\n   - yyyy\n\nzzzz\n3. next", content)
+
     def test_terminal_result_card_keeps_shell_glob_inside_normalized_code_block(self) -> None:
         card = build_terminal_result_card(
             "命令：\n"

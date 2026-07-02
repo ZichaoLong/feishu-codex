@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from bot.adapters.base import ThreadSummary
 from bot.runtime_admin_cli import (
@@ -13,6 +13,9 @@ from bot.runtime_admin_cli import (
     _attach_service,
     _build_thread_presence_checker,
     _build_parser,
+    _binding_list_refresh_target_count,
+    _binding_list_refresh_target_resolution_counts,
+    _binding_list_refresh_timeout_seconds,
     _cleanup_archived_thread_bindings_in_scope,
     _cleanup_archived_thread_bindings_in_other_instances,
     _clear_archived_thread_bindings,
@@ -656,23 +659,63 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertEqual(self._visual_cell_starts(lines[1], row1), header_starts)
         self.assertEqual(self._visual_cell_starts(lines[2], row2), header_starts)
 
+    def test_thread_list_collapses_and_truncates_long_multiline_titles(self) -> None:
+        title = "第一行\n第二行 " + ("很长" * 60)
+        threads = [
+            ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="",
+                preview=title,
+                created_at=0,
+                updated_at=0,
+                source="cli",
+                status="idle",
+                model_provider="openai",
+            ),
+        ]
+
+        class _FakeAdapter:
+            def stop(self) -> None:
+                return None
+
+        stdout = io.StringIO()
+        with patch("bot.runtime_admin_cli._remote_adapter", return_value=(_FakeAdapter(), {"thread_list_query_limit": 100}, "ws://127.0.0.1:8765")):
+            with patch("bot.runtime_admin_cli.list_global_threads", return_value=threads):
+                with redirect_stdout(stdout):
+                    result = _print_thread_list(Path("/tmp/instance-data"), scope="global", cwd="")
+
+        self.assertEqual(result, 0)
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("第一行 第二行", lines[1])
+        self.assertTrue(lines[1].endswith("…"))
+
     def test_binding_list_renders_aligned_columns_without_tabs(self) -> None:
         snapshot = {
             "bindings": [
                 {
                     "binding_id": "p2p:ou_user:chat-1",
                     "binding_kind": "p2p",
+                    "sender_id": "ou_user",
+                    "chat_id": "chat-1",
+                    "chat_display_name": "Alice",
                     "binding_state": "bound",
                     "feishu_runtime_state": "attached",
                     "thread_id": "thread-1234567890",
+                    "thread_name": "Renamed thread",
                     "working_dir": "/tmp/项目二",
                 },
                 {
                     "binding_id": "group:chat-2",
                     "binding_kind": "group",
+                    "sender_id": "__group__",
+                    "chat_id": "chat-2",
+                    "chat_display_name": "",
                     "binding_state": "detached",
                     "feishu_runtime_state": "idle",
                     "thread_id": "",
+                    "thread_name": "",
                     "working_dir": "/tmp/demo",
                 },
             ]
@@ -685,12 +728,237 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         lines = stdout.getvalue().splitlines()
         self.assertNotIn("\t", "\n".join(lines))
-        header = ["BINDING_ID", "KIND", "STATE", "RUNTIME", "THREAD", "CWD"]
-        row1 = ["p2p:ou_user:chat-1", "p2p", "bound", "attached", "thread-1…", "/tmp/项目二"]
-        row2 = ["group:chat-2", "group", "detached", "idle", "-", "/tmp/demo"]
+        header = ["BINDING_ID", "KIND", "CHAT", "STATE", "RUNTIME", "THREAD", "CWD"]
+        row1 = [
+            "p2p:ou_user:chat-1",
+            "p2p",
+            "Alice",
+            "bound",
+            "attached",
+            "thread-1… Renamed thread",
+            "/tmp/项目二",
+        ]
+        row2 = ["group:chat-2", "group", "chat-2", "detached", "idle", "-", "/tmp/demo"]
         header_starts = self._visual_cell_starts(lines[0], header)
         self.assertEqual(self._visual_cell_starts(lines[1], row1), header_starts)
         self.assertEqual(self._visual_cell_starts(lines[2], row2), header_starts)
+
+    def test_binding_list_thread_column_ignores_cached_title_and_preview(self) -> None:
+        snapshot = {
+            "bindings": [
+                {
+                    "binding_id": "p2p:ou_user:chat-1",
+                    "binding_kind": "p2p",
+                    "sender_id": "ou_user",
+                    "chat_id": "chat-1234567890",
+                    "chat_display_name": "",
+                    "binding_state": "bound",
+                    "feishu_runtime_state": "attached",
+                    "thread_id": "thread-1234567890",
+                    "thread_name": "",
+                    "thread_title": "cached title must not display",
+                    "thread_preview": "preview must not display",
+                    "working_dir": "/tmp/project",
+                },
+                {
+                    "binding_id": "p2p:ou_user2:chat-2",
+                    "binding_kind": "p2p",
+                    "sender_id": "ou_user2",
+                    "chat_id": "chat-2",
+                    "chat_display_name": "Very long chat display name " + ("x" * 80),
+                    "binding_state": "bound",
+                    "feishu_runtime_state": "attached",
+                    "thread_id": "thread-2234567890",
+                    "thread_name": "Line one\nLine two " + ("y" * 80),
+                    "working_dir": "/tmp/project",
+                },
+            ]
+        }
+        stdout = io.StringIO()
+        with patch("bot.runtime_admin_cli._request", return_value=snapshot):
+            with redirect_stdout(stdout):
+                result = _print_binding_list(Path("/tmp/instance-data"))
+
+        self.assertEqual(result, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("thread-1…", rendered)
+        self.assertNotIn("cached title", rendered)
+        self.assertNotIn("preview", rendered)
+        self.assertIn("Line one Line two", rendered)
+        self.assertNotIn("\nLine two", rendered)
+        self.assertIn("…", rendered)
+
+    def test_binding_list_prompts_refresh_when_chat_name_cache_misses(self) -> None:
+        snapshot = {
+            "bindings": [
+                {
+                    "binding_id": "group:chat-1",
+                    "binding_kind": "group",
+                    "sender_id": "__group__",
+                    "chat_id": "chat-1234567890",
+                    "chat_display_name": "",
+                    "binding_state": "bound",
+                    "feishu_runtime_state": "attached",
+                    "thread_id": "",
+                    "thread_name": "",
+                    "working_dir": "/tmp/project",
+                },
+            ],
+            "chat_display_name_cache_miss_count": 1,
+        }
+        stdout = io.StringIO()
+        with patch("bot.runtime_admin_cli._request", return_value=snapshot):
+            with redirect_stdout(stdout):
+                result = _print_binding_list(Path("/tmp/instance-data"))
+
+        self.assertEqual(result, 0)
+        self.assertIn("focusctl binding list --refresh-names", stdout.getvalue())
+
+    def test_binding_list_refresh_prompt_preserves_non_default_instance(self) -> None:
+        snapshot = {
+            "bindings": [
+                {
+                    "binding_id": "group:chat-1",
+                    "binding_kind": "group",
+                    "sender_id": "__group__",
+                    "chat_id": "chat-1234567890",
+                    "chat_display_name": "",
+                    "binding_state": "bound",
+                    "feishu_runtime_state": "attached",
+                    "thread_id": "",
+                    "thread_name": "",
+                    "working_dir": "/tmp/project",
+                },
+            ],
+            "chat_display_name_cache_miss_count": 1,
+        }
+        stdout = io.StringIO()
+        with patch("bot.runtime_admin_cli._request", return_value=snapshot):
+            with redirect_stdout(stdout):
+                result = _print_binding_list(Path("/tmp/instance-data"), instance_name="explorer")
+
+        self.assertEqual(result, 0)
+        self.assertIn("focusctl --instance explorer binding list --refresh-names", stdout.getvalue())
+
+    def test_binding_list_refresh_names_estimates_timeout_from_unique_targets(self) -> None:
+        snapshot = {
+            "bindings": [
+                {
+                    "binding_id": "group:chat-1",
+                    "binding_kind": "group",
+                    "sender_id": "__group__",
+                    "chat_id": "chat-1",
+                    "chat_display_name": "Project Group",
+                    "binding_state": "bound",
+                    "feishu_runtime_state": "attached",
+                    "thread_id": "",
+                    "thread_name": "",
+                    "working_dir": "/tmp/project",
+                },
+                {
+                    "binding_id": "group:chat-1-secondary",
+                    "binding_kind": "group",
+                    "sender_id": "__group__",
+                    "chat_id": "chat-1",
+                    "chat_display_name": "Project Group",
+                    "binding_state": "bound",
+                    "feishu_runtime_state": "attached",
+                    "thread_id": "",
+                    "thread_name": "",
+                    "working_dir": "/tmp/project",
+                },
+                {
+                    "binding_id": "p2p:ou_user:chat-2",
+                    "binding_kind": "p2p",
+                    "sender_id": "ou_user",
+                    "chat_id": "chat-2",
+                    "chat_display_name": "Alice",
+                    "binding_state": "bound",
+                    "feishu_runtime_state": "attached",
+                    "thread_id": "",
+                    "thread_name": "",
+                    "working_dir": "/tmp/project",
+                },
+            ],
+            "chat_display_name_cache_miss_count": 0,
+        }
+        stdout = io.StringIO()
+        with (
+            patch("bot.runtime_admin_cli._request", side_effect=[snapshot, snapshot]) as request,
+            patch("bot.runtime_admin_cli.load_system_config_raw", return_value={"request_timeout_seconds": 2}),
+            redirect_stdout(stdout),
+        ):
+            result = _print_binding_list(Path("/tmp/instance-data"), refresh_names=True)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            request.call_args_list,
+            [
+                call(
+                    Path("/tmp/instance-data"),
+                    "binding/list",
+                    timeout_seconds=3.0,
+                ),
+                call(
+                    Path("/tmp/instance-data"),
+                    "binding/list",
+                    {"refresh_names": True},
+                    timeout_seconds=7.0,
+                ),
+            ],
+        )
+        self.assertIn("name refresh targets: resolved=2 unresolved=0", stdout.getvalue())
+
+    def test_binding_list_refresh_target_count_deduplicates_lookup_targets(self) -> None:
+        bindings = [
+            {"binding_kind": "group", "sender_id": "__group__", "chat_id": "chat-1"},
+            {"binding_kind": "group", "sender_id": "__group__", "chat_id": "chat-1"},
+            {"binding_kind": "p2p", "sender_id": "ou_user", "chat_id": "chat-2"},
+            {"binding_kind": "p2p", "sender_id": "ou_user", "chat_id": "chat-3"},
+            {"binding_kind": "p2p", "sender_id": "", "chat_id": "chat-4"},
+            {"binding_kind": "unknown", "sender_id": "ou_other", "chat_id": "chat-5"},
+        ]
+
+        self.assertEqual(_binding_list_refresh_target_count(bindings), 2)
+
+    def test_binding_list_refresh_target_resolution_counts_deduplicate_targets(self) -> None:
+        bindings = [
+            {
+                "binding_kind": "group",
+                "sender_id": "__group__",
+                "chat_id": "chat-1",
+                "chat_display_name": "Project Group",
+            },
+            {
+                "binding_kind": "group",
+                "sender_id": "__group__",
+                "chat_id": "chat-1",
+                "chat_display_name": "Project Group",
+            },
+            {
+                "binding_kind": "p2p",
+                "sender_id": "ou_user",
+                "chat_id": "chat-2",
+                "chat_display_name": "",
+            },
+            {
+                "binding_kind": "p2p",
+                "sender_id": "ou_user",
+                "chat_id": "chat-3",
+                "chat_display_name": "",
+            },
+        ]
+
+        self.assertEqual(_binding_list_refresh_target_resolution_counts(bindings), (1, 1))
+
+    def test_binding_list_refresh_timeout_uses_system_request_timeout(self) -> None:
+        bindings = [
+            {"binding_kind": "group", "sender_id": "__group__", "chat_id": "chat-1"},
+            {"binding_kind": "p2p", "sender_id": "ou_user", "chat_id": "chat-2"},
+        ]
+
+        with patch("bot.runtime_admin_cli.load_system_config_raw", return_value={"request_timeout_seconds": 4}):
+            self.assertEqual(_binding_list_refresh_timeout_seconds(bindings), 11.0)
 
     def test_binding_status_renders_resolved_instance_name(self) -> None:
         stdout = io.StringIO()

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from bot.adapters.base import ThreadGoalSummary, ThreadSnapshot, ThreadSummary
 from bot.binding_runtime_manager import BindingRuntimeManager
+from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.reason_codes import (
     PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
     PROMPT_DENIED_BINDING_NOT_FOUND,
@@ -57,6 +58,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         reply_cards: list[tuple[str, dict[str, object], str]] = []
         submitted_prompts: list[dict[str, object]] = []
         thread_goals: dict[str, ThreadGoalSummary] = {}
+        chat_display_names: dict[tuple[str, str, str], str] = {}
+        chat_display_name_calls: list[dict[str, object]] = []
 
         def _read_thread(thread_id: str):
             return ThreadSnapshot(summary=summaries[thread_id])
@@ -88,6 +91,23 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             )
             thread_goals[thread_id] = goal
             return goal
+
+        def _resolve_binding_chat_display_name(
+            *,
+            binding_kind: str,
+            sender_id: str,
+            chat_id: str,
+            refresh_names: bool = False,
+        ) -> str:
+            chat_display_name_calls.append(
+                {
+                    "binding_kind": binding_kind,
+                    "sender_id": sender_id,
+                    "chat_id": chat_id,
+                    "refresh_names": refresh_names,
+                }
+            )
+            return chat_display_names.get((binding_kind, sender_id, chat_id), "")
 
         controller = RuntimeAdminController(
             lock=lock,
@@ -149,6 +169,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
                 source="cli",
                 status="idle",
             ),
+            resolve_binding_chat_display_name=_resolve_binding_chat_display_name,
             cancel_patch_timer_locked=lambda state: state.update({"patch_timer": None}),
             cancel_mirror_watchdog_locked=lambda state: state.update({"mirror_watchdog_timer": None}),
             is_thread_not_found_error=lambda exc: False,
@@ -156,6 +177,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         )
         controller._submitted_prompts = submitted_prompts  # type: ignore[attr-defined]
         controller._thread_goals = thread_goals  # type: ignore[attr-defined]
+        controller._chat_display_names = chat_display_names  # type: ignore[attr-defined]
+        controller._chat_display_name_calls = chat_display_name_calls  # type: ignore[attr-defined]
         return (
             lock,
             binding_runtime,
@@ -183,6 +206,158 @@ class RuntimeAdminControllerTests(unittest.TestCase):
                 working_dir="/tmp/project",
             )
         return state
+
+    def test_binding_list_uses_cached_chat_and_authoritative_thread_name_only(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        p2p_binding = ("ou_user", "oc_p2p")
+        group_binding = (GROUP_SHARED_BINDING_OWNER_ID, "oc_group")
+        self._bind_thread(lock, binding_runtime, p2p_binding, thread_id="thread-1")
+        self._bind_thread(lock, binding_runtime, group_binding, thread_id="thread-2")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="Renamed in Codex",
+            preview="first prompt must not matter",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        summaries["thread-2"] = ThreadSummary(
+            thread_id="thread-2",
+            cwd="/tmp/project",
+            name="",
+            preview="fallback preview must not be displayed",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        getattr(controller, "_chat_display_names").update(
+            {
+                ("p2p", "ou_user", "oc_p2p"): "Alice",
+                ("group", GROUP_SHARED_BINDING_OWNER_ID, "oc_group"): "Project Group",
+            }
+        )
+
+        result = controller.handle_service_control_request("binding/list", {})
+
+        bindings = {item["binding_id"]: item for item in result["bindings"]}
+        self.assertEqual(bindings["p2p:ou_user:oc_p2p"]["chat_display_name"], "Alice")
+        self.assertEqual(bindings["p2p:ou_user:oc_p2p"]["thread_name"], "Renamed in Codex")
+        self.assertEqual(bindings["group:oc_group"]["chat_display_name"], "Project Group")
+        self.assertEqual(bindings["group:oc_group"]["thread_name"], "")
+        self.assertEqual(result["chat_display_name_cache_miss_count"], 0)
+        self.assertNotIn("fallback preview", str(result))
+
+    def test_binding_list_reports_chat_display_name_cache_misses(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding = (GROUP_SHARED_BINDING_OWNER_ID, "oc_group")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        result = controller.handle_service_control_request("binding/list", {})
+
+        self.assertEqual(result["chat_display_name_cache_miss_count"], 1)
+        self.assertEqual(result["bindings"][0]["chat_display_name"], "")
+
+    def test_binding_list_deduplicates_p2p_display_name_refresh_by_sender(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        p2p_binding_a = ("ou_user", "oc_direct_a")
+        p2p_binding_b = ("ou_user", "oc_direct_b")
+        self._bind_thread(lock, binding_runtime, p2p_binding_a, thread_id="thread-1")
+        self._bind_thread(lock, binding_runtime, p2p_binding_b, thread_id="thread-2")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo 1",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        summaries["thread-2"] = ThreadSummary(
+            thread_id="thread-2",
+            cwd="/tmp/project",
+            name="demo 2",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        getattr(controller, "_chat_display_names").update(
+            {
+                ("p2p", "ou_user", "oc_direct_a"): "Alice",
+                ("p2p", "ou_user", "oc_direct_b"): "Alice",
+            }
+        )
+
+        result = controller.handle_service_control_request("binding/list", {"refresh_names": True})
+
+        bindings = {item["binding_id"]: item for item in result["bindings"]}
+        self.assertEqual(bindings["p2p:ou_user:oc_direct_a"]["chat_display_name"], "Alice")
+        self.assertEqual(bindings["p2p:ou_user:oc_direct_b"]["chat_display_name"], "Alice")
+        display_name_calls = getattr(controller, "_chat_display_name_calls")
+        self.assertEqual(
+            [
+                (call["binding_kind"], call["sender_id"], call["chat_id"], call["refresh_names"])
+                for call in display_name_calls
+            ],
+            [("p2p", "ou_user", "oc_direct_a", True)],
+        )
 
     def test_detach_thread_availability_locked_blocks_on_pending_request(self) -> None:
         (

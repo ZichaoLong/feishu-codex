@@ -35,7 +35,7 @@
 | `/pwd` | 查看当前工作目录 | 否 | 仅管理员 | 仅管理员 | 无 |
 | `/status` | 查看当前 chat 的目录、当前 thread 与当前会话设置摘要 | 是；`Connection Status` 页 | 仅管理员 | 仅管理员 | 深度诊断可用 `focusctl binding status <binding_id>` |
 | `/preflight` | 对下一条普通消息与当前 chat 的 detach 可用性做 dry-run | 是；`Connection Status` 页 | 仅管理员 | 仅管理员 | 与 `focusctl binding status <binding_id>` 部分重叠 |
-| `/cd [path]` | 查看或切换当前目录；切换时清空当前 thread 绑定 | 是；`Start` 表单 | 仅管理员 | 仅管理员 | 无 |
+| `/cd [path]` | 查看或切换当前目录，支持 `~` 展开为用户 home；切换时清空当前 thread 绑定 | 是；`Start` 表单 | 仅管理员 | 仅管理员 | 无 |
 | `/new` | 创建新的当前 thread | 是；`Start` 页 | 仅管理员 | 仅管理员 | 无 |
 | `/threads` | 浏览当前目录线程 | 是；`Start` 页 | 仅管理员 | 仅管理员 | `focusctl thread list --scope cwd` |
 | `/resume <thread_id\|thread_name>` | 把目标线程恢复到当前 chat | 是；`Start` 表单 | 仅管理员 | 仅管理员 | 本地继续 live thread 用 `focus resume <thread_id\|thread_name>` 或 `fcodex resume <thread_id\|thread_name>` |

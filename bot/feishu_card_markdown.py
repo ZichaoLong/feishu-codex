@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(([^)\n]+)\)")
 _MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[([^\]\n]*)\]\(([^)\n]+)\)")
 _MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 _FENCED_CODE_OPEN_RE = re.compile(r"^([ \t]*)(`{3,}|~{3,})([^\n]*)$")
 _LIST_ITEM_RE = re.compile(r"^([ \t]*)(?:[-+*]|\d{1,9}[.)])([ \t]+)")
+
+
+@dataclass(slots=True)
+class _ListItemContext:
+    marker_indent: int
+    content_indent: int
+    has_nested_list: bool = False
 
 
 def contains_unsupported_embedded_image_markdown(text: str) -> bool:
@@ -102,7 +110,7 @@ def _harden_list_continuation_soft_breaks_for_feishu(text: str) -> str:
         return normalized
 
     output: list[str] = []
-    active_content_indent: int | None = None
+    list_stack: list[_ListItemContext] = []
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -119,22 +127,46 @@ def _harden_list_continuation_soft_breaks_for_feishu(text: str) -> str:
             end_index = len(lines) if closing_index is None else closing_index + 1
             output.extend(lines[index:end_index])
             index = end_index
-            active_content_indent = None
+            list_stack.clear()
             continue
 
         list_match = _LIST_ITEM_RE.match(body)
-        if list_match is not None and _can_open_list_item(body, active_content_indent):
-            active_content_indent = _text_width(list_match.group(0))
+        active_context: _ListItemContext | None = None
+        current_content_indent = list_stack[-1].content_indent if list_stack else None
+        if list_match is not None and _can_open_list_item(body, current_content_indent):
+            marker_indent = _indent_width(str(list_match.group(1) or ""))
+            _pop_closed_list_contexts_for_list_item(list_stack, marker_indent)
+            if list_stack and marker_indent > list_stack[-1].marker_indent:
+                list_stack[-1].has_nested_list = True
+            active_context = _ListItemContext(
+                marker_indent=marker_indent,
+                content_indent=_text_width(list_match.group(0)),
+            )
+            list_stack.append(active_context)
         elif not body.strip():
-            active_content_indent = None
-        elif active_content_indent is not None and _indent_width(body) < active_content_indent:
-            active_content_indent = None
+            active_context = None
+        else:
+            body_indent = _indent_width(body)
+            _pop_closed_list_contexts_for_text_line(list_stack, body_indent)
+            if (
+                len(list_stack) == 1
+                and list_stack[-1].has_nested_list
+                and body_indent >= list_stack[-1].content_indent
+            ):
+                line = _dedent_line(line, list_stack[-1].content_indent)
+                list_stack.clear()
+            elif list_stack and body_indent >= list_stack[-1].content_indent:
+                active_context = list_stack[-1]
 
         if (
-            active_content_indent is not None
+            active_context is not None
             and newline
             and index + 1 < len(lines)
-            and _is_list_continuation_line(lines[index + 1], active_content_indent)
+            and (
+                _is_list_continuation_line(lines[index + 1], active_context.content_indent)
+                or _is_nested_list_item_line(lines[index + 1], active_context.marker_indent)
+                or _is_ancestor_list_continuation_line(lines[index + 1], list_stack, active_context)
+            )
         ):
             line = _append_html_hard_break(line)
         output.append(line)
@@ -148,6 +180,22 @@ def _can_open_list_item(body: str, active_content_indent: int | None) -> bool:
     return _indent_width(body) < 4
 
 
+def _pop_closed_list_contexts_for_list_item(
+    stack: list[_ListItemContext],
+    marker_indent: int,
+) -> None:
+    while stack and marker_indent <= stack[-1].marker_indent:
+        stack.pop()
+
+
+def _pop_closed_list_contexts_for_text_line(
+    stack: list[_ListItemContext],
+    body_indent: int,
+) -> None:
+    while stack and body_indent < stack[-1].content_indent:
+        stack.pop()
+
+
 def _is_list_continuation_line(line: str, content_indent: int) -> bool:
     body = line.rstrip("\r\n")
     if not body.strip():
@@ -159,6 +207,33 @@ def _is_list_continuation_line(line: str, content_indent: int) -> bool:
     return _indent_width(body) >= content_indent
 
 
+def _is_nested_list_item_line(line: str, parent_marker_indent: int) -> bool:
+    body = line.rstrip("\r\n")
+    list_match = _LIST_ITEM_RE.match(body)
+    if list_match is None:
+        return False
+    marker_indent = _indent_width(str(list_match.group(1) or ""))
+    return marker_indent > parent_marker_indent
+
+
+def _is_ancestor_list_continuation_line(
+    line: str,
+    stack: list[_ListItemContext],
+    active_context: _ListItemContext,
+) -> bool:
+    body = line.rstrip("\r\n")
+    if not body.strip():
+        return False
+    if _FENCED_CODE_OPEN_RE.match(body):
+        return False
+    if _LIST_ITEM_RE.match(body):
+        return False
+    body_indent = _indent_width(body)
+    if body_indent >= active_context.content_indent:
+        return False
+    return any(body_indent >= context.content_indent for context in stack[:-1])
+
+
 def _append_html_hard_break(line: str) -> str:
     body = line.rstrip("\r\n")
     newline = line[len(body):]
@@ -168,6 +243,23 @@ def _append_html_hard_break(line: str) -> str:
     if body.endswith(("  ", "\t")):
         return line
     return f"{body}<br>{newline}"
+
+
+def _dedent_line(line: str, width: int) -> str:
+    body = line.rstrip("\r\n")
+    newline = line[len(body):]
+    removed_width = 0
+    index = 0
+    while index < len(body) and removed_width < width:
+        char = body[index]
+        if char == " ":
+            removed_width += 1
+        elif char == "\t":
+            removed_width += 4
+        else:
+            break
+        index += 1
+    return f"{body[index:]}{newline}"
 
 
 def _indent_width(text: str) -> int:

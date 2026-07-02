@@ -1324,12 +1324,14 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             },
         )
         bot.remember_chat_type("chat-1", "group")
+        bot.remember_chat_display_name("chat-1", "Project Group")
 
         bot._on_raw_chat_disbanded(P2ImChatDisbandedV1({"event": {"chat_id": "chat-1"}}))
 
         self.assertEqual(bot.get_group_mode("chat-1"), "assistant")
         self.assertFalse(bot._group_store.log_path("chat-1").exists())
         self.assertEqual(bot.lookup_chat_type("chat-1"), "")
+        self.assertEqual(bot.lookup_chat_display_name("chat-1"), "")
         self.assertEqual(bot.chat_unavailable_events[-1], ("chat-1", "disbanded"))
 
     def test_bot_deleted_event_clears_local_group_state_and_notifies_subclass(self) -> None:
@@ -1824,6 +1826,13 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(bot.lookup_chat_type("chat-1"), "")
 
+    def test_lookup_chat_display_name_returns_empty_after_entry_expires(self) -> None:
+        bot = self._make_bot()
+        bot.remember_chat_display_name("chat-1", "Project Group")
+        bot._chat_display_name_cache["chat-1"].created_at = time.time() - (6 * 3600 + 1)
+
+        self.assertEqual(bot.lookup_chat_display_name("chat-1"), "")
+
     def test_claim_reserved_execution_card_returns_empty_after_entry_expires(self) -> None:
         bot = self._make_bot()
         bot.reserve_execution_card("m-1", "card-1")
@@ -2106,6 +2115,56 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(bot.fetch_runtime_chat_type("oc_123"), "group")
         self.assertEqual(bot.lookup_chat_type("oc_123"), "group")
+
+    def test_get_chat_display_name_fetches_and_caches_group_name(self) -> None:
+        bot = self._make_bot()
+        calls = []
+
+        class _Response:
+            code = 0
+            msg = "ok"
+            data = SimpleNamespace(name="Project Group", chat_mode="group")
+
+            @staticmethod
+            def success() -> bool:
+                return True
+
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    chat=SimpleNamespace(get=lambda request: calls.append(request) or _Response())
+                )
+            )
+        )
+
+        self.assertEqual(bot.get_chat_display_name("oc_123"), "Project Group")
+        self.assertEqual(bot.get_chat_display_name("oc_123"), "Project Group")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(bot.lookup_chat_display_name("oc_123"), "Project Group")
+        self.assertEqual(bot.lookup_chat_type("oc_123"), "group")
+
+    def test_get_chat_display_name_returns_empty_on_api_failure(self) -> None:
+        bot = self._make_bot()
+
+        class _Response:
+            code = 999
+            msg = "denied"
+            data = None
+
+            @staticmethod
+            def success() -> bool:
+                return False
+
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    chat=SimpleNamespace(get=lambda request: _Response())
+                )
+            )
+        )
+
+        self.assertEqual(bot.get_chat_display_name("oc_123"), "")
+        self.assertEqual(bot.lookup_chat_display_name("oc_123"), "")
 
     def test_fetch_runtime_chat_type_normalizes_topic_mode_to_group(self) -> None:
         bot = self._make_bot()

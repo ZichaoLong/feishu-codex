@@ -30,6 +30,7 @@
    `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`
    如需让 `/whoami`、群授权卡片、群上下文里显示可读名字，再补 `contact:contact.base:readonly`、`contact:user.base:readonly`
    如需让 `/whoami` 和日志里稳定看到 `user_id`，再补 `contact:user.employee_id:readonly`；缺少时 `user_id` 允许为空
+   如需让 `focusctl binding list --refresh-names` 刷新 `CHAT` 列群名缓存，再补 `im:chat:readonly`；缺少时允许回退为短 chat id
    如需用 `/bot-status` 实时探测机器人 `open_id`，再补 `application:application:self_manage`
 3. 确认事件与回调已启用：
    `im.message.receive_v1`、`im.message.recalled_v1`、`card.action.trigger`

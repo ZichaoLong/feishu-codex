@@ -601,6 +601,8 @@ def _complete_focusctl(context: CompletionContext) -> list[str]:
                 current,
                 ["list", "status", "clear", "attach", "detach", "clear-all", "clear-stale"],
             )
+        if len(positionals) >= 2 and positionals[1] == "list" and current.startswith("-"):
+            return _complete_candidates(current, ["--refresh-names", "--help", "-h"])
         if len(positionals) >= 2 and positionals[1] == "clear-stale" and current.startswith("-"):
             return _complete_candidates(current, ["--dry-run", "--help", "-h"])
         return []

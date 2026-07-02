@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import shlex
 import sys
 from dataclasses import replace
 from typing import Any
@@ -13,8 +14,8 @@ from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerC
 from bot.binding_identity import format_binding_id
 from bot.cli_table import render_table as _render_table
 from bot.cli_table import terminal_display_width as _terminal_display_width
-from bot.config import load_config_file
-from bot.constants import display_path, format_timestamp
+from bot.config import load_config_file, load_system_config_raw
+from bot.constants import DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS, display_path, format_timestamp
 from bot.codex_protocol.client import CodexRpcError
 from bot.env_file import load_env_file
 from bot.instance_layout import global_data_dir, list_known_instance_names, resolve_instance_paths
@@ -34,6 +35,11 @@ from bot.thread_resolution import list_current_dir_threads, list_global_threads
 from bot.version import __version__
 
 _CODEX_THREAD_ID_ENV_VAR = "CODEX_THREAD_ID"
+_THREAD_LIST_TITLE_MAX_WIDTH = 80
+_BINDING_LIST_CHAT_MAX_WIDTH = 32
+_BINDING_LIST_THREAD_MAX_WIDTH = 64
+_BINDING_LIST_CONTROL_TIMEOUT_SECONDS = 3.0
+_BINDING_LIST_REFRESH_TIMEOUT_MARGIN_SECONDS = 3.0
 
 
 class _HelpFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
@@ -227,6 +233,119 @@ def _goal_status_label(status: str) -> str:
     }.get(str(status or "").strip(), "未知")
 
 
+def _single_line_display_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _truncate_display_text(value: Any, *, max_width: int) -> str:
+    text = _single_line_display_text(value)
+    if max_width <= 0:
+        return ""
+    if _terminal_display_width(text) <= max_width:
+        return text
+    ellipsis = "…"
+    budget = max(max_width - _terminal_display_width(ellipsis), 0)
+    used = 0
+    chars: list[str] = []
+    for char in text:
+        char_width = _terminal_display_width(char)
+        if used + char_width > budget:
+            break
+        chars.append(char)
+        used += char_width
+    return "".join(chars).rstrip() + ellipsis
+
+
+def _short_display_id(value: Any, *, prefix_width: int = 8) -> str:
+    text = _single_line_display_text(value)
+    if not text:
+        return "-"
+    if _terminal_display_width(text) <= prefix_width:
+        return text
+    return _truncate_display_text(text, max_width=prefix_width + 1)
+
+
+def _binding_list_chat_display(item: dict[str, Any]) -> str:
+    display_name = _single_line_display_text(item.get("chat_display_name", ""))
+    if display_name:
+        return _truncate_display_text(display_name, max_width=_BINDING_LIST_CHAT_MAX_WIDTH)
+    fallback_id = item.get("chat_id") or item.get("sender_id") or ""
+    return _short_display_id(fallback_id)
+
+
+def _binding_list_thread_display(item: dict[str, Any]) -> str:
+    thread_id = _single_line_display_text(item.get("thread_id", ""))
+    if not thread_id:
+        return "-"
+    short_thread_id = _short_display_id(thread_id)
+    thread_name = _single_line_display_text(item.get("thread_name", ""))
+    if not thread_name:
+        return short_thread_id
+    return _truncate_display_text(
+        f"{short_thread_id} {thread_name}",
+        max_width=_BINDING_LIST_THREAD_MAX_WIDTH,
+    )
+
+
+def _binding_list_refresh_target_key(item: dict[str, Any]) -> tuple[str, str] | None:
+    binding_kind = _single_line_display_text(item.get("binding_kind", ""))
+    if binding_kind == "group":
+        chat_id = _single_line_display_text(item.get("chat_id", ""))
+        if chat_id:
+            return ("group", chat_id)
+    if binding_kind == "p2p":
+        sender_id = _single_line_display_text(item.get("sender_id", ""))
+        if sender_id:
+            return ("p2p", sender_id)
+    return None
+
+
+def _binding_list_refresh_target_count(bindings: list[dict[str, Any]]) -> int:
+    return len({key for item in bindings if (key := _binding_list_refresh_target_key(item)) is not None})
+
+
+def _binding_list_refresh_target_resolution_counts(bindings: list[dict[str, Any]]) -> tuple[int, int]:
+    resolved_by_target: dict[tuple[str, str], bool] = {}
+    for item in bindings:
+        target_key = _binding_list_refresh_target_key(item)
+        if target_key is None:
+            continue
+        resolved = bool(_single_line_display_text(item.get("chat_display_name", "")))
+        resolved_by_target[target_key] = resolved_by_target.get(target_key, False) or resolved
+    resolved_count = sum(1 for resolved in resolved_by_target.values() if resolved)
+    return resolved_count, len(resolved_by_target) - resolved_count
+
+
+def _configured_feishu_request_timeout_seconds() -> float:
+    try:
+        raw_value = load_system_config_raw().get(
+            "request_timeout_seconds",
+            DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS,
+        )
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS
+    if value <= 0:
+        return DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS
+    return value
+
+
+def _binding_list_refresh_timeout_seconds(bindings: list[dict[str, Any]]) -> float:
+    target_count = _binding_list_refresh_target_count(bindings)
+    return max(
+        _BINDING_LIST_CONTROL_TIMEOUT_SECONDS,
+        _BINDING_LIST_REFRESH_TIMEOUT_MARGIN_SECONDS
+        + target_count * _configured_feishu_request_timeout_seconds(),
+    )
+
+
+def _binding_list_refresh_command(*, instance_name: str = "") -> str:
+    normalized_instance = str(instance_name or "").strip()
+    if normalized_instance and normalized_instance.lower() != "default":
+        return f"focusctl --instance {shlex.quote(normalized_instance)} binding list --refresh-names"
+    return "focusctl binding list --refresh-names"
+
+
 def _reset_service_backend(data_dir: pathlib.Path, *, force: bool) -> int:
     result = control_request(
         data_dir,
@@ -276,28 +395,59 @@ def _attach_service(data_dir: pathlib.Path) -> int:
     return 0
 
 
-def _print_binding_list(data_dir: pathlib.Path) -> int:
-    result = _request(data_dir, "binding/list")
+def _print_binding_list(data_dir: pathlib.Path, *, refresh_names: bool = False, instance_name: str = "") -> int:
+    if refresh_names:
+        preview_result = _request(
+            data_dir,
+            "binding/list",
+            timeout_seconds=_BINDING_LIST_CONTROL_TIMEOUT_SECONDS,
+        )
+        preview_bindings = preview_result.get("bindings") or []
+        if not preview_bindings:
+            print("当前没有可见 binding。")
+            return 0
+        result = _request(
+            data_dir,
+            "binding/list",
+            {"refresh_names": True},
+            timeout_seconds=_binding_list_refresh_timeout_seconds(preview_bindings),
+        )
+    else:
+        result = _request(
+            data_dir,
+            "binding/list",
+            timeout_seconds=_BINDING_LIST_CONTROL_TIMEOUT_SECONDS,
+        )
     bindings = result.get("bindings") or []
     if not bindings:
         print("当前没有可见 binding。")
         return 0
     rows: list[list[str]] = []
     for item in bindings:
-        thread = item["thread_id"][:8] + "…" if item["thread_id"] else "-"
         cwd = display_path(str(item["working_dir"] or ""))
         rows.append(
             [
                 item["binding_id"],
                 item["binding_kind"],
+                _binding_list_chat_display(item),
                 item["binding_state"],
                 item["feishu_runtime_state"],
-                thread,
+                _binding_list_thread_display(item),
                 cwd,
             ]
-        )
-    for line in _render_table(["BINDING_ID", "KIND", "STATE", "RUNTIME", "THREAD", "CWD"], rows):
+    )
+    for line in _render_table(["BINDING_ID", "KIND", "CHAT", "STATE", "RUNTIME", "THREAD", "CWD"], rows):
         print(line)
+    cache_miss_count = int(result.get("chat_display_name_cache_miss_count") or 0)
+    if cache_miss_count and not refresh_names:
+        refresh_command = _binding_list_refresh_command(instance_name=instance_name)
+        print(
+            f"note: {cache_miss_count} 个 CHAT 名称未命中缓存；"
+            f"如需刷新可执行 `{refresh_command}`。"
+        )
+    if refresh_names:
+        resolved_count, unresolved_count = _binding_list_refresh_target_resolution_counts(bindings)
+        print(f"name refresh targets: resolved={resolved_count} unresolved={unresolved_count}")
     return 0
 
 
@@ -848,7 +998,7 @@ def _print_thread_list(
                 item.thread_id,
                 str(item.model_provider or "-"),
                 display_path(item.cwd),
-                item.title,
+                _truncate_display_text(item.title, max_width=_THREAD_LIST_TITLE_MAX_WIDTH),
             ]
         )
     for line in _render_table(["THREAD_ID", "PROVIDER", "CWD", "TITLE"], rows):
@@ -1450,11 +1600,19 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=_HelpFormatter,
     )
     binding_sub = binding.add_subparsers(dest="action", required=True, title="binding commands", metavar="binding-command")
-    binding_sub.add_parser(
+    binding_list = binding_sub.add_parser(
         "list",
         help="列出当前实例可见 binding。",
-        description="列出当前实例可见的 binding、运行态、关联 thread 与 cwd。",
+        description=(
+            "列出当前实例可见的 binding、运行态、关联 thread 与 cwd。\n"
+            "默认只使用本地缓存显示 CHAT 名称；如需同步查询飞书 / 联系人 API，可加 `--refresh-names`。"
+        ),
         formatter_class=_HelpFormatter,
+    )
+    binding_list.add_argument(
+        "--refresh-names",
+        action="store_true",
+        help="显式刷新 CHAT 显示名缓存；可能访问飞书 / 联系人 API，耗时取决于 binding 数量和飞书请求超时。",
     )
     binding_status = binding_sub.add_parser(
         "status",
@@ -1785,7 +1943,13 @@ def main(argv: list[str] | None = None) -> None:
         if args.resource == "service" and args.action == "attach":
             raise SystemExit(_attach_service(data_dir))
         if args.resource == "binding" and args.action == "list":
-            raise SystemExit(_print_binding_list(data_dir))
+            raise SystemExit(
+                _print_binding_list(
+                    data_dir,
+                    refresh_names=bool(args.refresh_names),
+                    instance_name=target.instance_name,
+                )
+            )
         if args.resource == "binding" and args.action == "status":
             raise SystemExit(_print_binding_status(data_dir, args.binding_id, instance_name=target.instance_name))
         if args.resource == "binding" and args.action == "attach":

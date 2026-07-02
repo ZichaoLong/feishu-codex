@@ -47,12 +47,124 @@ class FeishuCardMarkdownTests(unittest.TestCase):
         self.assertIn("1. **执行步骤**<br>\n   检查状态", markdown_blocks)
         self.assertIn("1. **回复步骤**<br>\n   输出结论", markdown_blocks)
 
-    def test_list_continuation_hardening_does_not_rewrite_nested_lists(self) -> None:
+    def test_list_continuation_hardening_marks_parent_before_nested_lists(self) -> None:
         text = "1. 外层\n    - 内层\n2. 另一项"
 
         self.assertEqual(
             sanitize_terminal_result_markdown_for_feishu_json2(text),
-            text,
+            "1. 外层<br>\n    - 内层\n2. 另一项",
+        )
+
+    def test_nested_list_item_continuation_keeps_child_order_for_feishu(self) -> None:
+        text = "2. xxxx：\n  - yyyy\n     zzzz"
+
+        self.assertEqual(
+            sanitize_terminal_result_markdown_for_feishu_json2(text),
+            "2. xxxx：<br>\n  - yyyy<br>\n     zzzz",
+        )
+
+    def test_parent_continuation_after_nested_list_is_not_hoisted_by_feishu(self) -> None:
+        text = "2. xxxx：\n   - yyyy\n\n   zzzz\n3. next"
+
+        self.assertEqual(
+            sanitize_terminal_result_markdown_for_feishu_json2(text),
+            "2. xxxx：<br>\n   - yyyy\n\nzzzz\n3. next",
+        )
+
+    def test_grandchild_list_before_child_continuation_gets_hard_break(self) -> None:
+        text = (
+            "1. 父项 A：\n"
+            "   - 子项 A1：\n"
+            "     - 孙项 A1-a\n"
+            "     - 孙项 A1-b\n"
+            "     回到子项 A1 的续行。\n"
+            "   - 子项 A2：\n"
+            "     子项 A2 的续行。"
+        )
+
+        self.assertEqual(
+            sanitize_terminal_result_markdown_for_feishu_json2(text),
+            (
+                "1. 父项 A：<br>\n"
+                "   - 子项 A1：<br>\n"
+                "     - 孙项 A1-a\n"
+                "     - 孙项 A1-b<br>\n"
+                "     回到子项 A1 的续行。\n"
+                "   - 子项 A2：<br>\n"
+                "     子项 A2 的续行。"
+            ),
+        )
+
+    def test_grandchild_list_after_blank_keeps_child_continuation_indent(self) -> None:
+        text = (
+            "2. 父项 B：\n"
+            "   - 子项 B1：\n"
+            "     - 孙项 B1-a\n"
+            "\n"
+            "     空行后回到子项 B1 的续行。\n"
+            "   - 子项 B2：\n"
+            "     子项 B2 的续行。"
+        )
+
+        self.assertEqual(
+            sanitize_terminal_result_markdown_for_feishu_json2(text),
+            (
+                "2. 父项 B：<br>\n"
+                "   - 子项 B1：<br>\n"
+                "     - 孙项 B1-a\n"
+                "\n"
+                "     空行后回到子项 B1 的续行。\n"
+                "   - 子项 B2：<br>\n"
+                "     子项 B2 的续行。"
+            ),
+        )
+
+    def test_grandchild_list_before_child_sibling_does_not_get_hard_break(self) -> None:
+        text = (
+            "1. 父项：\n"
+            "   - 子项 A：\n"
+            "     - 孙项 A1\n"
+            "   - 子项 B："
+        )
+
+        self.assertEqual(
+            sanitize_terminal_result_markdown_for_feishu_json2(text),
+            (
+                "1. 父项：<br>\n"
+                "   - 子项 A：<br>\n"
+                "     - 孙项 A1\n"
+                "   - 子项 B："
+            ),
+        )
+
+    def test_nested_fenced_code_block_clears_list_projection_context(self) -> None:
+        text = (
+            "1. 父项：\n"
+            "   - 子项：\n"
+            "     ```python\n"
+            "     x = 1\n"
+            "     ```\n"
+            "   父项续行"
+        )
+
+        self.assertEqual(
+            sanitize_terminal_result_markdown_for_feishu_json2(text),
+            (
+                "1. 父项：<br>\n"
+                "   - 子项：\n\n"
+                "```python\n"
+                "x = 1\n"
+                "```\n\n"
+                "   父项续行"
+            ),
+        )
+
+    def test_parent_continuation_before_nested_list_gets_hard_break(self) -> None:
+        text = "3. xxxx：\n   yyyy：\n   - zzzz"
+
+        self.assertEqual(
+            sanitize_terminal_result_markdown_for_feishu_json2(text),
+            "3. xxxx：<br>\n   yyyy：<br>\n   - zzzz",
         )
 
     def test_list_continuation_hardening_keeps_indented_code_like_list_text(self) -> None:
@@ -68,7 +180,7 @@ class FeishuCardMarkdownTests(unittest.TestCase):
 
         self.assertEqual(
             sanitize_terminal_result_markdown_for_feishu_json2(text),
-            "1. outer\n    1. inner<br>\n       detail",
+            "1. outer<br>\n    1. inner<br>\n       detail",
         )
 
     def test_list_continuation_hardening_skips_fenced_code_blocks(self) -> None:

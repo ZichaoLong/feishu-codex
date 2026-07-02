@@ -104,6 +104,21 @@ class ShellCompletionTests(unittest.TestCase):
         self.assertEqual(action_matches, ["clear-all", "clear-stale"])
         self.assertEqual(option_matches, ["--dry-run", "--help"])
 
+    def test_focusctl_completes_binding_list_refresh_names(self) -> None:
+        option_matches = complete_words(
+            "focusctl",
+            ["focusctl", "binding", "list", "--"],
+            3,
+        )
+        refresh_matches = complete_words(
+            "focusctl",
+            ["focusctl", "binding", "list", "--ref"],
+            3,
+        )
+
+        self.assertEqual(option_matches, ["--refresh-names", "--help"])
+        self.assertEqual(refresh_matches, ["--refresh-names"])
+
     def test_focusctl_completes_thread_goal_set_options_and_status(self) -> None:
         option_matches = complete_words(
             "focusctl",

@@ -93,6 +93,8 @@ _MESSAGE_CONTEXT_TTL = 600
 # chat_id -> chat_type 缓存；用于无 message_id 的群命令入口做兜底判断
 _CHAT_TYPE_CACHE_MAX_SIZE = 1000
 _CHAT_TYPE_CACHE_TTL = 24 * 3600
+_CHAT_DISPLAY_NAME_CACHE_MAX_SIZE = 1000
+_CHAT_DISPLAY_NAME_CACHE_TTL = 6 * 3600
 
 # 原始消息 -> 预发送执行卡片缓存；用于在耗时预处理前先给用户反馈
 _PENDING_EXECUTION_CARD_MAX_SIZE = 1000
@@ -171,6 +173,12 @@ class _CachedChatType:
 
 
 @dataclass
+class _CachedChatDisplayName:
+    display_name: str
+    created_at: float
+
+
+@dataclass
 class _PendingExecutionCard:
     card_message_id: str
     created_at: float
@@ -225,6 +233,8 @@ class FeishuBot(ABC):
         self._message_context_lock = threading.Lock()
         self._chat_type_cache: OrderedDict[str, _CachedChatType] = OrderedDict()
         self._chat_type_cache_lock = threading.Lock()
+        self._chat_display_name_cache: OrderedDict[str, _CachedChatDisplayName] = OrderedDict()
+        self._chat_display_name_cache_lock = threading.Lock()
         self._pending_execution_cards: OrderedDict[str, _PendingExecutionCard] = OrderedDict()
         self._pending_execution_cards_lock = threading.Lock()
         self._sender_name_cache: dict[str, tuple[float, str]] = {}
@@ -435,6 +445,68 @@ class FeishuBot(ABC):
                 return ""
             return cached.chat_type
 
+    def remember_chat_display_name(self, chat_id: str, display_name: str) -> None:
+        normalized_chat_id = str(chat_id or "").strip()
+        normalized_display_name = str(display_name or "").strip()
+        if not normalized_chat_id or not normalized_display_name:
+            return
+        with self._chat_display_name_cache_lock:
+            _store_fifo_ttl_entry(
+                self._chat_display_name_cache,
+                key=normalized_chat_id,
+                value=_CachedChatDisplayName(
+                    display_name=normalized_display_name,
+                    created_at=time.time(),
+                ),
+                ttl_seconds=_CHAT_DISPLAY_NAME_CACHE_TTL,
+                max_size=_CHAT_DISPLAY_NAME_CACHE_MAX_SIZE,
+                created_at=lambda item: item.created_at,
+            )
+
+    def lookup_chat_display_name(self, chat_id: str) -> str:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return ""
+        with self._chat_display_name_cache_lock:
+            self._cleanup_chat_display_name_cache()
+            cached = self._chat_display_name_cache.get(normalized_chat_id)
+            if not cached:
+                return ""
+            return cached.display_name
+
+    def get_chat_display_name(self, chat_id: str) -> str:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return ""
+        cached = self.lookup_chat_display_name(normalized_chat_id)
+        if cached:
+            return cached
+        return self.refresh_chat_display_name(normalized_chat_id)
+
+    def refresh_chat_display_name(self, chat_id: str) -> str:
+        normalized_chat_id = str(chat_id or "").strip()
+        if not normalized_chat_id:
+            return ""
+        try:
+            request = GetChatRequest.builder().chat_id(normalized_chat_id).build()
+            response = self.client.im.v1.chat.get(request)
+        except Exception as exc:
+            logger.warning("查询 chat 名称失败(SDK异常): chat=%s, error=%s", normalized_chat_id, exc)
+            return ""
+        if not response.success():
+            logger.warning("查询 chat 名称失败: chat=%s, code=%s, msg=%s", normalized_chat_id, response.code, response.msg)
+            return ""
+        data = getattr(response, "data", None)
+        display_name = str(getattr(data, "name", "") or "").strip()
+        if display_name:
+            self.remember_chat_display_name(normalized_chat_id, display_name)
+        chat_mode = str(getattr(data, "chat_mode", "") or "").strip()
+        if chat_mode == "p2p":
+            self.remember_chat_type(normalized_chat_id, "p2p")
+        elif chat_mode in {"group", "topic"}:
+            self.remember_chat_type(normalized_chat_id, "group")
+        return display_name
+
     def fetch_runtime_chat_type(self, chat_id: str) -> str:
         normalized_chat_id = str(chat_id or "").strip()
         if not normalized_chat_id:
@@ -449,6 +521,9 @@ class FeishuBot(ABC):
             logger.warning("查询 chat 类型失败: chat=%s, code=%s, msg=%s", normalized_chat_id, response.code, response.msg)
             return ""
         data = getattr(response, "data", None)
+        chat_name = str(getattr(data, "name", "") or "").strip()
+        if chat_name:
+            self.remember_chat_display_name(normalized_chat_id, chat_name)
         chat_mode = str(getattr(data, "chat_mode", "") or "").strip()
         if chat_mode == "p2p":
             self.remember_chat_type(normalized_chat_id, "p2p")
@@ -560,6 +635,14 @@ class FeishuBot(ABC):
             created_at=lambda item: item.created_at,
         )
 
+    def _cleanup_chat_display_name_cache(self) -> None:
+        _evict_expired_fifo_entries(
+            self._chat_display_name_cache,
+            now=time.time(),
+            ttl_seconds=_CHAT_DISPLAY_NAME_CACHE_TTL,
+            created_at=lambda item: item.created_at,
+        )
+
     def _cleanup_pending_execution_cards(self) -> None:
         _evict_expired_fifo_entries(
             self._pending_execution_cards,
@@ -575,6 +658,8 @@ class FeishuBot(ABC):
         self._group_store.clear_chat(normalized_chat_id)
         with self._chat_type_cache_lock:
             self._chat_type_cache.pop(normalized_chat_id, None)
+        with self._chat_display_name_cache_lock:
+            self._chat_display_name_cache.pop(normalized_chat_id, None)
         with self._message_context_lock:
             stale_message_ids = [
                 message_id

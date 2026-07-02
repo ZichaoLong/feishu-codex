@@ -527,6 +527,7 @@ class CodexHandler(BotHandler):
             prompt_write_denial_check=self._thread_access_policy.prompt_write_denial_check,
             detached_runtime_attach_check=self._detached_runtime_attach_check,
             resolve_thread_target_for_control_params=self._resolve_thread_target_for_control_params,
+            resolve_binding_chat_display_name=self._resolve_binding_chat_display_name,
             cancel_patch_timer_locked=self._cancel_patch_timer_locked,
             cancel_mirror_watchdog_locked=self._cancel_mirror_watchdog_locked,
             is_thread_not_found_error=self._is_thread_not_found_error,
@@ -1406,6 +1407,27 @@ class CodexHandler(BotHandler):
 
     def _is_group_chat(self, chat_id: str, message_id: str = "") -> bool:
         return self._resolve_chat_type(chat_id, message_id) == "group"
+
+    def _resolve_binding_chat_display_name(
+        self,
+        *,
+        binding_kind: str,
+        sender_id: str,
+        chat_id: str,
+        refresh_names: bool = False,
+    ) -> str:
+        if binding_kind == "p2p":
+            if not refresh_names:
+                return self.bot.lookup_cached_sender_name(sender_id)
+            return self.bot.get_sender_display_name(open_id=sender_id, sender_type="user")
+        if binding_kind == "group":
+            if not refresh_names:
+                return self.bot.lookup_chat_display_name(chat_id)
+            refresh_chat_display_name = getattr(self.bot, "refresh_chat_display_name", None)
+            if callable(refresh_chat_display_name):
+                return refresh_chat_display_name(chat_id)
+            return self.bot.get_chat_display_name(chat_id)
+        return ""
 
     def _validate_group_mode_change(self, chat_id: str, mode: str, *, message_id: str = "") -> str:
         runtime = self._get_runtime_view(GROUP_SHARED_BINDING_OWNER_ID, chat_id, message_id)

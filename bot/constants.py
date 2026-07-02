@@ -48,7 +48,7 @@ def display_path(path: str, base: str = "") -> str:
 def resolve_working_dir(raw: str = "", *, fallback: str = "") -> str:
     """解析工作目录，始终返回真实绝对路径。"""
     base = raw or fallback or os.getcwd()
-    return os.path.realpath(base)
+    return os.path.realpath(os.path.expanduser(base))
 
 
 def format_timestamp(ts: int | float | None) -> str:

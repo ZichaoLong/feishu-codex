@@ -131,7 +131,7 @@ the machine-wide instance overview.
 
 | Command | Purpose | Type | Feishu counterpart |
 | --- | --- | --- | --- |
-| `focusctl [--instance <name>] binding list` | List bindings visible in the target instance | read-only | none |
+| `focusctl [--instance <name>] binding list [--refresh-names]` | List bindings visible in the target instance, including cached chat display names and the authoritative raw thread name when present; `--refresh-names` explicitly refreshes chat display-name caches | read-only by default; `--refresh-names` may call Feishu/contact APIs and update local in-memory name caches | none |
 | `focusctl [--instance <name>] binding status <binding_id>` | Show one binding's chat, thread, push state, next-prompt status, current-instance interaction owner, and session settings | read-only | lower-level diagnostics behind Feishu `/status` and `/preflight` |
 | `focusctl [--instance <name>] binding attach <binding_id>` | Restore Feishu push for one binding | mutating | Feishu `/attach binding` |
 | `focusctl [--instance <name>] binding detach <binding_id>` | Pause Feishu push for one binding while keeping the binding record | mutating | binding-scoped counterpart of Feishu `/detach` |
@@ -144,6 +144,29 @@ the machine-wide instance overview.
 - `clear` deletes the local binding record, including its thread pointer and
   binding-local settings
 - `detach` removes the current Feishu push attachment
+
+`binding list` is a compact inventory view. By default, its `CHAT` column uses
+only local display-name caches and falls back to a short id on cache miss. It
+does not call Feishu/contact APIs during the default inventory path. If any
+`CHAT` value is missing, the CLI prints a note suggesting
+`focusctl binding list --refresh-names`.
+
+`--refresh-names` explicitly refreshes those caches. It deduplicates by
+chat/user target inside one request, then calls the relevant Feishu/contact API
+best-effort. Group chat names require the Feishu app to have
+`im:chat:readonly` or an equivalent chat-read scope; without it, group bindings
+intentionally show the short chat id.
+
+For CLI waiting behavior, a refresh target is one unique external lookup:
+`group:<chat_id>` for a group binding or `p2p:<sender_id>` for a direct-chat
+binding. Multiple bindings that share the same target are counted once. Before
+issuing the refresh request, the CLI takes a cache-only snapshot to estimate
+that target count, then sets the control-plane wait budget from the configured
+Feishu `request_timeout_seconds` plus a small local margin.
+
+Its `THREAD` column shows a short thread id plus the raw app-server
+`thread.name` when present; it does not fall back to binding-local
+`current_thread_title` or thread preview text.
 
 `binding clear-stale` is retain-oriented. Its source of truth is a cleanup-specific thread operability check, not the generic status display path:
 

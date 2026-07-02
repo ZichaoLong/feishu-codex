@@ -116,6 +116,7 @@ class RuntimeAdminController:
         prompt_write_denial_check: Callable[[ChatBindingKey, str, str, str], ReasonedCheck],
         detached_runtime_attach_check: Callable[[str], ReasonedCheck],
         resolve_thread_target_for_control_params: Callable[[dict[str, Any]], ThreadSummary],
+        resolve_binding_chat_display_name: Callable[..., str],
         cancel_patch_timer_locked: Callable[[RuntimeState], None],
         cancel_mirror_watchdog_locked: Callable[[RuntimeState], None],
         is_thread_not_found_error: Callable[[Exception], bool],
@@ -152,6 +153,7 @@ class RuntimeAdminController:
         self._prompt_write_denial_check = prompt_write_denial_check
         self._detached_runtime_attach_check = detached_runtime_attach_check
         self._resolve_thread_target_for_control_params = resolve_thread_target_for_control_params
+        self._resolve_binding_chat_display_name = resolve_binding_chat_display_name
         self._cancel_patch_timer_locked = cancel_patch_timer_locked
         self._cancel_mirror_watchdog_locked = cancel_mirror_watchdog_locked
         self._is_thread_not_found_error = is_thread_not_found_error
@@ -172,6 +174,112 @@ class RuntimeAdminController:
 
     def binding_inventory_locked(self) -> list[dict[str, Any]]:
         return self._binding_runtime.binding_inventory_locked()
+
+    def binding_list_snapshot(self, *, refresh_names: bool = False) -> list[dict[str, Any]]:
+        with self._lock:
+            bindings = [dict(item) for item in self.binding_inventory_locked()]
+        return self._enrich_binding_list_snapshot(bindings, refresh_names=refresh_names)
+
+    def binding_list_response(self, *, refresh_names: bool = False) -> dict[str, Any]:
+        bindings = self.binding_list_snapshot(refresh_names=refresh_names)
+        cache_miss_count = sum(
+            1
+            for item in bindings
+            if not str(item.get("chat_display_name", "") or "").strip()
+            and (
+                str(item.get("chat_id", "") or "").strip()
+                or str(item.get("sender_id", "") or "").strip()
+            )
+        )
+        return {
+            "bindings": bindings,
+            "refresh_names": bool(refresh_names),
+            "chat_display_name_cache_miss_count": cache_miss_count,
+        }
+
+    def _enrich_binding_list_snapshot(
+        self,
+        bindings: list[dict[str, Any]],
+        *,
+        refresh_names: bool,
+    ) -> list[dict[str, Any]]:
+        thread_name_by_id: dict[str, str] = {}
+        chat_name_by_key: dict[tuple[str, ...], str] = {}
+        for item in bindings:
+            thread_id = str(item.get("thread_id", "") or "").strip()
+            if thread_id:
+                if thread_id not in thread_name_by_id:
+                    thread_name_by_id[thread_id] = self._binding_list_thread_name(thread_id)
+                item["thread_name"] = thread_name_by_id[thread_id]
+            else:
+                item["thread_name"] = ""
+
+            binding_kind = str(item.get("binding_kind", "") or "").strip()
+            sender_id = str(item.get("sender_id", "") or "").strip()
+            chat_id = str(item.get("chat_id", "") or "").strip()
+            chat_key = self._binding_list_chat_display_name_key(
+                binding_kind=binding_kind,
+                sender_id=sender_id,
+                chat_id=chat_id,
+            )
+            if chat_key not in chat_name_by_key:
+                chat_name_by_key[chat_key] = self._binding_list_chat_display_name(
+                    binding_kind=binding_kind,
+                    sender_id=sender_id,
+                    chat_id=chat_id,
+                    refresh_names=refresh_names,
+                )
+            item["chat_display_name"] = chat_name_by_key[chat_key]
+        return bindings
+
+    @staticmethod
+    def _binding_list_chat_display_name_key(
+        *,
+        binding_kind: str,
+        sender_id: str,
+        chat_id: str,
+    ) -> tuple[str, ...]:
+        if binding_kind == "group" and chat_id:
+            return ("group", chat_id)
+        if binding_kind == "p2p" and sender_id:
+            return ("p2p", sender_id)
+        return ("binding", binding_kind, sender_id, chat_id)
+
+    def _binding_list_thread_name(self, thread_id: str) -> str:
+        try:
+            summary = self._read_thread(thread_id).summary
+        except Exception as exc:
+            logger.debug("binding list 读取 thread name 失败: thread=%s, error=%s", thread_id[:12], exc)
+            return ""
+        return str(getattr(summary, "name", "") or "").strip()
+
+    def _binding_list_chat_display_name(
+        self,
+        *,
+        binding_kind: str,
+        sender_id: str,
+        chat_id: str,
+        refresh_names: bool,
+    ) -> str:
+        try:
+            return str(
+                self._resolve_binding_chat_display_name(
+                    binding_kind=binding_kind,
+                    sender_id=sender_id,
+                    chat_id=chat_id,
+                    refresh_names=refresh_names,
+                )
+                or ""
+            ).strip()
+        except Exception as exc:
+            logger.debug(
+                "binding list 读取 chat display name 失败: kind=%s chat=%s sender=%s error=%s",
+                binding_kind,
+                chat_id[:12],
+                sender_id[:12],
+                exc,
+            )
+            return ""
 
     def bound_bindings_for_thread_locked(self, thread_id: str) -> list[ChatBindingKey]:
         return self._binding_runtime.bound_bindings_for_thread_locked(thread_id)
@@ -1843,8 +1951,7 @@ class RuntimeAdminController:
         if method == "service/attach":
             return self.attach_service()
         if method == "binding/list":
-            with self._lock:
-                return {"bindings": self.binding_inventory_locked()}
+            return self.binding_list_response(refresh_names=bool(params.get("refresh_names")))
         if method == "binding/status":
             binding_id = str(params.get("binding_id", "") or "").strip()
             binding = parse_binding_id(binding_id)
