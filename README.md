@@ -352,4 +352,4 @@ flowchart LR
 - 只有 `loaded gate` 通过后，才会继续争抢机器级 `ThreadRuntimeLease`
 
 **补充说明**
-- `permissions`、`model`、`effort` 都属于 frontend-owned runtime settings：主要由发起该轮 `thread/start` / `turn/start` 的前端注入；仅在恢复未 loaded thread 时，cold `thread/resume` 会携带其中一小段 one-shot override 来保护恢复后的第一轮 autonomous turn。这不会把它们变成 thread-wise next-load 设置，也不会在飞书与本地 `focus` / `fcodex` 间自动同步
+- `permissions`、`model`、`effort` 都属于 frontend-owned runtime settings：主要由发起该轮 `thread/start` / `turn/start` 的前端注入；仅在恢复未 loaded thread 时，cold `thread/resume` 会携带其中一小段 one-shot override 来保护恢复后的第一轮 autonomous turn。这不会把它们变成 thread-wise next-load 设置，也不会在飞书与本地 `focus` / `fcodex` 间自动同步持久化值；但显式值进入同一个 upstream thread 后，其他前端仍可能观察或覆盖

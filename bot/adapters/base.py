@@ -46,11 +46,19 @@ class ThreadGoalSummary:
 
 
 @dataclass(slots=True)
+class RuntimeReasoningEffortOption:
+    reasoning_effort: str
+    description: str = ""
+
+
+@dataclass(slots=True)
 class RuntimeModelSummary:
     model: str
     display_name: str | None = None
     is_default: bool = False
     hidden: bool = False
+    default_reasoning_effort: str | None = None
+    supported_reasoning_efforts: list[RuntimeReasoningEffortOption] | None = None
 
 
 @dataclass(slots=True)

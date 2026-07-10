@@ -8,13 +8,16 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from secrets import compare_digest
-from typing import Any
+from typing import Any, Literal
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
+from bot.adapters.base import RuntimeModelSummary
 from bot.cards import (
+    BINDING_OPTIONAL_OVERRIDE_SCOPE_TEXT,
+    BINDING_SAFETY_BASELINE_SCOPE_TEXT,
     CommandResult,
     build_approval_policy_card,
     build_model_effort_card,
@@ -36,10 +39,21 @@ _UNSET = object()
 _INIT_COMMAND = feishu_visible_command_syntax("/init <token>")
 _DEBUG_CONTACT_COMMAND = feishu_visible_command_syntax("/debug-contact <open_id>")
 _MODEL_WITH_NAME_COMMAND = feishu_visible_command_syntax("/model <name|auto>")
-_EFFORT_WITH_NAME_COMMAND = feishu_visible_command_syntax("/effort <auto|none|minimal|low|medium|high|xhigh>")
+_EFFORT_WITH_NAME_COMMAND = feishu_visible_command_syntax("/effort <auto|value>")
 _MODEL_AUTO = "auto"
 _EFFORT_AUTO = "auto"
-_REASONING_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
+_CANONICAL_REASONING_EFFORT_VALUES = frozenset(
+    ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+)
+ModelEffortValidationState = Literal["validated", "deferred", "rejected"]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelEffortValidation:
+    state: ModelEffortValidationState
+    model: str
+    reasoning_effort: str
+    model_summary: RuntimeModelSummary | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +65,7 @@ class SettingsDomainPorts:
     add_admin_open_id: Callable[[str], None]
     set_configured_bot_open_id: Callable[[str], None]
     get_runtime_view: Callable[[str, str, str], RuntimeView]
+    list_models: Callable[[], list[RuntimeModelSummary]]
     update_runtime_settings: Callable[..., None]
 
 
@@ -297,63 +312,166 @@ class CodexSettingsDomain:
         return normalized or _EFFORT_AUTO
 
     @staticmethod
-    def _normalize_reasoning_effort_override(target: str) -> str:
-        normalized_target = str(target or "").strip().lower()
-        if normalized_target == _EFFORT_AUTO:
+    def _normalize_model_override(target: str) -> str:
+        normalized_target = str(target or "").strip()
+        if normalized_target.lower() == _MODEL_AUTO:
             return ""
-        if normalized_target in _REASONING_EFFORT_VALUES:
-            return normalized_target
-        supported = "、".join(f"`{item}`" for item in (_EFFORT_AUTO, *_REASONING_EFFORT_VALUES))
-        raise ValueError(f"reasoning effort 仅支持：{supported}")
+        return normalized_target
+
+    @staticmethod
+    def _normalize_reasoning_effort_override(target: str) -> str:
+        normalized_target = str(target or "").strip()
+        if not normalized_target:
+            raise ValueError("reasoning effort 不能为空")
+        canonical_target = normalized_target.lower()
+        if canonical_target == _EFFORT_AUTO:
+            return ""
+        if canonical_target in _CANONICAL_REASONING_EFFORT_VALUES:
+            return canonical_target
+        return normalized_target
+
+    def _list_models(self) -> list[RuntimeModelSummary]:
+        try:
+            return list(self._ports.list_models())
+        except Exception as exc:
+            logger.warning("读取 Codex model metadata 失败；按 metadata unavailable 处理：%s", exc)
+            return []
+
+    @staticmethod
+    def _classify_model_effort(
+        *,
+        model: str,
+        reasoning_effort: str,
+        models: list[RuntimeModelSummary],
+    ) -> ModelEffortValidation:
+        normalized_model = str(model or "").strip()
+        normalized_effort = str(reasoning_effort or "").strip()
+        model_summary = next(
+            (item for item in models if str(item.model or "").strip() == normalized_model),
+            None,
+        )
+        if not normalized_effort:
+            state: ModelEffortValidationState = "validated"
+        elif not normalized_model:
+            state = "deferred"
+        elif model_summary is None or model_summary.supported_reasoning_efforts is None:
+            state = "deferred"
+        elif any(
+            option.reasoning_effort == normalized_effort
+            for option in model_summary.supported_reasoning_efforts
+        ):
+            state = "validated"
+        else:
+            state = "rejected"
+        return ModelEffortValidation(
+            state=state,
+            model=normalized_model,
+            reasoning_effort=normalized_effort,
+            model_summary=model_summary,
+        )
+
+    @staticmethod
+    def _model_effort_rejection_text(validation: ModelEffortValidation) -> str:
+        model_summary = validation.model_summary
+        supported_options = (
+            model_summary.supported_reasoning_efforts
+            if model_summary is not None
+            else None
+        )
+        supported_values = [
+            option.reasoning_effort
+            for option in (supported_options or [])
+            if option.reasoning_effort
+        ]
+        choices = "、".join(f"`{value}`" for value in (_EFFORT_AUTO, *supported_values))
+        return (
+            f"model `{validation.model}` 的 metadata 未声明支持 effort "
+            f"`{validation.reasoning_effort}`；可选：{choices}。"
+        )
+
+    @classmethod
+    def _model_effort_validation_text(cls, validation: ModelEffortValidation) -> str:
+        if validation.state == "rejected":
+            return cls._model_effort_rejection_text(validation)
+        if not validation.reasoning_effort:
+            return "effort 为 `auto`，Focus 不发送 effort 字段。"
+        if validation.state == "validated":
+            return "当前 model metadata 明确支持这个 effort。"
+        if not validation.model:
+            return "model 为 `auto`，Focus 不解析实际 model；显式 effort 将原样交给 app-server。"
+        return "当前 model 没有可用的 effort metadata；显式 effort 将原样交给 app-server。"
 
     def _build_model_effort_summary_card(
         self,
         *,
         runtime: RuntimeView,
+        models: list[RuntimeModelSummary] | None = None,
     ) -> dict:
+        available_models = self._list_models() if models is None else models
+        validation = self._classify_model_effort(
+            model=runtime.model,
+            reasoning_effort=runtime.reasoning_effort,
+            models=available_models,
+        )
         current_thread_id = str(runtime.current_thread_id or "").strip()
         lines = [
-            f"当前会话 model override：`{self._runtime_model_display_text(runtime.model)}`",
-            f"当前会话 effort override：`{self._runtime_effort_display_text(runtime.reasoning_effort)}`",
-            "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。",
+            f"model override: `{self._runtime_model_display_text(runtime.model)}`",
+            f"effort override: `{self._runtime_effort_display_text(runtime.reasoning_effort)}`",
+            f"validation: `{validation.state}`",
             "",
-            f"- `{_MODEL_AUTO}`：清除当前会话的 model override；回到当前 backend 已生效的默认 model",
-            f"- `{_EFFORT_AUTO}`：清除当前会话的 effort override；回到当前 backend 已生效的默认 effort / model default",
-            "- `none`：显式不使用 reasoning effort",
-            "- 显式设置具体 model 时，只覆盖当前会话后续 turn 的 `model` 名称",
-            "- 当前卡片不枚举 provider 模型列表；可直接输入 model 名称",
+            self._model_effort_validation_text(validation),
+            BINDING_OPTIONAL_OVERRIDE_SCOPE_TEXT,
+            "`auto` 的精确定义是 Focus 不发送对应字段；它不会主动恢复 backend 或 model 默认值。",
         ]
-        if current_thread_id:
-            lines.extend(
-                [
-                    "",
-                    f"当前 thread：`{current_thread_id[:8]}…`",
-                    (
-                        "当前 effective effort 来源："
-                        + (
-                            f"turn override `{self._runtime_effort_display_text(runtime.reasoning_effort)}`"
-                            if str(runtime.reasoning_effort or "").strip()
-                            else "backend default / model default"
-                        )
-                    ),
-                ]
+        if (
+            validation.model_summary is not None
+            and validation.model_summary.default_reasoning_effort
+        ):
+            lines.append(
+                "model metadata default effort: "
+                f"`{validation.model_summary.default_reasoning_effort}`"
+                "（仅供参考；auto 仍然不发送字段）。"
             )
+        if current_thread_id:
+            lines.extend(["", f"当前 thread：`{current_thread_id[:8]}…`"])
+        supported_reasoning_efforts = (
+            None
+            if validation.model_summary is None
+            or validation.model_summary.supported_reasoning_efforts is None
+            else [
+                (option.reasoning_effort, option.description)
+                for option in validation.model_summary.supported_reasoning_efforts
+            ]
+        )
         return build_model_effort_card(
             current_model=runtime.model,
             current_reasoning_effort=runtime.reasoning_effort,
             content="\n".join(lines),
+            supported_reasoning_efforts=supported_reasoning_efforts,
+            reasoning_effort_conflict=(
+                self._model_effort_rejection_text(validation)
+                if validation.state == "rejected"
+                else ""
+            ),
             running=runtime.running,
         )
 
     def handle_model_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         runtime = self._runtime_view(sender_id, chat_id, message_id)
+        models = self._list_models()
         if not arg:
-            return CommandResult(card=self._build_model_effort_summary_card(runtime=runtime))
+            return CommandResult(card=self._build_model_effort_summary_card(runtime=runtime, models=models))
         target = str(arg or "").strip()
         if not target:
             return CommandResult(text=f"用法：`{_MODEL_WITH_NAME_COMMAND}`")
-        normalized_target = target.lower()
-        desired_model = "" if normalized_target == _MODEL_AUTO else target
+        desired_model = self._normalize_model_override(target)
+        validation = self._classify_model_effort(
+            model=desired_model,
+            reasoning_effort=runtime.reasoning_effort,
+            models=models,
+        )
+        if validation.state == "rejected":
+            return CommandResult(text=f"未保存 model override：{self._model_effort_rejection_text(validation)}")
         self._update_runtime_settings(
             sender_id,
             chat_id,
@@ -362,25 +480,20 @@ class CodexSettingsDomain:
         )
         if str(runtime.model or "").strip() == desired_model:
             label = self._runtime_model_display_text(desired_model)
-            return CommandResult(
-                text=(
-                    f"当前会话的 model override 已是：`{label}`\n"
-                    "作用范围：只影响当前飞书会话的后续 turn。"
-                )
-            )
-        label = self._runtime_model_display_text(desired_model)
-        message = (
-            f"已切换当前会话的 model override：`{label}`\n"
-            "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
-        )
+            message = f"当前会话的 model override 已是：`{label}`"
+        else:
+            label = self._runtime_model_display_text(desired_model)
+            message = f"已切换当前会话的 model override：`{label}`"
+        message += f"\nvalidation: `{validation.state}`\n{BINDING_OPTIONAL_OVERRIDE_SCOPE_TEXT}"
         if runtime.running:
             message += "\n如果当前正在执行，新设置从下一轮生效。"
         return CommandResult(text=message)
 
     def handle_effort_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
         runtime = self._runtime_view(sender_id, chat_id, message_id)
+        models = self._list_models()
         if not arg:
-            return CommandResult(card=self._build_model_effort_summary_card(runtime=runtime))
+            return CommandResult(card=self._build_model_effort_summary_card(runtime=runtime, models=models))
         target = str(arg or "").strip()
         if not target:
             return CommandResult(text=f"用法：`{_EFFORT_WITH_NAME_COMMAND}`")
@@ -388,6 +501,13 @@ class CodexSettingsDomain:
             desired_effort = self._normalize_reasoning_effort_override(target)
         except ValueError as exc:
             return CommandResult(text=f"非法 reasoning effort：`{target}`\n用法：`{_EFFORT_WITH_NAME_COMMAND}`\n{exc}")
+        validation = self._classify_model_effort(
+            model=runtime.model,
+            reasoning_effort=desired_effort,
+            models=models,
+        )
+        if validation.state == "rejected":
+            return CommandResult(text=f"未保存 effort override：{self._model_effort_rejection_text(validation)}")
         self._update_runtime_settings(
             sender_id,
             chat_id,
@@ -396,17 +516,13 @@ class CodexSettingsDomain:
         )
         if str(runtime.reasoning_effort or "").strip() == desired_effort:
             label = self._runtime_effort_display_text(desired_effort)
-            return CommandResult(
-                text=(
-                    f"当前会话的 effort override 已是：`{label}`\n"
-                    "作用范围：只影响当前飞书会话的后续 turn。"
-                )
-            )
-        label = self._runtime_effort_display_text(desired_effort)
-        message = (
-            f"已切换当前会话的 effort override：`{label}`\n"
-            "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
-        )
+            message = f"当前会话的 effort override 已是：`{label}`"
+        else:
+            label = self._runtime_effort_display_text(desired_effort)
+            message = f"已切换当前会话的 effort override：`{label}`"
+        message += f"\nvalidation: `{validation.state}`\n{BINDING_OPTIONAL_OVERRIDE_SCOPE_TEXT}"
+        if desired_effort == "ultra":
+            message += "\n提示：Focus 会把 `ultra` 原样发送给 Codex，由上游走原生 Ultra 路径。"
         if runtime.running:
             message += "\n如果当前正在执行，新设置从下一轮生效。"
         return CommandResult(text=message)
@@ -424,7 +540,7 @@ class CodexSettingsDomain:
                 approval_policy=policy,
             )
             running = runtime.running
-            message = f"已切换审批策略：`{policy}`\n作用范围：只影响当前飞书会话的后续 turn。"
+            message = f"已切换审批策略：`{policy}`\n{BINDING_SAFETY_BASELINE_SCOPE_TEXT}"
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
             return CommandResult(text=message)
@@ -448,7 +564,7 @@ class CodexSettingsDomain:
                 f"已切换权限基线：`{config['label']}`\n"
                 f"Profile ID：`{config['profile_id']}`\n"
                 "它只决定执行边界；是否需要停下来审批，仍由 `/approval` 单独控制。\n"
-                "作用范围：只影响当前飞书会话的后续 turn。"
+                f"{BINDING_SAFETY_BASELINE_SCOPE_TEXT}"
             )
             if running:
                 message += "\n如果当前正在执行，新设置从下一轮生效。"
@@ -460,6 +576,99 @@ class CodexSettingsDomain:
             )
         )
 
+    def _model_effort_rejection_response(
+        self,
+        *,
+        runtime: RuntimeView,
+        models: list[RuntimeModelSummary],
+        validation: ModelEffortValidation,
+    ) -> P2CardActionTriggerResponse:
+        return make_card_response(
+            card=self._build_model_effort_summary_card(runtime=runtime, models=models),
+            toast=f"未保存：{self._model_effort_rejection_text(validation)}",
+            toast_type="warning",
+        )
+
+    def _apply_model_card_update(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        desired_model: str,
+    ) -> P2CardActionTriggerResponse:
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        models = self._list_models()
+        validation = self._classify_model_effort(
+            model=desired_model,
+            reasoning_effort=runtime.reasoning_effort,
+            models=models,
+        )
+        if validation.state == "rejected":
+            return self._model_effort_rejection_response(
+                runtime=runtime,
+                models=models,
+                validation=validation,
+            )
+        self._update_runtime_settings(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+            model=desired_model,
+        )
+        toast = f"已切换 model override：{self._runtime_model_display_text(desired_model)}"
+        if validation.state == "deferred":
+            toast += "；validation: deferred"
+        if runtime.running:
+            toast += "；下一轮生效"
+        return make_card_response(
+            card=self._build_model_effort_summary_card(
+                runtime=self._runtime_view(sender_id, chat_id, message_id),
+                models=models,
+            ),
+            toast=toast,
+            toast_type="success",
+        )
+
+    def _apply_reasoning_effort_card_update(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        desired_effort: str,
+    ) -> P2CardActionTriggerResponse:
+        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        models = self._list_models()
+        validation = self._classify_model_effort(
+            model=runtime.model,
+            reasoning_effort=desired_effort,
+            models=models,
+        )
+        if validation.state == "rejected":
+            return self._model_effort_rejection_response(
+                runtime=runtime,
+                models=models,
+                validation=validation,
+            )
+        self._update_runtime_settings(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+            reasoning_effort=desired_effort,
+        )
+        toast = f"已切换 effort override：{self._runtime_effort_display_text(desired_effort)}"
+        if validation.state == "deferred":
+            toast += "；validation: deferred"
+        if runtime.running:
+            toast += "；下一轮生效"
+        return make_card_response(
+            card=self._build_model_effort_summary_card(
+                runtime=self._runtime_view(sender_id, chat_id, message_id),
+                models=models,
+            ),
+            toast=toast,
+            toast_type="success",
+        )
+
     def handle_set_model(
         self,
         sender_id: str,
@@ -467,22 +676,14 @@ class CodexSettingsDomain:
         message_id: str,
         action_value: dict,
     ) -> P2CardActionTriggerResponse:
-        target_model = str(action_value.get("model", "") or "").strip()
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
-        self._update_runtime_settings(
+        desired_model = self._normalize_model_override(
+            str(action_value.get("model", "") or "")
+        )
+        return self._apply_model_card_update(
             sender_id,
             chat_id,
-            message_id=message_id,
-            model=target_model,
-        )
-        running = runtime.running
-        toast = f"已切换 model override：{self._runtime_model_display_text(target_model)}"
-        if running:
-            toast += "；下一轮生效"
-        return make_card_response(
-            card=self._build_model_effort_summary_card(runtime=self._runtime_view(sender_id, chat_id, message_id)),
-            toast=toast,
-            toast_type="success",
+            message_id,
+            desired_model,
         )
 
     def handle_submit_model_override(
@@ -498,21 +699,11 @@ class CodexSettingsDomain:
         submitted = str(form_value.get("model_override", "") or "").strip()
         if not submitted:
             return make_card_response(toast="请输入 model 名称；如需清除 override，请点 auto。", toast_type="warning")
-        desired_model = "" if submitted.lower() == _MODEL_AUTO else submitted
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
-        self._update_runtime_settings(
+        return self._apply_model_card_update(
             sender_id,
             chat_id,
-            message_id=message_id,
-            model=desired_model,
-        )
-        toast = f"已切换 model override：{self._runtime_model_display_text(desired_model)}"
-        if runtime.running:
-            toast += "；下一轮生效"
-        return make_card_response(
-            card=self._build_model_effort_summary_card(runtime=self._runtime_view(sender_id, chat_id, message_id)),
-            toast=toast,
-            toast_type="success",
+            message_id,
+            self._normalize_model_override(submitted),
         )
 
     def resolve_runtime_settings_form_submit_payload(self, action_value: dict[str, Any]) -> dict[str, str] | None:
@@ -521,6 +712,8 @@ class CodexSettingsDomain:
             return None
         if "model_override" in form_value:
             return {"action": "submit_model_override"}
+        if "reasoning_effort_override" in form_value:
+            return {"action": "submit_reasoning_effort_override"}
         return None
 
     def handle_set_reasoning_effort(
@@ -535,20 +728,35 @@ class CodexSettingsDomain:
             desired_effort = self._normalize_reasoning_effort_override(target_effort or _EFFORT_AUTO)
         except ValueError as exc:
             return make_card_response(toast=str(exc), toast_type="warning")
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
-        self._update_runtime_settings(
+        return self._apply_reasoning_effort_card_update(
             sender_id,
             chat_id,
-            message_id=message_id,
-            reasoning_effort=desired_effort,
+            message_id,
+            desired_effort,
         )
-        toast = f"已切换 effort override：{self._runtime_effort_display_text(desired_effort)}"
-        if runtime.running:
-            toast += "；下一轮生效"
-        return make_card_response(
-            card=self._build_model_effort_summary_card(runtime=self._runtime_view(sender_id, chat_id, message_id)),
-            toast=toast,
-            toast_type="success",
+
+    def handle_submit_reasoning_effort_override(
+        self,
+        sender_id: str,
+        chat_id: str,
+        message_id: str,
+        action_value: dict,
+    ) -> P2CardActionTriggerResponse:
+        form_value = action_value.get("_form_value") or {}
+        if not isinstance(form_value, dict):
+            return make_card_response(toast="表单缺少 effort 输入。", toast_type="warning")
+        submitted = str(form_value.get("reasoning_effort_override", "") or "").strip()
+        if not submitted:
+            return make_card_response(toast="请输入 effort；如需清除 override，请点 auto。", toast_type="warning")
+        try:
+            desired_effort = self._normalize_reasoning_effort_override(submitted)
+        except ValueError as exc:
+            return make_card_response(toast=str(exc), toast_type="warning")
+        return self._apply_reasoning_effort_card_update(
+            sender_id,
+            chat_id,
+            message_id,
+            desired_effort,
         )
 
     def handle_set_approval_policy(

@@ -13,6 +13,7 @@ from bot.adapters.base import (
     AgentAdapter,
     RuntimeConfigSummary,
     RuntimeModelSummary,
+    RuntimeReasoningEffortOption,
     ThreadGoalSummary,
     ThreadSnapshot,
     ThreadSummary,
@@ -536,14 +537,43 @@ class CodexAppServerAdapter(AgentAdapter):
             model = _read_string(item, "model")
             if not model:
                 continue
+            raw_reasoning_efforts = item.get("supportedReasoningEfforts")
+            supported_reasoning_efforts: list[RuntimeReasoningEffortOption] | None = None
+            if isinstance(raw_reasoning_efforts, list):
+                supported_reasoning_efforts = []
+                for raw_option in raw_reasoning_efforts:
+                    if not isinstance(raw_option, dict):
+                        continue
+                    reasoning_effort = _read_string(
+                        raw_option,
+                        "reasoningEffort",
+                        "reasoning_effort",
+                    )
+                    if not reasoning_effort:
+                        continue
+                    supported_reasoning_efforts.append(
+                        RuntimeReasoningEffortOption(
+                            reasoning_effort=reasoning_effort,
+                            description=_read_string(raw_option, "description"),
+                        )
+                    )
             models.append(
                 RuntimeModelSummary(
                     model=model,
                     display_name=_read_string(item, "displayName", "display_name") or None,
                     is_default=bool(item.get("isDefault")),
                     hidden=bool(item.get("hidden")),
+                    default_reasoning_effort=(
+                        _read_string(
+                            item,
+                            "defaultReasoningEffort",
+                            "default_reasoning_effort",
+                        )
+                        or None
+                    ),
+                    supported_reasoning_efforts=supported_reasoning_efforts,
                 )
-                )
+            )
         return models
 
     @staticmethod

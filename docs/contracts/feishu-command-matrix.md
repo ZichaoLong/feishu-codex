@@ -53,7 +53,7 @@ It does not redefine:
 | --- | --- | --- | --- | --- | --- |
 | `/permissions [read-only\|workspace\|danger-full-access]` | Set the permission baseline independently from approval policy | yes; `Turn Settings` page | admin only | admin only | none |
 | `/model [name\|auto]` | Set the current Feishu session's turn-time model override; no-arg opens the shared model/effort card | yes; `Turn Settings` page | admin only | admin only | none |
-| `/effort [auto\|none\|minimal\|low\|medium\|high\|xhigh]` | Set the current Feishu session's turn-time effort override; no-arg opens the shared model/effort card | yes; `Turn Settings` page | admin only | admin only | none |
+| `/effort [auto\|value]` | Set the current Feishu binding's turn-time effort override; known models are constrained by metadata, while auto/unknown models allow custom values; no-arg opens the shared model/effort card | yes; `Turn Settings` page | admin only | admin only | none |
 | `/approval [untrusted\|on-request\|never]` | Set approval policy | yes; `Turn Settings` page | admin only | admin only | none |
 | `/last text` | Export the latest authoritative terminal text from the current session; prefers terminal result, falls back to the latest execution card | yes; `Turn Settings` page | admin only | admin only | none |
 | `/reset-backend` | Preview and reset the current instance backend for recovery | yes; `More -> Advanced Actions` | admin only | admin only | `focusctl service reset-backend` |

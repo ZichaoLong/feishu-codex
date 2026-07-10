@@ -944,7 +944,7 @@ class CodexHelpDomain:
                 f"- `{_SHARED_LAST_COMMAND.feishu_usage}`\n"
                 "- `/permissions [read-only|workspace|danger-full-access]`\n"
                 "- `/model [name|auto]`\n"
-                "- `/effort [auto|none|minimal|low|medium|high|xhigh]`\n"
+                "- `/effort [auto|value]`\n"
                 "- `/approval [untrusted|on-request|never]`\n\n"
                 "`连接状态`\n"
                 "- `/status`\n"

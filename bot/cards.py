@@ -5,7 +5,7 @@ FOCUS 飞书卡片构建。
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
@@ -66,6 +66,15 @@ _SHARED_RESUME_COMMAND = get_shared_command("resume")
 _SHARED_RESET_BACKEND_COMMAND = get_shared_command("reset-backend")
 _LOCAL_THREAD_LIST_CWD = "focusctl thread list --scope cwd"
 _LOCAL_RESUME_COMMAND = feishu_visible_command_syntax("fcodex resume <thread_id|thread_name>")
+BINDING_SAFETY_BASELINE_SCOPE_TEXT = (
+    "这是当前 Feishu binding 的安全基线。Focus 发起每个 turn 时都会显式应用到"
+    "共享 Codex thread；其他前端可以覆盖上游状态，但下一次 Feishu turn 会重新应用本 binding 的值。"
+)
+BINDING_OPTIONAL_OVERRIDE_SCOPE_TEXT = (
+    "这是当前 Feishu binding 的可选 override。非 `auto` 字段会在 Focus 发起 turn 时"
+    "应用到共享 Codex thread；`auto` 不发送对应字段，因此沿用上游当前 thread 状态。"
+    "其他前端可以观察或覆盖该上游状态。"
+)
 
 
 def _card_config() -> dict:
@@ -961,7 +970,7 @@ def build_approval_policy_card(current_policy: str, *, running: bool = False) ->
     current_desc = (
         "它只决定什么时候停下来等你确认，不改变文件或网络边界。\n"
         "多数情况下，优先使用 `/permissions`。\n"
-        "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。"
+        f"{BINDING_SAFETY_BASELINE_SCOPE_TEXT}"
     )
     if running:
         current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
@@ -1013,7 +1022,7 @@ def build_permissions_profile_card(
     current_desc = (
         "它只决定执行边界，不决定是否停下来审批。\n"
         "审批策略请单独使用 `/approval`。\n"
-        "作用范围：只影响当前飞书会话的后续 turn，不影响已打开的 `fcodex` TUI。\n\n"
+        f"{BINDING_SAFETY_BASELINE_SCOPE_TEXT}\n\n"
         f"Profile ID：`{current_permissions_profile_id or '（空）'}`"
     )
     if running:
@@ -1066,6 +1075,8 @@ def build_model_effort_card(
     current_model: str,
     current_reasoning_effort: str,
     content: str,
+    supported_reasoning_efforts: Sequence[tuple[str, str]] | None = None,
+    reasoning_effort_conflict: str = "",
     running: bool = False,
 ) -> dict:
     """构造 model / effort 联合运行时设置卡片。"""
@@ -1081,7 +1092,7 @@ def build_model_effort_card(
             "tag": "markdown",
             "content": (
                 "**model override**\n"
-                "输入任意非空 model 名称即可；如需回到默认解析结果，请点 `auto`。"
+                "输入任意非空 model 名称即可；如需让 Focus 不发送 model 字段，请点 `auto`。"
             ),
         },
         {
@@ -1116,7 +1127,7 @@ def build_model_effort_card(
                     "tag": "button",
                     "text": {
                         "tag": "plain_text",
-                        "content": f"{'✓ ' if not current_model_value else ''}auto",
+                        "content": "auto",
                     },
                     "type": "primary" if not current_model_value else "default",
                     "value": {
@@ -1131,19 +1142,36 @@ def build_model_effort_card(
             "tag": "markdown",
             "content": (
                 "**effort override**\n"
-                "`auto` 表示清除 override，先回到 thread profile effort；若 thread profile effort 也未设置，则回到 model default。`none` 表示显式不用 reasoning effort。"
+                "`auto` 表示 Focus 不发送 effort 字段；它不会主动恢复 backend 或 model 默认值。"
             ),
         },
     ]
-    effort_actions = [
-        ("auto", ""),
-        ("none", "none"),
-        ("minimal", "minimal"),
-        ("low", "low"),
-        ("medium", "medium"),
-        ("high", "high"),
-        ("xhigh", "xhigh"),
-    ]
+    effort_actions = [("auto", "")]
+    seen_efforts: set[str] = {"auto"}
+    if supported_reasoning_efforts is not None:
+        for effort, _description in supported_reasoning_efforts:
+            normalized_effort = str(effort or "").strip()
+            if not normalized_effort or normalized_effort in seen_efforts:
+                continue
+            seen_efforts.add(normalized_effort)
+            effort_actions.append((normalized_effort, normalized_effort))
+    if reasoning_effort_conflict:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"**当前组合冲突**\n{reasoning_effort_conflict}",
+            }
+        )
+    if "ultra" in seen_efforts:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": (
+                    "提示：当前 model metadata 提供 `ultra`。Focus 会原样发送，"
+                    "Codex 将走原生 Ultra 路径，并可启用其 proactive multi-agent 行为。"
+                ),
+            }
+        )
     buttons = []
     for label, value in effort_actions:
         selected = (not current_effort_value and not value) or current_effort_value == value
@@ -1152,7 +1180,7 @@ def build_model_effort_card(
                 "tag": "button",
                 "text": {
                     "tag": "plain_text",
-                    "content": f"{'✓ ' if selected else ''}{label}",
+                    "content": label,
                 },
                 "type": "primary" if selected else "default",
                 "value": {
@@ -1167,6 +1195,40 @@ def build_model_effort_card(
         if len(row_actions) == 3:
             row["layout"] = "trisection"
         elements.append(row)
+    if supported_reasoning_efforts is None:
+        elements.extend(
+            [
+                {
+                    "tag": "markdown",
+                    "content": "当前 model 为 auto 或没有可用的 effort metadata；可输入任意非空值，由 app-server 决定。",
+                },
+                {
+                    "tag": "form",
+                    "name": "reasoning_effort_override_form",
+                    "elements": [
+                        {
+                            "tag": "input",
+                            "name": "reasoning_effort_override",
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": "输入 effort，例如 ultra 或上游自定义值…",
+                            },
+                            "default_value": current_effort_value,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "submit_reasoning_effort_override",
+                            "text": {"tag": "plain_text", "content": "保存 effort"},
+                            "type": "primary",
+                            "form_action_type": "submit",
+                            "value": {
+                                "action": "submit_reasoning_effort_override",
+                            },
+                        },
+                    ],
+                },
+            ]
+        )
     if running:
         elements.append(
             {

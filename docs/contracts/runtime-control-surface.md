@@ -63,9 +63,20 @@ Within that family:
 
 - for `/model` and `/effort`, `auto` means "do not explicitly override"
 - it no longer maps to any project-owned thread-level fallback state
+- Focus treats model and effort as one constrained pair:
+  - `validated`: effort is `auto`, or metadata for the explicit model advertises that effort
+  - `deferred`: model is `auto`, or the explicit model has no usable metadata; Focus passes the explicit effort through and lets app-server decide
+  - `rejected`: metadata exists for the explicit model and does not advertise the explicit effort
+- `/model`, `/effort`, and card actions refuse newly requested `rejected` pairs; existing binding values are not migrated, and turn dispatch does not rewrite old values
+- known canonical effort input is normalized to lowercase; unknown/custom effort only has surrounding whitespace trimmed and otherwise preserves case
+- `ultra` is sent to Codex unchanged; Focus does not translate it to `max` or construct `collaborationMode`
+- after explicit model / effort values are sent with a turn, they can affect the shared upstream thread's current and subsequent turns; local `focus` / `fcodex` may observe or overwrite that upstream state
+- `auto` only means Focus omits the field; it does not restore `.codex/config.toml`, the model default, or an older value from another frontend
+- model / effort are optional overrides: Focus reapplies only non-`auto` fields on each turn, while `auto` continues with the shared upstream thread's current state
 - for `/approval` and `/permissions`, the persisted binding value is the
   safety baseline; a new binding is seeded from instance config, and once it is
   persisted it does not drift with later instance-default changes
+- approval / permissions have no `auto` state: Focus explicitly reapplies the binding's safety baseline on every turn; another frontend may change the upstream thread, but the next Feishu turn applies this binding's value again
 
 ## 5. Side-effect boundary of reset-backend
 

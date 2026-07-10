@@ -19,6 +19,7 @@ from bot import process_utils
 from bot.adapters.base import (
     RuntimeConfigSummary,
     RuntimeModelSummary,
+    RuntimeReasoningEffortOption,
     ThreadGoalSummary,
     ThreadSummary,
 )
@@ -79,8 +80,22 @@ class _FakeRpc:
         if method == "model/list":
             return {
                 "data": [
-                    {"model": self.default_model, "isDefault": True, "hidden": False},
-                    {"model": "gpt-5.4", "isDefault": False, "hidden": False},
+                    {
+                        "model": self.default_model,
+                        "isDefault": True,
+                        "hidden": False,
+                        "defaultReasoningEffort": "medium",
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low", "description": "Fast"},
+                            {"reasoningEffort": "medium", "description": "Balanced"},
+                            {"reasoningEffort": "high", "description": "Deep"},
+                        ],
+                    },
+                    {
+                        "model": "gpt-5.4",
+                        "isDefault": False,
+                        "hidden": False,
+                    },
                 ]
             }
         if method == "config/read":
@@ -618,6 +633,23 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         self.assertEqual(params["effort"], "high")
         self.assertNotIn("collaborationMode", params)
 
+    def test_start_turn_sends_ultra_unchanged(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.start_turn(
+            thread_id="thread-1",
+            input_items=[{"type": "text", "text": "hello"}],
+            cwd="/tmp",
+            reasoning_effort="ultra",
+        )
+
+        method, params = fake_rpc.calls[0]
+        self.assertEqual(method, "turn/start")
+        self.assertEqual(params["effort"], "ultra")
+        self.assertNotIn("collaborationMode", params)
+
     def test_start_turn_explicit_effort_is_not_reinjected_on_auto(self) -> None:
         adapter = CodexAppServerAdapter(CodexAppServerConfig())
         fake_rpc = _FakeRpc()
@@ -737,7 +769,18 @@ class CodexAppServerAdapterTests(unittest.TestCase):
         self.assertEqual(
             models,
             [
-                RuntimeModelSummary(model="gpt-5.3-codex", display_name=None, is_default=True, hidden=False),
+                RuntimeModelSummary(
+                    model="gpt-5.3-codex",
+                    display_name=None,
+                    is_default=True,
+                    hidden=False,
+                    default_reasoning_effort="medium",
+                    supported_reasoning_efforts=[
+                        RuntimeReasoningEffortOption(reasoning_effort="low", description="Fast"),
+                        RuntimeReasoningEffortOption(reasoning_effort="medium", description="Balanced"),
+                        RuntimeReasoningEffortOption(reasoning_effort="high", description="Deep"),
+                    ],
+                ),
                 RuntimeModelSummary(model="gpt-5.4", display_name=None, is_default=False, hidden=False),
             ],
         )

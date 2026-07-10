@@ -13,6 +13,7 @@ from bot.adapters.base import (
     RuntimeConfigSummary,
     ThreadGoalSummary,
     RuntimeModelSummary,
+    RuntimeReasoningEffortOption,
     ThreadSnapshot,
     ThreadSummary,
 )
@@ -70,8 +71,28 @@ class _FakeAdapter:
         self.thread_snapshots: dict[tuple[str, bool | None], ThreadSnapshot | Exception] = {}
         self.thread_goals: dict[str, ThreadGoalSummary] = {}
         self.models: list[RuntimeModelSummary] = [
-            RuntimeModelSummary(model="gpt-5.5", display_name="gpt-5.5", is_default=True),
-            RuntimeModelSummary(model="gpt-5.4", display_name="gpt-5.4"),
+            RuntimeModelSummary(
+                model="gpt-5.5",
+                display_name="gpt-5.5",
+                is_default=True,
+                default_reasoning_effort="high",
+                supported_reasoning_efforts=[
+                    RuntimeReasoningEffortOption(reasoning_effort="medium"),
+                    RuntimeReasoningEffortOption(reasoning_effort="high"),
+                    RuntimeReasoningEffortOption(reasoning_effort="xhigh"),
+                    RuntimeReasoningEffortOption(reasoning_effort="ultra"),
+                ],
+            ),
+            RuntimeModelSummary(
+                model="gpt-5.4",
+                display_name="gpt-5.4",
+                default_reasoning_effort="medium",
+                supported_reasoning_efforts=[
+                    RuntimeReasoningEffortOption(reasoning_effort="low"),
+                    RuntimeReasoningEffortOption(reasoning_effort="medium"),
+                    RuntimeReasoningEffortOption(reasoning_effort="high"),
+                ],
+            ),
         ]
 
     def stop(self) -> None:
@@ -749,7 +770,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["model"], "gpt-5.5")
         self.assertIn("已切换当前会话的 model override：`gpt-5.5`", bot.replies[-1][1])
-        self.assertIn("只影响当前飞书会话的后续 turn", bot.replies[-1][1])
+        self.assertIn("共享 Codex thread", bot.replies[-1][1])
 
     def test_model_command_auto_clears_override(self) -> None:
         handler, bot = self._make_handler()
@@ -769,7 +790,7 @@ class CodexHandlerTests(unittest.TestCase):
         state = handler._get_runtime_state("ou_user", "c1")
         self.assertEqual(state["reasoning_effort"], "high")
         self.assertIn("已切换当前会话的 effort override：`high`", bot.replies[-1][1])
-        self.assertIn("只影响当前飞书会话的后续 turn", bot.replies[-1][1])
+        self.assertIn("共享 Codex thread", bot.replies[-1][1])
 
     def test_effort_command_auto_clears_override(self) -> None:
         handler, bot = self._make_handler()
@@ -3288,11 +3309,14 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
         self.assertEqual(card["header"]["title"]["content"], "Codex 模型 / Effort")
-        self.assertIn("当前会话 model override：`auto`", card["elements"][0]["content"])
-        self.assertIn("当前会话 effort override：`auto`", card["elements"][0]["content"])
+        self.assertIn("model override: `auto`", card["elements"][0]["content"])
+        self.assertIn("effort override: `auto`", card["elements"][0]["content"])
+        self.assertIn("validation: `validated`", card["elements"][0]["content"])
         self.assertNotIn("startup profile", card["elements"][0]["content"])
         action_elements = self._action_elements(card)
-        self.assertEqual(action_elements[0]["actions"][0]["text"]["content"], "✓ auto")
+        self.assertEqual(action_elements[0]["actions"][0]["text"]["content"], "auto")
+        self.assertEqual(action_elements[1]["actions"][0]["text"]["content"], "auto")
+        self.assertEqual(action_elements[1]["actions"][0]["type"], "primary")
 
     def test_effort_command_without_arg_shows_combined_runtime_card(self) -> None:
         handler, bot = self._make_handler()
@@ -3302,7 +3326,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(len(bot.cards), 1)
         _, card = bot.cards[0]
         self.assertEqual(card["header"]["title"]["content"], "Codex 模型 / Effort")
-        self.assertIn("当前会话 effort override：`auto`", card["elements"][0]["content"])
+        self.assertIn("effort override: `auto`", card["elements"][0]["content"])
 
     def test_approval_command_without_arg_shows_approval_boundary(self) -> None:
         handler, bot = self._make_handler()
@@ -3399,6 +3423,24 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("glm-4.5", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 模型 / Effort")
 
+    def test_effort_form_value_only_callback_updates_state_and_preserves_case(self) -> None:
+        handler, _ = self._make_handler()
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "m1",
+            {"_form_value": {"reasoning_effort_override": "Future-Max"}},
+        ))
+
+        self.assertEqual(
+            handler._get_runtime_state("ou_user", "c1")["reasoning_effort"],
+            "Future-Max",
+        )
+        self.assertEqual(response["toast_type"], "success")
+        self.assertIn("Future-Max", response["toast"])
+        self.assertIn("validation: deferred", response["toast"])
+
     def test_effort_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
 
@@ -3413,6 +3455,24 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(response["toast_type"], "success")
         self.assertIn("high", response["toast"])
         self.assertEqual(response["card"]["header"]["title"]["content"], "Codex 模型 / Effort")
+
+    def test_stale_effort_card_action_revalidates_against_current_model(self) -> None:
+        handler, _ = self._make_handler()
+        state = handler._get_runtime_state("ou_user", "c1")
+        state["model"] = "gpt-5.4"
+        state["reasoning_effort"] = "high"
+
+        response = self._unpack_card_response(handler.handle_card_action(
+            "ou_user",
+            "c1",
+            "m1",
+            {"action": "set_reasoning_effort", "reasoning_effort": "ultra"},
+        ))
+
+        self.assertEqual(state["reasoning_effort"], "high")
+        self.assertEqual(response["toast_type"], "warning")
+        self.assertIn("未保存", response["toast"])
+        self.assertIn("validation: `validated`", response["card"]["elements"][0]["content"])
 
     def test_permissions_card_action_updates_state(self) -> None:
         handler, _ = self._make_handler()
@@ -6658,7 +6718,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertIn("`/reset-backend`", reply)
         self.assertIn("`/last text`", reply)
         self.assertIn("`/model [name|auto]`", reply)
-        self.assertIn("`/effort [auto|none|minimal|low|medium|high|xhigh]`", reply)
+        self.assertIn("`/effort [auto|value]`", reply)
         self.assertIn(f"`{_DISPLAY_INIT_COMMAND}`", reply)
         self.assertIn(f"`{_DISPLAY_DEBUG_CONTACT_COMMAND}`", reply)
         self.assertNotIn("`/cancel`", reply)

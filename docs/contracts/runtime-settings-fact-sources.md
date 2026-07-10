@@ -88,6 +88,9 @@ Within that family:
     baseline; a new binding is seeded from `codex.yaml`, and once the binding
     is persisted the resolved safety baseline is frozen and does not drift with
     later instance-default changes
+- Their turn-dispatch behavior also differs:
+  - approval / permissions are sent explicitly on every Feishu turn to reassert the binding's safety baseline
+  - model / effort are sent only when non-`auto`; `auto` does not reassert a value and lets the upstream thread's current state continue
 - `model` and `reasoning_effort` in `codex.yaml` only seed a new binding's
   initial runtime state; once a binding exists, ordinary `thread/start` and
   `turn/start` calls read binding runtime settings only and do not fall back to
@@ -99,6 +102,29 @@ Within that family:
 - collaboration mode is not a Feishu runtime setting. If needed, configure it
   in upstream Codex; this project does not construct or send upstream
   `collaborationMode` payloads.
+
+### 5.1 Model / effort pair validation
+
+Focus uses only `supportedReasoningEfforts` from app-server
+`model/list` as validation metadata for an explicit model. It does not try
+to reconstruct an "effective model / effort" mirror from the current thread.
+
+- effort is `auto`: `validated`
+- model is `auto` and effort is explicit: `deferred`
+- the explicit model has no usable metadata and effort is explicit: `deferred`
+- explicit-model metadata advertises the effort: `validated`
+- explicit-model metadata does not advertise the effort: `rejected`
+
+The control surface refuses newly requested `rejected` pairs, but it does
+not migrate or repair existing binding data and does not add a second admission
+check before prompt dispatch. Existing values are still sent to app-server as
+their stored strings, and upstream owns the final execution result.
+
+Upstream `turn/start` semantics apply explicit model / effort values to the
+current and subsequent turns of the shared thread. The Feishu binding and local
+TUI therefore do not share project-persisted settings, but they can still
+observe or overwrite the most recently sent explicit values through the same
+upstream thread.
 
 ## 6. Empty Values In The Binding Store
 

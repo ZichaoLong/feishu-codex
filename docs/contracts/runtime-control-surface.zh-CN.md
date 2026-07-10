@@ -60,8 +60,19 @@ memory 行为，应直接通过上游 Codex 处理，而不是走项目自管的
 
 - 对 `/model`、`/effort`，`auto` 表示“不显式 override”
 - 它不再映射到任何项目自管 thread-level fallback state
+- Focus 把 model 与 effort 作为一个受约束的组合：
+  - `validated`：effort 为 `auto`，或显式 model 的 metadata 明确支持该 effort
+  - `deferred`：model 为 `auto`，或显式 model 没有可用 metadata；Focus 原样传递显式 effort，由 app-server 决定
+  - `rejected`：显式 model 的 metadata 明确存在，但没有声明支持该显式 effort
+- `/model`、`/effort` 与卡片动作会拒绝新建 `rejected` 组合；既有 binding 值不迁移，turn dispatch 也不改写旧值
+- 已知 canonical effort 输入会规范化为小写；未知/custom effort 只去除首尾空白并保留大小写
+- `ultra` 原样发送给 Codex，不转换为 `max`，也不构造 `collaborationMode`
+- 显式 model / effort 随 turn 进入共享 upstream thread 后，可能影响该 thread 当前及后续 turn；本地 `focus` / `fcodex` 可以观察或覆盖这些上游状态
+- `auto` 只表示 Focus 省略对应字段，不表示恢复 `.codex/config.toml`、model default 或其他 frontend 的旧值
+- model / effort 是可选 override：Focus 每轮只重新应用非 `auto` 字段；`auto` 会继续沿用共享 upstream thread 的当前状态
 - 对 `/approval`、`/permissions`，binding 持久化值是安全基线；新 binding
   从实例配置 seed 出初始值，一旦落盘就不随实例默认漂移
+- approval / permissions 不提供 `auto`：Focus 发起每个 turn 时都会显式重新应用该 binding 的安全基线；其他 frontend 可以改写 upstream thread，但下一次 Feishu turn 会再次应用本 binding 的值
 
 ## 5. reset-backend 的副作用边界
 

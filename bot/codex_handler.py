@@ -392,6 +392,7 @@ class CodexHandler(BotHandler):
                 add_admin_open_id=lambda open_id: self.bot.add_admin_open_id(open_id),
                 set_configured_bot_open_id=lambda open_id: self.bot.set_configured_bot_open_id(open_id),
                 get_runtime_view=self._get_runtime_view,
+                list_models=lambda: self._adapter.list_models(include_hidden=True),
                 update_runtime_settings=self._update_runtime_settings,
             ),
             approval_policies=_APPROVAL_POLICIES,
@@ -1964,6 +1965,12 @@ class CodexHandler(BotHandler):
             ),
             "submit_model_override": ActionRoute(
                 handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_submit_model_override(
+                    sender_id, chat_id, message_id, action_value
+                ),
+                group_guard="group_admin",
+            ),
+            "submit_reasoning_effort_override": ActionRoute(
+                handler=lambda sender_id, chat_id, message_id, action_value: self._settings_domain.handle_submit_reasoning_effort_override(
                     sender_id, chat_id, message_id, action_value
                 ),
                 group_guard="group_admin",

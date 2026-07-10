@@ -84,6 +84,9 @@
   - `approval_policy` / `permissions_profile_id` 是 binding-local 安全
     baseline；新 binding 用 `codex.yaml` seed 解析出初始值，一旦 binding
     落盘，就冻结这份 resolved 安全基线，后续不随实例默认漂移
+- 两组设置的 turn dispatch 也不同：
+  - approval / permissions 每个 Feishu turn 都显式发送，用于重新声明该 binding 的安全基线
+  - model / effort 只在非 `auto` 时发送；`auto` 不重新声明，让 upstream thread 当前状态继续生效
 - `codex.yaml` 中的 `model` 与 `reasoning_effort` 只 seed 新 binding 的
   初始 runtime state；进入 binding 后，`thread/start` 与普通
   `turn/start` 都只看 binding runtime settings，不再从 adapter config
@@ -95,6 +98,26 @@
 - collaboration mode 不再是 Feishu runtime setting。如需使用，交给上游
   Codex 配置/行为；本项目不再构造或发送上游 `collaborationMode`
   payload。
+
+### 5.1 model / effort 组合校验
+
+Focus 只使用 app-server `model/list` 返回的
+`supportedReasoningEfforts` 作为显式 model 的校验 metadata，不尝试从
+当前 thread 反推一个“effective model / effort”镜像。
+
+- effort 为 `auto`：`validated`
+- model 为 `auto` 且 effort 显式：`deferred`
+- 显式 model 没有可用 metadata 且 effort 显式：`deferred`
+- 显式 model metadata 声明支持该 effort：`validated`
+- 显式 model metadata 未声明支持该 effort：`rejected`
+
+控制面不允许用户新建 `rejected` 组合，但不会迁移或修复已有 binding
+数据，也不会在 prompt dispatch 前增加第二套 admission。已有值仍按原字符串传给
+app-server，最终执行结果由上游决定。
+
+显式 model / effort 在 `turn/start` 上的上游语义是作用于当前及后续
+共享 thread turn。因此，Feishu binding 与本地 TUI 不共享一份项目持久化设置，
+但它们仍可能通过同一个 upstream thread 观察或覆盖彼此最近发送的显式值。
 
 ## 6. binding store 的空值规则
 
