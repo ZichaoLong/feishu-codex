@@ -68,6 +68,19 @@ class FocusctlEntrypointTests(unittest.TestCase):
 
         mock_runtime.assert_called_once_with(["thread", "list", "--scope", "cwd"])
 
+    def test_help_mentions_thread_lifecycle_commands(self) -> None:
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as exc:
+                focusctl.main(["--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("thread list --archived --scope global", rendered)
+        self.assertIn("thread unarchive --thread-id <id-1> --thread-id <id-2>", rendered)
+        self.assertIn("thread delete --thread-id <id> --force", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

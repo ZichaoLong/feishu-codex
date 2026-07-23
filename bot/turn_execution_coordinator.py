@@ -169,13 +169,10 @@ class TurnExecutionCoordinator:
             )
         return bool(normalized_turn_id and state["pending_cancel"])
 
-    def request_cancel_without_turn_id_locked(self, state: RuntimeState) -> None:
+    def mark_cancel_pending_locked(self, state: RuntimeState) -> None:
         self.apply_runtime_state_message_locked(
             state,
-            ExecutionStateChanged(
-                cancelled=True,
-                pending_cancel=True,
-            ),
+            ExecutionStateChanged(pending_cancel=True),
         )
 
     def confirm_cancel_requested_locked(self, state: RuntimeState) -> None:

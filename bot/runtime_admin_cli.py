@@ -7,6 +7,7 @@ import os
 import pathlib
 import shlex
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any
 
@@ -18,20 +19,36 @@ from bot.config import load_config_file, load_system_config_raw
 from bot.constants import DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS, display_path, format_timestamp
 from bot.codex_protocol.client import CodexRpcError
 from bot.env_file import load_env_file
-from bot.instance_layout import global_data_dir, list_known_instance_names, resolve_instance_paths
+from bot.instance_layout import (
+    global_data_dir,
+    infer_instance_name_from_data_dir,
+    list_known_instance_names,
+    resolve_instance_paths,
+)
 from bot.instance_resolution import (
+    CliInstanceTarget,
     list_running_instances,
     resolve_cli_instance_target,
     resolve_running_instance_app_server_url,
 )
 from bot.platform_paths import default_data_root
-from bot.service_control_plane import ServiceControlError, ServiceControlResponseTimeoutError, control_request
+from bot.service_control_plane import (
+    ServiceControlError,
+    ServiceControlOutcomeUnknownError,
+    ServiceControlResponseTimeoutError,
+    control_request,
+)
 from bot.stores.app_server_runtime_store import resolve_effective_app_server_url
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import InteractionLeaseStore, make_feishu_interaction_holder
 from bot.stores.instance_registry_store import InstanceRegistryEntry
+from bot.stores.service_instance_lease import ServiceInstanceMaintenanceLease
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseStore
-from bot.thread_resolution import list_current_dir_threads, list_global_threads
+from bot.thread_resolution import (
+    list_current_dir_threads,
+    list_global_threads,
+    resolve_resume_target_by_name,
+)
 from bot.version import __version__
 
 _CODEX_THREAD_ID_ENV_VAR = "CODEX_THREAD_ID"
@@ -40,6 +57,7 @@ _BINDING_LIST_CHAT_MAX_WIDTH = 32
 _BINDING_LIST_THREAD_MAX_WIDTH = 64
 _BINDING_LIST_CONTROL_TIMEOUT_SECONDS = 3.0
 _BINDING_LIST_REFRESH_TIMEOUT_MARGIN_SECONDS = 3.0
+_CODEX_LIFECYCLE_TIMEOUT_MARGIN_SECONDS = 5.0
 
 
 class _HelpFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
@@ -79,7 +97,7 @@ def _remote_adapter(
     *,
     running_entry: InstanceRegistryEntry | None = None,
 ) -> tuple[CodexAppServerAdapter, dict[str, Any], str]:
-    cfg = load_config_file("codex")
+    cfg = _target_codex_config(data_dir, running_entry=running_entry)
     configured_url = str(cfg.get("app_server_url", "ws://127.0.0.1:8765")).strip() or "ws://127.0.0.1:8765"
     if running_entry is not None:
         app_server_url = resolve_running_instance_app_server_url(
@@ -99,6 +117,48 @@ def _remote_adapter(
         app_server_data_dir=str(data_dir),
     )
     return CodexAppServerAdapter(config), cfg, app_server_url
+
+
+def _target_codex_config(
+    data_dir: pathlib.Path,
+    *,
+    running_entry: InstanceRegistryEntry | None = None,
+) -> dict[str, Any]:
+    target_config_dir: pathlib.Path | None = None
+    if running_entry is not None and str(running_entry.config_dir or "").strip():
+        target_config_dir = pathlib.Path(running_entry.config_dir)
+    else:
+        inferred_instance = infer_instance_name_from_data_dir(data_dir)
+        if inferred_instance:
+            target_config_dir = resolve_instance_paths(inferred_instance).config_dir
+    return load_config_file("codex", directory=target_config_dir)
+
+
+def _lifecycle_control_timeout_seconds(
+    data_dir: pathlib.Path,
+    *,
+    operation: str,
+    running_entry: InstanceRegistryEntry | None = None,
+) -> float:
+    cfg = _target_codex_config(pathlib.Path(data_dir), running_entry=running_entry)
+    request_timeout = max(float(cfg.get("request_timeout_seconds", 30.0)), 0.1)
+    connect_timeout = max(float(cfg.get("connect_timeout_seconds", 15.0)), 0.1)
+    normalized_operation = str(operation or "").strip().lower()
+    if normalized_operation == "archive":
+        request_count = 3
+    elif normalized_operation == "delete":
+        request_count = 3
+    elif normalized_operation == "unarchive":
+        request_count = 2
+    else:
+        raise ValueError(f"未知 lifecycle operation：{operation}")
+    startup_budget = connect_timeout * 2
+    return max(
+        startup_budget
+        + request_timeout * request_count
+        + _CODEX_LIFECYCLE_TIMEOUT_MARGIN_SECONDS,
+        10.0,
+    )
 
 
 def _thread_target_params(args: argparse.Namespace) -> dict[str, str]:
@@ -138,7 +198,12 @@ def _image_send_target_params(args: argparse.Namespace) -> tuple[dict[str, str],
 def _thread_archive_inputs(args: argparse.Namespace) -> tuple[list[str], str]:
     raw_thread_ids = list(getattr(args, "thread_ids", []) or [])
     thread_ids = list(dict.fromkeys(str(item or "").strip() for item in raw_thread_ids if str(item or "").strip()))
-    thread_name = str(getattr(args, "thread_name", "") or "").strip()
+    raw_thread_names = list(getattr(args, "thread_names", []) or [])
+    if len(raw_thread_names) > 1:
+        raise ValueError(
+            "thread archive 只允许提供一个 `--thread-name`；批量归档请重复提供 `--thread-id`。"
+        )
+    thread_name = str(raw_thread_names[0] if raw_thread_names else "").strip()
     if thread_ids and thread_name:
         raise ValueError("thread archive 不能同时提供 `--thread-id` 和 `--thread-name`。")
     if not thread_ids and not thread_name:
@@ -146,11 +211,60 @@ def _thread_archive_inputs(args: argparse.Namespace) -> tuple[list[str], str]:
     return thread_ids, thread_name
 
 
+def _thread_unarchive_inputs(args: argparse.Namespace) -> list[str]:
+    raw_thread_ids = list(getattr(args, "thread_ids", []) or [])
+    if not raw_thread_ids:
+        raise ValueError("thread unarchive 必须提供至少一个 `--thread-id`。")
+    thread_ids = [str(item or "").strip() for item in raw_thread_ids]
+    if any(not thread_id for thread_id in thread_ids):
+        raise ValueError("thread unarchive 的 `--thread-id` 不能为空。")
+    return list(dict.fromkeys(thread_ids))
+
+
+def _thread_delete_input(args: argparse.Namespace) -> str:
+    raw_thread_ids = list(getattr(args, "thread_ids", []) or [])
+    if not raw_thread_ids:
+        raise ValueError("thread delete 必须提供 `--thread-id`。")
+    if len(raw_thread_ids) > 1:
+        raise ValueError("thread delete 只允许提供一个 `--thread-id`；请逐个确认并删除。")
+    thread_id = str(raw_thread_ids[0] or "").strip()
+    if not thread_id:
+        raise ValueError("thread delete 的 `--thread-id` 不能为空。")
+    return thread_id
+
+
 def _resolve_thread_archive_target(args: argparse.Namespace):
     targets = _resolve_thread_archive_targets(args)
     if len(targets) != 1:
         raise ValueError("thread archive 批量模式请改用 _resolve_thread_archive_targets().")
     return targets[0]
+
+
+def _resolve_thread_archive_name(target: CliInstanceTarget, thread_name: str) -> str:
+    try:
+        adapter, cfg, _app_server_url = _remote_adapter(
+            target.data_dir,
+            running_entry=target.running_entry,
+        )
+        try:
+            thread = resolve_resume_target_by_name(
+                adapter,
+                name=thread_name,
+                limit=int(cfg.get("thread_list_query_limit", 100)),
+            )
+        finally:
+            adapter.stop()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(
+            "按名称解析 thread 失败；archive mutation 尚未发送，可安全重试："
+            f"{exc}"
+        ) from exc
+    resolved_thread_id = str(thread.thread_id or "").strip()
+    if not resolved_thread_id:
+        raise ValueError("按名称解析 thread 返回了空 thread_id；archive mutation 尚未发送。")
+    return resolved_thread_id
 
 
 def _resolve_thread_archive_targets(args: argparse.Namespace):
@@ -170,18 +284,14 @@ def _resolve_thread_archive_targets(args: argparse.Namespace):
                 )
             )
         return targets
-    target_params = {"thread_name": thread_name}
     if explicit_instance:
-        return [(_resolve_target_instance(explicit_instance), target_params)]
+        target = _resolve_target_instance(explicit_instance)
+        thread_id = _resolve_thread_archive_name(target, thread_name)
+        return [(target, {"thread_id": thread_id})]
     bootstrap_target = _resolve_target_instance(None)
-    snapshot = _request(bootstrap_target.data_dir, "thread/status", target_params)
-    resolved_thread_id = str(snapshot.get("thread_id", "") or "").strip()
-    live_runtime_owner = snapshot.get("live_runtime_owner") or {}
-    owner_instance = ""
-    if isinstance(live_runtime_owner, dict):
-        owner_instance = str(live_runtime_owner.get("instance_name", "") or "").strip()
-    if resolved_thread_id:
-        target_params = {"thread_id": resolved_thread_id}
+    resolved_thread_id = _resolve_thread_archive_name(bootstrap_target, thread_name)
+    target_params = {"thread_id": resolved_thread_id}
+    owner_instance = _lease_owner_instance(resolved_thread_id)
     if owner_instance:
         return [(_resolve_target_instance(None, preferred_running_instance=owner_instance), target_params)]
     return [(bootstrap_target, target_params)]
@@ -591,37 +701,40 @@ def _clear_stale_bindings_from_store(
     *,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    store = ChatBindingStore(pathlib.Path(data_dir))
-    interaction_leases = InteractionLeaseStore(pathlib.Path(data_dir))
-    clear_bindings: list[tuple[tuple[str, str], str]] = []
-    retained_binding_ids: list[str] = []
-    skipped_binding_ids: list[str] = []
-    unknown_threads: dict[str, str] = {}
-    stale_thread_ids: set[str] = set()
-    for binding, state in sorted(store.load_all().items(), key=lambda item: format_binding_id(item[0])):
-        binding_id = format_binding_id(binding)
-        thread_id = str(state.get("current_thread_id", "") or "").strip()
-        if not thread_id:
-            skipped_binding_ids.append(binding_id)
-            continue
-        status, reason = thread_presence_check(thread_id)
-        if status == "stale":
-            clear_bindings.append((binding, thread_id))
-            stale_thread_ids.add(thread_id)
-            continue
-        if status == "unknown":
-            unknown_threads.setdefault(thread_id, reason)
+    maintenance = nullcontext() if dry_run else ServiceInstanceMaintenanceLease(pathlib.Path(data_dir))
+    with maintenance:
+        store = ChatBindingStore(pathlib.Path(data_dir))
+        interaction_leases = InteractionLeaseStore(pathlib.Path(data_dir))
+        clear_bindings: list[tuple[tuple[str, str], str]] = []
+        retained_binding_ids: list[str] = []
+        skipped_binding_ids: list[str] = []
+        unknown_threads: dict[str, str] = {}
+        stale_thread_ids: set[str] = set()
+        for binding, state in sorted(store.load_all().items(), key=lambda item: format_binding_id(item[0])):
+            binding_id = format_binding_id(binding)
+            thread_id = str(state.get("current_thread_id", "") or "").strip()
+            if not thread_id:
+                skipped_binding_ids.append(binding_id)
+                continue
+            status, reason = thread_presence_check(thread_id)
+            if status == "stale":
+                clear_bindings.append((binding, thread_id))
+                stale_thread_ids.add(thread_id)
+                continue
+            if status == "unknown":
+                unknown_threads.setdefault(thread_id, reason)
+                retained_binding_ids.append(binding_id)
+                continue
             retained_binding_ids.append(binding_id)
-            continue
-        retained_binding_ids.append(binding_id)
 
-    if not dry_run:
-        for binding, thread_id in clear_bindings:
-            store.clear(binding)
-            interaction_leases.release(
-                thread_id,
-                make_feishu_interaction_holder(binding[0], binding[1], owner_pid=0),
-            )
+        if not dry_run:
+            for binding, thread_id in clear_bindings:
+                _release_offline_binding_interaction_lease(
+                    interaction_leases,
+                    binding=binding,
+                    thread_id=thread_id,
+                )
+                store.clear(binding)
     cleared_binding_ids = [format_binding_id(binding) for binding, _thread_id in clear_bindings]
     return {
         "cleared_binding_ids": [] if dry_run else cleared_binding_ids,
@@ -976,20 +1089,21 @@ def _print_thread_list(
     scope: str,
     cwd: str,
     running_entry: InstanceRegistryEntry | None = None,
+    archived: bool = False,
 ) -> int:
     adapter, cfg, app_server_url = _remote_adapter(data_dir, running_entry=running_entry)
     del app_server_url
     try:
         limit = int(cfg.get("thread_list_query_limit", 100))
         threads = (
-            list_current_dir_threads(adapter, cwd=cwd, limit=limit)
+            list_current_dir_threads(adapter, cwd=cwd, limit=limit, archived=archived)
             if scope == "cwd"
-            else list_global_threads(adapter, limit=limit)
+            else list_global_threads(adapter, limit=limit, archived=archived)
         )
     finally:
         adapter.stop()
     if not threads:
-        print("当前没有可见线程。")
+        print("当前没有可见的已归档线程。" if archived else "当前没有可见线程。")
         return 0
     rows: list[list[str]] = []
     for item in threads:
@@ -1040,6 +1154,21 @@ def _same_path(left: pathlib.Path | str, right: pathlib.Path | str) -> bool:
     return left_path == right_path
 
 
+def _release_offline_binding_interaction_lease(
+    interaction_leases: InteractionLeaseStore,
+    *,
+    binding: tuple[str, str],
+    thread_id: str,
+) -> None:
+    holder = make_feishu_interaction_holder(binding[0], binding[1], owner_pid=0)
+    interaction_leases.release(thread_id, holder)
+    remaining = interaction_leases.load(thread_id)
+    if remaining is not None and remaining.holder.same_holder(holder):
+        raise RuntimeError(
+            f"interaction lease 仍由已清理 binding 持有: {format_binding_id(binding)}"
+        )
+
+
 def _clear_archived_thread_bindings_from_store(
     data_dir: pathlib.Path,
     thread_id: str,
@@ -1049,20 +1178,23 @@ def _clear_archived_thread_bindings_from_store(
     normalized_thread_id = str(thread_id or "").strip()
     if not normalized_thread_id:
         return []
-    store = ChatBindingStore(pathlib.Path(data_dir))
-    interaction_leases = InteractionLeaseStore(pathlib.Path(data_dir))
-    cleared_binding_ids: list[str] = []
-    for binding, state in sorted(store.load_all().items(), key=lambda item: format_binding_id(item[0])):
-        if str(state.get("current_thread_id", "") or "").strip() != normalized_thread_id:
-            continue
-        if not dry_run:
-            store.clear(binding)
-            interaction_leases.release(
-                normalized_thread_id,
-                make_feishu_interaction_holder(binding[0], binding[1], owner_pid=0),
-            )
-        cleared_binding_ids.append(format_binding_id(binding))
-    return cleared_binding_ids
+    maintenance = nullcontext() if dry_run else ServiceInstanceMaintenanceLease(pathlib.Path(data_dir))
+    with maintenance:
+        store = ChatBindingStore(pathlib.Path(data_dir))
+        interaction_leases = InteractionLeaseStore(pathlib.Path(data_dir))
+        cleared_binding_ids: list[str] = []
+        for binding, state in sorted(store.load_all().items(), key=lambda item: format_binding_id(item[0])):
+            if str(state.get("current_thread_id", "") or "").strip() != normalized_thread_id:
+                continue
+            if not dry_run:
+                _release_offline_binding_interaction_lease(
+                    interaction_leases,
+                    binding=binding,
+                    thread_id=normalized_thread_id,
+                )
+                store.clear(binding)
+            cleared_binding_ids.append(format_binding_id(binding))
+        return cleared_binding_ids
 
 
 def _cleanup_archived_thread_bindings_in_running_instance(
@@ -1399,8 +1531,122 @@ def _clear_archived_thread_bindings(
     return 1 if cleanup_failures else 0
 
 
-def _archive_thread(data_dir: pathlib.Path, target_params: dict[str, str], *, instance_name: str = "") -> int:
-    result = _request(data_dir, "thread/archive", target_params)
+def _print_lifecycle_non_success(result: dict[str, Any], *, action: str) -> int:
+    outcome = str(result.get("upstream_outcome", "error") or "error")
+    print(f"upstream outcome: {outcome}")
+    if outcome == "unknown" and result.get("outcome_detail"):
+        print(f"diagnostic: {result['outcome_detail']}")
+    elif result.get("upstream_error"):
+        print(f"upstream error: {result['upstream_error']}")
+    print("focus cleanup: skipped")
+    if outcome == "unknown":
+        print(f"note: {action} 请求可能仍已执行；请先核对 thread 状态，不要自动重试。")
+        return 3
+    print(f"note: 上游明确返回错误；{action} 仍可能伴随局部副作用。")
+    return 1
+
+
+def _validate_lifecycle_control_result(
+    result: Any,
+    *,
+    action: str,
+    expected_thread_id: str = "",
+) -> dict[str, Any]:
+    def _invalid(reason: str) -> None:
+        raise ServiceControlOutcomeUnknownError(
+            f"控制面已处理 `{action}`，但返回了畸形 lifecycle result：{reason}"
+        )
+
+    if not isinstance(result, dict):
+        _invalid("result 不是对象")
+    valid_actions = {"thread/archive", "thread/unarchive", "thread/delete"}
+    if action not in valid_actions:
+        raise ValueError(f"未知 lifecycle action：{action}")
+    outcome = result.get("upstream_outcome")
+    if outcome not in {"success", "error", "unknown"}:
+        _invalid("缺少有效 upstream_outcome")
+    focus_cleanup = result.get("focus_cleanup")
+    if focus_cleanup not in {"complete", "incomplete", "skipped"}:
+        _invalid("缺少有效 focus_cleanup")
+    thread_id = result.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        _invalid("缺少有效 thread_id")
+    normalized_expected_thread_id = str(expected_thread_id or "").strip()
+    if normalized_expected_thread_id and thread_id.strip() != normalized_expected_thread_id:
+        _invalid(
+            f"thread_id 不匹配：expected={normalized_expected_thread_id}, actual={thread_id.strip()}"
+        )
+    if not isinstance(result.get("thread_title"), str):
+        _invalid("thread_title 不是字符串")
+    if not isinstance(result.get("working_dir"), str):
+        _invalid("working_dir 不是字符串")
+    cleared_binding_ids = result.get("cleared_binding_ids")
+    if not isinstance(cleared_binding_ids, list) or not all(
+        isinstance(item, str) for item in cleared_binding_ids
+    ):
+        _invalid("cleared_binding_ids 必须为 list[str]")
+    cleanup_errors = result.get("cleanup_errors")
+    if not isinstance(cleanup_errors, list) or not all(
+        isinstance(item, str) for item in cleanup_errors
+    ):
+        _invalid("cleanup_errors 必须为 list[str]")
+    if outcome in {"error", "unknown"} and focus_cleanup != "skipped":
+        _invalid(f"upstream_outcome={outcome} 时 focus_cleanup 必须为 skipped")
+    if outcome == "success":
+        if action == "thread/unarchive" and focus_cleanup != "skipped":
+            _invalid("thread/unarchive 成功时 focus_cleanup 必须为 skipped")
+        if action in {"thread/archive", "thread/delete"} and focus_cleanup not in {
+            "complete",
+            "incomplete",
+        }:
+            _invalid(f"{action} 成功时 focus_cleanup 必须为 complete 或 incomplete")
+    if focus_cleanup == "complete" and cleanup_errors:
+        _invalid("focus_cleanup=complete 时 cleanup_errors 必须为空")
+    if focus_cleanup == "incomplete" and not cleanup_errors:
+        _invalid("focus_cleanup=incomplete 时 cleanup_errors 不能为空")
+    if focus_cleanup == "skipped" and (cleared_binding_ids or cleanup_errors):
+        _invalid("focus_cleanup=skipped 时不能包含 binding cleanup 结果")
+    return result
+
+
+def _archive_thread(
+    data_dir: pathlib.Path,
+    target_params: dict[str, str],
+    *,
+    instance_name: str = "",
+    running_entry: InstanceRegistryEntry | None = None,
+) -> int:
+    thread_id = str(target_params.get("thread_id", "") or "").strip()
+    if not thread_id or str(target_params.get("thread_name", "") or "").strip():
+        raise ValueError("thread archive mutation 只接受已解析的 thread_id。")
+    try:
+        result = _validate_lifecycle_control_result(
+            _request(
+                data_dir,
+                "thread/archive",
+                target_params,
+                timeout_seconds=_lifecycle_control_timeout_seconds(
+                    data_dir,
+                    operation="archive",
+                    running_entry=running_entry,
+                ),
+            ),
+            action="thread/archive",
+            expected_thread_id=thread_id,
+        )
+    except ServiceControlOutcomeUnknownError as exc:
+        if instance_name:
+            print(f"instance: {instance_name}")
+        print("upstream outcome: unknown")
+        print(f"reason: {exc}")
+        print("focus cleanup: skipped")
+        print("note: archive 请求可能仍在 service 中执行；请先核对 archived 列表，不要自动重试。")
+        return 3
+    if str(result.get("upstream_outcome", "success") or "success") != "success":
+        if instance_name:
+            print(f"instance: {instance_name}")
+        print(f"thread: {result.get('thread_id') or target_params.get('thread_id') or '-'}")
+        return _print_lifecycle_non_success(result, action="archive")
     cleanup_results, cleanup_failures = _cleanup_archived_thread_bindings_in_other_instances(
         str(result["thread_id"]),
         target_instance_name=instance_name,
@@ -1410,11 +1656,22 @@ def _archive_thread(data_dir: pathlib.Path, target_params: dict[str, str], *, in
         print(f"instance: {instance_name}")
     print(f"thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
     print(f"working_dir: {display_path(result['working_dir'])}")
+    print("upstream outcome: success")
+    print(f"focus cleanup in this instance: {result.get('focus_cleanup') or 'complete'}")
     print(f"cleared bindings in this instance: {', '.join(result.get('cleared_binding_ids') or []) or '（无）'}")
+    for cleanup_error in result.get("cleanup_errors") or []:
+        print(f"cleanup warning: {cleanup_error}")
     _print_archive_cleanup_results(cleanup_results, cleanup_failures)
     print("note: 归档完成；该 thread 会从常规列表中隐藏，不是硬删除。")
-    print("note: 已同时清理其他可达运行实例与已知非运行实例里指向该 thread 的本地 bindings。")
-    return 1 if cleanup_failures else 0
+    print("note: 安全范围仅覆盖本机已知 Focus/fcodex runtime；不包含裸 Codex、IDE 或其他机器。")
+    if cleanup_failures:
+        print(
+            "note: 已尝试清理其他可达运行实例与已知非运行实例里的本地 bindings；"
+            "部分实例未完成，见 cleanup warnings。"
+        )
+    else:
+        print("note: 已清理其他可达运行实例与已知非运行实例里指向该 thread 的本地 bindings。")
+    return 1 if cleanup_failures or result.get("focus_cleanup") == "incomplete" else 0
 
 
 def _archive_threads(thread_ids: list[str], *, explicit_instance: str = "") -> int:
@@ -1431,6 +1688,7 @@ def _archive_threads(thread_ids: list[str], *, explicit_instance: str = "") -> i
             target.data_dir,
             {"thread_id": thread_id},
             instance_name=target.instance_name,
+            running_entry=target.running_entry,
         )
 
     success_count = 0
@@ -1454,20 +1712,66 @@ def _archive_threads(thread_ids: list[str], *, explicit_instance: str = "") -> i
             continue
         print(f"instance: {target.instance_name}")
         try:
-            result = _request(target.data_dir, "thread/archive", {"thread_id": requested_thread_id})
+            result = _validate_lifecycle_control_result(
+                _request(
+                    target.data_dir,
+                    "thread/archive",
+                    {"thread_id": requested_thread_id},
+                    timeout_seconds=_lifecycle_control_timeout_seconds(
+                        target.data_dir,
+                        operation="archive",
+                        running_entry=target.running_entry,
+                    ),
+                ),
+                action="thread/archive",
+                expected_thread_id=requested_thread_id,
+            )
+        except ServiceControlOutcomeUnknownError as exc:
+            print("status: unknown")
+            print(f"reason: {exc}")
+            print("note: batch 已停止；该请求可能仍在执行，请先人工核对。")
+            print()
+            print(
+                f"summary: archived={success_count} failed={failure_count} "
+                f"unknown=1 cleanup_failed={cleanup_failure_count}"
+            )
+            return 3
         except ServiceControlError as exc:
             failure_count += 1
             print("status: failed")
             print(f"reason: {exc}")
         else:
+            upstream_outcome = str(result.get("upstream_outcome", "success") or "success")
+            if upstream_outcome == "unknown":
+                print("status: unknown")
+                _print_lifecycle_non_success(result, action="archive")
+                print("note: batch 已停止，请先人工核对。")
+                print()
+                print(
+                    f"summary: archived={success_count} failed={failure_count} "
+                    f"unknown=1 cleanup_failed={cleanup_failure_count}"
+                )
+                return 3
+            if upstream_outcome != "success":
+                failure_count += 1
+                print("status: failed")
+                _print_lifecycle_non_success(result, action="archive")
+                if index != len(normalized_thread_ids):
+                    print()
+                continue
             success_count += 1
             print("status: archived")
             print(f"resolved thread: {result['thread_id']} {result['thread_title'] or ''}".rstrip())
             print(f"working_dir: {display_path(result['working_dir'])}")
+            print(f"focus cleanup in this instance: {result.get('focus_cleanup') or 'complete'}")
             print(
                 "cleared bindings in this instance: "
                 + (", ".join(result.get("cleared_binding_ids") or []) or "（无）")
             )
+            if result.get("focus_cleanup") == "incomplete":
+                cleanup_failure_count += 1
+            for cleanup_error in result.get("cleanup_errors") or []:
+                print(f"cleanup warning: {cleanup_error}")
             cleanup_results, cleanup_failures = _cleanup_archived_thread_bindings_in_other_instances(
                 str(result["thread_id"]),
                 target_instance_name=target.instance_name,
@@ -1480,8 +1784,301 @@ def _archive_threads(thread_ids: list[str], *, explicit_instance: str = "") -> i
     print()
     print(f"summary: archived={success_count} failed={failure_count} cleanup_failed={cleanup_failure_count}")
     print("note: 每个 thread 都按现有单线程 archive 语义独立路由、独立执行。")
-    print("note: archive 成功后会清理其他可达运行实例与已知非运行实例里指向该 thread 的本地 bindings。")
+    if cleanup_failure_count:
+        print("note: archive 成功项的 Focus cleanup 已尝试执行；部分清理未完成，见各项 warning 和 summary。")
+    else:
+        print("note: archive 成功项已完成当前可见范围内的 Focus binding 清理。")
+    print("note: 安全范围仅覆盖本机已知 Focus/fcodex runtime；不包含裸 Codex、IDE 或其他机器。")
     return 0 if failure_count == 0 and cleanup_failure_count == 0 else 1
+
+
+def _thread_binding_locations(thread_id: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    normalized_thread_id = str(thread_id or "").strip()
+    locations: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    running_instance_names: set[str] = set()
+    for entry in list_running_instances():
+        instance_name = str(entry.instance_name or "").strip().lower()
+        running_instance_names.add(instance_name)
+        try:
+            result = _request(
+                pathlib.Path(entry.data_dir),
+                "thread/local-bindings",
+                {"thread_id": normalized_thread_id},
+            )
+        except Exception as exc:
+            failures.append(
+                {
+                    "instance_name": instance_name,
+                    "mode": "control-plane",
+                    "reason": str(exc),
+                }
+            )
+            continue
+        locations.append(
+            {
+                "instance_name": instance_name,
+                "mode": "control-plane",
+                "binding_ids": list(result.get("binding_ids") or []),
+                "running_binding_ids": list(result.get("running_binding_ids") or []),
+                "pending_binding_ids": list(result.get("pending_binding_ids") or []),
+            }
+        )
+
+    for instance_name in list_known_instance_names():
+        normalized_instance_name = str(instance_name or "").strip().lower()
+        if not normalized_instance_name or normalized_instance_name in running_instance_names:
+            continue
+        paths = resolve_instance_paths(normalized_instance_name)
+        try:
+            with ServiceInstanceMaintenanceLease(paths.data_dir):
+                binding_ids = [
+                    format_binding_id(binding)
+                    for binding, state in sorted(
+                        ChatBindingStore(paths.data_dir).load_all().items(),
+                        key=lambda item: format_binding_id(item[0]),
+                    )
+                    if str(state.get("current_thread_id", "") or "").strip() == normalized_thread_id
+                ]
+        except Exception as exc:
+            failures.append(
+                {
+                    "instance_name": normalized_instance_name,
+                    "mode": "local-store",
+                    "reason": str(exc),
+                }
+            )
+            continue
+        locations.append(
+            {
+                "instance_name": normalized_instance_name,
+                "mode": "local-store",
+                "binding_ids": binding_ids,
+                "running_binding_ids": [],
+                "pending_binding_ids": [],
+            }
+        )
+    return locations, failures
+
+
+def _validate_unarchive_binding_preflight(thread_id: str) -> None:
+    locations, failures = _thread_binding_locations(thread_id)
+    if failures:
+        details = "; ".join(
+            f"{item['instance_name']} ({item['mode']}): {item['reason']}" for item in failures
+        )
+        raise ValueError(f"无法完整检查本机 Focus bindings，拒绝 unarchive：{details}")
+    residual = [
+        (item["instance_name"], binding_id)
+        for item in locations
+        for binding_id in item.get("binding_ids") or []
+    ]
+    if residual:
+        details = ", ".join(f"{instance}:{binding_id}" for instance, binding_id in residual)
+        raise ValueError(
+            "仍有本地 binding 指向该 archived thread；"
+            "请先执行 `focusctl thread clear-archived-bindings --thread-id <id>`："
+            + details
+        )
+
+
+def _validate_delete_binding_preflight(thread_id: str) -> None:
+    locations, failures = _thread_binding_locations(thread_id)
+    if failures:
+        details = "; ".join(
+            f"{item['instance_name']} ({item['mode']}): {item['reason']}" for item in failures
+        )
+        raise ValueError(f"无法完整检查本机 Focus runtime，拒绝 delete：{details}")
+    running = [
+        (item["instance_name"], binding_id)
+        for item in locations
+        for binding_id in item.get("running_binding_ids") or []
+    ]
+    pending = [
+        (item["instance_name"], binding_id)
+        for item in locations
+        for binding_id in item.get("pending_binding_ids") or []
+    ]
+    if running or pending:
+        details = [f"running {instance}:{binding_id}" for instance, binding_id in running]
+        details.extend(f"pending {instance}:{binding_id}" for instance, binding_id in pending)
+        raise ValueError("该 thread 仍有已知 Focus 活动，拒绝 delete：" + ", ".join(details))
+
+
+def _unarchive_thread(
+    data_dir: pathlib.Path,
+    thread_id: str,
+    *,
+    instance_name: str,
+    running_entry: InstanceRegistryEntry | None = None,
+) -> int:
+    _validate_unarchive_binding_preflight(thread_id)
+    try:
+        result = _validate_lifecycle_control_result(
+            _request(
+                data_dir,
+                "thread/unarchive",
+                {"thread_id": thread_id},
+                timeout_seconds=_lifecycle_control_timeout_seconds(
+                    data_dir,
+                    operation="unarchive",
+                    running_entry=running_entry,
+                ),
+            ),
+            action="thread/unarchive",
+            expected_thread_id=thread_id,
+        )
+    except ServiceControlOutcomeUnknownError as exc:
+        print(f"instance: {instance_name}")
+        print(f"thread: {thread_id}")
+        print("upstream outcome: unknown")
+        print(f"reason: {exc}")
+        print("focus cleanup: skipped")
+        print("note: unarchive 可能已经发生；请先查看 active/archived 列表，不要自动重试。")
+        return 3
+    print(f"instance: {instance_name}")
+    resolved_thread_id = str(result.get("thread_id") or thread_id)
+    print(f"thread: {resolved_thread_id} {result.get('thread_title') or ''}".rstrip())
+    if str(result.get("upstream_outcome", "success") or "success") != "success":
+        return _print_lifecycle_non_success(result, action="unarchive")
+    print(f"working_dir: {display_path(result.get('working_dir') or '')}")
+    print("upstream outcome: success")
+    print("focus cleanup: skipped")
+    print("note: thread 已恢复为未归档状态并回到常规列表；当前仍未加载，也未创建 binding。")
+    print(f"next (本地): focus resume {resolved_thread_id}")
+    print(f"next (飞书): /resume {resolved_thread_id}")
+    print("note: 安全范围仅覆盖本机已知 Focus/fcodex runtime；不包含裸 Codex、IDE 或其他机器。")
+    return 0
+
+
+def _unarchive_threads(thread_ids: list[str], *, explicit_instance: str = "") -> int:
+    normalized_thread_ids = list(
+        dict.fromkeys(str(item or "").strip() for item in thread_ids if str(item or "").strip())
+    )
+    if not normalized_thread_ids:
+        raise ValueError("thread unarchive 缺少目标。")
+    target = _resolve_target_instance(explicit_instance or None)
+    if target.running_entry is None:
+        raise ValueError("thread unarchive 需要目标 Focus 实例正在运行。")
+    if len(normalized_thread_ids) == 1:
+        return _unarchive_thread(
+            target.data_dir,
+            normalized_thread_ids[0],
+            instance_name=target.instance_name,
+            running_entry=target.running_entry,
+        )
+
+    success_count = 0
+    failure_count = 0
+    print(f"batch unarchive: total={len(normalized_thread_ids)}")
+    for index, thread_id in enumerate(normalized_thread_ids, start=1):
+        print(f"[{index}/{len(normalized_thread_ids)}] requested thread: {thread_id}")
+        try:
+            result = _unarchive_thread(
+                target.data_dir,
+                thread_id,
+                instance_name=target.instance_name,
+                running_entry=target.running_entry,
+            )
+        except ServiceControlOutcomeUnknownError as exc:
+            print("status: unknown")
+            print(f"reason: {exc}")
+            print("note: batch 已停止；该请求可能仍在执行，请先人工核对。")
+            print()
+            print(f"summary: unarchived={success_count} failed={failure_count} unknown=1")
+            return 3
+        except (ServiceControlError, ValueError) as exc:
+            failure_count += 1
+            print(f"instance: {target.instance_name}")
+            print("status: failed")
+            print(f"reason: {exc}")
+        else:
+            if result == 3:
+                print("status: unknown")
+                print("note: batch 已停止；请先人工核对该 thread 的 active/archived 状态。")
+                print()
+                print(f"summary: unarchived={success_count} failed={failure_count} unknown=1")
+                return 3
+            if result == 0:
+                success_count += 1
+                print("status: unarchived")
+            else:
+                failure_count += 1
+                print("status: failed")
+        if index != len(normalized_thread_ids):
+            print()
+    print()
+    print(f"summary: unarchived={success_count} failed={failure_count}")
+    print("note: 每个 thread 都独立执行；已成功项不会因后续失败而回滚。")
+    return 0 if failure_count == 0 else 1
+
+
+def _confirm_delete_thread(thread_id: str, *, force: bool) -> bool:
+    print("安全范围：Focus 仅协调本机已知 Focus/fcodex runtime；请先停止其他客户端对该 thread 的使用。")
+    if force:
+        return True
+    if not sys.stdin.isatty():
+        raise ValueError("非交互环境执行 thread delete 必须显式提供 `--force`。")
+    print(f"将永久删除 thread `{thread_id}`。")
+    print("Codex 可能同时级联删除 spawned descendants；Focus 不声称能完整预览该集合。")
+    answer = input("继续？输入 yes 确认: ").strip().lower()
+    return answer == "yes"
+
+
+def _delete_thread(
+    data_dir: pathlib.Path,
+    thread_id: str,
+    *,
+    instance_name: str,
+    force: bool,
+    running_entry: InstanceRegistryEntry | None = None,
+) -> int:
+    _validate_delete_binding_preflight(thread_id)
+    if not _confirm_delete_thread(thread_id, force=force):
+        print("已取消。")
+        return 1
+    try:
+        result = _validate_lifecycle_control_result(
+            _request(
+                data_dir,
+                "thread/delete",
+                {"thread_id": thread_id},
+                timeout_seconds=_lifecycle_control_timeout_seconds(
+                    data_dir,
+                    operation="delete",
+                    running_entry=running_entry,
+                ),
+            ),
+            action="thread/delete",
+            expected_thread_id=thread_id,
+        )
+    except ServiceControlOutcomeUnknownError as exc:
+        print(f"instance: {instance_name}")
+        print(f"thread: {thread_id}")
+        print("upstream outcome: unknown")
+        print(f"reason: {exc}")
+        print("focus cleanup: skipped")
+        print("note: delete 可能已经发生；请先核对 thread 状态，不要自动重试。")
+        return 3
+    print(f"instance: {instance_name}")
+    print(f"thread: {result.get('thread_id') or thread_id} {result.get('thread_title') or ''}".rstrip())
+    if str(result.get("upstream_outcome", "success") or "success") != "success":
+        return _print_lifecycle_non_success(result, action="delete")
+
+    cleanup_results, cleanup_failures = _cleanup_archived_thread_bindings_in_other_instances(
+        str(result.get("thread_id") or thread_id),
+        target_instance_name=instance_name,
+        target_data_dir=data_dir,
+    )
+    print("upstream outcome: success")
+    print(f"focus cleanup in this instance: {result.get('focus_cleanup') or 'complete'}")
+    print(f"cleared bindings in this instance: {', '.join(result.get('cleared_binding_ids') or []) or '（无）'}")
+    for cleanup_error in result.get("cleanup_errors") or []:
+        print(f"cleanup warning: {cleanup_error}")
+    _print_archive_cleanup_results(cleanup_results, cleanup_failures)
+    print("note: thread 已由上游永久删除；上游可能同时删除 spawned descendants。")
+    print("note: 未被 Focus 预先发现的 descendant binding 可用 `binding clear-stale --dry-run` 检查。")
+    return 1 if cleanup_failures or result.get("focus_cleanup") == "incomplete" else 0
 
 
 def _send_thread_image(
@@ -1540,6 +2137,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "  focusctl thread goal --thread-id <id>\n"
             "  focusctl thread archive --thread-name demo\n"
             "  focusctl thread archive --thread-id <id-1> --thread-id <id-2>\n"
+            "  focusctl thread list --archived --scope global\n"
+            "  focusctl thread unarchive --thread-id <id-1> --thread-id <id-2>\n"
+            "  focusctl thread delete --thread-id <id> --force\n"
             "  focusctl thread clear-archived-bindings --thread-id <id> --dry-run\n"
             "  focusctl thread clear-archived-bindings --all --dry-run\n"
             "  focusctl thread attach --thread-id <id>\n"
@@ -1727,6 +2327,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     thread_list.add_argument("--scope", choices=("cwd", "global"), default="cwd", help="列线程时使用的作用域。")
     thread_list.add_argument("--cwd", default="", help="当 `--scope cwd` 时使用的目录；省略时取当前 shell 目录。")
+    thread_list.add_argument(
+        "--archived",
+        action="store_true",
+        help="列出 archived thread；仍沿用当前 scope 与默认 source 可见性。",
+    )
     thread_status = thread_sub.add_parser(
         "status",
         help="查看单个 thread 详情。",
@@ -1803,7 +2408,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "归档目标 thread，使其从常规列表中隐藏，而不是硬删除。\n"
             "可重复提供 `--thread-id` 做批量归档；批量时每个 thread 都独立按当前单线程语义路由并执行。\n"
-            "归档成功后，会清理当前目标实例、其他可达运行实例，以及已知非运行实例里指向该 thread 的 bindings。"
+            "归档成功后，会清理当前目标实例、其他可达运行实例，以及已知非运行实例里指向该 thread 的 bindings。\n"
+            "Focus 会 fail-closed 检查本机已知实例的 loaded 状态，但不协调裸 Codex、IDE 或其他机器。"
         ),
         formatter_class=_HelpFormatter,
     )
@@ -1816,7 +2422,52 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     thread_archive.add_argument(
         "--thread-name",
+        dest="thread_names",
+        action="append",
+        default=[],
         help="目标 thread 名称。仅单线程归档时可用，不能与 `--thread-id` 连用。",
+    )
+    thread_unarchive = thread_sub.add_parser(
+        "unarchive",
+        help="按 thread id 恢复一个或多个 archived thread。",
+        description=(
+            "逐项调用上游 Codex thread/unarchive，把 archived thread 恢复为未归档状态并放回常规列表。\n"
+            "可重复提供 `--thread-id` 批量恢复；各项独立执行，结果 unknown 时停止，已成功项不回滚。\n"
+            "可先运行 `focusctl thread list --archived --scope global` 查询归档线程及其 ID。\n"
+            "执行前要求本机所有已知 Focus 实例都不再保留该 thread 的 binding 或 loaded runtime；"
+            "成功后不会自动创建 binding。\n"
+            "Focus 不协调裸 Codex、IDE 或其他机器。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    thread_unarchive.add_argument(
+        "--thread-id",
+        dest="thread_ids",
+        action="append",
+        required=True,
+        help="目标 archived thread id。可重复提供以批量恢复。",
+    )
+    thread_delete = thread_sub.add_parser(
+        "delete",
+        help="按 thread id 永久删除一个 thread。",
+        description=(
+            "调用上游 Codex thread/delete 永久删除目标 thread。\n"
+            "上游可能同时级联删除 spawned descendants；Focus 不把不完整查询包装成确认范围。\n"
+            "执行前会检查本机已知 Focus runtime；请自行停止裸 Codex、IDE 或其他机器对同一 thread 的使用。"
+        ),
+        formatter_class=_HelpFormatter,
+    )
+    thread_delete.add_argument(
+        "--thread-id",
+        dest="thread_ids",
+        action="append",
+        required=True,
+        help="要永久删除的 thread id。只允许提供一次。",
+    )
+    thread_delete.add_argument(
+        "--force",
+        action="store_true",
+        help="只跳过交互确认，不绕过 loaded/running/unknown 等安全检查；非交互环境必须提供。",
     )
     thread_clear_archived = thread_sub.add_parser(
         "clear-archived-bindings",
@@ -1917,9 +2568,34 @@ def main(argv: list[str] | None = None) -> None:
                         target.data_dir,
                         target_params,
                         instance_name=target.instance_name,
+                        running_entry=target.running_entry,
                     )
                 )
             raise SystemExit(_archive_threads(thread_ids, explicit_instance=str(args.instance or "").strip()))
+        if args.resource == "thread" and args.action == "unarchive":
+            raise SystemExit(
+                _unarchive_threads(
+                    _thread_unarchive_inputs(args),
+                    explicit_instance=str(args.instance or "").strip(),
+                )
+            )
+        if args.resource == "thread" and args.action == "delete":
+            thread_id = _thread_delete_input(args)
+            target = _resolve_target_instance(
+                args.instance,
+                preferred_running_instance="" if args.instance else _lease_owner_instance(thread_id),
+            )
+            if target.running_entry is None:
+                raise ValueError("thread delete 需要目标 Focus 实例正在运行。")
+            raise SystemExit(
+                _delete_thread(
+                    target.data_dir,
+                    thread_id,
+                    instance_name=target.instance_name,
+                    force=bool(args.force),
+                    running_entry=target.running_entry,
+                )
+            )
         if args.resource == "thread" and args.action == "clear-archived-bindings":
             raise SystemExit(
                 _clear_archived_thread_bindings(
@@ -1980,6 +2656,7 @@ def main(argv: list[str] | None = None) -> None:
                     scope=args.scope,
                     cwd=cwd,
                     running_entry=target.running_entry,
+                    archived=bool(args.archived),
                 )
             )
         if args.resource == "thread" and args.action == "status":
@@ -2024,6 +2701,9 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_attach_thread(data_dir, _thread_target_params(args)))
         if args.resource == "thread" and args.action == "detach":
             raise SystemExit(_detach_thread(data_dir, _thread_target_params(args)))
+    except ServiceControlOutcomeUnknownError as exc:
+        print(f"控制面请求结果未知：{exc}", file=sys.stderr)
+        raise SystemExit(3)
     except ServiceControlError as exc:
         print(f"控制面请求失败：{exc}", file=sys.stderr)
         raise SystemExit(2)

@@ -75,6 +75,14 @@
 - 修改 runtime-setting family
 - 隐含任何 profile 或 memory 语义
 
+若上游 archive 请求在发送后发生 timeout 或 transport 断开，Focus 会把结果标记为
+`unknown`，保留 binding 且不自动重试。上游明确成功但本地 binding / lease 清理失败时，
+Focus 会明确报告“已归档、清理不完整”，而不是把两层结果合并成一个模糊失败。
+
+归档前，Focus 会 fail-closed 检查本机已知其他 Focus 实例是否仍将 root thread 保持为
+loaded；若存在 blocking instance，应改在该实例执行或先明确 reset 其 backend。该检查只覆盖
+本机已登记的 Focus/fcodex runtime，不检测裸 Codex、IDE 或其他机器，也不是跨客户端原子锁。
+
 ## 6. 本地 `focus` / `fcodex` continuation
 
 `focus resume <thread_id|thread_name>` 与 `fcodex resume <thread_id|thread_name>` 是 live shared-backend thread 的本地继续入口。

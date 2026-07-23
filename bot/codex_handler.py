@@ -46,7 +46,7 @@ from bot.constants import (
 from bot.handler import BotHandler
 from bot.instance_layout import current_instance_name, global_data_dir
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
-from bot.codex_protocol.client import CodexRpcError
+from bot.codex_protocol.client import CodexRpcError, CodexRpcPreSendError, CodexRpcTransportError
 from bot.codex_goal_domain import CodexGoalDomain, GoalDomainPorts
 from bot.codex_group_domain import CodexGroupDomain, GroupDomainPorts
 from bot.codex_help_domain import CodexHelpDomain
@@ -55,7 +55,11 @@ from bot.codex_settings_domain import (
     CodexSettingsDomain,
     SettingsDomainPorts,
 )
-from bot.reason_codes import ReasonedCheck
+from bot.reason_codes import (
+    LIFECYCLE_BLOCKED_BY_LOADED_THREAD,
+    LIFECYCLE_BLOCKED_BY_RUNTIME_UNVERIFIED,
+    ReasonedCheck,
+)
 from bot.execution_transcript import ExecutionTranscript
 from bot.execution_output_controller import ExecutionOutputController
 from bot.execution_recovery_controller import (
@@ -124,6 +128,7 @@ from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, Thre
 from bot.thread_subscription_registry import ThreadSubscriptionRegistry
 from bot.thread_runtime_coordination import (
     acquire_thread_runtime_holder_or_raise,
+    inspect_thread_global_loaded_presence,
     preview_thread_global_loaded_gate,
     preview_thread_runtime_holder_acquire,
 )
@@ -189,7 +194,7 @@ class CodexHandler(BotHandler):
 
     def __init__(self, data_dir: pathlib.Path | None = None, config_dir: pathlib.Path | None = None):
         super().__init__()
-        cfg = load_config_file("codex")
+        cfg = load_config_file("codex", directory=config_dir)
 
         self._data_dir = data_dir or default_data_root()
         self._config_dir = config_dir
@@ -307,6 +312,7 @@ class CodexHandler(BotHandler):
             read_thread=lambda thread_id: self._adapter.read_thread(thread_id, include_turns=True),
             is_thread_not_found_error=self._is_thread_not_found_error,
             is_turn_thread_not_found_error=self._is_turn_thread_not_found_error,
+            is_pre_send_error=self._is_pre_send_error,
             is_transport_disconnect=self._is_transport_disconnect,
             is_request_timeout_error=self._is_request_timeout_error,
             runtime_recovery_reason=self._runtime_recovery_reason,
@@ -363,7 +369,7 @@ class CodexHandler(BotHandler):
             interrupt_running_turn=self._interrupt_running_turn,
             on_server_request_resolved=self._interaction_requests.handle_server_request_resolved,
         )
-        self._hydrate_stored_bindings()
+        self._hydrate_stored_bindings(read_only=True)
         if self._adapter_config.app_server_mode == "remote":
             self._adapter_config = replace(
                 self._adapter_config,
@@ -509,6 +515,8 @@ class CodexHandler(BotHandler):
             app_server_mode=lambda: self._adapter_config.app_server_mode,
             unsubscribe_thread=lambda thread_id: self._adapter.unsubscribe_thread(thread_id),
             archive_thread=lambda thread_id: self._adapter.archive_thread(thread_id),
+            unarchive_thread=lambda thread_id: self._adapter.unarchive_thread(thread_id),
+            delete_thread=lambda thread_id: self._adapter.delete_thread(thread_id),
             release_service_thread_runtime_lease=self._release_service_thread_runtime_lease,
             service_control_endpoint=lambda: self._service_control_plane.control_endpoint,
             instance_name=lambda: self._instance_name,
@@ -527,6 +535,7 @@ class CodexHandler(BotHandler):
             submit_prompt_for_control=self._submit_prompt_for_control,
             prompt_write_denial_check=self._thread_access_policy.prompt_write_denial_check,
             detached_runtime_attach_check=self._detached_runtime_attach_check,
+            lifecycle_loaded_gate_check=self._lifecycle_loaded_gate_check,
             resolve_thread_target_for_control_params=self._resolve_thread_target_for_control_params,
             resolve_binding_chat_display_name=self._resolve_binding_chat_display_name,
             cancel_patch_timer_locked=self._cancel_patch_timer_locked,
@@ -589,6 +598,7 @@ class CodexHandler(BotHandler):
                 runtime_recovery_reason=self._runtime_recovery_reason,
                 is_turn_thread_not_found_error=self._is_turn_thread_not_found_error,
                 is_thread_not_found_error=self._is_thread_not_found_error,
+                is_pre_send_error=self._is_pre_send_error,
                 is_transport_disconnect=self._is_transport_disconnect,
                 is_request_timeout_error=self._is_request_timeout_error,
                 start_turn=lambda **kwargs: self._adapter.start_turn(**kwargs),
@@ -667,6 +677,7 @@ class CodexHandler(BotHandler):
             set_terminal_result_text_resolver(self._resolve_terminal_result_text)
         try:
             self._service_instance_lease.acquire()
+            self._hydrate_stored_bindings(replace=True)
             self._runtime_loop.start()
             self._adapter.start()
             control_endpoint = self._service_control_plane.start()
@@ -754,6 +765,59 @@ class CodexHandler(BotHandler):
         if preview.allowed:
             return ReasonedCheck.allow()
         return ReasonedCheck.deny(preview.reason_code, preview.reason_text)
+
+    def _lifecycle_loaded_gate_check(self, thread_id: str, operation: str) -> ReasonedCheck:
+        normalized_thread_id = str(thread_id or "").strip()
+        normalized_operation = str(operation or "").strip().lower()
+        if not normalized_thread_id:
+            return ReasonedCheck.allow()
+        if normalized_operation not in {"archive", "unarchive", "delete"}:
+            return ReasonedCheck.deny(
+                LIFECYCLE_BLOCKED_BY_RUNTIME_UNVERIFIED,
+                f"未知 lifecycle operation：{operation}",
+            )
+        presence = inspect_thread_global_loaded_presence(
+            thread_id=normalized_thread_id,
+            registry_store=self._instance_registry,
+            excluded_instance_names=(self._instance_name,),
+        )
+        if presence.verified_clear:
+            return ReasonedCheck.allow()
+        action_label = {
+            "archive": "归档",
+            "unarchive": "恢复归档",
+            "delete": "永久删除",
+        }[normalized_operation]
+        blocking_instance = presence.blocking_instance or "unknown"
+        if presence.diagnostic:
+            return ReasonedCheck.deny(
+                LIFECYCLE_BLOCKED_BY_RUNTIME_UNVERIFIED,
+                (
+                    f"无法确认运行中的实例 `{blocking_instance}` 是否仍将该 thread 保持为 loaded："
+                    f"{presence.diagnostic}。当前按 fail-close 拒绝{action_label}。"
+                    f"请先检查该实例，或在确认可丢弃其 live runtime 后执行 "
+                    f"`focusctl --instance {blocking_instance} service reset-backend`。"
+                ),
+            )
+        status = presence.blocking_status or "unknown"
+        if normalized_operation in {"archive", "delete"}:
+            return ReasonedCheck.deny(
+                LIFECYCLE_BLOCKED_BY_LOADED_THREAD,
+                (
+                    f"运行中的实例 `{blocking_instance}` 仍将该 thread 保持为 loaded (`{status}`)；"
+                    f"拒绝在当前实例{action_label}。请改在该实例执行对应 lifecycle 命令，"
+                    "或在确认可丢弃其 live runtime 后先执行 "
+                    f"`focusctl --instance {blocking_instance} service reset-backend`。"
+                ),
+            )
+        return ReasonedCheck.deny(
+            LIFECYCLE_BLOCKED_BY_LOADED_THREAD,
+            (
+                f"运行中的实例 `{blocking_instance}` 仍将该 thread 保持为 loaded (`{status}`)；"
+                "拒绝 unarchive。请先关闭相关 Focus/fcodex runtime，"
+                "或在确认可丢弃后 reset 对应实例 backend。"
+            ),
+        )
 
     def _ensure_service_thread_runtime_lease(self, thread_id: str) -> bool:
         normalized_thread_id = str(thread_id or "").strip()
@@ -1141,8 +1205,8 @@ class CodexHandler(BotHandler):
             self._runtime_loop.stop()
             self._service_instance_lease.release()
 
-    def _hydrate_stored_bindings(self) -> None:
-        self._binding_runtime.hydrate_stored_bindings()
+    def _hydrate_stored_bindings(self, *, read_only: bool = False, replace: bool = False) -> None:
+        self._binding_runtime.hydrate_stored_bindings(read_only=read_only, replace=replace)
 
     def _feishu_interaction_holder(self, binding: ChatBindingKey):
         return self._binding_runtime.feishu_interaction_holder(binding)
@@ -3310,8 +3374,17 @@ class CodexHandler(BotHandler):
         return self._is_thread_not_loaded_error(exc) or self._is_compact_thread_not_found_error(exc)
 
     @staticmethod
+    def _is_pre_send_error(exc: Exception) -> bool:
+        return isinstance(exc, CodexRpcPreSendError)
+
+    @staticmethod
     def _is_transport_disconnect(exc: Exception) -> bool:
-        return isinstance(exc, CodexRpcError) and exc.error.get("message") == "Codex websocket disconnected"
+        if isinstance(exc, CodexRpcTransportError):
+            return True
+        return isinstance(exc, CodexRpcError) and exc.error.get("message") in {
+            "Codex websocket disconnected",
+            "Codex app-server closed",
+        }
 
     def _bind_thread(
         self,

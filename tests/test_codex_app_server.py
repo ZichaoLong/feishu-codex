@@ -25,7 +25,13 @@ from bot.adapters.base import (
 )
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
 from bot.codex_command_resolver import DEFAULT_CODEX_COMMAND
-from bot.codex_protocol.client import CodexRpcClient, CodexRpcError
+from bot.codex_protocol.client import (
+    CodexRpcClient,
+    CodexRpcError,
+    CodexRpcPreSendError,
+    CodexRpcProtocolError,
+    CodexRpcTransportError,
+)
 from bot.fcodex import (
     _default_data_dir,
     _launch_local_cwd_proxy,
@@ -137,6 +143,19 @@ class _FakeRpc:
             if self.thread_reasoning_effort:
                 response["reasoningEffort"] = self.thread_reasoning_effort
             return response
+        if method == "thread/unarchive":
+            return {
+                "thread": {
+                    "id": "thread-1",
+                    "cwd": "/tmp/project",
+                    "name": "demo",
+                    "preview": "hello",
+                    "createdAt": 0,
+                    "updatedAt": 0,
+                    "source": "cli",
+                    "status": {"type": "notLoaded", "activeFlags": []},
+                }
+            }
         if method in {"thread/goal/get", "thread/goal/set"}:
             return {
                 "goal": {
@@ -803,6 +822,53 @@ class CodexAppServerAdapterTests(unittest.TestCase):
 
         self.assertEqual(fake_rpc.calls[0], ("thread/archive", {"threadId": "thread-1"}))
 
+    def test_archive_thread_rejects_non_object_success_response(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        with patch.object(fake_rpc, "request", return_value=None):
+            with self.assertRaises(CodexRpcProtocolError):
+                adapter.archive_thread("thread-1")
+
+    def test_unarchive_thread_calls_public_unarchive_api(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        summary = adapter.unarchive_thread("thread-1")
+
+        self.assertEqual(fake_rpc.calls[0], ("thread/unarchive", {"threadId": "thread-1"}))
+        self.assertEqual(summary.thread_id, "thread-1")
+        self.assertEqual(summary.name, "demo")
+
+    def test_unarchive_thread_rejects_malformed_success_response_as_protocol_error(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        with patch.object(fake_rpc, "request", return_value={"thread": "invalid"}):
+            with self.assertRaises(CodexRpcProtocolError):
+                adapter.unarchive_thread("thread-1")
+
+    def test_delete_thread_calls_public_delete_api(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        adapter.delete_thread("thread-1")
+
+        self.assertEqual(fake_rpc.calls[0], ("thread/delete", {"threadId": "thread-1"}))
+
+    def test_delete_thread_rejects_non_object_success_response(self) -> None:
+        adapter = CodexAppServerAdapter(CodexAppServerConfig())
+        fake_rpc = _FakeRpc()
+        adapter._rpc = fake_rpc
+
+        with patch.object(fake_rpc, "request", return_value=None):
+            with self.assertRaises(CodexRpcProtocolError):
+                adapter.delete_thread("thread-1")
+
     def test_config_rejects_invalid_app_server_mode(self) -> None:
         with self.assertRaises(ValueError):
             CodexAppServerConfig.from_dict({"app_server_mode": "broken"})
@@ -1306,6 +1372,113 @@ class CodexRpcClientTests(unittest.TestCase):
 
         self.assertEqual(disconnects, ["disconnected"])
         self.assertIsNone(client._ws)
+
+    def test_request_raises_transport_error_when_send_fails(self) -> None:
+        client = CodexRpcClient()
+
+        class _Ws:
+            def send(self, payload: str) -> None:
+                del payload
+                raise BrokenPipeError("closed")
+
+        client._ws = _Ws()
+        client.start = lambda: None  # type: ignore[method-assign]
+
+        with self.assertRaises(CodexRpcTransportError) as caught:
+            client.request("thread/delete", {"threadId": "thread-1"})
+
+        self.assertIsInstance(caught.exception, CodexRpcError)
+        self.assertEqual(client._pending, {})
+
+    def test_request_reports_serialization_failure_as_local_error_before_send(self) -> None:
+        client = CodexRpcClient()
+        sent_payloads: list[str] = []
+
+        class _Ws:
+            def send(self, payload: str) -> None:
+                sent_payloads.append(payload)
+
+        client._ws = _Ws()
+        client.start = lambda: None  # type: ignore[method-assign]
+
+        with self.assertRaises(TypeError):
+            client.request("thread/start", {"cwd": object()})
+
+        self.assertEqual(sent_payloads, [])
+        self.assertEqual(client._pending, {})
+
+    def test_request_wraps_startup_transport_failure_as_pre_send_error(self) -> None:
+        client = CodexRpcClient()
+        client.start = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            CodexRpcTransportError("initialize", {"message": "initialize disconnected"})
+        )
+
+        with self.assertRaises(CodexRpcPreSendError) as caught:
+            client.request("thread/archive", {"threadId": "thread-1"})
+
+        self.assertIn("initialize disconnected", str(caught.exception))
+        self.assertEqual(client._pending, {})
+
+    def test_request_treats_missing_websocket_before_send_as_pre_send_error(self) -> None:
+        client = CodexRpcClient()
+        client.start = lambda: None  # type: ignore[method-assign]
+        client._ws = None
+
+        with self.assertRaises(CodexRpcPreSendError):
+            client.request("thread/archive", {"threadId": "thread-1"})
+
+        self.assertEqual(client._pending, {})
+
+    def test_request_rejects_malformed_json_rpc_error_envelopes(self) -> None:
+        malformed_errors = [
+            "text",
+            [],
+            None,
+            {"code": "-32000", "message": "bad code"},
+            {"code": -32000, "message": ["bad message"]},
+        ]
+
+        for malformed_error in malformed_errors:
+            with self.subTest(error=malformed_error):
+                client = CodexRpcClient()
+                client.start = lambda: None  # type: ignore[method-assign]
+
+                class _Ws:
+                    def send(self, payload: str) -> None:
+                        request_id = json.loads(payload)["id"]
+                        client._dispatch_payload(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "error": malformed_error,
+                            }
+                        )
+
+                client._ws = _Ws()
+
+                with self.assertRaises(CodexRpcProtocolError):
+                    client.request("thread/delete", {"threadId": "thread-1"})
+
+    def test_request_rejects_ambiguous_json_rpc_response_envelope(self) -> None:
+        client = CodexRpcClient()
+        client.start = lambda: None  # type: ignore[method-assign]
+
+        class _Ws:
+            def send(self, payload: str) -> None:
+                request_id = json.loads(payload)["id"]
+                client._dispatch_payload(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {},
+                        "error": {"code": -32000, "message": "ambiguous"},
+                    }
+                )
+
+        client._ws = _Ws()
+
+        with self.assertRaises(CodexRpcProtocolError):
+            client.request("thread/archive", {"threadId": "thread-1"})
 
 
 class FCodexTests(unittest.TestCase):

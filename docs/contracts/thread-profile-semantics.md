@@ -78,6 +78,18 @@ It does not:
 - change runtime-setting families
 - imply any profile or memory behavior
 
+If an upstream archive request times out or loses transport after it may have
+been sent, Focus reports the result as `unknown`, keeps bindings intact, and
+does not retry automatically. If upstream succeeds but local binding / lease
+cleanup fails, Focus reports "archived, cleanup incomplete" instead of
+collapsing both layers into an ambiguous failure.
+
+Before archival, Focus fail-closes when another known local Focus instance still
+keeps the root thread loaded. The operation should be run on that blocking
+instance, or its backend should be explicitly reset first. This preflight covers
+only registered local Focus/fcodex runtimes; it does not detect bare Codex, IDEs,
+or other machines, and is not an atomic cross-client lock.
+
 ## 6. Local `focus` / `fcodex` continuation
 
 `focus resume <thread_id|thread_name>` and

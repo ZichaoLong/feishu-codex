@@ -15,6 +15,7 @@ from bot.stores.instance_registry_store import InstanceRegistryStore, build_inst
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
 from bot.thread_runtime_coordination import (
     acquire_thread_runtime_holder_or_raise,
+    inspect_thread_global_loaded_presence,
     preview_thread_runtime_holder_acquire,
     preview_thread_global_loaded_gate,
 )
@@ -34,6 +35,81 @@ def _holder(*, instance_name: str, holder_id: str, service_token: str) -> Thread
 
 
 class ThreadRuntimeCoordinationTests(unittest.TestCase):
+    def test_loaded_presence_can_include_or_exclude_current_instance(self) -> None:
+        current = build_instance_registry_entry(
+            instance_name="corp-a",
+            service_token="token-a",
+            control_endpoint="tcp://127.0.0.1:32001",
+            app_server_url="http://127.0.0.1:1234",
+            config_dir=pathlib.Path("/tmp/corp-a-config"),
+            data_dir=pathlib.Path("/tmp/corp-a-data"),
+            owner_pid=os.getpid(),
+        )
+        other = build_instance_registry_entry(
+            instance_name="corp-b",
+            service_token="token-b",
+            control_endpoint="tcp://127.0.0.1:32002",
+            app_server_url="http://127.0.0.1:2234",
+            config_dir=pathlib.Path("/tmp/corp-b-config"),
+            data_dir=pathlib.Path("/tmp/corp-b-data"),
+            owner_pid=os.getpid(),
+        )
+
+        with patch(
+            "bot.thread_runtime_coordination.control_request",
+            side_effect=[
+                {"backend_thread_status": BACKEND_THREAD_STATUS_IDLE},
+                {"backend_thread_status": BACKEND_THREAD_STATUS_NOT_LOADED},
+            ],
+        ):
+            including_current = inspect_thread_global_loaded_presence(
+                thread_id="thread-1",
+                running_instances=[current, other],
+            )
+            excluding_current = inspect_thread_global_loaded_presence(
+                thread_id="thread-1",
+                running_instances=[current, other],
+                excluded_instance_names=("corp-a",),
+            )
+
+        self.assertFalse(including_current.verified_clear)
+        self.assertEqual(including_current.blocking_instance, "corp-a")
+        self.assertEqual(including_current.blocking_status, BACKEND_THREAD_STATUS_IDLE)
+        self.assertTrue(excluding_current.verified_clear)
+
+    def test_loaded_presence_uses_one_total_timeout_budget(self) -> None:
+        entries = [
+            build_instance_registry_entry(
+                instance_name=instance_name,
+                service_token=f"token-{instance_name}",
+                control_endpoint=f"tcp://127.0.0.1:{port}",
+                app_server_url=f"http://127.0.0.1:{port}",
+                config_dir=pathlib.Path(f"/tmp/{instance_name}-config"),
+                data_dir=pathlib.Path(f"/tmp/{instance_name}-data"),
+                owner_pid=os.getpid(),
+            )
+            for instance_name, port in (("corp-a", 32001), ("corp-b", 32002))
+        ]
+
+        with patch(
+            "bot.thread_runtime_coordination.time.monotonic",
+            side_effect=[0.0, 0.1, 4.0],
+        ):
+            with patch(
+                "bot.thread_runtime_coordination.control_request",
+                return_value={"backend_thread_status": BACKEND_THREAD_STATUS_NOT_LOADED},
+            ) as mock_control:
+                presence = inspect_thread_global_loaded_presence(
+                    thread_id="thread-1",
+                    running_instances=entries,
+                    timeout_seconds=3.0,
+                )
+
+        self.assertFalse(presence.verified_clear)
+        self.assertEqual(presence.blocking_instance, "corp-b")
+        self.assertIn("total timeout", presence.diagnostic)
+        self.assertEqual(mock_control.call_count, 1)
+
     def test_global_loaded_gate_allows_when_other_running_instances_report_not_loaded(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -56,7 +132,7 @@ class ThreadRuntimeCoordinationTests(unittest.TestCase):
         with patch(
             "bot.thread_runtime_coordination.control_request",
             return_value={"backend_thread_status": BACKEND_THREAD_STATUS_NOT_LOADED},
-        ):
+        ) as mock_control:
             preview = preview_thread_global_loaded_gate(
                 thread_id="thread-1",
                 current_instance_name="corp-a",
@@ -64,6 +140,7 @@ class ThreadRuntimeCoordinationTests(unittest.TestCase):
             )
 
         self.assertTrue(preview.allowed)
+        self.assertEqual(mock_control.call_args.args[1], "thread/loaded-status")
 
     def test_global_loaded_gate_rejects_when_other_running_instance_reports_loaded(self) -> None:
         tempdir = tempfile.TemporaryDirectory()

@@ -20,12 +20,17 @@ from bot.adapters.base import (
 from bot.feishu_bot import InteractiveMessageReadResult
 from bot.card_text_projection import project_interactive_card_text, terminal_result_checksum
 from bot.codex_handler import CodexHandler, _replace_text_input_items
-from bot.codex_protocol.client import CodexRpcError
+from bot.codex_protocol.client import CodexRpcError, CodexRpcPreSendError, CodexRpcTransportError
 from bot.execution_transcript import ExecutionReplySegment
 from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.service_control_plane import ServiceControlError, control_request
+from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.service_instance_lease import ServiceInstanceLease, ServiceInstanceLeaseError
-from bot.stores.interaction_lease_store import InteractionLeaseStore, make_fcodex_interaction_holder
+from bot.stores.interaction_lease_store import (
+    InteractionLeaseStore,
+    make_fcodex_interaction_holder,
+    make_feishu_interaction_holder,
+)
 from bot.stores.terminal_result_store import TerminalResultRecord
 from bot.stores.thread_runtime_lease_store import ThreadRuntimeLease
 
@@ -65,6 +70,8 @@ class _FakeAdapter:
         self.interrupt_turn_calls: list[dict] = []
         self.respond_calls: list[dict] = []
         self.archive_thread_calls: list[str] = []
+        self.unarchive_thread_calls: list[str] = []
+        self.delete_thread_calls: list[str] = []
         self.unsubscribe_thread_calls: list[str] = []
         self.compact_thread_calls: list[str] = []
         self.read_thread_calls: list[dict] = []
@@ -287,6 +294,7 @@ class _FakeAdapter:
         sort_key: str = "updated_at",
         source_kinds: list[str] | None = None,
         model_providers: list[str] | None = None,
+        archived: bool | None = None,
     ) -> list[ThreadSummary]:
         del cwd
         del limit
@@ -294,6 +302,7 @@ class _FakeAdapter:
         del sort_key
         del source_kinds
         del model_providers
+        del archived
         summaries: dict[str, ThreadSummary] = {}
         for (_thread_id, _include_turns), snapshot in self.thread_snapshots.items():
             if isinstance(snapshot, ThreadSnapshot):
@@ -310,6 +319,7 @@ class _FakeAdapter:
         sort_key: str = "updated_at",
         source_kinds: list[str] | None = None,
         model_providers: list[str] | None = None,
+        archived: bool | None = None,
     ) -> tuple[list[ThreadSummary], str | None]:
         start = max(int(cursor or 0), 0)
         page_size = max(int(limit or 0), 1)
@@ -321,6 +331,7 @@ class _FakeAdapter:
             sort_key=sort_key,
             source_kinds=source_kinds,
             model_providers=model_providers,
+            archived=archived,
         )
         end = start + page_size
         next_cursor = str(end) if end < len(threads) else None
@@ -328,6 +339,27 @@ class _FakeAdapter:
 
     def archive_thread(self, thread_id: str) -> None:
         self.archive_thread_calls.append(thread_id)
+
+    def unarchive_thread(self, thread_id: str) -> ThreadSummary:
+        self.unarchive_thread_calls.append(thread_id)
+        snapshot = self.thread_snapshots.get((thread_id, None))
+        if isinstance(snapshot, Exception):
+            raise snapshot
+        if isinstance(snapshot, ThreadSnapshot):
+            return snapshot.summary
+        return ThreadSummary(
+            thread_id=thread_id,
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+    def delete_thread(self, thread_id: str) -> None:
+        self.delete_thread_calls.append(thread_id)
 
     def start_turn(
         self,
@@ -1406,6 +1438,7 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(message, "已请求停止当前执行。")
         self.assertEqual(handler._adapter.interrupt_turn_calls, [])
         self.assertTrue(handler._get_runtime_state("ou_user", "c1")["pending_cancel"])
+        self.assertFalse(handler._get_runtime_state("ou_user", "c1")["cancelled"])
 
         handler._handle_turn_started({"threadId": "thread-created", "turn": {"id": "turn-1"}})
 
@@ -1414,6 +1447,7 @@ class CodexHandlerTests(unittest.TestCase):
             [{"thread_id": "thread-created", "turn_id": "turn-1"}],
         )
         self.assertFalse(handler._get_runtime_state("ou_user", "c1")["pending_cancel"])
+        self.assertTrue(handler._get_runtime_state("ou_user", "c1")["cancelled"])
 
     def test_cancel_recovers_from_missing_thread(self) -> None:
         handler, _ = self._make_handler()
@@ -1435,6 +1469,39 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertFalse(state["running"])
         self.assertEqual(state["current_thread_id"], "thread-created")
         self.assertEqual(state["current_turn_id"], "")
+
+    def test_cancel_pre_send_failure_retains_cancel_intent(self) -> None:
+        handler, _ = self._make_handler()
+
+        handler.handle_message("ou_user", "c1", "hello")
+
+        def _raise_pre_send(*, thread_id: str, turn_id: str):
+            del thread_id
+            del turn_id
+            raise CodexRpcPreSendError(
+                "turn/interrupt",
+                TimeoutError("initialize timed out"),
+            )
+
+        handler._adapter.interrupt_turn = _raise_pre_send
+
+        ok, message = handler._cancel_current_turn("ou_user", "c1")
+
+        state = handler._get_runtime_state("ou_user", "c1")
+        self.assertFalse(ok)
+        self.assertIn("取消请求未发送", message)
+        self.assertFalse(state["cancelled"])
+        self.assertTrue(state["pending_cancel"])
+        self.assertEqual(state["runtime_channel_state"], "degraded")
+        self.assertEqual(state["current_turn_id"], "turn-1")
+
+        handler._handle_turn_completed(
+            {"threadId": "thread-created", "turn": {"id": "turn-1", "status": "completed"}}
+        )
+
+        state = handler._get_runtime_state("ou_user", "c1")
+        self.assertFalse(state["pending_cancel"])
+        self.assertFalse(state["cancelled"])
 
     def test_continue_auto_resumes_bound_thread_when_loaded_thread_is_missing(self) -> None:
         handler, _ = self._make_handler()
@@ -1940,6 +2007,7 @@ class CodexHandlerTests(unittest.TestCase):
         handler1.handle_message("ou_user", "chat-a", "first turn")
 
         handler2, bot2 = self._make_handler(data_dir=data_dir)
+        handler2.on_register(bot2)
 
         self.assertEqual(handler2._thread_subscribers("thread-1"), ())
         interaction_owner = handler2._binding_runtime.interaction_owner_snapshot_locked(
@@ -1965,6 +2033,45 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(bot2.sent_messages, [])
         self.assertEqual(handler2._get_runtime_state("ou_user", "chat-a")["execution_transcript"].reply_text(), "")
         self.assertEqual(handler2._get_runtime_state("ou_user", "chat-b")["execution_transcript"].reply_text(), "")
+
+    def test_constructor_hydration_is_read_only_until_service_ownership(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        binding = ("ou_user", "chat-a")
+        ChatBindingStore(data_dir).save(
+            binding,
+            {
+                "working_dir": "/tmp/project",
+                "current_thread_id": "thread-1",
+                "current_thread_title": "demo",
+                "feishu_runtime_state": "attached",
+                "approval_policy": "never",
+                "permissions_profile_id": ":danger-full-access",
+                "model": "",
+                "reasoning_effort": "",
+            },
+        )
+        leases = InteractionLeaseStore(data_dir)
+        leases.acquire(
+            "thread-1",
+            make_feishu_interaction_holder(binding[0], binding[1], owner_pid=os.getpid()),
+        )
+
+        handler, bot = self._make_handler(data_dir=data_dir)
+
+        stored_before_register = ChatBindingStore(data_dir).load(binding)
+        assert stored_before_register is not None
+        self.assertEqual(stored_before_register["feishu_runtime_state"], "attached")
+        self.assertIsNotNone(leases.load("thread-1"))
+        self.assertEqual(handler._get_runtime_state(*binding)["feishu_runtime_state"], "detached")
+
+        handler.on_register(bot)
+
+        stored_after_register = ChatBindingStore(data_dir).load(binding)
+        assert stored_after_register is not None
+        self.assertEqual(stored_after_register["feishu_runtime_state"], "detached")
+        self.assertIsNone(leases.load("thread-1"))
 
     def test_adapter_disconnect_fail_closes_attached_runtime_state(self) -> None:
         handler, bot = self._make_handler()
@@ -4494,6 +4601,47 @@ class CodexHandlerTests(unittest.TestCase):
         self.assertEqual(handler._get_runtime_state("ou_user", "c1")["feishu_runtime_state"], "detached")
         self.assertIn("拒绝跨实例继续", bot.replies[-1][1])
 
+    def test_lifecycle_loaded_gate_reports_blocking_focus_instance(self) -> None:
+        handler, _ = self._make_handler()
+
+        with patch(
+            "bot.codex_handler.inspect_thread_global_loaded_presence",
+            return_value=SimpleNamespace(
+                verified_clear=False,
+                blocking_instance="explorer",
+                blocking_status="idle",
+                diagnostic="",
+            ),
+        ) as mock_inspect:
+            check = handler._lifecycle_loaded_gate_check("thread-1", "archive")
+
+        self.assertFalse(check.allowed)
+        self.assertIn("实例 `explorer`", check.reason_text)
+        self.assertIn("改在该实例执行", check.reason_text)
+        mock_inspect.assert_called_once_with(
+            thread_id="thread-1",
+            registry_store=handler._instance_registry,
+            excluded_instance_names=(handler._instance_name,),
+        )
+
+    def test_lifecycle_loaded_gate_fails_closed_when_other_instance_is_unverified(self) -> None:
+        handler, _ = self._make_handler()
+
+        with patch(
+            "bot.codex_handler.inspect_thread_global_loaded_presence",
+            return_value=SimpleNamespace(
+                verified_clear=False,
+                blocking_instance="explorer",
+                blocking_status="unknown",
+                diagnostic="control timeout",
+            ),
+        ):
+            check = handler._lifecycle_loaded_gate_check("thread-1", "delete")
+
+        self.assertFalse(check.allowed)
+        self.assertIn("无法确认", check.reason_text)
+        self.assertIn("fail-close", check.reason_text)
+
     def test_denied_prompt_keeps_detached_binding_detached_when_all_mode_group_owns_thread(self) -> None:
         handler, bot = self._make_handler()
         bot.chat_types["chat-a"] = "group"
@@ -5186,6 +5334,70 @@ class CodexHandlerTests(unittest.TestCase):
                 {"thread_id": "thread-1", "thread_name": "demo"},
             )
 
+    def test_service_control_plane_unarchives_by_id_without_binding(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+
+        result = control_request(data_dir, "thread/unarchive", {"thread_id": "thread-1"})
+
+        self.assertEqual(result["upstream_outcome"], "success")
+        self.assertEqual(result["focus_cleanup"], "skipped")
+        self.assertEqual(handler._adapter.unarchive_thread_calls, ["thread-1"])
+        self.assertEqual(self._binding_keys(handler), ())
+
+    def test_service_control_plane_deletes_root_and_clears_local_binding(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+        handler._adapter.thread_snapshots[("thread-1", None)] = ThreadSnapshot(summary=thread)
+
+        result = control_request(data_dir, "thread/delete", {"thread_id": "thread-1"})
+
+        self.assertEqual(result["upstream_outcome"], "success")
+        self.assertEqual(result["focus_cleanup"], "complete")
+        self.assertEqual(handler._adapter.delete_thread_calls, ["thread-1"])
+        self.assertEqual(result["cleared_binding_ids"], ["p2p:ou_user:c1"])
+        self.assertIsNone(handler._chat_binding_store.load(("ou_user", "c1")))
+
+    def test_service_control_plane_local_binding_inventory_does_not_read_backend(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        handler, bot = self._make_handler(data_dir=data_dir)
+        handler.on_register(bot)
+        thread = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        handler._bind_thread("ou_user", "c1", thread)
+
+        result = control_request(data_dir, "thread/local-bindings", {"thread_id": "thread-1"})
+
+        self.assertEqual(result["binding_ids"], ["p2p:ou_user:c1"])
+        self.assertEqual(handler._adapter.read_thread_calls, [])
+
     def test_archive_command_archives_current_thread_and_clears_binding(self) -> None:
         handler, bot = self._make_handler()
         thread = ThreadSummary(
@@ -5649,6 +5861,27 @@ class CodexHandlerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "无法通过 app-server 恢复这个 CLI 线程"):
             handler._resume_snapshot(thread.thread_id)
+
+    def test_transport_disconnect_recognizes_new_transport_exception(self) -> None:
+        handler, _ = self._make_handler()
+
+        error = CodexRpcTransportError(
+            "thread/resume",
+            {"code": -32000, "message": "transport reset"},
+        )
+
+        self.assertTrue(handler._is_transport_disconnect(error))
+
+    def test_pre_send_startup_failure_is_not_transport_disconnect(self) -> None:
+        handler, _ = self._make_handler()
+
+        error = CodexRpcPreSendError(
+            "thread/resume",
+            TimeoutError("initialize timed out"),
+        )
+
+        self.assertTrue(handler._is_pre_send_error(error))
+        self.assertFalse(handler._is_transport_disconnect(error))
 
     def test_resume_thread_id_not_found_returns_value_error(self) -> None:
         handler, _ = self._make_handler()

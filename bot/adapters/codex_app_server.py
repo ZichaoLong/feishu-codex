@@ -19,7 +19,7 @@ from bot.adapters.base import (
     ThreadSummary,
     TurnInputItem,
 )
-from bot.codex_protocol.client import CodexRpcClient
+from bot.codex_protocol.client import CodexRpcClient, CodexRpcError, CodexRpcProtocolError
 from bot.constants import DEFAULT_APP_SERVER_MODE, DEFAULT_APP_SERVER_URL, DEFAULT_SOURCE_KINDS
 from bot.permissions_profile import (
     BUILTIN_PERMISSION_PROFILE_DANGER_FULL_ACCESS,
@@ -31,8 +31,6 @@ from bot.thread_memory_mode import (
     deep_merge_config_overrides,
     thread_memory_mode_from_memories_config,
 )
-from bot.codex_protocol.client import CodexRpcError
-
 logger = logging.getLogger(__name__)
 
 
@@ -338,7 +336,42 @@ class CodexAppServerAdapter(AgentAdapter):
         self._rpc.request("thread/name/set", {"threadId": thread_id, "name": name})
 
     def archive_thread(self, thread_id: str) -> None:
-        self._rpc.request("thread/archive", {"threadId": thread_id})
+        result = self._rpc.request("thread/archive", {"threadId": thread_id})
+        self._require_object_result("thread/archive", result)
+
+    def unarchive_thread(self, thread_id: str) -> ThreadSummary:
+        result = self._require_object_result(
+            "thread/unarchive",
+            self._rpc.request("thread/unarchive", {"threadId": thread_id}),
+        )
+        try:
+            thread = result.get("thread")
+            if not isinstance(thread, dict):
+                raise TypeError("result.thread is not an object")
+            summary = self._summary_from_thread(thread)
+            if summary.thread_id != thread_id:
+                raise ValueError(
+                    f"result.thread.id mismatch: expected {thread_id}, got {summary.thread_id or '<empty>'}"
+                )
+            return summary
+        except Exception as exc:
+            raise CodexRpcProtocolError(
+                "thread/unarchive",
+                "Codex thread/unarchive returned an invalid response",
+            ) from exc
+
+    def delete_thread(self, thread_id: str) -> None:
+        result = self._rpc.request("thread/delete", {"threadId": thread_id})
+        self._require_object_result("thread/delete", result)
+
+    @staticmethod
+    def _require_object_result(method: str, result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise CodexRpcProtocolError(
+                method,
+                f"Codex {method} returned a non-object response",
+            )
+        return result
 
     def start_turn(
         self,

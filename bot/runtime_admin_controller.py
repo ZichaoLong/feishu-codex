@@ -12,6 +12,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 from bot.adapters.base import ThreadGoalSummary, ThreadSummary
 from bot.binding_identity import format_binding_id, parse_binding_id
 from bot.binding_runtime_manager import BindingRuntimeManager
+from bot.codex_protocol.client import CodexRpcError, CodexRpcProtocolError, CodexRpcTransportError
 from bot.cards import (
     CommandResult,
     build_backend_reset_card,
@@ -40,6 +41,7 @@ from bot.reason_codes import (
 )
 from bot.runtime_state import (
     BACKEND_THREAD_STATUS_ACTIVE,
+    BACKEND_THREAD_STATUS_IDLE,
     BACKEND_THREAD_LOOKUP_ERROR,
     BACKEND_THREAD_LOOKUP_MISSING,
     BACKEND_THREAD_STATUS_NOT_LOADED,
@@ -60,6 +62,12 @@ RuntimeState: TypeAlias = RuntimeStateDict
 BACKEND_RESET_STATUS_AVAILABLE = "available"
 BACKEND_RESET_STATUS_FORCE_ONLY = "force-only"
 BACKEND_RESET_STATUS_BLOCKED = "blocked"
+UPSTREAM_OUTCOME_SUCCESS = "success"
+UPSTREAM_OUTCOME_ERROR = "error"
+UPSTREAM_OUTCOME_UNKNOWN = "unknown"
+FOCUS_CLEANUP_COMPLETE = "complete"
+FOCUS_CLEANUP_INCOMPLETE = "incomplete"
+FOCUS_CLEANUP_SKIPPED = "skipped"
 @dataclass(frozen=True, slots=True)
 class BackendResetPreview:
     status: str
@@ -97,6 +105,8 @@ class RuntimeAdminController:
         app_server_mode: Callable[[], str],
         unsubscribe_thread: Callable[[str], None],
         archive_thread: Callable[[str], None],
+        unarchive_thread: Callable[[str], ThreadSummary],
+        delete_thread: Callable[[str], None],
         release_service_thread_runtime_lease: Callable[[str], None],
         service_control_endpoint: Callable[[], str],
         instance_name: Callable[[], str],
@@ -115,6 +125,7 @@ class RuntimeAdminController:
         submit_prompt_for_control: Callable[..., dict[str, Any]],
         prompt_write_denial_check: Callable[[ChatBindingKey, str, str, str], ReasonedCheck],
         detached_runtime_attach_check: Callable[[str], ReasonedCheck],
+        lifecycle_loaded_gate_check: Callable[[str, str], ReasonedCheck],
         resolve_thread_target_for_control_params: Callable[[dict[str, Any]], ThreadSummary],
         resolve_binding_chat_display_name: Callable[..., str],
         cancel_patch_timer_locked: Callable[[RuntimeState], None],
@@ -134,6 +145,8 @@ class RuntimeAdminController:
         self._app_server_mode = app_server_mode
         self._unsubscribe_thread = unsubscribe_thread
         self._archive_thread = archive_thread
+        self._unarchive_thread = unarchive_thread
+        self._delete_thread = delete_thread
         self._release_service_thread_runtime_lease = release_service_thread_runtime_lease
         self._service_control_endpoint = service_control_endpoint
         self._instance_name = instance_name
@@ -152,6 +165,7 @@ class RuntimeAdminController:
         self._submit_prompt_for_control = submit_prompt_for_control
         self._prompt_write_denial_check = prompt_write_denial_check
         self._detached_runtime_attach_check = detached_runtime_attach_check
+        self._lifecycle_loaded_gate_check = lifecycle_loaded_gate_check
         self._resolve_thread_target_for_control_params = resolve_thread_target_for_control_params
         self._resolve_binding_chat_display_name = resolve_binding_chat_display_name
         self._cancel_patch_timer_locked = cancel_patch_timer_locked
@@ -319,6 +333,63 @@ class RuntimeAdminController:
             logger.exception("读取线程状态失败: thread=%s", normalized_thread_id[:12])
             return None, BACKEND_THREAD_LOOKUP_ERROR
         return summary, str(summary.status or BACKEND_THREAD_STATUS_UNKNOWN).strip() or BACKEND_THREAD_STATUS_UNKNOWN
+
+    def loaded_thread_status_for_control(self, thread_id: str) -> dict[str, str]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空。")
+        loaded_thread_ids = {
+            str(item or "").strip()
+            for item in self._list_loaded_thread_ids()
+            if str(item or "").strip()
+        }
+        if normalized_thread_id not in loaded_thread_ids:
+            backend_thread_status = BACKEND_THREAD_STATUS_NOT_LOADED
+        else:
+            _summary, backend_thread_status = self.read_thread_summary_for_status(normalized_thread_id)
+            if backend_thread_status not in LOADED_BACKEND_THREAD_STATUSES:
+                backend_thread_status = BACKEND_THREAD_STATUS_UNKNOWN
+        return {
+            "thread_id": normalized_thread_id,
+            "backend_thread_status": backend_thread_status,
+        }
+
+    def _raise_lifecycle_loaded_gate_blocker(self, thread_id: str, *, operation: str) -> None:
+        check = self._lifecycle_loaded_gate_check(thread_id, operation)
+        if not check.allowed:
+            raise ValueError(check.reason_text or f"thread {operation} 被 loaded gate 拒绝。")
+
+    def _non_service_runtime_holder_labels(self, lease: ThreadRuntimeLease | None) -> list[str]:
+        return [
+            label
+            for holder, label in zip(
+                lease.holders if lease is not None else (),
+                self._live_runtime_holder_labels(lease),
+            )
+            if str(holder.holder_type or "").strip() != "service"
+        ]
+
+    def _raise_non_service_lifecycle_holder_blocker(
+        self,
+        lease: ThreadRuntimeLease | None,
+        *,
+        operation: str,
+    ) -> None:
+        holder_labels = self._non_service_runtime_holder_labels(lease)
+        if holder_labels:
+            raise ValueError(
+                f"当前 thread 仍有非 service live runtime holder；拒绝 {operation}："
+                + ", ".join(holder_labels)
+            )
+
+    def _raise_current_loaded_unarchive_blocker(self, thread_id: str) -> None:
+        status = self.loaded_thread_status_for_control(thread_id)["backend_thread_status"]
+        if status == BACKEND_THREAD_STATUS_NOT_LOADED:
+            return
+        raise ValueError(
+            f"当前目标实例仍将该 thread 保持为 loaded (`{status or BACKEND_THREAD_STATUS_UNKNOWN}`)；"
+            "拒绝 unarchive。请先等待其 unload，或在确认可丢弃 live runtime 后 reset 当前实例 backend。"
+        )
 
     def _classify_thread_for_stale_binding_cleanup(self, thread_id: str) -> tuple[str, str]:
         normalized_thread_id = str(thread_id or "").strip()
@@ -579,6 +650,7 @@ class RuntimeAdminController:
     def clear_all_bindings_for_control(self) -> dict[str, Any]:
         unsubscribe_thread_ids: list[str] = []
         cleared_binding_ids: list[str] = []
+        cleanup_errors: list[str] = []
         with self._lock:
             self._binding_runtime.hydrate_missing_stored_bindings_locked()
             bindings = list(self._binding_runtime.binding_keys_locked())
@@ -595,15 +667,54 @@ class RuntimeAdminController:
                     blockers.append(f"{format_binding_id(binding)}: {reason}")
             if blockers:
                 raise ValueError("以下 binding 当前不能清除：\n" + "\n".join(blockers))
-            unsubscribe_thread_ids.extend(self._binding_runtime.deactivate_bindings_locked(bindings))
-            cleared_binding_ids.extend(format_binding_id(binding) for binding in bindings)
-        for unsubscribe_thread_id in sorted(set(unsubscribe_thread_ids)):
-            self._unsubscribe_thread(unsubscribe_thread_id)
-            self._release_service_thread_runtime_lease(unsubscribe_thread_id)
+            unsubscribe_thread_ids.extend(
+                self._binding_runtime.deactivate_bindings_locked(
+                    bindings,
+                    cleanup_errors=cleanup_errors,
+                )
+            )
+            cleared_binding_ids.extend(
+                format_binding_id(binding)
+                for binding in bindings
+                if self._binding_runtime.binding_runtime_snapshot_locked(binding) is None
+            )
+        self._finalize_deactivated_thread_runtime(
+            unsubscribe_thread_ids,
+            cleanup_errors=cleanup_errors,
+        )
+        self._raise_binding_cleanup_errors(cleanup_errors)
         return {
             "cleared_binding_ids": cleared_binding_ids,
             "already_empty": False,
         }
+
+    def _finalize_deactivated_thread_runtime(
+        self,
+        unsubscribe_thread_ids: list[str] | tuple[str, ...],
+        *,
+        release_only_thread_ids: set[str] | None = None,
+        cleanup_errors: list[str],
+    ) -> None:
+        unique_unsubscribe_thread_ids = sorted(set(unsubscribe_thread_ids))
+        for thread_id in unique_unsubscribe_thread_ids:
+            try:
+                self._unsubscribe_thread(thread_id)
+            except Exception as exc:
+                cleanup_errors.append(f"取消 thread 订阅失败: {thread_id}: {exc}")
+            try:
+                self._release_service_thread_runtime_lease(thread_id)
+            except Exception as exc:
+                cleanup_errors.append(f"释放 runtime lease 失败: {thread_id}: {exc}")
+        for thread_id in sorted(set(release_only_thread_ids or ()) - set(unique_unsubscribe_thread_ids)):
+            try:
+                self._release_service_thread_runtime_lease(thread_id)
+            except Exception as exc:
+                cleanup_errors.append(f"释放 runtime lease 失败: {thread_id}: {exc}")
+
+    @staticmethod
+    def _raise_binding_cleanup_errors(cleanup_errors: list[str]) -> None:
+        if cleanup_errors:
+            raise RuntimeError("binding 清理不完整：" + "；".join(cleanup_errors))
 
     def binding_status_snapshot(self, binding: ChatBindingKey) -> dict[str, Any]:
         with self._lock:
@@ -1482,11 +1593,13 @@ class RuntimeAdminController:
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
             raise ValueError("thread_id 不能为空。")
+        self._raise_lifecycle_loaded_gate_blocker(normalized_thread_id, operation="archive")
         effective_summary = summary
         if effective_summary is None:
             resolved_summary, _backend_thread_status = self.read_thread_summary_for_status(normalized_thread_id)
             effective_summary = resolved_summary
         lease = self._load_thread_runtime_lease(normalized_thread_id)
+        self._raise_non_service_lifecycle_holder_blocker(lease, operation="archive")
         live_runtime_owner = self._live_runtime_owner_snapshot(lease)
         owner_instance = str(live_runtime_owner.get("instance_name", "") or "").strip()
         if owner_instance and owner_instance != self._instance_name():
@@ -1508,23 +1621,21 @@ class RuntimeAdminController:
             pending_binding_ids,
             action_text="archive 该 thread",
         )
-        self._archive_thread(normalized_thread_id)
-        cleared_binding_ids: list[str] = []
-        unsubscribe_thread_ids: list[str] = []
-        with self._lock:
-            existing_bindings = [
-                binding
-                for binding in bound_bindings
-                if self._binding_runtime.binding_runtime_snapshot_locked(binding) is not None
-            ]
-            unsubscribe_thread_ids.extend(self._binding_runtime.deactivate_bindings_locked(existing_bindings))
-            cleared_binding_ids.extend(format_binding_id(binding) for binding in existing_bindings)
-        unique_unsubscribe_thread_ids = sorted(set(unsubscribe_thread_ids))
-        for unsubscribe_thread_id in unique_unsubscribe_thread_ids:
-            self._unsubscribe_thread(unsubscribe_thread_id)
-            self._release_service_thread_runtime_lease(unsubscribe_thread_id)
-        if normalized_thread_id not in unique_unsubscribe_thread_ids:
-            self._release_service_thread_runtime_lease(normalized_thread_id)
+        try:
+            self._archive_thread(normalized_thread_id)
+        except (TimeoutError, CodexRpcError, CodexRpcProtocolError) as exc:
+            return self._thread_lifecycle_error_result(
+                operation="archive",
+                thread_id=normalized_thread_id,
+                summary=effective_summary,
+                snapshot=snapshot,
+                live_runtime_owner=live_runtime_owner,
+                error=exc,
+            )
+        cleanup = self._cleanup_local_thread_bindings_after_lifecycle(
+            normalized_thread_id,
+            bound_bindings,
+        )
         return {
             "thread_id": normalized_thread_id,
             "thread_title": effective_summary.title if effective_summary is not None else "",
@@ -1532,8 +1643,255 @@ class RuntimeAdminController:
             "bound_binding_ids": snapshot["bound_binding_ids"],
             "attached_binding_ids": snapshot["attached_binding_ids"],
             "detached_binding_ids": snapshot["detached_binding_ids"],
-            "cleared_binding_ids": cleared_binding_ids,
             "live_runtime_owner": live_runtime_owner,
+            "upstream_outcome": UPSTREAM_OUTCOME_SUCCESS,
+            **cleanup,
+        }
+
+    def unarchive_thread_for_control(self, thread_id: str) -> dict[str, Any]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空。")
+        self._raise_current_loaded_unarchive_blocker(normalized_thread_id)
+        self._raise_lifecycle_loaded_gate_blocker(normalized_thread_id, operation="unarchive")
+        lease = self._load_thread_runtime_lease(normalized_thread_id)
+        live_runtime_owner = self._live_runtime_owner_snapshot(lease)
+        owner_instance = str(live_runtime_owner.get("instance_name", "") or "").strip()
+        if owner_instance:
+            raise ValueError(
+                f"当前 thread 仍有 live runtime owner `{owner_instance}`；不能执行 unarchive。"
+            )
+        with self._lock:
+            self._binding_runtime.hydrate_missing_stored_bindings_locked()
+            bound_bindings, _running_binding_ids, _pending_binding_ids = (
+                self._local_thread_binding_clear_plan_locked(normalized_thread_id)
+            )
+        if bound_bindings:
+            raise ValueError(
+                "当前实例仍有 binding 指向该 archived thread；请先清理 binding 后再执行 unarchive："
+                + ", ".join(f"`{format_binding_id(binding)}`" for binding in bound_bindings)
+            )
+        try:
+            summary = self._unarchive_thread(normalized_thread_id)
+        except (TimeoutError, CodexRpcError, CodexRpcProtocolError) as exc:
+            return self._thread_lifecycle_error_result(
+                operation="unarchive",
+                thread_id=normalized_thread_id,
+                summary=None,
+                snapshot=None,
+                live_runtime_owner=live_runtime_owner,
+                error=exc,
+            )
+        return {
+            "thread_id": normalized_thread_id,
+            "thread_title": summary.title,
+            "working_dir": summary.cwd,
+            "bound_binding_ids": [],
+            "attached_binding_ids": [],
+            "detached_binding_ids": [],
+            "cleared_binding_ids": [],
+            "live_runtime_owner": live_runtime_owner,
+            "upstream_outcome": UPSTREAM_OUTCOME_SUCCESS,
+            "focus_cleanup": FOCUS_CLEANUP_SKIPPED,
+            "cleanup_errors": [],
+        }
+
+    def delete_thread_for_control(self, thread_id: str) -> dict[str, Any]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空。")
+        self._raise_lifecycle_loaded_gate_blocker(normalized_thread_id, operation="delete")
+        effective_summary, backend_thread_status = self.read_thread_summary_for_status(normalized_thread_id)
+        lease = self._load_thread_runtime_lease(normalized_thread_id)
+        live_runtime_owner = self._live_runtime_owner_snapshot(lease)
+        self._raise_non_service_lifecycle_holder_blocker(lease, operation="delete")
+        owner_instance = str(live_runtime_owner.get("instance_name", "") or "").strip()
+        if owner_instance and owner_instance != self._instance_name():
+            raise ValueError(
+                f"当前 thread 的 live runtime 由实例 `{owner_instance}` 持有；"
+                "请改在该实例执行 delete。"
+            )
+        if backend_thread_status == BACKEND_THREAD_STATUS_ACTIVE:
+            raise ValueError(
+                "当前 root thread 的 backend 状态为 `active`；拒绝 delete。"
+                "请先结束当前执行并确认状态变为 `idle`。"
+            )
+        if backend_thread_status not in {
+            BACKEND_THREAD_STATUS_IDLE,
+            BACKEND_THREAD_STATUS_NOT_LOADED,
+            BACKEND_THREAD_LOOKUP_MISSING,
+        }:
+            raise ValueError(
+                "无法确认 root thread 处于可删除的静止状态；拒绝 delete："
+                f"backend status=`{backend_thread_status or BACKEND_THREAD_STATUS_UNKNOWN}`。"
+            )
+        with self._lock:
+            self._binding_runtime.hydrate_missing_stored_bindings_locked()
+            snapshot = self._binding_runtime.thread_binding_snapshot_locked(
+                normalized_thread_id,
+                detach_availability=self.detach_thread_availability_locked,
+            )
+            bound_bindings, running_binding_ids, pending_binding_ids = (
+                self._local_thread_binding_clear_plan_locked(normalized_thread_id)
+            )
+        self._raise_local_thread_binding_clear_blockers(
+            running_binding_ids,
+            pending_binding_ids,
+            action_text="delete 该 thread",
+        )
+        try:
+            self._delete_thread(normalized_thread_id)
+        except (TimeoutError, CodexRpcError, CodexRpcProtocolError) as exc:
+            return self._thread_lifecycle_error_result(
+                operation="delete",
+                thread_id=normalized_thread_id,
+                summary=effective_summary,
+                snapshot=snapshot,
+                live_runtime_owner=live_runtime_owner,
+                error=exc,
+            )
+        cleanup = self._cleanup_local_thread_bindings_after_lifecycle(
+            normalized_thread_id,
+            bound_bindings,
+        )
+        return {
+            "thread_id": normalized_thread_id,
+            "thread_title": effective_summary.title if effective_summary is not None else "",
+            "working_dir": effective_summary.cwd if effective_summary is not None else "",
+            "bound_binding_ids": snapshot["bound_binding_ids"],
+            "attached_binding_ids": snapshot["attached_binding_ids"],
+            "detached_binding_ids": snapshot["detached_binding_ids"],
+            "live_runtime_owner": live_runtime_owner,
+            "upstream_outcome": UPSTREAM_OUTCOME_SUCCESS,
+            **cleanup,
+        }
+
+    def local_thread_bindings_for_control(self, thread_id: str) -> dict[str, Any]:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            raise ValueError("thread_id 不能为空。")
+        with self._lock:
+            self._binding_runtime.hydrate_missing_stored_bindings_locked()
+            bound_bindings, running_binding_ids, pending_binding_ids = (
+                self._local_thread_binding_clear_plan_locked(normalized_thread_id)
+            )
+        return {
+            "thread_id": normalized_thread_id,
+            "binding_ids": [format_binding_id(binding) for binding in bound_bindings],
+            "running_binding_ids": running_binding_ids,
+            "pending_binding_ids": pending_binding_ids,
+        }
+
+    def _cleanup_local_thread_bindings_after_lifecycle(
+        self,
+        thread_id: str,
+        bound_bindings: list[ChatBindingKey],
+    ) -> dict[str, Any]:
+        cleanup_errors: list[str] = []
+        cleared_binding_ids: list[str] = []
+        retained_binding_ids: list[str] = []
+        unsubscribe_thread_ids: tuple[str, ...] = ()
+        binding_cleanup_verified = False
+        try:
+            with self._lock:
+                existing_bindings = [
+                    binding
+                    for binding in bound_bindings
+                    if self._binding_runtime.binding_runtime_snapshot_locked(binding) is not None
+                ]
+                unsubscribe_thread_ids = self._binding_runtime.deactivate_bindings_locked(
+                    existing_bindings,
+                    cleanup_errors=cleanup_errors,
+                )
+                cleared_binding_ids.extend(
+                    format_binding_id(binding)
+                    for binding in existing_bindings
+                    if self._binding_runtime.binding_runtime_snapshot_locked(binding) is None
+                )
+                retained_binding_ids.extend(
+                    format_binding_id(binding)
+                    for binding in existing_bindings
+                    if self._binding_runtime.binding_runtime_snapshot_locked(binding) is not None
+                )
+                binding_cleanup_verified = True
+        except Exception as exc:
+            cleanup_errors.append(f"清理本地 binding 失败: {exc}")
+            try:
+                with self._lock:
+                    retained_binding_ids.extend(
+                        format_binding_id(binding)
+                        for binding in bound_bindings
+                        if self._binding_runtime.binding_runtime_snapshot_locked(binding) is not None
+                    )
+            except Exception as retained_exc:
+                cleanup_errors.append(f"复核 retained binding 失败: {retained_exc}")
+
+        unique_unsubscribe_thread_ids = sorted(set(unsubscribe_thread_ids))
+        for unsubscribe_thread_id in unique_unsubscribe_thread_ids:
+            try:
+                self._unsubscribe_thread(unsubscribe_thread_id)
+            except Exception as exc:
+                cleanup_errors.append(f"取消 thread 订阅失败: {unsubscribe_thread_id}: {exc}")
+            try:
+                self._release_service_thread_runtime_lease(unsubscribe_thread_id)
+            except Exception as exc:
+                cleanup_errors.append(f"释放 runtime lease 失败: {unsubscribe_thread_id}: {exc}")
+        if (
+            binding_cleanup_verified
+            and thread_id not in unique_unsubscribe_thread_ids
+            and not retained_binding_ids
+        ):
+            try:
+                self._release_service_thread_runtime_lease(thread_id)
+            except Exception as exc:
+                cleanup_errors.append(f"释放 runtime lease 失败: {thread_id}: {exc}")
+        return {
+            "cleared_binding_ids": cleared_binding_ids,
+            "focus_cleanup": FOCUS_CLEANUP_INCOMPLETE if cleanup_errors else FOCUS_CLEANUP_COMPLETE,
+            "cleanup_errors": cleanup_errors,
+        }
+
+    @staticmethod
+    def _thread_lifecycle_error_result(
+        *,
+        operation: str,
+        thread_id: str,
+        summary: ThreadSummary | None,
+        snapshot: dict[str, Any] | None,
+        live_runtime_owner: dict[str, Any],
+        error: Exception,
+    ) -> dict[str, Any]:
+        legacy_transport_error = (
+            isinstance(error, CodexRpcError)
+            and str(error.error.get("message", "") or "")
+            in {"Codex websocket disconnected", "Codex app-server closed"}
+        )
+        if (
+            isinstance(error, (TimeoutError, CodexRpcTransportError, CodexRpcProtocolError))
+            or legacy_transport_error
+        ):
+            outcome = UPSTREAM_OUTCOME_UNKNOWN
+        elif isinstance(error, CodexRpcError):
+            outcome = UPSTREAM_OUTCOME_ERROR
+        else:
+            raise error
+        detail = str(error) or type(error).__name__
+        snapshot = snapshot or {}
+        return {
+            "operation": operation,
+            "thread_id": thread_id,
+            "thread_title": summary.title if summary is not None else "",
+            "working_dir": summary.cwd if summary is not None else "",
+            "bound_binding_ids": list(snapshot.get("bound_binding_ids") or []),
+            "attached_binding_ids": list(snapshot.get("attached_binding_ids") or []),
+            "detached_binding_ids": list(snapshot.get("detached_binding_ids") or []),
+            "cleared_binding_ids": [],
+            "live_runtime_owner": live_runtime_owner,
+            "upstream_outcome": outcome,
+            "upstream_error": detail if outcome == UPSTREAM_OUTCOME_ERROR else "",
+            "outcome_detail": detail if outcome == UPSTREAM_OUTCOME_UNKNOWN else "",
+            "focus_cleanup": FOCUS_CLEANUP_SKIPPED,
+            "cleanup_errors": [],
         }
 
     def _local_thread_binding_clear_plan_locked(
@@ -1586,6 +1944,8 @@ class RuntimeAdminController:
 
         unsubscribe_thread_ids: list[str] = []
         cleared_binding_ids: list[str] = []
+        cleanup_errors: list[str] = []
+        retained_binding_ids: list[str] = []
         with self._lock:
             self._binding_runtime.hydrate_missing_stored_bindings_locked()
             bound_bindings, running_binding_ids, pending_binding_ids = (
@@ -1611,15 +1971,33 @@ class RuntimeAdminController:
                     ],
                     "dry_run": True,
                 }
-            unsubscribe_thread_ids.extend(self._binding_runtime.deactivate_bindings_locked(existing_bindings))
-            cleared_binding_ids.extend(format_binding_id(binding) for binding in existing_bindings)
+            unsubscribe_thread_ids.extend(
+                self._binding_runtime.deactivate_bindings_locked(
+                    existing_bindings,
+                    cleanup_errors=cleanup_errors,
+                )
+            )
+            cleared_binding_ids.extend(
+                format_binding_id(binding)
+                for binding in existing_bindings
+                if self._binding_runtime.binding_runtime_snapshot_locked(binding) is None
+            )
+            retained_binding_ids.extend(
+                format_binding_id(binding)
+                for binding in existing_bindings
+                if self._binding_runtime.binding_runtime_snapshot_locked(binding) is not None
+            )
 
-        unique_unsubscribe_thread_ids = sorted(set(unsubscribe_thread_ids))
-        for unsubscribe_thread_id in unique_unsubscribe_thread_ids:
-            self._unsubscribe_thread(unsubscribe_thread_id)
-            self._release_service_thread_runtime_lease(unsubscribe_thread_id)
-        if cleared_binding_ids and normalized_thread_id not in unique_unsubscribe_thread_ids:
-            self._release_service_thread_runtime_lease(normalized_thread_id)
+        self._finalize_deactivated_thread_runtime(
+            unsubscribe_thread_ids,
+            release_only_thread_ids=(
+                {normalized_thread_id}
+                if cleared_binding_ids and not retained_binding_ids
+                else set()
+            ),
+            cleanup_errors=cleanup_errors,
+        )
+        self._raise_binding_cleanup_errors(cleanup_errors)
         return {
             "thread_id": normalized_thread_id,
             "cleared_binding_ids": cleared_binding_ids,
@@ -1695,16 +2073,39 @@ class RuntimeAdminController:
                     "retained_thread_ids": retained_thread_ids,
                     "dry_run": True,
                 }
-            unsubscribe_thread_ids = self._binding_runtime.deactivate_bindings_locked(existing_bindings)
-            cleared_binding_ids = [format_binding_id(binding) for binding in existing_bindings]
+            cleanup_errors: list[str] = []
+            unsubscribe_thread_ids = self._binding_runtime.deactivate_bindings_locked(
+                existing_bindings,
+                cleanup_errors=cleanup_errors,
+            )
+            cleared_bindings = [
+                binding
+                for binding in existing_bindings
+                if self._binding_runtime.binding_runtime_snapshot_locked(binding) is None
+            ]
+            retained_bindings = [
+                binding
+                for binding in existing_bindings
+                if self._binding_runtime.binding_runtime_snapshot_locked(binding) is not None
+            ]
+            cleared_binding_ids = [format_binding_id(binding) for binding in cleared_bindings]
 
-        unique_unsubscribe_thread_ids = sorted(set(unsubscribe_thread_ids))
-        for unsubscribe_thread_id in unique_unsubscribe_thread_ids:
-            self._unsubscribe_thread(unsubscribe_thread_id)
-            self._release_service_thread_runtime_lease(unsubscribe_thread_id)
-        for thread_id in sorted(set(existing_binding_thread_ids.values()) - set(unique_unsubscribe_thread_ids)):
-            if thread_id:
-                self._release_service_thread_runtime_lease(thread_id)
+        cleared_thread_ids = {
+            existing_binding_thread_ids[binding]
+            for binding in cleared_bindings
+            if existing_binding_thread_ids[binding]
+        }
+        failed_cleanup_thread_ids = {
+            existing_binding_thread_ids[binding]
+            for binding in retained_bindings
+            if existing_binding_thread_ids[binding]
+        }
+        self._finalize_deactivated_thread_runtime(
+            unsubscribe_thread_ids,
+            release_only_thread_ids=cleared_thread_ids - failed_cleanup_thread_ids,
+            cleanup_errors=cleanup_errors,
+        )
+        self._raise_binding_cleanup_errors(cleanup_errors)
         return {
             "cleared_binding_ids": cleared_binding_ids,
             "stale_thread_ids": sorted(stale_thread_ids),
@@ -2009,6 +2410,31 @@ class RuntimeAdminController:
                 thread_id,
                 dry_run=bool(params.get("dry_run")),
             )
+        if method == "thread/local-bindings":
+            thread_id = str(params.get("thread_id", "") or "").strip()
+            if not thread_id:
+                raise ValueError("thread/local-bindings 缺少 thread_id。")
+            return self.local_thread_bindings_for_control(thread_id)
+        if method == "thread/loaded-status":
+            thread_id = str(params.get("thread_id", "") or "").strip()
+            if not thread_id:
+                raise ValueError("thread/loaded-status 缺少 thread_id。")
+            return self.loaded_thread_status_for_control(thread_id)
+        if method == "thread/archive":
+            thread_id = str(params.get("thread_id", "") or "").strip()
+            if not thread_id:
+                raise ValueError("thread/archive 缺少 thread_id。")
+            return self.archive_thread_for_control(thread_id)
+        if method == "thread/unarchive":
+            thread_id = str(params.get("thread_id", "") or "").strip()
+            if not thread_id:
+                raise ValueError("thread/unarchive 缺少 thread_id。")
+            return self.unarchive_thread_for_control(thread_id)
+        if method == "thread/delete":
+            thread_id = str(params.get("thread_id", "") or "").strip()
+            if not thread_id:
+                raise ValueError("thread/delete 缺少 thread_id。")
+            return self.delete_thread_for_control(thread_id)
         if method in {
             "thread/status",
             "thread/bindings",
@@ -2018,7 +2444,6 @@ class RuntimeAdminController:
             "thread/detach",
             "thread/send-image",
             "thread/attach",
-            "thread/archive",
         }:
             thread_id = str(params.get("thread_id", "") or "").strip()
             thread_name = str(params.get("thread_name", "") or "").strip()
@@ -2079,7 +2504,5 @@ class RuntimeAdminController:
                 )
             if method == "thread/attach":
                 return self.attach_thread(thread.thread_id)
-            if method == "thread/archive":
-                return self.archive_thread_for_control(thread.thread_id, summary=thread)
             return self.detach_thread(thread.thread_id)
         raise ValueError(f"未知控制面方法：{method}")

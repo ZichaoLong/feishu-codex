@@ -50,3 +50,6 @@ class ThreadSubscriptionRegistry:
         normalized_thread_id = self._normalize_thread_id(thread_id)
         subscribers = self._subscribers_by_thread_id.get(normalized_thread_id) or set()
         return tuple(sorted(subscribers))
+
+    def clear(self) -> None:
+        self._subscribers_by_thread_id.clear()

@@ -4,7 +4,12 @@ import pathlib
 import tempfile
 import unittest
 
-from bot.stores.service_instance_lease import ServiceInstanceLease, ServiceInstanceLeaseError
+from bot.stores.service_instance_lease import (
+    ServiceInstanceLease,
+    ServiceInstanceLeaseError,
+    ServiceInstanceMaintenanceLease,
+    ServiceInstanceMaintenanceLeaseError,
+)
 
 
 class ServiceInstanceLeaseTests(unittest.TestCase):
@@ -91,3 +96,31 @@ class ServiceInstanceLeaseTests(unittest.TestCase):
         self.assertNotEqual(metadata.owner_token, "stale-owner-token")
         self.assertEqual(metadata.control_endpoint, control_endpoint)
         self.assertEqual(lease.load_metadata(), metadata)
+
+    def test_maintenance_lease_blocks_service_without_publishing_metadata(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        maintenance = ServiceInstanceMaintenanceLease(data_dir)
+        service = ServiceInstanceLease(data_dir)
+        self.addCleanup(maintenance.release)
+        self.addCleanup(service.release)
+
+        maintenance.acquire()
+
+        self.assertIsNone(service.load_metadata())
+        with self.assertRaises(ServiceInstanceLeaseError):
+            service.acquire()
+
+    def test_running_service_blocks_maintenance_lease(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        service = ServiceInstanceLease(data_dir)
+        maintenance = ServiceInstanceMaintenanceLease(data_dir)
+        self.addCleanup(service.release)
+        self.addCleanup(maintenance.release)
+        service.acquire()
+
+        with self.assertRaises(ServiceInstanceMaintenanceLeaseError):
+            maintenance.acquire()

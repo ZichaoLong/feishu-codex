@@ -302,6 +302,30 @@ class BindingRuntimeManagerTests(unittest.TestCase):
         self.assertEqual(stored_a["current_thread_id"], "thread-a")
         self.assertEqual(stored_b["current_thread_id"], "thread-b")
 
+    def test_deactivate_binding_preserves_retry_marker_when_interaction_lease_cleanup_fails(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        data_dir = pathlib.Path(tempdir.name)
+        manager = self._make_manager(data_dir=data_dir)
+        binding = ("ou-user", "chat-1")
+        self._attach_binding(manager, binding)
+        cleanup_errors: list[str] = []
+
+        with patch.object(
+            manager._interaction_lease_store,
+            "release",
+            side_effect=OSError("lease store failed"),
+        ):
+            with manager._lock:
+                manager.deactivate_bindings_locked([binding], cleanup_errors=cleanup_errors)
+
+        stored = ChatBindingStore(data_dir).load(binding)
+        self.assertIsNotNone(stored)
+        self.assertEqual(manager.bound_bindings_for_thread_locked("thread-1"), [binding])
+        self.assertEqual(manager.attached_bindings_for_thread_locked("thread-1"), [binding])
+        self.assertEqual(len(cleanup_errors), 1)
+        self.assertIn("lease store failed", cleanup_errors[0])
+
     def test_bind_thread_locked_replaces_old_thread_and_persists_new_attachment(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)

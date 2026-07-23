@@ -137,8 +137,8 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertTrue(coordinator.mark_runtime_degraded_locked(state))
         self.assertEqual(state["runtime_channel_state"], "degraded")
 
-        coordinator.request_cancel_without_turn_id_locked(state)
-        self.assertTrue(state["cancelled"])
+        coordinator.mark_cancel_pending_locked(state)
+        self.assertFalse(state["cancelled"])
         self.assertTrue(state["pending_cancel"])
 
         coordinator.acknowledge_active_thread_locked(state)

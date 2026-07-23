@@ -64,12 +64,14 @@ def list_current_dir_threads(
     limit: int,
     sort_key: str = "updated_at",
     predicate: Callable[[ThreadSummary], bool] | None = None,
+    archived: bool | None = None,
 ) -> list[ThreadSummary]:
     threads = adapter.list_threads_all(
         cwd=cwd,
         limit=limit,
         sort_key=sort_key,
         model_providers=[],
+        archived=archived,
     )
     if predicate is None:
         return threads
@@ -82,11 +84,13 @@ def list_global_threads(
     limit: int,
     sort_key: str = "updated_at",
     predicate: Callable[[ThreadSummary], bool] | None = None,
+    archived: bool | None = None,
 ) -> list[ThreadSummary]:
     threads = adapter.list_threads_all(
         limit=limit,
         sort_key=sort_key,
         model_providers=[],
+        archived=archived,
     )
     if predicate is None:
         return threads

@@ -190,6 +190,14 @@ class AgentAdapter(ABC):
         ...
 
     @abstractmethod
+    def unarchive_thread(self, thread_id: str) -> ThreadSummary:
+        ...
+
+    @abstractmethod
+    def delete_thread(self, thread_id: str) -> None:
+        ...
+
+    @abstractmethod
     def start_turn(
         self,
         *,

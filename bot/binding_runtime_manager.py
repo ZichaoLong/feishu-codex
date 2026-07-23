@@ -407,16 +407,20 @@ class BindingRuntimeManager:
         with self._lock:
             self.sync_stored_binding_locked(resolved.binding, resolved.state)
 
-    def hydrate_stored_bindings(self) -> None:
+    def hydrate_stored_bindings(self, *, read_only: bool = False, replace: bool = False) -> None:
         stored_bindings = self._chat_binding_store.load_all()
-        if not stored_bindings:
-            return
         with self._lock:
-            self.hydrate_missing_stored_bindings_locked(stored_bindings)
+            if replace:
+                self._runtime_state_by_binding.clear()
+                self._thread_subscription_registry.clear()
+            if stored_bindings:
+                self.hydrate_missing_stored_bindings_locked(stored_bindings, read_only=read_only)
 
     def hydrate_missing_stored_bindings_locked(
         self,
         stored_bindings: dict[ChatBindingKey, StoredChatBinding] | None = None,
+        *,
+        read_only: bool = False,
     ) -> tuple[ChatBindingKey, ...]:
         loaded_bindings = stored_bindings if stored_bindings is not None else self._chat_binding_store.load_all()
         if not loaded_bindings:
@@ -429,7 +433,7 @@ class BindingRuntimeManager:
             state = self.build_default_runtime_state()
             downgraded_attached = self.hydrate_stored_binding_locked(state, stored_binding)
             self._runtime_state_by_binding[binding] = state
-            if downgraded_attached:
+            if downgraded_attached and not read_only:
                 self.release_interaction_lease_for_binding(binding, str(state["current_thread_id"] or "").strip())
                 self.sync_stored_binding_locked(binding, state)
             current_thread_id = str(state["current_thread_id"] or "").strip()
@@ -463,6 +467,7 @@ class BindingRuntimeManager:
         bindings: list[ChatBindingKey] | tuple[ChatBindingKey, ...],
         *,
         on_deactivate_state: Callable[[RuntimeStateDict], None] | None = None,
+        cleanup_errors: list[str] | None = None,
     ) -> tuple[str, ...]:
         plans: list[tuple[ChatBindingKey, RuntimeStateDict, str, StoredChatBinding]] = []
         seen: set[ChatBindingKey] = set()
@@ -496,23 +501,42 @@ class BindingRuntimeManager:
             self._rollback_stored_binding_updates_locked(rollback_entries)
             raise
 
-        planned_bindings = {binding for binding, _state, _thread_id, _stored in plans}
         unsubscribe_thread_ids: list[str] = []
-        for thread_id in sorted({thread_id for _binding, _state, thread_id, _stored in plans if thread_id}):
-            subscribers = set(self.thread_subscribers(thread_id))
-            if subscribers and subscribers.issubset(planned_bindings):
-                unsubscribe_thread_ids.append(thread_id)
-
-        for binding, state, thread_id, _stored in plans:
+        interaction_lease_errors: list[str] = []
+        for binding, state, thread_id, original_stored_binding in plans:
+            release_error = self._release_interaction_lease_for_binding_commit_locked(binding, thread_id)
+            if release_error:
+                interaction_lease_errors.append(release_error)
+                try:
+                    self._persist_stored_binding_locked(binding, original_stored_binding)
+                except Exception as exc:
+                    logger.exception(
+                        "恢复待清理 binding 标记失败: binding=%s",
+                        format_binding_id(binding),
+                    )
+                    interaction_lease_errors.append(
+                        f"恢复待清理 binding 标记失败: {format_binding_id(binding)}: {exc}"
+                    )
+                continue
             self._apply_commit_state_callback_locked(
                 binding,
                 state,
                 on_deactivate_state,
                 action="提交 deactivate runtime state",
             )
-            self._release_interaction_lease_for_binding_commit_locked(binding, thread_id)
+            unsubscribe_thread_id = self._unsubscribe_thread_id_if_last_subscriber_locked(
+                binding,
+                thread_id,
+            )
             self.unsubscribe_thread_locked(binding, thread_id)
             self._runtime_state_by_binding.pop(binding, None)
+            if unsubscribe_thread_id:
+                unsubscribe_thread_ids.append(unsubscribe_thread_id)
+        if interaction_lease_errors:
+            if cleanup_errors is not None:
+                cleanup_errors.extend(interaction_lease_errors)
+            else:
+                raise RuntimeError("；".join(interaction_lease_errors))
         return tuple(unsubscribe_thread_ids)
 
     def visit_runtime_states_locked(self, visitor: Callable[[RuntimeStateDict], None]) -> None:
@@ -595,15 +619,23 @@ class BindingRuntimeManager:
         self,
         binding: ChatBindingKey,
         thread_id: str,
-    ) -> None:
+    ) -> str:
+        holder = self._feishu_interaction_holder(binding)
         try:
-            self.release_interaction_lease_for_binding(binding, thread_id)
-        except Exception:
+            self._interaction_lease_store.release(thread_id, holder)
+            remaining = self._interaction_lease_store.load(thread_id)
+        except Exception as exc:
             logger.exception(
                 "释放 interaction lease 失败: binding=%s thread=%s",
                 format_binding_id(binding),
                 thread_id[:12],
             )
+            return f"释放 interaction lease 失败: {format_binding_id(binding)}: {exc}"
+        if remaining is not None and remaining.holder.same_holder(holder):
+            message = f"interaction lease 仍由已清理 binding 持有: {format_binding_id(binding)}"
+            logger.error("%s thread=%s", message, thread_id[:12])
+            return message
+        return ""
 
     def _unsubscribe_thread_id_if_last_subscriber_locked(
         self,

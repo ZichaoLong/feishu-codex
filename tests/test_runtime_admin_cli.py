@@ -1,8 +1,9 @@
 import io
 import os
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -22,7 +23,11 @@ from bot.runtime_admin_cli import (
     _clear_archived_thread_bindings_from_store,
     _clear_stale_bindings,
     _clear_stale_bindings_from_store,
+    _confirm_delete_thread,
+    _delete_thread,
+    _thread_delete_input,
     _list_archived_thread_ids_from_running_instance,
+    _lifecycle_control_timeout_seconds,
     _clear_thread_goal,
     _image_send_target_params,
     _print_binding_list,
@@ -34,19 +39,29 @@ from bot.runtime_admin_cli import (
     _send_thread_image,
     _send_binding_prompt,
     _set_thread_goal,
+    _resolve_thread_archive_name,
     _resolve_thread_archive_target,
     _resolve_thread_archive_targets,
     _remote_adapter,
     _terminal_display_width,
+    _thread_archive_inputs,
+    _thread_unarchive_inputs,
     _print_thread_status,
     _thread_target_params,
+    _unarchive_thread,
+    _unarchive_threads,
     main as runtime_admin_cli_main,
 )
 from bot.codex_protocol.client import CodexRpcError
 from bot.instance_resolution import CliInstanceTarget
-from bot.service_control_plane import ServiceControlError, ServiceControlResponseTimeoutError
+from bot.service_control_plane import (
+    ServiceControlError,
+    ServiceControlOutcomeUnknownError,
+    ServiceControlResponseTimeoutError,
+)
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.instance_registry_store import InstanceRegistryEntry
+from bot.stores.service_instance_lease import ServiceInstanceLease, ServiceInstanceMaintenanceLeaseError
 from bot.version import __version__
 
 
@@ -74,6 +89,9 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertIn("thread goal --thread-id <id>", rendered)
         self.assertIn("prompt send --binding-id <binding_id>", rendered)
         self.assertIn("thread archive --thread-id <id-1> --thread-id <id-2>", rendered)
+        self.assertIn("thread list --archived --scope global", rendered)
+        self.assertIn("thread unarchive --thread-id <id-1> --thread-id <id-2>", rendered)
+        self.assertIn("thread delete --thread-id <id> --force", rendered)
         self.assertIn("thread clear-archived-bindings --thread-id <id> --dry-run", rendered)
 
     def test_top_level_version_prints_project_version(self) -> None:
@@ -283,6 +301,95 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertEqual(args.scope, "global")
         self.assertEqual(args.cwd, "/tmp/project")
 
+    def test_thread_list_accepts_archived_inventory(self) -> None:
+        parser = _build_parser()
+
+        args = parser.parse_args(["thread", "list", "--archived", "--scope", "global"])
+
+        self.assertTrue(args.archived)
+        self.assertEqual(args.scope, "global")
+
+    def test_thread_unarchive_accepts_repeated_ids_and_delete_accepts_one_id(self) -> None:
+        parser = _build_parser()
+
+        unarchive = parser.parse_args(
+            ["thread", "unarchive", "--thread-id", "thread-1", "--thread-id", "thread-2"]
+        )
+        delete = parser.parse_args(["thread", "delete", "--thread-id", "thread-1", "--force"])
+
+        self.assertEqual(_thread_unarchive_inputs(unarchive), ["thread-1", "thread-2"])
+        self.assertEqual(_thread_delete_input(delete), "thread-1")
+        self.assertTrue(delete.force)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["thread", "unarchive", "--thread-name", "demo"])
+
+    def test_thread_delete_rejects_repeated_thread_ids(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["thread", "delete", "--thread-id", "thread-1", "--thread-id", "thread-2"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "只允许提供一个.*--thread-id"):
+            _thread_delete_input(args)
+
+    def test_main_thread_unarchive_passes_all_ids_to_batch_handler(self) -> None:
+        with patch("bot.runtime_admin_cli._unarchive_threads", return_value=0) as mock_unarchive:
+            with self.assertRaises(SystemExit) as exc:
+                runtime_admin_cli_main(
+                    [
+                        "--instance",
+                        "explorer",
+                        "thread",
+                        "unarchive",
+                        "--thread-id",
+                        "thread-1",
+                        "--thread-id",
+                        "thread-2",
+                    ]
+                )
+
+        self.assertEqual(exc.exception.code, 0)
+        mock_unarchive.assert_called_once_with(
+            ["thread-1", "thread-2"],
+            explicit_instance="explorer",
+        )
+
+    def test_main_thread_delete_rejects_repeated_ids_before_target_resolution(self) -> None:
+        stderr = io.StringIO()
+        with patch("bot.runtime_admin_cli._resolve_target_instance") as mock_resolve:
+            with redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as exc:
+                    runtime_admin_cli_main(
+                        [
+                            "thread",
+                            "delete",
+                            "--thread-id",
+                            "thread-1",
+                            "--thread-id",
+                            "thread-2",
+                            "--force",
+                        ]
+                    )
+
+        self.assertEqual(exc.exception.code, 2)
+        mock_resolve.assert_not_called()
+        self.assertIn("只允许提供一个 `--thread-id`", stderr.getvalue())
+
+    def test_thread_unarchive_help_points_to_archived_inventory(self) -> None:
+        parser = _build_parser()
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as exc:
+                parser.parse_args(["thread", "unarchive", "--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        self.assertIn(
+            "focusctl thread list --archived --scope global",
+            stdout.getvalue(),
+        )
+        self.assertIn("可重复提供 `--thread-id`", stdout.getvalue())
+
     def test_remote_adapter_prefers_running_instance_resolution(self) -> None:
         entry = InstanceRegistryEntry(
             instance_name="aft",
@@ -295,7 +402,10 @@ class RuntimeAdminCliTests(unittest.TestCase):
             started_at=1.0,
             updated_at=1.0,
         )
-        with patch("bot.runtime_admin_cli.load_config_file", return_value={"app_server_url": "ws://127.0.0.1:8765"}):
+        with patch(
+            "bot.runtime_admin_cli.load_config_file",
+            return_value={"app_server_url": "ws://127.0.0.1:8765"},
+        ) as mock_load_config:
             with patch(
                 "bot.runtime_admin_cli.resolve_running_instance_app_server_url",
                 return_value="ws://127.0.0.1:43210",
@@ -303,6 +413,7 @@ class RuntimeAdminCliTests(unittest.TestCase):
                 adapter, _, app_server_url = _remote_adapter(Path("/tmp/data-aft"), running_entry=entry)
 
         self.assertEqual(app_server_url, "ws://127.0.0.1:43210")
+        mock_load_config.assert_called_once_with("codex", directory=Path("/tmp/config-aft"))
         self.assertEqual(mock_resolve.call_args.args[0], entry)
         self.assertEqual(mock_resolve.call_args.kwargs["configured_app_server_url"], "ws://127.0.0.1:8765")
         adapter.stop()
@@ -337,6 +448,49 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 0)
         self.assertEqual(mock_print.call_args.kwargs["scope"], "cwd")
         self.assertEqual(mock_print.call_args.kwargs["running_entry"], entry)
+
+    def test_lifecycle_timeout_uses_running_instance_config_dir(self) -> None:
+        entry = InstanceRegistryEntry(
+            instance_name="aft",
+            owner_pid=1234,
+            service_token="token-aft",
+            control_endpoint="tcp://127.0.0.1:9000",
+            app_server_url="ws://127.0.0.1:8765",
+            config_dir="/tmp/config-aft",
+            data_dir="/tmp/data-aft",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        with patch(
+            "bot.runtime_admin_cli.load_config_file",
+            return_value={
+                "request_timeout_seconds": 47,
+                "connect_timeout_seconds": 11,
+            },
+        ) as mock_load_config:
+            unarchive_timeout = _lifecycle_control_timeout_seconds(
+                Path("/tmp/data-aft"),
+                operation="unarchive",
+                running_entry=entry,
+            )
+            archive_timeout = _lifecycle_control_timeout_seconds(
+                Path("/tmp/data-aft"),
+                operation="archive",
+                running_entry=entry,
+            )
+            delete_timeout = _lifecycle_control_timeout_seconds(
+                Path("/tmp/data-aft"),
+                operation="delete",
+                running_entry=entry,
+            )
+
+        self.assertEqual(unarchive_timeout, 121.0)
+        self.assertEqual(archive_timeout, 168.0)
+        self.assertEqual(delete_timeout, 168.0)
+        self.assertEqual(mock_load_config.call_count, 3)
+        for call_args in mock_load_config.call_args_list:
+            self.assertEqual(call_args.args, ("codex",))
+            self.assertEqual(call_args.kwargs, {"directory": Path("/tmp/config-aft")})
 
     def test_main_thread_goal_show_dispatches_to_goal_printer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -377,7 +531,16 @@ class RuntimeAdminCliTests(unittest.TestCase):
 
         args = parser.parse_args(["thread", "archive", "--thread-name", "demo"])
 
-        self.assertEqual(args.thread_name, "demo")
+        self.assertEqual(_thread_archive_inputs(args), ([], "demo"))
+
+    def test_thread_archive_rejects_repeated_thread_names(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["thread", "archive", "--thread-name", "demo-a", "--thread-name", "demo-b"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "只允许提供一个.*--thread-name"):
+            _thread_archive_inputs(args)
 
     def test_thread_archive_accepts_repeated_thread_ids(self) -> None:
         parser = _build_parser()
@@ -690,6 +853,29 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertIn("第一行 第二行", lines[1])
         self.assertTrue(lines[1].endswith("…"))
+
+    def test_thread_list_archived_forwards_archived_filter(self) -> None:
+        class _FakeAdapter:
+            def stop(self) -> None:
+                return None
+
+        stdout = io.StringIO()
+        with patch(
+            "bot.runtime_admin_cli._remote_adapter",
+            return_value=(_FakeAdapter(), {"thread_list_query_limit": 100}, "ws://127.0.0.1:8765"),
+        ):
+            with patch("bot.runtime_admin_cli.list_global_threads", return_value=[]) as mock_list:
+                with redirect_stdout(stdout):
+                    result = _print_thread_list(
+                        Path("/tmp/instance-data"),
+                        scope="global",
+                        cwd="",
+                        archived=True,
+                    )
+
+        self.assertEqual(result, 0)
+        self.assertTrue(mock_list.call_args.kwargs["archived"])
+        self.assertIn("已归档", stdout.getvalue())
 
     def test_binding_list_renders_aligned_columns_without_tabs(self) -> None:
         snapshot = {
@@ -1176,7 +1362,10 @@ class RuntimeAdminCliTests(unittest.TestCase):
             "thread_id": "thread-1",
             "thread_title": "demo",
             "working_dir": "/tmp/project",
+            "upstream_outcome": "success",
+            "focus_cleanup": "complete",
             "cleared_binding_ids": ["p2p:ou_user:chat-1"],
+            "cleanup_errors": [],
         }
         explorer_entry = InstanceRegistryEntry(
             instance_name="explorer",
@@ -1191,7 +1380,14 @@ class RuntimeAdminCliTests(unittest.TestCase):
         )
         calls: list[tuple[Path, str, dict[str, object]]] = []
 
-        def _fake_request(data_dir: Path, method: str, params: dict[str, object]):
+        def _fake_request(
+            data_dir: Path,
+            method: str,
+            params: dict[str, object],
+            *,
+            timeout_seconds: float = 3.0,
+        ):
+            del timeout_seconds
             calls.append((data_dir, method, params))
             if method == "thread/archive":
                 return snapshot
@@ -1229,7 +1425,10 @@ class RuntimeAdminCliTests(unittest.TestCase):
             "thread_id": "thread-1",
             "thread_title": "demo",
             "working_dir": "/tmp/project",
+            "upstream_outcome": "success",
+            "focus_cleanup": "complete",
             "cleared_binding_ids": [],
+            "cleanup_errors": [],
         }
         with patch("bot.runtime_admin_cli._request", return_value=snapshot):
             with patch(
@@ -1251,6 +1450,74 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertIn("instance: explorer", rendered)
         self.assertIn("cleanup warnings:", rendered)
         self.assertIn("explorer (control-plane): down", rendered)
+        self.assertIn("已尝试清理其他可达运行实例", rendered)
+        self.assertNotIn("已同时清理其他可达运行实例", rendered)
+
+    def test_archive_thread_rejects_unresolved_name_target(self) -> None:
+        with self.assertRaisesRegex(ValueError, "只接受已解析的 thread_id"):
+            _archive_thread(
+                Path("/tmp/default-data"),
+                {"thread_name": "demo"},
+                instance_name="default",
+            )
+
+    def test_archive_thread_treats_malformed_lifecycle_result_as_unknown(self) -> None:
+        stdout = io.StringIO()
+        with patch("bot.runtime_admin_cli._request", return_value={}):
+            with redirect_stdout(stdout):
+                result = _archive_thread(
+                    Path("/tmp/default-data"),
+                    {"thread_id": "thread-1"},
+                    instance_name="default",
+                )
+
+        self.assertEqual(result, 3)
+        self.assertIn("upstream outcome: unknown", stdout.getvalue())
+        self.assertIn("畸形 lifecycle result", stdout.getvalue())
+
+    def test_archive_thread_rejects_non_string_cleanup_items_as_unknown(self) -> None:
+        stdout = io.StringIO()
+        result_payload = {
+            "thread_id": "thread-1",
+            "thread_title": "demo",
+            "working_dir": "/tmp/project",
+            "upstream_outcome": "success",
+            "focus_cleanup": "complete",
+            "cleared_binding_ids": [1],
+            "cleanup_errors": [],
+        }
+        with patch("bot.runtime_admin_cli._request", return_value=result_payload):
+            with redirect_stdout(stdout):
+                result = _archive_thread(
+                    Path("/tmp/default-data"),
+                    {"thread_id": "thread-1"},
+                    instance_name="default",
+                )
+
+        self.assertEqual(result, 3)
+        self.assertIn("upstream outcome: unknown", stdout.getvalue())
+
+    def test_archive_thread_rejects_invalid_outcome_cleanup_combination(self) -> None:
+        stdout = io.StringIO()
+        result_payload = {
+            "thread_id": "thread-1",
+            "thread_title": "demo",
+            "working_dir": "/tmp/project",
+            "upstream_outcome": "success",
+            "focus_cleanup": "skipped",
+            "cleared_binding_ids": [],
+            "cleanup_errors": [],
+        }
+        with patch("bot.runtime_admin_cli._request", return_value=result_payload):
+            with redirect_stdout(stdout):
+                result = _archive_thread(
+                    Path("/tmp/default-data"),
+                    {"thread_id": "thread-1"},
+                    instance_name="default",
+                )
+
+        self.assertEqual(result, 3)
+        self.assertIn("focus_cleanup", stdout.getvalue())
 
     def test_cleanup_archived_thread_bindings_clears_stopped_known_instance_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1553,6 +1820,44 @@ class RuntimeAdminCliTests(unittest.TestCase):
             self.assertEqual(store.load(matched), None)
             self.assertIsNotNone(store.load(retained))
 
+    def test_clear_archived_thread_bindings_from_store_keeps_marker_when_lease_release_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = ChatBindingStore(data_dir)
+            binding = ("ou_user", "chat-1")
+            store.save(
+                binding,
+                {
+                    "working_dir": "/tmp/project",
+                    "current_thread_id": "thread-1",
+                    "current_thread_title": "demo",
+                    "feishu_runtime_state": "detached",
+                    "approval_policy": "never",
+                    "permissions_profile_id": ":danger-full-access",
+                    "model": "",
+                    "reasoning_effort": "",
+                },
+            )
+
+            with patch(
+                "bot.runtime_admin_cli._release_offline_binding_interaction_lease",
+                side_effect=OSError("lease cleanup failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "lease cleanup failed"):
+                    _clear_archived_thread_bindings_from_store(data_dir, "thread-1")
+
+            self.assertIsNotNone(store.load(binding))
+
+    def test_offline_binding_cleanup_refuses_running_service_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            service_lease = ServiceInstanceLease(data_dir)
+            service_lease.acquire()
+            self.addCleanup(service_lease.release)
+
+            with self.assertRaises(ServiceInstanceMaintenanceLeaseError):
+                _clear_archived_thread_bindings_from_store(data_dir, "thread-1")
+
     def test_clear_stale_bindings_from_store_only_clears_missing_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
@@ -1594,6 +1899,37 @@ class RuntimeAdminCliTests(unittest.TestCase):
             self.assertEqual(store.load(stale), None)
             self.assertIsNotNone(store.load(retained))
             self.assertIsNotNone(store.load(unknown))
+
+    def test_clear_stale_bindings_from_store_keeps_marker_when_lease_release_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            store = ChatBindingStore(data_dir)
+            binding = ("ou_user", "chat-stale")
+            store.save(
+                binding,
+                {
+                    "working_dir": "/tmp/project",
+                    "current_thread_id": "thread-stale",
+                    "current_thread_title": "demo",
+                    "feishu_runtime_state": "detached",
+                    "approval_policy": "never",
+                    "permissions_profile_id": ":danger-full-access",
+                    "model": "",
+                    "reasoning_effort": "",
+                },
+            )
+
+            with patch(
+                "bot.runtime_admin_cli._release_offline_binding_interaction_lease",
+                side_effect=OSError("lease cleanup failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "lease cleanup failed"):
+                    _clear_stale_bindings_from_store(
+                        data_dir,
+                        lambda _thread_id: ("stale", "not found"),
+                    )
+
+            self.assertIsNotNone(store.load(binding))
 
     def test_clear_stale_bindings_from_store_dry_run_does_not_clear(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1757,7 +2093,14 @@ class RuntimeAdminCliTests(unittest.TestCase):
         target_a = CliInstanceTarget(instance_name="explorer", data_dir=Path("/tmp/explorer-data"))
         target_b = CliInstanceTarget(instance_name="default", data_dir=Path("/tmp/default-data"))
 
-        def _fake_request(data_dir: Path, method: str, params: dict[str, str]):
+        def _fake_request(
+            data_dir: Path,
+            method: str,
+            params: dict[str, str],
+            *,
+            timeout_seconds: float = 3.0,
+        ):
+            del timeout_seconds
             self.assertEqual(method, "thread/archive")
             if params["thread_id"] == "thread-2":
                 raise ServiceControlError("busy")
@@ -1765,7 +2108,10 @@ class RuntimeAdminCliTests(unittest.TestCase):
                 "thread_id": params["thread_id"],
                 "thread_title": "demo",
                 "working_dir": str(data_dir),
+                "upstream_outcome": "success",
+                "focus_cleanup": "complete",
                 "cleared_binding_ids": ["p2p:ou_user:chat-1"],
+                "cleanup_errors": [],
             }
 
         with patch("bot.runtime_admin_cli._lease_owner_instance", side_effect=["explorer", "default"]):
@@ -1789,6 +2135,204 @@ class RuntimeAdminCliTests(unittest.TestCase):
         self.assertIn("status: failed", rendered)
         self.assertIn("summary: archived=1 failed=1", rendered)
 
+    def test_archive_threads_stops_immediately_on_unknown_outcome(self) -> None:
+        stdout = io.StringIO()
+        target = CliInstanceTarget(instance_name="default", data_dir=Path("/tmp/default-data"))
+
+        with patch("bot.runtime_admin_cli._lease_owner_instance", return_value="default"):
+            with patch("bot.runtime_admin_cli._resolve_target_instance", return_value=target):
+                with patch(
+                    "bot.runtime_admin_cli._request",
+                    side_effect=ServiceControlOutcomeUnknownError("response lost"),
+                ) as mock_request:
+                    with redirect_stdout(stdout):
+                        result = _archive_threads(["thread-1", "thread-2"])
+
+        self.assertEqual(result, 3)
+        self.assertEqual(mock_request.call_count, 1)
+        self.assertIn("status: unknown", stdout.getvalue())
+        self.assertIn("batch 已停止", stdout.getvalue())
+
+    def test_unarchive_thread_success_does_not_create_binding(self) -> None:
+        stdout = io.StringIO()
+        result_payload = {
+            "thread_id": "thread-1",
+            "thread_title": "demo",
+            "working_dir": "/tmp/project",
+            "upstream_outcome": "success",
+            "focus_cleanup": "skipped",
+            "cleared_binding_ids": [],
+            "cleanup_errors": [],
+        }
+        with patch("bot.runtime_admin_cli._validate_unarchive_binding_preflight") as mock_preflight:
+            with patch("bot.runtime_admin_cli._request", return_value=result_payload) as mock_request:
+                with redirect_stdout(stdout):
+                    result = _unarchive_thread(
+                        Path("/tmp/default-data"),
+                        "thread-1",
+                        instance_name="default",
+                    )
+
+        self.assertEqual(result, 0)
+        mock_preflight.assert_called_once_with("thread-1")
+        self.assertEqual(mock_request.call_args.args[:3], (
+            Path("/tmp/default-data"),
+            "thread/unarchive",
+            {"thread_id": "thread-1"},
+        ))
+        rendered = stdout.getvalue()
+        self.assertIn("恢复为未归档状态并回到常规列表", rendered)
+        self.assertIn("当前仍未加载，也未创建 binding", rendered)
+        self.assertIn("focus resume thread-1", rendered)
+        self.assertIn("/resume thread-1", rendered)
+
+    def test_unarchive_threads_runs_each_target_and_reports_summary(self) -> None:
+        stdout = io.StringIO()
+        running_entry = InstanceRegistryEntry(
+            instance_name="default",
+            owner_pid=1234,
+            service_token="token-default",
+            control_endpoint="tcp://127.0.0.1:9000",
+            app_server_url="ws://127.0.0.1:8765",
+            config_dir="/tmp/config-default",
+            data_dir="/tmp/data-default",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        target = CliInstanceTarget(
+            instance_name="default",
+            data_dir=Path("/tmp/data-default"),
+            running_entry=running_entry,
+        )
+
+        with patch("bot.runtime_admin_cli._resolve_target_instance", return_value=target):
+            with patch("bot.runtime_admin_cli._unarchive_thread", return_value=0) as mock_unarchive:
+                with redirect_stdout(stdout):
+                    result = _unarchive_threads(["thread-1", "thread-2"])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(mock_unarchive.call_count, 2)
+        self.assertEqual(
+            [item.args[1] for item in mock_unarchive.call_args_list],
+            ["thread-1", "thread-2"],
+        )
+        self.assertIn("summary: unarchived=2 failed=0", stdout.getvalue())
+
+    def test_unarchive_threads_continues_after_failure_but_stops_on_unknown(self) -> None:
+        stdout = io.StringIO()
+        running_entry = InstanceRegistryEntry(
+            instance_name="default",
+            owner_pid=1234,
+            service_token="token-default",
+            control_endpoint="tcp://127.0.0.1:9000",
+            app_server_url="ws://127.0.0.1:8765",
+            config_dir="/tmp/config-default",
+            data_dir="/tmp/data-default",
+            started_at=1.0,
+            updated_at=1.0,
+        )
+        target = CliInstanceTarget(
+            instance_name="default",
+            data_dir=Path("/tmp/data-default"),
+            running_entry=running_entry,
+        )
+
+        with patch("bot.runtime_admin_cli._resolve_target_instance", return_value=target):
+            with patch(
+                "bot.runtime_admin_cli._unarchive_thread",
+                side_effect=[ValueError("blocked"), 0, 3, 0],
+            ) as mock_unarchive:
+                with redirect_stdout(stdout):
+                    result = _unarchive_threads(
+                        ["thread-1", "thread-2", "thread-3", "thread-4"]
+                    )
+
+        self.assertEqual(result, 3)
+        self.assertEqual(mock_unarchive.call_count, 3)
+        rendered = stdout.getvalue()
+        self.assertIn("reason: blocked", rendered)
+        self.assertIn("summary: unarchived=1 failed=1 unknown=1", rendered)
+        self.assertIn("batch 已停止", rendered)
+
+    def test_unarchive_thread_treats_malformed_lifecycle_result_as_unknown(self) -> None:
+        stdout = io.StringIO()
+        with patch("bot.runtime_admin_cli._validate_unarchive_binding_preflight"):
+            with patch("bot.runtime_admin_cli._request", return_value={}):
+                with redirect_stdout(stdout):
+                    result = _unarchive_thread(
+                        Path("/tmp/default-data"),
+                        "thread-1",
+                        instance_name="default",
+                    )
+
+        self.assertEqual(result, 3)
+        self.assertIn("upstream outcome: unknown", stdout.getvalue())
+        self.assertIn("畸形 lifecycle result", stdout.getvalue())
+
+    def test_delete_thread_success_uses_root_only_contract(self) -> None:
+        stdout = io.StringIO()
+        result_payload = {
+            "thread_id": "thread-1",
+            "thread_title": "demo",
+            "working_dir": "/tmp/project",
+            "upstream_outcome": "success",
+            "focus_cleanup": "complete",
+            "cleared_binding_ids": [],
+            "cleanup_errors": [],
+        }
+        with patch("bot.runtime_admin_cli._validate_delete_binding_preflight") as mock_preflight:
+            with patch("bot.runtime_admin_cli._request", return_value=result_payload):
+                with patch(
+                    "bot.runtime_admin_cli._cleanup_archived_thread_bindings_in_other_instances",
+                    return_value=([], []),
+                ):
+                    with redirect_stdout(stdout):
+                        result = _delete_thread(
+                            Path("/tmp/default-data"),
+                            "thread-1",
+                            instance_name="default",
+                            force=True,
+                        )
+
+        self.assertEqual(result, 0)
+        mock_preflight.assert_called_once_with("thread-1")
+        self.assertIn("可能同时删除 spawned descendants", stdout.getvalue())
+        self.assertIn("binding clear-stale --dry-run", stdout.getvalue())
+
+    def test_delete_thread_treats_malformed_lifecycle_result_as_unknown(self) -> None:
+        stdout = io.StringIO()
+        with patch("bot.runtime_admin_cli._validate_delete_binding_preflight"):
+            with patch("bot.runtime_admin_cli._request", return_value={}):
+                with patch(
+                    "bot.runtime_admin_cli._cleanup_archived_thread_bindings_in_other_instances"
+                ) as mock_cleanup:
+                    with redirect_stdout(stdout):
+                        result = _delete_thread(
+                            Path("/tmp/default-data"),
+                            "thread-1",
+                            instance_name="default",
+                            force=True,
+                        )
+
+        self.assertEqual(result, 3)
+        mock_cleanup.assert_not_called()
+        self.assertIn("upstream outcome: unknown", stdout.getvalue())
+        self.assertIn("畸形 lifecycle result", stdout.getvalue())
+
+    def test_delete_confirmation_requires_force_when_noninteractive(self) -> None:
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            with self.assertRaisesRegex(ValueError, "必须显式提供 `--force`"):
+                _confirm_delete_thread("thread-1", force=False)
+
+    def test_delete_force_still_prints_focus_safety_scope(self) -> None:
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            confirmed = _confirm_delete_thread("thread-1", force=True)
+
+        self.assertTrue(confirmed)
+        self.assertIn("仅协调本机已知 Focus/fcodex runtime", stdout.getvalue())
+
     def test_archive_threads_continues_after_target_resolution_failure(self) -> None:
         stdout = io.StringIO()
         target_b = CliInstanceTarget(instance_name="default", data_dir=Path("/tmp/default-data"))
@@ -1804,7 +2348,10 @@ class RuntimeAdminCliTests(unittest.TestCase):
                         "thread_id": "thread-2",
                         "thread_title": "demo",
                         "working_dir": "/tmp/default-data",
+                        "upstream_outcome": "success",
+                        "focus_cleanup": "complete",
                         "cleared_binding_ids": [],
+                        "cleanup_errors": [],
                     },
                 ):
                     with patch(
@@ -1826,21 +2373,86 @@ class RuntimeAdminCliTests(unittest.TestCase):
         args = parser.parse_args(["thread", "archive", "--thread-name", "demo"])
         bootstrap = CliInstanceTarget(instance_name="default", data_dir=Path("/tmp/default-data"))
         owner_target = CliInstanceTarget(instance_name="explorer", data_dir=Path("/tmp/explorer-data"))
-        snapshot = {
-            "thread_id": "thread-1",
-            "live_runtime_owner": {
-                "instance_name": "explorer",
-                "label": "explorer",
-            },
-        }
-
         with patch("bot.runtime_admin_cli._resolve_target_instance", side_effect=[bootstrap, owner_target]):
-            with patch("bot.runtime_admin_cli._request", return_value=snapshot):
-                target, target_params = _resolve_thread_archive_target(args)
+            with patch("bot.runtime_admin_cli._resolve_thread_archive_name", return_value="thread-1"):
+                with patch("bot.runtime_admin_cli._lease_owner_instance", return_value="explorer"):
+                    target, target_params = _resolve_thread_archive_target(args)
 
         self.assertEqual(target.instance_name, "explorer")
         self.assertEqual(target.data_dir, Path("/tmp/explorer-data"))
         self.assertEqual(target_params, {"thread_id": "thread-1"})
+
+    def test_resolve_thread_archive_target_resolves_name_before_explicit_instance_mutation(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["--instance", "explorer", "thread", "archive", "--thread-name", "demo"]
+        )
+        target = CliInstanceTarget(instance_name="explorer", data_dir=Path("/tmp/explorer-data"))
+
+        with patch("bot.runtime_admin_cli._resolve_target_instance", return_value=target):
+            with patch(
+                "bot.runtime_admin_cli._resolve_thread_archive_name",
+                return_value="thread-1",
+            ) as mock_resolve_name:
+                resolved_target, target_params = _resolve_thread_archive_target(args)
+
+        self.assertIs(resolved_target, target)
+        self.assertEqual(target_params, {"thread_id": "thread-1"})
+        mock_resolve_name.assert_called_once_with(target, "demo")
+
+    def test_resolve_thread_archive_name_reports_read_only_failure_as_safe_to_retry(self) -> None:
+        target = CliInstanceTarget(instance_name="explorer", data_dir=Path("/tmp/explorer-data"))
+
+        class FailingAdapter:
+            def list_threads(self, **_kwargs):
+                raise TimeoutError("page timed out")
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        adapter = FailingAdapter()
+        adapter.stopped = False
+        with patch(
+            "bot.runtime_admin_cli._remote_adapter",
+            return_value=(adapter, {"thread_list_query_limit": 100}, "ws://127.0.0.1:8765"),
+        ):
+            with self.assertRaisesRegex(ValueError, "mutation 尚未发送，可安全重试"):
+                _resolve_thread_archive_name(target, "demo")
+
+        self.assertTrue(adapter.stopped)
+
+    def test_resolve_thread_archive_name_uses_read_only_paginated_resolver(self) -> None:
+        target = CliInstanceTarget(instance_name="explorer", data_dir=Path("/tmp/explorer-data"))
+
+        class FakeAdapter:
+            def stop(self) -> None:
+                self.stopped = True
+
+        adapter = FakeAdapter()
+        adapter.stopped = False
+        summary = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        with patch(
+            "bot.runtime_admin_cli._remote_adapter",
+            return_value=(adapter, {"thread_list_query_limit": 37}, "ws://127.0.0.1:8765"),
+        ):
+            with patch(
+                "bot.runtime_admin_cli.resolve_resume_target_by_name",
+                return_value=summary,
+            ) as mock_resolve:
+                thread_id = _resolve_thread_archive_name(target, "demo")
+
+        self.assertEqual(thread_id, "thread-1")
+        self.assertTrue(adapter.stopped)
+        mock_resolve.assert_called_once_with(adapter, name="demo", limit=37)
 
     def test_resolve_thread_archive_targets_prefers_live_runtime_owner_for_each_thread_id(self) -> None:
         parser = _build_parser()

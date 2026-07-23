@@ -14,6 +14,12 @@ class _PortsStub:
         self.resolve_calls: list[str] = []
         self.rename_calls: list[tuple[str, str]] = []
         self.patches: list[tuple[str, str]] = []
+        self.archive_result: dict[str, object] = {
+            "thread_id": "thread-1",
+            "cleared_binding_ids": ["p2p:ou_user:chat-a"],
+            "upstream_outcome": "success",
+            "focus_cleanup": "complete",
+        }
         self.thread = ThreadSummary(
             thread_id="thread-1",
             cwd="/tmp/project",
@@ -107,7 +113,7 @@ class _PortsStub:
         summary: ThreadSummary | None = None,
     ) -> dict[str, object]:
         self.archive_calls.append((thread_id, summary))
-        return {"thread_id": thread_id, "cleared_binding_ids": ["p2p:ou_user:chat-a"]}
+        return dict(self.archive_result)
 
     def rename_thread(self, thread_id: str, name: str) -> None:
         self.rename_calls.append((thread_id, name))
@@ -251,6 +257,71 @@ class CodexThreadsUiDomainTests(unittest.TestCase):
         self.assertIsNotNone(result.toast)
         self.assertEqual(result.toast.content, "已归档线程：thread-1…")
         self.assertEqual(result.toast.type, "success")
+
+    def test_archive_command_reports_unknown_without_claiming_success(self) -> None:
+        ports_stub = _PortsStub()
+        ports_stub.archive_result = {
+            "thread_id": "thread-1",
+            "upstream_outcome": "unknown",
+            "outcome_detail": "request timed out",
+            "focus_cleanup": "skipped",
+        }
+        domain = CodexThreadsUiDomain(
+            ports=ThreadsUiPorts(
+                get_runtime_view=ports_stub._get_runtime_view,
+                is_group_chat=ports_stub._is_group_chat,
+                is_group_admin_actor=ports_stub._is_group_admin_actor,
+                rename_bound_thread_title=ports_stub._rename_bound_thread_title,
+                reply_text=ports_stub._reply_text,
+                resolve_resume_target=ports_stub._resolve_resume_target,
+                list_visible_current_dir_threads=ports_stub._list_visible_current_dir_threads,
+                read_thread_summary_authoritatively=ports_stub._read_thread_summary_authoritatively,
+                get_thread_goal=ports_stub._get_thread_goal,
+                archive_thread_for_control=ports_stub._archive_thread_for_control,
+                rename_thread=ports_stub.rename_thread,
+                patch_message=ports_stub.patch_message,
+                is_thread_not_loaded_error=ports_stub.is_thread_not_loaded_error,
+                threads_initial_limit=5,
+            ),
+            runtime_ports=ThreadsUiRuntimePorts(
+                submit_to_runtime=lambda fn, *args, **kwargs: None,
+                resume_thread_on_runtime=lambda *args, **kwargs: None,
+            ),
+        )
+
+        result = domain.handle_archive_command("ou_user", "chat-a", "thread-1")
+
+        self.assertIn("结果未知", result.text)
+        self.assertIn("不要直接重试", result.text)
+
+    def test_archive_command_reports_focus_safety_scope_after_success(self) -> None:
+        ports_stub = _PortsStub()
+        domain = CodexThreadsUiDomain(
+            ports=ThreadsUiPorts(
+                get_runtime_view=ports_stub._get_runtime_view,
+                is_group_chat=ports_stub._is_group_chat,
+                is_group_admin_actor=ports_stub._is_group_admin_actor,
+                rename_bound_thread_title=ports_stub._rename_bound_thread_title,
+                reply_text=ports_stub._reply_text,
+                resolve_resume_target=ports_stub._resolve_resume_target,
+                list_visible_current_dir_threads=ports_stub._list_visible_current_dir_threads,
+                read_thread_summary_authoritatively=ports_stub._read_thread_summary_authoritatively,
+                get_thread_goal=ports_stub._get_thread_goal,
+                archive_thread_for_control=ports_stub._archive_thread_for_control,
+                rename_thread=ports_stub.rename_thread,
+                patch_message=ports_stub.patch_message,
+                is_thread_not_loaded_error=ports_stub.is_thread_not_loaded_error,
+                threads_initial_limit=5,
+            ),
+            runtime_ports=ThreadsUiRuntimePorts(
+                submit_to_runtime=lambda fn, *args, **kwargs: None,
+                resume_thread_on_runtime=lambda *args, **kwargs: None,
+            ),
+        )
+
+        result = domain.handle_archive_command("ou_user", "chat-a", "thread-1")
+
+        self.assertIn("只协调了本机已知 Focus/fcodex runtime", result.text)
 
     def test_handle_resume_thread_action_ignores_goals_disabled_and_still_submits_resume(self) -> None:
         ports_stub = _PortsStub()

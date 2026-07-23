@@ -269,6 +269,26 @@ The repository deliberately does not add a freshness gate for delayed receive
 events in this contract. A late receive event is still admitted normally unless
 it is cancelled by a received recall event before it dequeues.
 
+### 5.7 Cancel Dispatch Failures
+
+`/cancel` and the execution-card cancel action must distinguish a request that
+was never sent from one that may already have reached app-server:
+
+- if connection setup or request preparation fails before `turn/interrupt` is
+  sent, the command must report that cancellation was not sent, retain the
+  pending cancel intent, mark the runtime channel degraded, and ask the user to
+  retry `/cancel`
+- if the request was sent but its response is lost through timeout or transport
+  disconnect, the command may report that cancellation was requested but its
+  result is currently unknown; normal runtime reconciliation remains responsible
+  for observing the terminal state
+- a pre-send failure must not be rendered as "cancel request sent" and must not
+  clear the pending cancel intent
+- a pending cancel intent alone must not set the execution's `cancelled` state
+  or render a normally completed turn as stopped; `cancelled` is set only after
+  the interrupt request is successfully submitted or upstream reports an
+  interrupted turn
+
 ## 6. Relationship With `focus` / `fcodex`
 
 `focus` / `fcodex` and Feishu still share the same backend contract:

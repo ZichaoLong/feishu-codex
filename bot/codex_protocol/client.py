@@ -48,11 +48,38 @@ class CodexRpcError(RuntimeError):
         super().__init__(message)
 
 
+class CodexRpcTransportError(CodexRpcError):
+    """Codex request outcome is unknown because the transport was lost."""
+
+
+class CodexRpcProtocolError(RuntimeError):
+    """Codex returned a response that does not satisfy the expected contract."""
+
+    def __init__(self, method: str, message: str):
+        self.method = method
+        super().__init__(message)
+
+
+class CodexRpcPreSendError(RuntimeError):
+    """The target Codex request was not sent because startup failed first."""
+
+    def __init__(self, method: str, cause: Exception):
+        self.method = method
+        self.cause = cause
+        super().__init__(f"Codex request was not sent because startup failed: {cause}")
+
+
+class _CodexWebsocketNotConnectedError(RuntimeError):
+    pass
+
+
 @dataclass
 class _PendingResponse:
     event: threading.Event
     result: Any = None
     error: dict[str, Any] | None = None
+    protocol_error: str | None = None
+    transport_error: bool = False
 
 
 class CodexRpcClient:
@@ -145,14 +172,22 @@ class CodexRpcClient:
             except subprocess.TimeoutExpired:
                 process.kill()
         self._clear_managed_runtime_state()
-        self._fail_pending({"code": -32000, "message": "Codex app-server closed"})
+        self._fail_pending(
+            {"code": -32000, "message": "Codex app-server closed"},
+            transport_error=True,
+        )
 
     def current_app_server_url(self) -> str:
         return self._app_server_url or self._configured_app_server_url
 
     def request(self, method: str, params: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
         """发送 JSON-RPC 请求并等待响应。"""
-        self.start()
+        try:
+            self.start()
+        except CodexRpcPreSendError:
+            raise
+        except Exception as exc:
+            raise CodexRpcPreSendError(method, exc) from exc
         request_id, pending = self._register_pending()
         payload = {
             "jsonrpc": "2.0",
@@ -160,17 +195,41 @@ class CodexRpcClient:
             "method": method,
             "params": params or {},
         }
+        try:
+            serialized_payload = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            with self._lock:
+                self._pending.pop(request_id, None)
+            raise
         if method in ("thread/start", "turn/start", "thread/resume"):
-            logger.debug("rpc request: %s params=%s", method, json.dumps(params or {}, ensure_ascii=False, default=str))
-        self._send_json(payload)
+            logger.debug("rpc request: %s payload=%s", method, serialized_payload)
+        try:
+            self._send_serialized_json(serialized_payload)
+        except _CodexWebsocketNotConnectedError as exc:
+            with self._lock:
+                self._pending.pop(request_id, None)
+            raise CodexRpcPreSendError(method, exc) from exc
+        except Exception as exc:
+            with self._lock:
+                self._pending.pop(request_id, None)
+            raise CodexRpcTransportError(
+                method,
+                {
+                    "code": -32000,
+                    "message": f"Codex websocket send failed: {exc}",
+                },
+            ) from exc
 
         wait_seconds = timeout or self._request_timeout_seconds
         if not pending.event.wait(wait_seconds):
             with self._lock:
                 self._pending.pop(request_id, None)
             raise TimeoutError(f"Codex request timed out: {method}")
+        if pending.protocol_error is not None:
+            raise CodexRpcProtocolError(method, pending.protocol_error)
         if pending.error is not None:
-            raise CodexRpcError(method, pending.error)
+            error_type = CodexRpcTransportError if pending.transport_error else CodexRpcError
+            raise error_type(method, pending.error)
         if method in ("thread/start", "turn/start", "thread/resume"):
             logger.debug("rpc result: %s keys=%s", method, sorted((pending.result or {}).keys()))
         return pending.result
@@ -182,7 +241,7 @@ class CodexRpcClient:
             payload["error"] = error
         else:
             payload["result"] = result or {}
-        self._send_json(payload)
+        self._send_serialized_json(json.dumps(payload, ensure_ascii=False))
 
     def _start_locked(self) -> None:
         self._closing = False
@@ -347,11 +406,11 @@ class CodexRpcClient:
             self._pending[request_id] = pending
             return request_id, pending
 
-    def _send_json(self, payload: dict[str, Any]) -> None:
+    def _send_serialized_json(self, payload: str) -> None:
         with self._send_lock:
             if self._ws is None:
-                raise RuntimeError("Codex websocket is not connected")
-            self._ws.send(json.dumps(payload, ensure_ascii=False))
+                raise _CodexWebsocketNotConnectedError("Codex websocket is not connected")
+            self._ws.send(payload)
 
     def _reader_loop(self) -> None:
         disconnected = False
@@ -380,10 +439,18 @@ class CodexRpcClient:
                 payload = json.loads(message)
             except json.JSONDecodeError:
                 logger.warning("忽略无法解析的 Codex 消息: %r", message[:200])
+                self._fail_pending_protocol("Codex websocket returned invalid JSON")
+                continue
+            if not isinstance(payload, dict):
+                logger.warning("忽略非对象 Codex 消息: %r", payload)
+                self._fail_pending_protocol("Codex websocket returned a non-object JSON-RPC envelope")
                 continue
             self._dispatch_payload(payload)
 
-        self._fail_pending({"code": -32000, "message": "Codex websocket disconnected"})
+        self._fail_pending(
+            {"code": -32000, "message": "Codex websocket disconnected"},
+            transport_error=True,
+        )
         with self._lock:
             should_notify_disconnect = disconnected and not self._closing and self._ws is ws
             self._ws = None
@@ -392,6 +459,9 @@ class CodexRpcClient:
 
     def _dispatch_payload(self, payload: dict[str, Any]) -> None:
         if "method" in payload and "id" in payload:
+            if not isinstance(payload.get("method"), str):
+                self._fail_pending_protocol("Codex server request method is not a string")
+                return
             threading.Thread(
                 target=self._safe_on_request,
                 args=(payload["id"], payload["method"], payload.get("params") or {}),
@@ -399,29 +469,58 @@ class CodexRpcClient:
             ).start()
             return
         if "method" in payload:
+            if not isinstance(payload.get("method"), str):
+                self._fail_pending_protocol("Codex notification method is not a string")
+                return
             self._safe_on_notification(payload["method"], payload.get("params") or {})
             return
         if "id" in payload:
             self._resolve_response(payload)
+            return
+        self._fail_pending_protocol("Codex JSON-RPC envelope has neither method nor id")
 
     def _resolve_response(self, payload: dict[str, Any]) -> None:
         response_id = payload.get("id")
+        if isinstance(response_id, bool) or not isinstance(response_id, (int, str)):
+            self._fail_pending_protocol("Codex JSON-RPC response has an invalid id")
+            return
         with self._lock:
             pending = self._pending.pop(response_id, None)
         if pending is None:
             return
-        if "error" in payload:
-            pending.error = payload["error"]
+        has_error = "error" in payload
+        has_result = "result" in payload
+        if has_error == has_result:
+            pending.protocol_error = "Codex JSON-RPC response must contain exactly one of result or error"
+        elif has_error:
+            error = payload.get("error")
+            if not isinstance(error, dict):
+                pending.protocol_error = "Codex JSON-RPC error must be an object"
+            elif isinstance(error.get("code"), bool) or not isinstance(error.get("code"), int):
+                pending.protocol_error = "Codex JSON-RPC error code must be an integer"
+            elif not isinstance(error.get("message"), str):
+                pending.protocol_error = "Codex JSON-RPC error message must be a string"
+            else:
+                pending.error = error
         else:
             pending.result = payload.get("result")
         pending.event.set()
 
-    def _fail_pending(self, error: dict[str, Any]) -> None:
+    def _fail_pending(self, error: dict[str, Any], *, transport_error: bool = False) -> None:
         with self._lock:
             pending_items = list(self._pending.values())
             self._pending.clear()
         for pending in pending_items:
             pending.error = error
+            pending.transport_error = bool(transport_error)
+            pending.event.set()
+
+    def _fail_pending_protocol(self, message: str) -> None:
+        with self._lock:
+            pending_items = list(self._pending.values())
+            self._pending.clear()
+        for pending in pending_items:
+            pending.protocol_error = str(message or "Codex JSON-RPC protocol error")
             pending.event.set()
 
     def _safe_on_notification(self, method: str, params: dict[str, Any]) -> None:

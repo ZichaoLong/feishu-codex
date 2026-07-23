@@ -628,7 +628,18 @@ def _complete_focusctl(context: CompletionContext) -> list[str]:
         if positional_index == 1:
             return _complete_candidates(
                 current,
-                ["list", "status", "bindings", "goal", "archive", "clear-archived-bindings", "attach", "detach"],
+                [
+                    "list",
+                    "status",
+                    "bindings",
+                    "goal",
+                    "archive",
+                    "unarchive",
+                    "delete",
+                    "clear-archived-bindings",
+                    "attach",
+                    "detach",
+                ],
             )
         if len(positionals) < 2:
             return []
@@ -636,7 +647,7 @@ def _complete_focusctl(context: CompletionContext) -> list[str]:
         goal_subaction = positionals[2] if len(positionals) >= 3 else ""
         if current.startswith("-"):
             if action == "list":
-                return _complete_candidates(current, ["--scope", "--cwd", "--help", "-h"])
+                return _complete_candidates(current, ["--scope", "--cwd", "--archived", "--help", "-h"])
             if action == "goal":
                 if goal_subaction == "set":
                     return _complete_candidates(
@@ -655,6 +666,10 @@ def _complete_focusctl(context: CompletionContext) -> list[str]:
                 return _complete_candidates(current, ["--thread-id", "--thread-name", "--help", "-h"])
             if action in {"status", "bindings", "archive", "attach", "detach"}:
                 return _complete_candidates(current, ["--thread-id", "--thread-name", "--help", "-h"])
+            if action == "unarchive":
+                return _complete_candidates(current, ["--thread-id", "--help", "-h"])
+            if action == "delete":
+                return _complete_candidates(current, ["--thread-id", "--force", "--help", "-h"])
             if action == "clear-archived-bindings":
                 return _complete_candidates(current, ["--thread-id", "--all", "--dry-run", "--help", "-h"])
         if action == "goal" and positional_index == 2:

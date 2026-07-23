@@ -20,6 +20,9 @@ PROMPT_DENIED_BY_INTERACTION_OWNER = "prompt_denied_by_interaction_owner"
 PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER = "prompt_denied_by_live_runtime_owner"
 PROMPT_DENIED_BINDING_NOT_FOUND = "prompt_denied_binding_not_found"
 
+LIFECYCLE_BLOCKED_BY_LOADED_THREAD = "lifecycle_blocked_by_loaded_thread"
+LIFECYCLE_BLOCKED_BY_RUNTIME_UNVERIFIED = "lifecycle_blocked_by_runtime_unverified"
+
 BACKEND_RESET_UNSUPPORTED_REMOTE = "backend_reset_unsupported_remote"
 BACKEND_RESET_FORCE_ONLY_BY_RUNTIME_UNVERIFIED = "backend_reset_force_only_by_runtime_unverified"
 BACKEND_RESET_FORCE_ONLY_BY_RUNNING_BINDING = "backend_reset_force_only_by_running_binding"

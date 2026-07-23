@@ -113,6 +113,7 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
             read_thread=_read_thread,
             is_thread_not_found_error=lambda exc: isinstance(exc, _ThreadNotFound),
             is_turn_thread_not_found_error=lambda exc: False,
+            is_pre_send_error=lambda exc: False,
             is_transport_disconnect=lambda exc: isinstance(exc, _TransportDisconnect),
             is_request_timeout_error=lambda exc: isinstance(exc, TimeoutError)
             and str(exc).startswith("Codex request timed out:"),
@@ -204,6 +205,47 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
         self.assertEqual(state["runtime_channel_state"], "live")
         self.assertEqual(terminal_results, [])
         self.assertEqual(delivered_images, [])
+
+    def test_reconcile_execution_snapshot_restores_interrupted_status(self) -> None:
+        state = self._make_state()
+        controller, snapshots, _, _, finalized, _, _ = self._make_controller(state)
+        state["running"] = True
+        state["current_thread_id"] = "thread-1"
+        state["current_message_id"] = "card-1"
+        state["current_turn_id"] = "turn-1"
+        snapshots.append(
+            ThreadSnapshot(
+                summary=ThreadSummary(
+                    thread_id="thread-1",
+                    cwd="/tmp/project",
+                    name="demo",
+                    preview="",
+                    created_at=0,
+                    updated_at=0,
+                    source="cli",
+                    status="idle",
+                ),
+                turns=[
+                    {
+                        "id": "turn-1",
+                        "status": "interrupted",
+                        "items": [{"type": "agentMessage", "text": "partial reply"}],
+                    }
+                ],
+            )
+        )
+
+        finalized_now = controller.reconcile_execution_snapshot(
+            "ou_user",
+            "c1",
+            thread_id="thread-1",
+            turn_id="turn-1",
+        )
+
+        self.assertTrue(finalized_now)
+        self.assertEqual(finalized, [("ou_user", "c1")])
+        self.assertTrue(state["cancelled"])
+        self.assertFalse(state["pending_cancel"])
 
     def test_reconcile_execution_snapshot_timeout_marks_runtime_degraded(self) -> None:
         state = self._make_state()
@@ -526,6 +568,235 @@ class ExecutionRecoveryControllerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(delivered_images, [])
+
+    def test_terminal_reconcile_uses_interrupted_snapshot_for_card_status(self) -> None:
+        state = self._make_state()
+        controller, snapshots, patches, _, _, _, _ = self._make_controller(state)
+        state["current_message_id"] = "card-1"
+        state["last_execution_message_id"] = "card-1"
+        state["execution_transcript"].set_reply_text("阶段总结\n\n最终答案")
+        snapshots.append(
+            ThreadSnapshot(
+                summary=ThreadSummary(
+                    thread_id="thread-1",
+                    cwd="/tmp/project",
+                    name="demo",
+                    preview="",
+                    created_at=0,
+                    updated_at=0,
+                    source="cli",
+                    status="idle",
+                ),
+                turns=[
+                    {
+                        "id": "turn-1",
+                        "status": "interrupted",
+                        "items": [
+                            {"type": "agentMessage", "text": "阶段总结"},
+                            {"type": "agentMessage", "text": "最终答案"},
+                        ],
+                    }
+                ],
+            )
+        )
+
+        controller.run_terminal_execution_reconcile(
+            TerminalReconcileTarget(
+                sender_id="ou_user",
+                chat_id="c1",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                card_message_id="card-1",
+                prompt_message_id="msg-1",
+                prompt_reply_in_thread=True,
+                transcript=state["execution_transcript"].clone(),
+                cancelled=False,
+                elapsed=5,
+            )
+        )
+
+        self.assertEqual(len(patches), 1)
+        self.assertTrue(patches[0]["cancelled"])
+
+    def test_terminal_reconcile_refreshes_interrupted_status_without_reply_text(self) -> None:
+        state = self._make_state()
+        controller, snapshots, patches, _, _, terminal_results, delivered_images = (
+            self._make_controller(state)
+        )
+        state["current_message_id"] = "card-1"
+        state["last_execution_message_id"] = "card-1"
+        snapshot = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="cli",
+                status="idle",
+            ),
+            turns=[{"id": "turn-1", "status": "interrupted", "items": []}],
+        )
+        snapshots.extend([snapshot, snapshot, snapshot])
+
+        controller.run_terminal_execution_reconcile(
+            TerminalReconcileTarget(
+                sender_id="ou_user",
+                chat_id="c1",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                card_message_id="card-1",
+                prompt_message_id="msg-1",
+                prompt_reply_in_thread=True,
+                transcript=state["execution_transcript"].clone(),
+                cancelled=False,
+                elapsed=5,
+            )
+        )
+
+        self.assertEqual(
+            patches,
+            [
+                {
+                    "message_id": "card-1",
+                    "reply_text": "",
+                    "running": False,
+                    "elapsed": 5,
+                    "cancelled": True,
+                }
+            ],
+        )
+        self.assertEqual(terminal_results, [])
+        self.assertEqual(delivered_images, [])
+
+    def test_terminal_reconcile_refreshes_interrupted_status_when_retained_card_text_is_unchanged(
+        self,
+    ) -> None:
+        state = self._make_state()
+        controller, snapshots, patches, _, _, terminal_results, delivered_images = (
+            self._make_controller(state)
+        )
+        state["current_message_id"] = "card-1"
+        state["last_execution_message_id"] = "card-1"
+        state["execution_transcript"].append_process_note("过程内容")
+        state["execution_transcript"].set_reply_text("本地回复")
+        snapshots.append(
+            ThreadSnapshot(
+                summary=ThreadSummary(
+                    thread_id="thread-1",
+                    cwd="/tmp/project",
+                    name="demo",
+                    preview="",
+                    created_at=0,
+                    updated_at=0,
+                    source="cli",
+                    status="idle",
+                ),
+                turns=[{"id": "turn-1", "status": "interrupted", "items": []}],
+            )
+        )
+
+        controller.run_terminal_execution_reconcile(
+            TerminalReconcileTarget(
+                sender_id="ou_user",
+                chat_id="c1",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                card_message_id="card-1",
+                prompt_message_id="msg-1",
+                prompt_reply_in_thread=True,
+                transcript=state["execution_transcript"].clone(),
+                cancelled=False,
+                elapsed=5,
+            )
+        )
+
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(patches[0]["reply_text"], "本地回复")
+        self.assertTrue(patches[0]["cancelled"])
+        self.assertEqual(len(terminal_results), 1)
+        self.assertEqual(delivered_images, [])
+
+    def test_terminal_reconcile_refreshes_interrupted_status_when_snapshot_text_is_unchanged(
+        self,
+    ) -> None:
+        state = self._make_state()
+        controller, snapshots, patches, _, _, terminal_results, delivered_images = (
+            self._make_controller(state)
+        )
+        state["current_message_id"] = "card-1"
+        state["last_execution_message_id"] = "card-1"
+        state["execution_transcript"].set_reply_text("相同回复")
+        controller._publish_terminal_result = lambda *args, **kwargs: False
+        snapshots.append(
+            ThreadSnapshot(
+                summary=ThreadSummary(
+                    thread_id="thread-1",
+                    cwd="/tmp/project",
+                    name="demo",
+                    preview="",
+                    created_at=0,
+                    updated_at=0,
+                    source="cli",
+                    status="idle",
+                ),
+                turns=[
+                    {
+                        "id": "turn-1",
+                        "status": "interrupted",
+                        "items": [{"type": "agentMessage", "text": "相同回复"}],
+                    }
+                ],
+            )
+        )
+
+        controller.run_terminal_execution_reconcile(
+            TerminalReconcileTarget(
+                sender_id="ou_user",
+                chat_id="c1",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                card_message_id="card-1",
+                prompt_message_id="msg-1",
+                prompt_reply_in_thread=True,
+                transcript=state["execution_transcript"].clone(),
+                cancelled=False,
+                elapsed=5,
+            )
+        )
+
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(patches[0]["reply_text"], "相同回复")
+        self.assertTrue(patches[0]["cancelled"])
+        self.assertEqual(terminal_results, [])
+        self.assertEqual(delivered_images, [])
+
+    def test_snapshot_reply_does_not_apply_status_from_unmatched_turn(self) -> None:
+        snapshot = ThreadSnapshot(
+            summary=ThreadSummary(
+                thread_id="thread-1",
+                cwd="/tmp/project",
+                name="demo",
+                preview="",
+                created_at=0,
+                updated_at=0,
+                source="cli",
+                status="idle",
+            ),
+            turns=[
+                {
+                    "id": "other-turn",
+                    "status": "interrupted",
+                    "items": [{"type": "agentMessage", "text": "other reply"}],
+                }
+            ],
+        )
+
+        projection = ExecutionRecoveryController.snapshot_reply(snapshot, turn_id="missing-turn")
+
+        self.assertEqual(projection.full_reply_text, "other reply")
+        self.assertEqual(projection.turn_status, "")
 
     def test_run_terminal_execution_reconcile_sends_fallback_transcript_when_snapshot_unavailable(self) -> None:
         state = self._make_state()

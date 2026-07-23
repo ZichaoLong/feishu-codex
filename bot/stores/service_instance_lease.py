@@ -33,6 +33,61 @@ class ServiceInstanceLeaseError(RuntimeError):
     """Raised when FOCUS_DATA_DIR service ownership cannot be acquired."""
 
 
+class ServiceInstanceMaintenanceLeaseError(RuntimeError):
+    """Raised when offline maintenance cannot exclusively own FOCUS_DATA_DIR."""
+
+
+class ServiceInstanceMaintenanceLease:
+    """Exclusive offline maintenance ownership for one FOCUS_DATA_DIR.
+
+    Maintenance and the running service contend on the same file lock. Unlike
+    ``ServiceInstanceLease``, maintenance never publishes service metadata.
+    """
+
+    def __init__(self, data_dir: pathlib.Path) -> None:
+        self._data_dir = pathlib.Path(data_dir)
+        self._lock = threading.Lock()
+        self._lock_file = None
+
+    def _lease_path(self) -> pathlib.Path:
+        return self._data_dir / "service-instance.lock"
+
+    def acquire(self) -> None:
+        with self._lock:
+            if self._lock_file is not None:
+                return
+            lease_path = self._lease_path()
+            lease_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = lease_path.open("a+", encoding="utf-8")
+            try:
+                acquire_file_lock(lock_file, blocking=False)
+            except FileLockBusyError as exc:
+                lock_file.close()
+                raise ServiceInstanceMaintenanceLeaseError(
+                    "目标 FOCUS 实例正在运行或已有 maintenance 操作；不能直接修改离线状态。"
+                ) from exc
+            self._lock_file = lock_file
+
+    def release(self) -> None:
+        with self._lock:
+            lock_file = self._lock_file
+            self._lock_file = None
+        if lock_file is None:
+            return
+        try:
+            release_file_lock(lock_file)
+        finally:
+            lock_file.close()
+
+    def __enter__(self) -> "ServiceInstanceMaintenanceLease":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        self.release()
+
+
 class ServiceInstanceLease:
     def __init__(self, data_dir: pathlib.Path) -> None:
         self._data_dir = pathlib.Path(data_dir)
@@ -72,7 +127,7 @@ class ServiceInstanceLease:
                 owner_pid = metadata.owner_pid if metadata is not None else 0
                 owner_endpoint = metadata.control_endpoint if metadata is not None else normalized_control_endpoint
                 raise ServiceInstanceLeaseError(
-                    "当前 FOCUS_DATA_DIR 已有运行中的 FOCUS service 持有所有权。"
+                    "当前 FOCUS_DATA_DIR 已有运行中的 FOCUS service 或 maintenance 操作持有所有权。"
                     f" owner_pid={owner_pid or 'unknown'} control={owner_endpoint or 'unknown'}"
                 ) from exc
 

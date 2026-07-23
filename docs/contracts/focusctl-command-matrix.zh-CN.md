@@ -32,6 +32,8 @@
 - `thread archive` 支持两种目标形式：
   - 单线程：`--thread-name <name>` 或 `--thread-id <id>`
   - 批量：重复提供 `--thread-id <id>`；每个目标 thread 都独立按现有单线程 archive 语义路由、归档并清理本地 bindings
+- `thread unarchive` 只接受 ID，可重复提供 `--thread-id <id>` 批量恢复。
+- `thread delete` 只接受且只允许一个 `--thread-id <id>`。
 
 ## 3. 资源层
 
@@ -183,13 +185,15 @@ binding-local `current_thread_title`，也不会显示 thread preview。
 
 | 命令 | 作用 | 类型 | 飞书对应 |
 | --- | --- | --- | --- |
-| `focusctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>]` | 浏览 persisted thread；默认按当前目录过滤 | 只读 | 飞书 `/threads` 的目标发现面 |
+| `focusctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>] [--archived]` | 浏览 persisted thread；默认按当前目录过滤，`--archived` 改为浏览归档线程 | 只读 | 飞书 `/threads` 的目标发现面；飞书当前不提供 archived inventory |
 | `focusctl [--instance <name>] thread status (--thread-id <id> \| --thread-name <name>)` | 查看某个 thread 的 backend 状态、live runtime owner / holders、bound / attached / detached bindings | 只读 | 无一条完全等价命令 |
 | `focusctl [--instance <name>] thread bindings (--thread-id <id> \| --thread-name <name>)` | 查看某个 thread 当前关联的 binding 列表 | 只读 | 无 |
 | `focusctl [--instance <name>] thread goal (--thread-id <id> \| --thread-name <name>)` | 查看某个 thread 当前 goal；这是默认 show 形态 | 只读 | 飞书 `/goal` |
 | `focusctl [--instance <name>] thread goal set (--thread-id <id> \| --thread-name <name>) [--objective <text>] [--status active\|paused]` | 对某个 thread goal 执行原始 persisted 状态改写，供调试或运维使用；至少提供 `--objective` 或 `--status` 之一 | 变更 | 写 objective 时最接近飞书 `/goal set <objective>`；原始 `--status active\|paused` 改写没有精确飞书等价物 |
 | `focusctl [--instance <name>] thread goal clear (--thread-id <id> \| --thread-name <name>)` | 清除某个 thread 当前 goal | 变更 | 飞书 `/goal clear` |
 | `focusctl [--instance <name>] thread archive (--thread-id <id> [--thread-id <id> ...] \| --thread-name <name>)` | 归档一个或多个目标 thread；归档成功后清理当前目标实例、其他可达运行实例，以及已知非运行实例里仍指向它的本地 bindings | 变更 | 飞书 `/archive` 的本地运维对应；批量和跨实例本地 binding 清理能力仅本地 CLI 提供 |
+| `focusctl [--instance <name>] thread unarchive --thread-id <id> [--thread-id <id> ...]` | 逐项调用上游恢复一个或多个 archived thread；执行前拒绝仍被本机已知 Focus binding 引用的目标，成功后不创建 binding | 变更 | 无 |
+| `focusctl [--instance <name>] thread delete --thread-id <id> [--force]` | 调用上游永久删除 root thread；上游可能级联删除 spawned descendants，Focus 不承诺完整预览该集合 | 破坏性变更 | 无 |
 | `focusctl [--instance <name>] thread clear-archived-bindings (--thread-id <id> \| --all) [--dry-run]` | 删除已归档 thread 残留的本地 binding 记录；不调用上游 archive；`--thread-id` 删除指向指定 thread 的 binding，`--all` 先查询上游 archived 列表再删除命中的 binding；默认扫描所有运行中实例和已知非运行实例，显式 `--instance` 时只作用于该实例 | 变更 | 无；这是本地 binding 记录修复 / 运维入口 |
 | `focusctl [--instance <name>] thread attach (--thread-id <id> \| --thread-name <name>)` | 恢复某个 thread 当前所有 detached bindings 的飞书推送 | 变更 | 飞书 `/attach thread`，以及 reset 结果卡里的“附着当前线程” |
 | `focusctl [--instance <name>] thread detach (--thread-id <id> \| --thread-name <name>)` | 暂停某个 thread 的飞书推送，同时保留 thread 与 binding 关系 | 变更 | 飞书 thread-scoped 的 detach 管理动作 |
@@ -202,9 +206,32 @@ binding-local `current_thread_title`，也不会显示 thread preview。
   - 运行中的其他实例走各自 service control plane，只清理本地 binding，不再次调用上游 archive。
   - 已知但未运行的实例直接通过本项目的 binding store API 删除同 `thread_id` 的 binding 记录；不直接手写 `chat_bindings.json`。
 - 如果某个运行实例的本地清理因 running turn、pending request 或 control plane 不可达而失败，archive 已完成但命令返回非零，并在输出里列出 cleanup warning。
+- `archive`、`unarchive` 与 `delete` 的 mutation 结果采用两个独立维度：
+  - `upstream_outcome=success|error|unknown` 只表示是否拿到了上游 RPC 的明确结果；`success` 不表示 Focus 独立验证了完整 spawned subtree。
+  - `focus_cleanup=complete|incomplete|skipped` 只描述本次命令发现的本机 Focus 状态；不代表其它机器或裸 Codex 前端。
+  - 控制请求发送后发生 timeout、EOF、连接重置或损坏响应时返回退出码 `3`，不自动重试，也不清理 binding。
+  - websocket 发送前发现的本地校验或 JSON 序列化错误属于明确的本地错误，不标记为 `unknown`。
+  - 目标 lifecycle mutation 发送前发生的 app-server 连接或 `initialize` 失败同样属于明确的 pre-send 本地错误。
+  - 控制请求已被接受后返回畸形 lifecycle result 时按 `unknown` 处理，并返回退出码 `3`。
+  - JSON-RPC response envelope 必须是对象，并且只能包含 `result` 或结构合法的 `error` 之一；畸形 envelope 统一视为 protocol error，lifecycle mutation 按 `unknown` 处理。
+  - lifecycle mutation 的 control timeout 会覆盖一次有界 startup 预算和操作的正常内部 RPC 链：unarchive 计两次（本实例 loaded inventory 加 mutation），按 id archive/delete 计三次；跨实例 loaded preflight 使用一个有界总 control-plane 预算，不会按实例数累加完整 timeout。
+  - `thread archive --thread-name` 会先通过现有只读 app-server 分页列表解析唯一 thread id；只有解析后的 id 才进入 lifecycle 控制面，因此查询 timeout 或中断可以安全重试，不会留下仍在 service 中执行的 archive mutation。
+  - 上游明确错误或上游成功但 Focus cleanup 不完整时返回退出码 `1`；明确成功且 cleanup 完成时返回 `0`。
+- `thread unarchive` 与 `thread delete` 只接受 `--thread-id`，不提供 name selector，避免 archived/active 同名与 source 可见性产生歧义。
+- `thread unarchive` 可重复提供 `--thread-id`；各目标逐项独立执行，普通失败计入汇总并继续，结果为 `unknown` 时立即停止，已成功项不回滚。
+- `thread delete` 只允许一个 `--thread-id`；重复提供会在目标解析或 mutation 前报错，永久删除仍要求逐项确认。
+- lifecycle mutation 会对 root thread 执行本机已知 Focus 实例的 loaded preflight：archive/delete 允许目标实例自身 loaded，但拒绝其他实例 loaded 或状态不可确认；unarchive 要求目标实例自身和其他已知实例都已确认 not-loaded。
+- `thread unarchive` 的全机 binding/loaded 检查是 fail-closed 的 Focus 本地预检；它不会建立跨前端事务，也不会阻止裸 Codex 在检查后并发操作。
+- `thread delete` 的确认对象只有 root ID。上游可能依据自身 persisted/live agent graph 级联删除 descendants；Focus 不把不完整的 descendant 查询当成确认集合。成功后只清理 root 的已知本地 bindings，遗漏项由 `binding clear-stale --dry-run` 检查。
+- `thread archive` 与 `thread delete` 都会拒绝机器级 runtime lease 中仍有 `fcodex` 等非 service holder 的 root；delete 还会拒绝已知为 `active` 或 backend 状态无法可靠读取的 root。只由目标 service 持有且状态为 `idle` 的 root 仍可由目标实例执行 lifecycle mutation。
+- 若上游已成功，但 interaction lease 无法释放，Focus 会保留 binding 记录作为明确的重试标记，并报告 `focus_cleanup=incomplete`。
+- 若 binding 删除本身失败或无法确认完成，Focus 也会保留 service runtime lease，不会削弱跨实例所有权保护。
+- `thread delete --force` 只跳过交互确认，不绕过 loaded、running、pending 或 unknown 等安全检查。
+- 这些命令是上游公开 lifecycle API 的薄封装，只协调本机已登记的 Focus/fcodex runtime；不检测或锁定裸 Codex、IDE、独立 app-server 或其他机器，也不提供 rollout 导入/迁移、自动回滚、文件系统 scanner 或跨机器一致性保证。
 - `thread clear-archived-bindings` 复用同一套本地 binding 清理逻辑，但不执行 archive。它用于补救旧版本残留、外部归档后的残留，或服务重启后无 live owner 时归档路由到其它实例造成的残留。
   - `--thread-id` 是显式修复入口；命令不会为了确认 archived 状态再查询上游。
   - `--all` 是 archived-aware sweep：先通过运行中的 app-server 调用上游 `thread/list archived=true` 收集 archived thread id，然后逐个复用本地清理逻辑。省略 `--instance` 时优先用运行中的 `default` 实例查询，若没有则按实例名选一个运行实例查询，并清理所有可见实例；显式 `--instance` 时该实例必须正在运行，且只清理该实例。
+- 对已停止实例的直接 binding-store 修改会先取得与 service 共用的 maintenance ownership；若 service 正在启动或运行则拒绝修改。Handler 构造期只做只读 hydration，取得 service ownership 后再从磁盘替换式加载，避免启动与离线维护互相覆盖。
 
 ### 4.7 `image`
 

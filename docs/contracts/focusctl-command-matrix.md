@@ -34,6 +34,8 @@ It answers:
 - `thread archive` supports two target forms:
   - single-thread: `--thread-name <name>` or `--thread-id <id>`
   - batch: repeat `--thread-id <id>`; each target thread is routed, archived, and locally cleaned up independently using the existing single-thread archive semantics
+- `thread unarchive` is ID-only and accepts repeated `--thread-id <id>` options for batch restore.
+- `thread delete` is ID-only and accepts exactly one `--thread-id <id>`.
 
 ## 3. Resource Layers
 
@@ -193,13 +195,15 @@ Notes:
 
 | Command | Purpose | Type | Feishu counterpart |
 | --- | --- | --- | --- |
-| `focusctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>]` | Browse persisted threads; default is current-directory scope | read-only | target-discovery counterpart of Feishu `/threads` |
+| `focusctl [--instance <name>] thread list [--scope cwd\|global] [--cwd <path>] [--archived]` | Browse persisted threads; default is current-directory scope, while `--archived` browses archived threads | read-only | target-discovery counterpart of Feishu `/threads`; Feishu currently has no archived inventory |
 | `focusctl [--instance <name>] thread status (--thread-id <id> \| --thread-name <name>)` | Show backend status, live runtime owner / holders, and bound / attached / detached bindings for one thread | read-only | no exact single command |
 | `focusctl [--instance <name>] thread bindings (--thread-id <id> \| --thread-name <name>)` | Show all bindings currently pointing at one thread | read-only | none |
 | `focusctl [--instance <name>] thread goal (--thread-id <id> \| --thread-name <name>)` | Show the current goal for one thread; this is the default show form | read-only | Feishu `/goal` |
 | `focusctl [--instance <name>] thread goal set (--thread-id <id> \| --thread-name <name>) [--objective <text>] [--status active\|paused]` | Apply a raw persisted-thread goal mutation for debugging or ops; at least one of `--objective` or `--status` is required | mutating | Feishu `/goal set <objective>` for objective writes; no exact Feishu equivalent for raw `--status active\|paused` edits |
 | `focusctl [--instance <name>] thread goal clear (--thread-id <id> \| --thread-name <name>)` | Clear the current goal on one thread | mutating | Feishu `/goal clear` |
 | `focusctl [--instance <name>] thread archive (--thread-id <id> [--thread-id <id> ...] \| --thread-name <name>)` | Archive one or more target threads; after a successful archive, clear local bindings that still point to it in the target instance, other reachable running instances, and known stopped instances | mutating | local operational counterpart of Feishu `/archive`; batch and cross-instance local binding cleanup are local-CLI only |
+| `focusctl [--instance <name>] thread unarchive --thread-id <id> [--thread-id <id> ...]` | Ask upstream, one target at a time, to restore one or more archived threads; reject targets still referenced by known local Focus bindings, and do not create a binding after success | mutating | none |
+| `focusctl [--instance <name>] thread delete --thread-id <id> [--force]` | Ask upstream to permanently delete the root thread; upstream may cascade to spawned descendants, and Focus does not promise a complete preview of that set | destructive | none |
 | `focusctl [--instance <name>] thread clear-archived-bindings (--thread-id <id> \| --all) [--dry-run]` | Delete local binding records left behind for archived threads; does not call upstream archive; `--thread-id` deletes bindings pointing at one specified thread, while `--all` queries upstream archived threads before deleting matching bindings; by default scans all running instances and known stopped instances, while explicit `--instance` limits the action to that instance | mutating | none; this is a local binding-record repair / ops entry |
 | `focusctl [--instance <name>] thread attach (--thread-id <id> \| --thread-name <name>)` | Restore Feishu push for all detached bindings on one target thread | mutating | Feishu `/attach thread`, and the post-reset `Attach Current Thread` button |
 | `focusctl [--instance <name>] thread detach (--thread-id <id> \| --thread-name <name>)` | Pause Feishu push for one target thread while keeping thread / binding relationships intact | mutating | no exact single Feishu command |
@@ -212,9 +216,32 @@ Implementation note:
   - other running instances are cleaned through their service control plane, and that local cleanup does not call upstream archive again
   - known stopped instances are cleaned through this project's binding store API by deleting binding records with the matching `thread_id`; the command does not hand-edit `chat_bindings.json`
 - if cleanup in a running instance fails because of a running turn, pending request, or unreachable control plane, the upstream archive remains done, but the command exits non-zero and prints a cleanup warning
+- `archive`, `unarchive`, and `delete` report mutation results along two independent dimensions:
+  - `upstream_outcome=success|error|unknown` only records whether an authoritative upstream RPC result was received; `success` does not mean Focus independently verified the complete spawned subtree
+  - `focus_cleanup=complete|incomplete|skipped` only describes local Focus state discovered by this command; it says nothing about other machines or bare Codex frontends
+  - timeout, EOF, connection reset, or corrupt response after the control request may have been sent returns exit code `3`; Focus does not retry automatically or clear bindings
+  - local validation or JSON serialization errors detected before websocket send are definite local errors, not `unknown`
+  - app-server connection or `initialize` failure before the target lifecycle mutation is sent is also a definite pre-send local error
+  - a malformed lifecycle result returned after the control request was accepted is `unknown` and returns exit code `3`
+  - a JSON-RPC response envelope must be an object containing exactly one of `result` or a structurally valid `error`; malformed envelopes are protocol errors, and lifecycle mutations classify them as `unknown`
+  - lifecycle mutation control timeouts cover one bounded startup budget plus the operation's normal internal RPC chain: two requests for unarchive (local loaded inventory plus mutation) and three for archive/delete by id; the cross-instance loaded preflight uses one bounded total control-plane budget rather than accumulating a full timeout per instance
+  - `thread archive --thread-name` first resolves a unique id through the existing read-only paginated app-server listing path; only the resolved id is sent to the lifecycle control plane, so a lookup timeout or interruption is safely retryable and cannot leave an archive mutation running in the service
+  - an explicit upstream error, or upstream success with incomplete Focus cleanup, returns `1`; explicit success with complete cleanup returns `0`
+- `thread unarchive` and `thread delete` accept only `--thread-id`; name selectors are deliberately omitted to avoid archived/active duplicate-name and source-visibility ambiguity
+- `thread unarchive` accepts repeated `--thread-id` options; targets run independently in sequence, ordinary failures are summarized and processing continues, an `unknown` result stops the batch immediately, and completed items are not rolled back
+- `thread delete` accepts exactly one `--thread-id`; repeated options fail before target resolution or mutation, so permanent deletion remains an explicitly confirmed one-at-a-time operation
+- lifecycle mutations perform a root-thread loaded preflight across known local Focus instances: archive/delete allow the target instance itself to be loaded but reject another loaded or unverifiable instance, while unarchive requires both the target and all other known instances to be confirmed not loaded
+- `thread unarchive` performs a fail-closed local Focus binding/loaded preflight. It does not create a cross-frontend transaction and cannot prevent a bare Codex client from racing after the check.
+- `thread delete` confirms only the root ID. Upstream may cascade through its own persisted/live agent graph; Focus does not treat an incomplete descendant query as a confirmation set. After success, Focus clears known local bindings for the root, and `binding clear-stale --dry-run` is the repair path for undiscovered descendant leftovers.
+- both `thread archive` and `thread delete` reject a root whose machine-level runtime lease still contains a non-service holder such as `fcodex`; delete additionally rejects a root that is known `active` or whose backend status cannot be read reliably. An `idle` root held only by the target service remains eligible for lifecycle mutation on that instance.
+- if upstream succeeds but an interaction lease cannot be released, Focus retains the binding record as an explicit retry marker and reports `focus_cleanup=incomplete`.
+- if binding removal itself fails or cannot be verified, Focus also retains the service runtime lease instead of weakening cross-instance ownership protection.
+- `thread delete --force` only skips interactive confirmation; it does not bypass loaded, running, pending, or unknown safety checks
+- these commands are thin wrappers over the public upstream lifecycle APIs and coordinate only registered local Focus/fcodex runtimes. They do not detect or lock bare Codex, IDEs, standalone app-servers, or other machines, and do not provide rollout import/migration, automatic rollback, filesystem scanning, or cross-machine consistency guarantees.
 - `thread clear-archived-bindings` reuses the same local binding cleanup logic but does not archive. It is for repairing leftovers from older versions, externally archived threads, or no-live-owner archive routing after a service restart.
   - `--thread-id` is the explicit repair path; the command does not query upstream just to validate archived state.
   - `--all` is an archived-aware sweep: it first calls upstream `thread/list archived=true` through a running app-server to collect archived thread ids, then reuses the local cleanup path for each id. Without `--instance`, it prefers a running `default` instance for the query, otherwise picks one running instance by name, and cleans all visible instances; with explicit `--instance`, that instance must be running and only that instance is cleaned.
+- direct binding-store mutation for a stopped instance first acquires maintenance ownership through the same lock used by the service; mutation is rejected while the service is starting or running. Handler construction performs read-only hydration, then replaces its in-memory binding view from disk only after service ownership is acquired, preventing startup and offline maintenance from overwriting each other.
 
 ### 4.7 `image`
 

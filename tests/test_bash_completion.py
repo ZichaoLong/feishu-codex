@@ -89,6 +89,33 @@ class ShellCompletionTests(unittest.TestCase):
         self.assertEqual(action_matches, ["clear-archived-bindings"])
         self.assertEqual(option_matches, ["--thread-id", "--all", "--dry-run", "--help"])
 
+    def test_focusctl_completes_thread_lifecycle_commands(self) -> None:
+        action_matches = complete_words(
+            "focusctl",
+            ["focusctl", "thread", "un"],
+            2,
+        )
+        list_options = complete_words(
+            "focusctl",
+            ["focusctl", "thread", "list", "--a"],
+            3,
+        )
+        unarchive_options = complete_words(
+            "focusctl",
+            ["focusctl", "thread", "unarchive", "--"],
+            3,
+        )
+        delete_options = complete_words(
+            "focusctl",
+            ["focusctl", "thread", "delete", "--"],
+            3,
+        )
+
+        self.assertEqual(action_matches, ["unarchive"])
+        self.assertEqual(list_options, ["--archived"])
+        self.assertEqual(unarchive_options, ["--thread-id", "--help"])
+        self.assertEqual(delete_options, ["--thread-id", "--force", "--help"])
+
     def test_focusctl_completes_binding_clear_stale(self) -> None:
         action_matches = complete_words(
             "focusctl",

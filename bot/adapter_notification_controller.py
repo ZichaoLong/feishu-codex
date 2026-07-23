@@ -430,10 +430,7 @@ class AdapterNotificationController:
                         interrupt_succeeded = True
                 if interrupt_succeeded:
                     with self._lock:
-                        self._apply_runtime_state_message_locked(
-                            state,
-                            ExecutionStateChanged(pending_cancel=False),
-                        )
+                        self._turn_execution.confirm_cancel_requested_locked(state)
             self._schedule_execution_card_update(*binding)
 
     def handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
@@ -547,10 +544,7 @@ class AdapterNotificationController:
                         interrupt_succeeded = True
                 if interrupt_succeeded:
                     with self._lock:
-                        self._apply_runtime_state_message_locked(
-                            state,
-                            ExecutionStateChanged(pending_cancel=False),
-                        )
+                        self._turn_execution.confirm_cancel_requested_locked(state)
             self._schedule_execution_card_update(*binding)
 
     def handle_agent_message_delta(self, params: dict[str, Any]) -> None:

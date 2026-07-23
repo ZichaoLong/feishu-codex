@@ -17,7 +17,11 @@ class ServiceControlError(RuntimeError):
     """Raised when a control-plane request fails."""
 
 
-class ServiceControlResponseTimeoutError(ServiceControlError):
+class ServiceControlOutcomeUnknownError(ServiceControlError):
+    """Raised after a request may have reached the service without a usable response."""
+
+
+class ServiceControlResponseTimeoutError(ServiceControlOutcomeUnknownError):
     """Raised when a request was sent but the response did not arrive in time."""
 
 
@@ -168,32 +172,45 @@ def control_request(
     ).encode("utf-8") + b"\n"
     host, port = parse_control_endpoint(metadata.control_endpoint)
     try:
-        with socket.create_connection((host, port), timeout=timeout_seconds) as sock:
-            sock.settimeout(timeout_seconds)
-            try:
-                sock.sendall(payload)
-            except TimeoutError as exc:
-                raise ServiceControlError(f"控制面请求发送超时：{metadata.control_endpoint}") from exc
-            try:
-                response = _recv_line(sock)
-            except TimeoutError as exc:
-                raise ServiceControlResponseTimeoutError(
-                    f"控制面请求已发送，但等待响应超时：{metadata.control_endpoint}"
-                ) from exc
-    except ServiceControlResponseTimeoutError:
-        raise
+        sock = socket.create_connection((host, port), timeout=timeout_seconds)
     except ConnectionRefusedError as exc:
         raise ServiceControlError(f"控制面连接失败：{metadata.control_endpoint}") from exc
     except TimeoutError as exc:
         raise ServiceControlError(f"控制面连接超时：{metadata.control_endpoint}") from exc
     except OSError as exc:
-        raise ServiceControlError(f"控制面请求失败：{exc}") from exc
+        raise ServiceControlError(f"控制面连接失败：{metadata.control_endpoint}: {exc}") from exc
+    with sock:
+        sock.settimeout(timeout_seconds)
+        try:
+            sock.sendall(payload)
+        except Exception as exc:
+            raise ServiceControlOutcomeUnknownError(
+                f"控制面请求发送结果未知：{metadata.control_endpoint}: {exc}"
+            ) from exc
+        try:
+            response = _recv_line(sock)
+        except TimeoutError as exc:
+            raise ServiceControlResponseTimeoutError(
+                f"控制面请求已发送，但等待响应超时：{metadata.control_endpoint}"
+            ) from exc
+        except Exception as exc:
+            raise ServiceControlOutcomeUnknownError(
+                f"控制面请求已发送，但响应不可用：{metadata.control_endpoint}: {exc}"
+            ) from exc
     if not isinstance(response, dict):
-        raise ServiceControlError("控制面返回了无效响应")
+        raise ServiceControlOutcomeUnknownError("控制面请求已发送，但返回了无效响应")
     if response.get("ok") is True:
         return response.get("result")
-    error = response.get("error") or {}
-    raise ServiceControlError(str(error.get("message", "控制面请求失败")))
+    if response.get("ok") is not False:
+        raise ServiceControlOutcomeUnknownError("控制面请求已发送，但响应缺少明确结果")
+    error = response.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message", "控制面请求失败") or "控制面请求失败")
+    elif isinstance(error, str):
+        message = error.strip() or "控制面请求失败"
+    else:
+        message = "控制面请求失败"
+    raise ServiceControlError(message)
 
 
 def _recv_line(sock: socket.socket) -> Any:

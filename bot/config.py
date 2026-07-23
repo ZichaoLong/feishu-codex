@@ -99,12 +99,12 @@ def load_config() -> dict:
     return config
 
 
-def load_config_file(name: str) -> dict:
+def load_config_file(name: str, *, directory: Path | None = None) -> dict:
     """加载指定组件的配置 ({name}.yaml)
 
     文件不存在时返回空字典，组件将使用各自的默认值。
     """
-    path = config_dir() / f"{name}.yaml"
+    path = (directory or config_dir()) / f"{name}.yaml"
     return _load_yaml_file(path)
 
 

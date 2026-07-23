@@ -44,6 +44,8 @@ class SnapshotReplyProjection:
     full_reply_text: str
     final_reply_text: str
     reply_items: list[dict[str, Any]]
+    turn_id: str = ""
+    turn_status: str = ""
 
 
 class ExecutionRecoveryController:
@@ -66,6 +68,7 @@ class ExecutionRecoveryController:
         read_thread: Callable[[str], ThreadSnapshot],
         is_thread_not_found_error: Callable[[Exception], bool],
         is_turn_thread_not_found_error: Callable[[Exception], bool],
+        is_pre_send_error: Callable[[Exception], bool],
         is_transport_disconnect: Callable[[Exception], bool],
         is_request_timeout_error: Callable[[Exception], bool],
         runtime_recovery_reason: Callable[[Exception], str],
@@ -90,6 +93,7 @@ class ExecutionRecoveryController:
         self._read_thread = read_thread
         self._is_thread_not_found_error = is_thread_not_found_error
         self._is_turn_thread_not_found_error = is_turn_thread_not_found_error
+        self._is_pre_send_error = is_pre_send_error
         self._is_transport_disconnect = is_transport_disconnect
         self._is_request_timeout_error = is_request_timeout_error
         self._runtime_recovery_reason = runtime_recovery_reason
@@ -251,6 +255,7 @@ class ExecutionRecoveryController:
         chat_id: str,
         execution_message_id: str,
         transcript: ExecutionTranscript,
+        current_cancelled: bool,
         cancelled: bool,
         elapsed: int,
     ) -> bool:
@@ -262,14 +267,36 @@ class ExecutionRecoveryController:
             execution_message_id=execution_message_id,
             transcript=cleared,
         )
-        if self._display_changed(transcript, cleared):
-            self._dispatch_execution_card_message(
-                execution_message_id,
-                transcript=cleared,
-                running=False,
-                elapsed=elapsed,
-                cancelled=cancelled,
-            )
+        return self._refresh_terminal_execution_card_if_changed(
+            execution_message_id=execution_message_id,
+            current_transcript=transcript,
+            display_transcript=cleared,
+            current_cancelled=current_cancelled,
+            cancelled=cancelled,
+            elapsed=elapsed,
+        )
+
+    def _refresh_terminal_execution_card_if_changed(
+        self,
+        *,
+        execution_message_id: str,
+        current_transcript: ExecutionTranscript,
+        display_transcript: ExecutionTranscript,
+        current_cancelled: bool,
+        cancelled: bool,
+        elapsed: int,
+    ) -> bool:
+        transcript_changed = self._display_changed(current_transcript, display_transcript)
+        cancelled_changed = current_cancelled != cancelled
+        if not (transcript_changed or cancelled_changed):
+            return False
+        self._dispatch_execution_card_message(
+            execution_message_id,
+            transcript=display_transcript,
+            running=False,
+            elapsed=elapsed,
+            cancelled=cancelled,
+        )
         return True
 
     def _publish_terminal_result_if_needed(
@@ -317,6 +344,7 @@ class ExecutionRecoveryController:
         prompt_message_id: str,
         prompt_reply_in_thread: bool,
         current_transcript: ExecutionTranscript,
+        current_cancelled: bool,
         cancelled: bool,
         elapsed: int,
         projection: SnapshotReplyProjection,
@@ -349,14 +377,13 @@ class ExecutionRecoveryController:
             execution_message_id=execution_message_id,
             transcript=display_transcript,
         )
-        if not self._display_changed(current_transcript, display_transcript):
-            return carrier_available
-        self._dispatch_execution_card_message(
-            execution_message_id,
-            transcript=display_transcript,
-            running=False,
-            elapsed=elapsed,
+        self._refresh_terminal_execution_card_if_changed(
+            execution_message_id=execution_message_id,
+            current_transcript=current_transcript,
+            display_transcript=display_transcript,
+            current_cancelled=current_cancelled,
             cancelled=cancelled,
+            elapsed=elapsed,
         )
         return carrier_available
 
@@ -474,11 +501,13 @@ class ExecutionRecoveryController:
                         chat_id=target.chat_id,
                         execution_message_id=target.card_message_id,
                         transcript=target.transcript,
+                        current_cancelled=target.cancelled,
                         cancelled=target.cancelled,
                         elapsed=target.elapsed,
                     )
             return
 
+        snapshot_cancelled = target.cancelled or projection.turn_status == "interrupted"
         if projection.final_reply_text:
             carrier_available = self._apply_terminal_snapshot_projection(
                 sender_id=target.sender_id,
@@ -487,7 +516,8 @@ class ExecutionRecoveryController:
                 prompt_message_id=target.prompt_message_id,
                 prompt_reply_in_thread=target.prompt_reply_in_thread,
                 current_transcript=target.transcript,
-                cancelled=target.cancelled,
+                current_cancelled=target.cancelled,
+                cancelled=snapshot_cancelled,
                 elapsed=target.elapsed,
                 projection=projection,
                 thread_id=target.thread_id,
@@ -505,6 +535,7 @@ class ExecutionRecoveryController:
             return
 
         published = False
+        display_transcript = target.transcript
         if fallback_reply_text:
             published = self._maybe_publish_terminal_result(
                 sender_id=target.sender_id,
@@ -519,14 +550,22 @@ class ExecutionRecoveryController:
                 target.transcript,
                 final_reply_text=fallback_reply_text,
             ):
-                self._clear_and_refresh_execution_card(
+                display_transcript = target.transcript.clone()
+                display_transcript.set_reply_text("")
+                self._replace_terminal_execution_transcript(
                     sender_id=target.sender_id,
                     chat_id=target.chat_id,
                     execution_message_id=target.card_message_id,
-                    transcript=target.transcript,
-                    cancelled=target.cancelled,
-                    elapsed=target.elapsed,
+                    transcript=display_transcript,
                 )
+        self._refresh_terminal_execution_card_if_changed(
+            execution_message_id=target.card_message_id,
+            current_transcript=target.transcript,
+            display_transcript=display_transcript,
+            current_cancelled=target.cancelled,
+            cancelled=snapshot_cancelled,
+            elapsed=target.elapsed,
+        )
         if published or not fallback_reply_text:
             self._deliver_generated_images_if_available(
                 sender_id=target.sender_id,
@@ -689,6 +728,7 @@ class ExecutionRecoveryController:
                         chat_id=chat_id,
                         execution_message_id=card_message_id,
                         transcript=runtime.execution.transcript,
+                        current_cancelled=cancelled,
                         cancelled=cancelled,
                         elapsed=elapsed,
                     )
@@ -736,11 +776,16 @@ class ExecutionRecoveryController:
                             chat_id=chat_id,
                             execution_message_id=card_message_id,
                             transcript=runtime.execution.transcript,
+                            current_cancelled=cancelled,
                             cancelled=cancelled,
                             elapsed=elapsed,
                         )
                 return finalized
-            if self._is_transport_disconnect(exc) or self._is_request_timeout_error(exc):
+            if (
+                self._is_pre_send_error(exc)
+                or self._is_transport_disconnect(exc)
+                or self._is_request_timeout_error(exc)
+            ):
                 self.mark_runtime_degraded(
                     sender_id,
                     chat_id,
@@ -768,6 +813,11 @@ class ExecutionRecoveryController:
                 reply_text=projection.full_reply_text,
                 reply_items=projection.reply_items,
             )
+            if projection.turn_status == "interrupted":
+                self._apply_runtime_state_message_locked(
+                    state,
+                    ExecutionStateChanged(cancelled=True),
+                )
             if not should_finalize:
                 self._turn_execution.acknowledge_running_snapshot_locked(
                     state,
@@ -797,6 +847,7 @@ class ExecutionRecoveryController:
                 prompt_message_id=prompt_message_id,
                 prompt_reply_in_thread=prompt_reply_in_thread,
                 current_transcript=current_transcript,
+                current_cancelled=cancelled,
                 cancelled=cancelled,
                 elapsed=elapsed,
                 projection=projection,
@@ -833,6 +884,7 @@ class ExecutionRecoveryController:
                     chat_id=chat_id,
                     execution_message_id=card_message_id,
                     transcript=current_transcript,
+                    current_cancelled=cancelled,
                     cancelled=cancelled,
                     elapsed=elapsed,
                 )
@@ -852,6 +904,7 @@ class ExecutionRecoveryController:
     def snapshot_reply(snapshot: ThreadSnapshot, *, turn_id: str = "") -> SnapshotReplyProjection:
         target_turns = snapshot.turns
         normalized_turn_id = str(turn_id or "").strip()
+        status_is_authoritative = not normalized_turn_id
         if normalized_turn_id:
             matched_turns = [
                 turn
@@ -860,7 +913,19 @@ class ExecutionRecoveryController:
             ]
             if matched_turns:
                 target_turns = matched_turns[-1:]
+                status_is_authoritative = True
+        fallback_turn_id = ""
+        fallback_turn_status = ""
         for turn in reversed(target_turns):
+            projected_turn_id = str(turn.get("id", "") or "").strip()
+            projected_turn_status = (
+                str(turn.get("status", "") or "").strip().lower()
+                if status_is_authoritative
+                else ""
+            )
+            if not fallback_turn_id:
+                fallback_turn_id = projected_turn_id if status_is_authoritative else ""
+                fallback_turn_status = projected_turn_status
             items = turn.get("items") or []
             parts = [
                 str(item.get("text", "") or "")
@@ -872,6 +937,8 @@ class ExecutionRecoveryController:
                     full_reply_text="\n\n".join(parts),
                     final_reply_text=parts[-1],
                     reply_items=items,
+                    turn_id=projected_turn_id if status_is_authoritative else "",
+                    turn_status=projected_turn_status,
                 )
             error = turn.get("error") or {}
             error_message = str(error.get("message", "") or "").strip()
@@ -887,9 +954,13 @@ class ExecutionRecoveryController:
                     full_reply_text=error_message,
                     final_reply_text=error_message,
                     reply_items=items,
+                    turn_id=projected_turn_id if status_is_authoritative else "",
+                    turn_status=projected_turn_status,
                 )
         return SnapshotReplyProjection(
             full_reply_text="",
             final_reply_text="",
             reply_items=[],
+            turn_id=fallback_turn_id,
+            turn_status=fallback_turn_status,
         )

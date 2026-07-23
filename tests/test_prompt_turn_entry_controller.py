@@ -226,6 +226,7 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
                 runtime_recovery_reason=lambda exc: str(exc),
                 is_turn_thread_not_found_error=lambda exc: str(exc) == "thread not found",
                 is_thread_not_found_error=lambda exc: str(exc) == "thread missing",
+                is_pre_send_error=lambda exc: str(exc) == "pre-send",
                 is_transport_disconnect=lambda exc: str(exc) == "disconnect",
                 is_request_timeout_error=lambda exc: str(exc) == "timeout",
                 start_turn=_start_turn,
@@ -271,6 +272,23 @@ class PromptTurnEntryControllerTests(unittest.TestCase):
             "start_turn_behavior": start_turn_behavior,
             "interrupt_behavior": interrupt_behavior,
         }
+
+    def test_cancel_pre_send_failure_preserves_cancel_intent_and_reports_not_sent(self) -> None:
+        env = self._make_controller()
+        self._bind_thread(env, thread_id="thread-1")
+        with env["lock"]:
+            env["state"]["running"] = True
+            env["state"]["current_turn_id"] = "turn-1"
+        env["interrupt_behavior"]["exc"] = RuntimeError("pre-send")
+
+        ok, message = env["controller"].cancel_current_turn("ou_user", "c1")
+
+        self.assertFalse(ok)
+        self.assertIn("未发送", message)
+        self.assertIn("重试 `/cancel`", message)
+        self.assertTrue(env["state"]["pending_cancel"])
+        self.assertFalse(env["state"]["cancelled"])
+        self.assertEqual(env["degraded"], [("ou_user", "c1", "pre-send")])
 
     def _bind_thread(self, env, *, thread_id: str, runtime_state: str = "attached") -> None:
         thread = ThreadSummary(

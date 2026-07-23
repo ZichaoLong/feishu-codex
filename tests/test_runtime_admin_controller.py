@@ -7,6 +7,12 @@ from unittest.mock import patch
 
 from bot.adapters.base import ThreadGoalSummary, ThreadSnapshot, ThreadSummary
 from bot.binding_runtime_manager import BindingRuntimeManager
+from bot.codex_protocol.client import (
+    CodexRpcError,
+    CodexRpcPreSendError,
+    CodexRpcProtocolError,
+    CodexRpcTransportError,
+)
 from bot.constants import GROUP_SHARED_BINDING_OWNER_ID
 from bot.reason_codes import (
     PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
@@ -45,6 +51,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         )
         unsubscribed: list[str] = []
         archived: list[str] = []
+        unarchived: list[str] = []
+        deleted: list[str] = []
         released_runtime_leases: list[str] = []
         pending_by_thread: set[str] = set()
         pending_by_binding: set[tuple[str, str]] = set()
@@ -125,6 +133,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             app_server_mode=lambda: "managed",
             unsubscribe_thread=lambda thread_id: unsubscribed.append(thread_id),
             archive_thread=lambda thread_id: archived.append(thread_id),
+            unarchive_thread=lambda thread_id: unarchived.append(thread_id) or summaries[thread_id],
+            delete_thread=lambda thread_id: deleted.append(thread_id),
             release_service_thread_runtime_lease=lambda thread_id: released_runtime_leases.append(thread_id),
             service_control_endpoint=lambda: "tcp://127.0.0.1:32001",
             instance_name=lambda: "corp-a",
@@ -159,6 +169,7 @@ class RuntimeAdminControllerTests(unittest.TestCase):
             },
             prompt_write_denial_check=lambda binding, chat_id, thread_id, message_id="": ReasonedCheck.allow(),
             detached_runtime_attach_check=lambda thread_id: ReasonedCheck.allow(),
+            lifecycle_loaded_gate_check=lambda thread_id, operation: ReasonedCheck.allow(),
             resolve_thread_target_for_control_params=lambda params: ThreadSummary(
                 thread_id=str(params.get("thread_id", "") or "").strip(),
                 cwd="/tmp/project",
@@ -177,6 +188,8 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         )
         controller._submitted_prompts = submitted_prompts  # type: ignore[attr-defined]
         controller._thread_goals = thread_goals  # type: ignore[attr-defined]
+        controller._unarchived = unarchived  # type: ignore[attr-defined]
+        controller._deleted = deleted  # type: ignore[attr-defined]
         controller._chat_display_names = chat_display_names  # type: ignore[attr-defined]
         controller._chat_display_name_calls = chat_display_name_calls  # type: ignore[attr-defined]
         return (
@@ -530,6 +543,121 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         self.assertEqual(unsubscribed, ["thread-1"])
         self.assertEqual(released_runtime_leases, ["thread-1"])
 
+    def test_lifecycle_mutations_reject_cross_instance_loaded_gate_blocker(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._lifecycle_loaded_gate_check = lambda thread_id, operation: ReasonedCheck.deny(
+            "lifecycle_blocked_by_loaded_thread",
+            f"blocked {operation}: {thread_id}",
+        )
+
+        for operation, call in (
+            ("archive", lambda: controller.archive_thread_for_control("thread-1")),
+            ("unarchive", lambda: controller.unarchive_thread_for_control("thread-1")),
+            ("delete", lambda: controller.delete_thread_for_control("thread-1")),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(ValueError, f"blocked {operation}"):
+                    call()
+
+        self.assertEqual(archived, [])
+        self.assertEqual(controller._unarchived, [])  # type: ignore[attr-defined]
+        self.assertEqual(controller._deleted, [])  # type: ignore[attr-defined]
+
+    def test_unarchive_rejects_current_instance_loaded_copy(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        loaded_thread_ids.append("thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        with self.assertRaisesRegex(ValueError, "当前目标实例仍将该 thread 保持为 loaded"):
+            controller.unarchive_thread_for_control("thread-1")
+
+        self.assertEqual(controller._unarchived, [])  # type: ignore[attr-defined]
+
+    def test_loaded_thread_status_uses_loaded_inventory_before_read(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+
+        self.assertEqual(
+            controller.loaded_thread_status_for_control("thread-1")["backend_thread_status"],
+            "notLoaded",
+        )
+
+        loaded_thread_ids.append("thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="active",
+        )
+        self.assertEqual(
+            controller.loaded_thread_status_for_control("thread-1")["backend_thread_status"],
+            "active",
+        )
+
     def test_archive_thread_for_control_clears_store_only_binding(self) -> None:
         (
             lock,
@@ -579,6 +707,538 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         with lock:
             self.assertEqual(binding_runtime.bound_bindings_for_thread_locked("thread-1"), [])
         self.assertEqual(released_runtime_leases, ["thread-1"])
+
+    def test_archive_thread_timeout_returns_unknown_without_cleanup(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._archive_thread = lambda thread_id: (_ for _ in ()).throw(TimeoutError(thread_id))
+
+        result = controller.archive_thread_for_control("thread-1", summary=summaries["thread-1"])
+
+        self.assertEqual(result["upstream_outcome"], "unknown")
+        self.assertEqual(result["focus_cleanup"], "skipped")
+        self.assertIsNotNone(binding_runtime._chat_binding_store.load(binding))
+        self.assertEqual(released_runtime_leases, [])
+
+    def test_archive_thread_reports_incomplete_when_interaction_lease_cleanup_fails(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        with patch.object(
+            binding_runtime._interaction_lease_store,
+            "release",
+            side_effect=OSError("lease cleanup failed"),
+        ):
+            result = controller.archive_thread_for_control("thread-1", summary=summaries["thread-1"])
+
+        self.assertEqual(result["upstream_outcome"], "success")
+        self.assertEqual(result["focus_cleanup"], "incomplete")
+        self.assertIn("lease cleanup failed", result["cleanup_errors"][0])
+        self.assertEqual(result["cleared_binding_ids"], [])
+        self.assertIsNotNone(binding_runtime._chat_binding_store.load(binding))
+        with lock:
+            self.assertIsNotNone(binding_runtime.binding_runtime_snapshot_locked(binding))
+        self.assertEqual(released_runtime_leases, [])
+
+    def test_archive_thread_store_clear_failure_retains_root_runtime_lease(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+
+        with patch.object(
+            binding_runtime._chat_binding_store,
+            "clear",
+            side_effect=OSError("store clear failed"),
+        ):
+            result = controller.archive_thread_for_control("thread-1", summary=summaries["thread-1"])
+
+        self.assertEqual(result["upstream_outcome"], "success")
+        self.assertEqual(result["focus_cleanup"], "incomplete")
+        self.assertIn("store clear failed", result["cleanup_errors"][0])
+        self.assertIsNotNone(binding_runtime._chat_binding_store.load(binding))
+        with lock:
+            self.assertIsNotNone(binding_runtime.binding_runtime_snapshot_locked(binding))
+        self.assertEqual(released_runtime_leases, [])
+
+    def test_unarchive_thread_succeeds_without_creating_binding(self) -> None:
+        (
+            _lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="notLoaded",
+        )
+
+        result = controller.unarchive_thread_for_control("thread-1")
+
+        self.assertEqual(controller._unarchived, ["thread-1"])  # type: ignore[attr-defined]
+        self.assertEqual(result["upstream_outcome"], "success")
+        self.assertEqual(result["focus_cleanup"], "skipped")
+        self.assertEqual(binding_runtime.binding_keys_locked(), ())
+
+    def test_unarchive_thread_rejects_residual_local_binding(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        self._bind_thread(lock, binding_runtime, ("ou_user", "c1"), thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="notLoaded",
+        )
+
+        with self.assertRaisesRegex(ValueError, "仍有 binding"):
+            controller.unarchive_thread_for_control("thread-1")
+
+        self.assertEqual(controller._unarchived, [])  # type: ignore[attr-defined]
+
+    def test_delete_thread_transport_error_returns_unknown_without_cleanup(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._delete_thread = lambda thread_id: (_ for _ in ()).throw(
+            CodexRpcTransportError("thread/delete", {"message": f"disconnected: {thread_id}"})
+        )
+
+        result = controller.delete_thread_for_control("thread-1")
+
+        self.assertEqual(result["upstream_outcome"], "unknown")
+        self.assertEqual(result["focus_cleanup"], "skipped")
+        self.assertIsNotNone(binding_runtime._chat_binding_store.load(binding))
+
+    def test_delete_thread_explicit_rpc_error_is_reported_as_upstream_error(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._delete_thread = lambda thread_id: (_ for _ in ()).throw(
+            CodexRpcError("thread/delete", {"message": f"refused: {thread_id}"})
+        )
+
+        result = controller.delete_thread_for_control("thread-1")
+
+        self.assertEqual(result["upstream_outcome"], "error")
+        self.assertIn("refused", result["upstream_error"])
+
+    def test_unarchive_thread_protocol_error_is_unknown(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        controller._unarchive_thread = lambda thread_id: (_ for _ in ()).throw(
+            CodexRpcProtocolError("thread/unarchive", f"invalid response: {thread_id}")
+        )
+
+        result = controller.unarchive_thread_for_control("thread-1")
+
+        self.assertEqual(result["upstream_outcome"], "unknown")
+        self.assertEqual(result["focus_cleanup"], "skipped")
+        self.assertIn("invalid response", result["outcome_detail"])
+        self.assertEqual(result["upstream_error"], "")
+
+    def test_archive_thread_pre_send_error_is_not_reported_as_unknown(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._archive_thread = lambda thread_id: (_ for _ in ()).throw(
+            CodexRpcPreSendError("thread/archive", TimeoutError(f"initialize failed: {thread_id}"))
+        )
+
+        with self.assertRaises(CodexRpcPreSendError):
+            controller.archive_thread_for_control("thread-1", summary=summaries["thread-1"])
+
+    def test_delete_thread_local_error_is_not_mislabeled_as_upstream_error(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._delete_thread = lambda thread_id: (_ for _ in ()).throw(
+            OSError(f"local startup failed: {thread_id}")
+        )
+
+        with self.assertRaisesRegex(OSError, "local startup failed"):
+            controller.delete_thread_for_control("thread-1")
+
+    def test_delete_thread_rejects_active_root(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="active",
+        )
+
+        with self.assertRaisesRegex(ValueError, "backend 状态为 `active`"):
+            controller.delete_thread_for_control("thread-1")
+
+        self.assertEqual(controller._deleted, [])  # type: ignore[attr-defined]
+
+    def test_delete_thread_rejects_backend_status_lookup_error(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        controller._read_thread = lambda thread_id: (_ for _ in ()).throw(
+            OSError(f"read failed: {thread_id}")
+        )
+
+        with patch("bot.runtime_admin_controller.logger.exception"):
+            with self.assertRaisesRegex(ValueError, "无法确认 root thread"):
+                controller.delete_thread_for_control("thread-1")
+
+        self.assertEqual(controller._deleted, [])  # type: ignore[attr-defined]
+
+    def test_archive_and_delete_reject_same_instance_fcodex_holder(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._load_thread_runtime_lease = lambda thread_id: ThreadRuntimeLease(
+            thread_id=thread_id,
+            owner_instance="corp-a",
+            owner_service_token="svc-token",
+            control_endpoint="tcp://127.0.0.1:32001",
+            backend_url="ws://127.0.0.1:8765",
+            attached_at=1.0,
+            holders=(
+                ThreadRuntimeLeaseHolder(
+                    holder_id="fcodex:123",
+                    holder_type="fcodex",
+                    instance_name="corp-a",
+                    owner_pid=123,
+                    owner_service_token="svc-token",
+                    control_endpoint="tcp://127.0.0.1:32001",
+                    backend_url="ws://127.0.0.1:8765",
+                    updated_at=1.0,
+                ),
+            ),
+        )
+
+        for operation, call in (
+            ("archive", lambda: controller.archive_thread_for_control("thread-1")),
+            ("delete", lambda: controller.delete_thread_for_control("thread-1")),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(ValueError, "fcodex@corp-a"):
+                    call()
+
+        self.assertEqual(archived, [])
+        self.assertEqual(controller._deleted, [])  # type: ignore[attr-defined]
+
+    def test_delete_thread_success_clears_root_binding(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding = ("ou_user", "c1")
+        self._bind_thread(lock, binding_runtime, binding, thread_id="thread-1")
+        summaries["thread-1"] = ThreadSummary(
+            thread_id="thread-1",
+            cwd="/tmp/project",
+            name="demo",
+            preview="",
+            created_at=0,
+            updated_at=0,
+            source="cli",
+            status="idle",
+        )
+        controller._load_thread_runtime_lease = lambda thread_id: ThreadRuntimeLease(
+            thread_id=thread_id,
+            owner_instance="corp-a",
+            owner_service_token="svc-token",
+            control_endpoint="tcp://127.0.0.1:32001",
+            backend_url="ws://127.0.0.1:8765",
+            attached_at=1.0,
+            holders=(
+                ThreadRuntimeLeaseHolder(
+                    holder_id="service:svc-token",
+                    holder_type="service",
+                    instance_name="corp-a",
+                    owner_pid=123,
+                    owner_service_token="svc-token",
+                    control_endpoint="tcp://127.0.0.1:32001",
+                    backend_url="ws://127.0.0.1:8765",
+                    updated_at=1.0,
+                ),
+            ),
+        )
+
+        result = controller.delete_thread_for_control("thread-1")
+
+        self.assertEqual(controller._deleted, ["thread-1"])  # type: ignore[attr-defined]
+        self.assertEqual(result["upstream_outcome"], "success")
+        self.assertEqual(result["focus_cleanup"], "complete")
+        self.assertEqual(result["cleared_binding_ids"], ["p2p:ou_user:c1"])
+        self.assertIsNone(binding_runtime._chat_binding_store.load(binding))
 
     def test_archive_thread_for_control_rejects_other_instance_live_runtime_owner(self) -> None:
         (
@@ -801,11 +1461,52 @@ class RuntimeAdminControllerTests(unittest.TestCase):
 
         self.assertEqual(result["cleared_binding_ids"], ["p2p:ou_stale:chat-stale"])
         self.assertEqual(result["stale_thread_ids"], ["thread-stale"])
+        self.assertEqual(result["retained_thread_ids"], ["thread-live"])
         with lock:
             self.assertIsNotNone(binding_runtime.binding_runtime_snapshot_locked(live_binding))
             self.assertIsNone(binding_runtime.binding_runtime_snapshot_locked(stale_binding))
         self.assertEqual(unsubscribed, ["thread-stale"])
         self.assertEqual(released_runtime_leases, ["thread-stale"])
+
+    def test_clear_stale_bindings_finalizes_successes_before_reporting_partial_failure(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            unsubscribed,
+            _archived,
+            released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding_a = ("ou_a", "chat-a")
+        binding_b = ("ou_b", "chat-b")
+        self._bind_thread(lock, binding_runtime, binding_a, thread_id="thread-a")
+        self._bind_thread(lock, binding_runtime, binding_b, thread_id="thread-b")
+        controller._is_thread_not_found_error = lambda exc: isinstance(exc, KeyError)
+        original_release = binding_runtime._interaction_lease_store.release
+
+        def _release(thread_id, holder):
+            if thread_id == "thread-b":
+                raise OSError("lease cleanup failed")
+            return original_release(thread_id, holder)
+
+        with patch.object(binding_runtime._interaction_lease_store, "release", side_effect=_release):
+            with self.assertRaisesRegex(RuntimeError, "lease cleanup failed"):
+                controller.clear_stale_bindings_for_control()
+
+        with lock:
+            self.assertIsNone(binding_runtime.binding_runtime_snapshot_locked(binding_a))
+            self.assertIsNotNone(binding_runtime.binding_runtime_snapshot_locked(binding_b))
+        self.assertIsNone(binding_runtime._chat_binding_store.load(binding_a))
+        self.assertIsNotNone(binding_runtime._chat_binding_store.load(binding_b))
+        self.assertEqual(unsubscribed, ["thread-a"])
+        self.assertEqual(released_runtime_leases, ["thread-a"])
 
     def test_fail_close_service_attached_runtime_downgrades_attached_without_backend_unsubscribe(self) -> None:
         (
@@ -1483,6 +2184,45 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         self.assertEqual(unsubscribed, [])
         self.assertEqual(released_runtime_leases, [])
 
+    def test_clear_all_bindings_finalizes_successes_before_reporting_partial_failure(self) -> None:
+        (
+            lock,
+            binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            unsubscribed,
+            _archived,
+            released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        binding_a = ("ou_a", "chat-a")
+        binding_b = ("ou_b", "chat-b")
+        self._bind_thread(lock, binding_runtime, binding_a, thread_id="thread-a")
+        self._bind_thread(lock, binding_runtime, binding_b, thread_id="thread-b")
+        original_release = binding_runtime._interaction_lease_store.release
+
+        def _release(thread_id, holder):
+            if thread_id == "thread-b":
+                raise OSError("lease cleanup failed")
+            return original_release(thread_id, holder)
+
+        with patch.object(binding_runtime._interaction_lease_store, "release", side_effect=_release):
+            with self.assertRaisesRegex(RuntimeError, "lease cleanup failed"):
+                controller.clear_all_bindings_for_control()
+
+        with lock:
+            self.assertIsNone(binding_runtime.binding_runtime_snapshot_locked(binding_a))
+            self.assertIsNotNone(binding_runtime.binding_runtime_snapshot_locked(binding_b))
+        self.assertIsNone(binding_runtime._chat_binding_store.load(binding_a))
+        self.assertIsNotNone(binding_runtime._chat_binding_store.load(binding_b))
+        self.assertEqual(unsubscribed, ["thread-a"])
+        self.assertEqual(released_runtime_leases, ["thread-a"])
+
     def test_clear_all_bindings_for_control_clears_store_only_stale_binding(self) -> None:
         (
             lock,
@@ -1743,6 +2483,57 @@ class RuntimeAdminControllerTests(unittest.TestCase):
         self.assertEqual(result["thread_id"], "thread-1")
         self.assertEqual(archived, ["thread-1"])
         self.assertEqual(released_runtime_leases, ["thread-1"])
+
+    def test_handle_service_control_request_reports_loaded_status_without_reading_archived_thread(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+        controller._read_thread = lambda thread_id: (_ for _ in ()).throw(
+            AssertionError(f"not-loaded status must not read thread: {thread_id}")
+        )
+
+        result = controller.handle_service_control_request(
+            "thread/loaded-status",
+            {"thread_id": "thread-archived"},
+        )
+
+        self.assertEqual(result["thread_id"], "thread-archived")
+        self.assertEqual(result["backend_thread_status"], "notLoaded")
+
+    def test_handle_service_control_request_thread_archive_requires_resolved_id(self) -> None:
+        (
+            _lock,
+            _binding_runtime,
+            controller,
+            _summaries,
+            _loaded_thread_ids,
+            _unsubscribed,
+            _archived,
+            _released_runtime_leases,
+            _pending_by_thread,
+            _pending_by_binding,
+            _pending_requests,
+            _reset_calls,
+            _sent_images,
+        ) = self._make_controller()
+
+        with self.assertRaisesRegex(ValueError, "thread/archive 缺少 thread_id"):
+            controller.handle_service_control_request(
+                "thread/archive",
+                {"thread_name": "demo"},
+            )
 
     def test_handle_service_control_request_clear_archived_bindings_dispatches_local_cleanup(self) -> None:
         (

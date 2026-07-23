@@ -196,6 +196,21 @@ FIFO 准入细节由
 
 本合同暂不引入迟到 receive event 的 freshness gate。迟到送达的消息仍会正常准入，除非它在出队前又被收到的撤回事件取消。
 
+### 5.7 取消请求发送失败
+
+`/cancel` 与执行卡片取消按钮必须区分“请求尚未发送”和“请求可能已经到达
+app-server”两种情况：
+
+- 如果连接建立或请求准备阶段失败，`turn/interrupt` 实际尚未发送，则命令必须明确提示
+  取消请求未发送，保留 pending cancel 意图，将运行通道标记为降级，并提示用户稍后重试
+  `/cancel`
+- 如果请求已经发送，但响应因 timeout 或 transport disconnect 丢失，则可以提示“取消已请求，
+  结果暂不可确认”；后续仍由普通 runtime reconcile 观察最终状态
+- pre-send 失败不能显示为“取消请求已发送”，也不能清除 pending cancel 意图
+- 仅有 pending cancel 意图时，不能把 execution 的 `cancelled` 状态置为真，也不能把正常完成的
+  turn 渲染为“已停止”；只有 interrupt 请求成功提交，或上游明确报告 interrupted，才设置
+  `cancelled`
+
 ## 6. 与 `focus` / `fcodex` 的关系
 
 `focus` / `fcodex` 与飞书侧仍共享同一套 backend 合同：

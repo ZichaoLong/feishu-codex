@@ -95,6 +95,7 @@ class PromptTurnEntryPorts:
     runtime_recovery_reason: Callable[[Exception], str]
     is_turn_thread_not_found_error: Callable[[Exception], bool]
     is_thread_not_found_error: Callable[[Exception], bool]
+    is_pre_send_error: Callable[[Exception], bool]
     is_transport_disconnect: Callable[[Exception], bool]
     is_request_timeout_error: Callable[[Exception], bool]
     start_turn: Callable[..., dict[str, Any]]
@@ -145,6 +146,7 @@ class PromptTurnEntryController:
         self._runtime_recovery_reason = ports.runtime_recovery_reason
         self._is_turn_thread_not_found_error = ports.is_turn_thread_not_found_error
         self._is_thread_not_found_error = ports.is_thread_not_found_error
+        self._is_pre_send_error = ports.is_pre_send_error
         self._is_transport_disconnect = ports.is_transport_disconnect
         self._is_request_timeout_error = ports.is_request_timeout_error
         self._start_turn = ports.start_turn
@@ -578,10 +580,7 @@ class PromptTurnEntryController:
                 logger.exception("延迟取消 turn 失败")
             else:
                 with self._lock:
-                    self._apply_runtime_state_message_locked(
-                        state,
-                        ExecutionStateChanged(pending_cancel=False),
-                    )
+                    self._turn_execution.confirm_cancel_requested_locked(state)
         self._schedule_mirror_watchdog(sender_id, chat_id)
         return PromptTurnStartResult(
             started=True,
@@ -617,7 +616,7 @@ class PromptTurnEntryController:
             return False, denial_text
         if not turn_id:
             with self._lock:
-                self._turn_execution.request_cancel_without_turn_id_locked(state)
+                self._turn_execution.mark_cancel_pending_locked(state)
             return True, "已请求停止当前执行。"
         try:
             self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
@@ -625,6 +624,15 @@ class PromptTurnEntryController:
             if self._is_turn_thread_not_found_error(exc) or self._is_thread_not_found_error(exc):
                 self._finalize_execution_card_from_state(sender_id, chat_id)
                 return True, "当前执行已结束，已刷新卡片状态。"
+            if self._is_pre_send_error(exc):
+                with self._lock:
+                    self._turn_execution.mark_cancel_pending_locked(state)
+                self._mark_runtime_degraded(
+                    sender_id,
+                    chat_id,
+                    reason=self._runtime_recovery_reason(exc),
+                )
+                return False, "取消请求未发送；已保留取消意图，请稍后重试 `/cancel`。"
             if self._is_transport_disconnect(exc) or self._is_request_timeout_error(exc):
                 self._mark_runtime_degraded(
                     sender_id,
