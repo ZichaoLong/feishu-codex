@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol, TypeAlias
 from bot.card_text_projection import terminal_result_checksum
 from bot.cards import build_terminal_result_card_message_content
 from bot.runtime_card_publisher import (
+    ExecutionCardPatchOutcome,
     ExecutionCardModel,
     RuntimeCardPublisher,
     build_execution_card_model,
@@ -114,7 +115,7 @@ class ExecutionOutputController:
         running: bool,
         elapsed: int,
         cancelled: bool,
-    ) -> bool:
+    ) -> ExecutionCardPatchOutcome:
         model = build_execution_card_model(
             transcript,
             running=running,
@@ -123,7 +124,7 @@ class ExecutionOutputController:
             log_limit=int(self._card_log_limit()),
             reply_limit=int(self._card_reply_limit()),
         )
-        return self._card_publisher_factory().patch_execution_card(message_id, model).ok
+        return self._card_publisher_factory().patch_execution_card(message_id, model)
 
     def dispatch_execution_card_message(
         self,
@@ -154,13 +155,14 @@ class ExecutionOutputController:
             transcript = runtime.execution.transcript
             elapsed = int(max(0.0, time.monotonic() - runtime.execution.started_at)) if runtime.execution.started_at else 0
             cancelled = runtime.execution.cancelled
-        return self.patch_execution_card_message(
+        outcome = self.patch_execution_card_message(
             message_id,
             transcript=transcript,
             running=False,
             elapsed=elapsed,
             cancelled=cancelled,
         )
+        return outcome.applied
 
     def schedule_execution_card_update(self, sender_id: str, chat_id: str) -> None:
         state = self._get_runtime_state(sender_id, chat_id)
@@ -255,14 +257,14 @@ class ExecutionOutputController:
             )
             return
 
-        ok = self.patch_execution_card_message(
+        outcome = self.patch_execution_card_message(
             message_id,
             transcript=transcript,
             running=running,
             elapsed=elapsed,
             cancelled=cancelled,
         )
-        if not ok and immediate and reply_text:
+        if not outcome.full_content_applied and immediate and reply_text:
             with self._lock:
                 followup = self._turn_execution.prepare_patch_failure_followup_locked(state)
             if followup is not None:

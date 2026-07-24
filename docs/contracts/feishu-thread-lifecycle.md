@@ -219,6 +219,20 @@ time:
   process log or staged reply content, the old card should be finalized as a
   minimal terminal card instead of being deleted; that minimal card currently
   renders a single `无` placeholder
+- display-only execution-card markdown must neutralize raw HTML/XML outside
+  fenced code and closed inline-code spans before it reaches Feishu; valid URI
+  and email autolinks are reduced to their target text without angle brackets.
+  If Feishu still rejects a full terminal execution-card payload as invalid
+  content, Focus retries once with the same minimal terminal card so stale
+  running controls do not remain visible
+- a successful minimal terminal execution-card patch proves only that the stale
+  running UI was closed; it does not prove that the omitted terminal text was
+  delivered. Synchronous failure paths without an independent terminal-result
+  carrier must still send that text through the existing idempotent follow-up
+  path
+- if the minimal fallback is rate-limited, the patch dispatcher retries the
+  minimal model rather than the already rejected full model; a newer submitted
+  model still takes precedence over that pending retry
 - generated images discovered from the terminal thread snapshot are delivered
   only as separate follow-up Feishu image messages, after the authoritative
   text terminal result has been sent successfully when such text exists; they

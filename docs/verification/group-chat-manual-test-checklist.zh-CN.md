@@ -29,7 +29,7 @@
 2. 确认应用权限至少包含：
    `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message.group_msg`、`im:message`、`im:message:readonly`、`im:message:send_as_bot`、`im:message:update`
    如需让 `/whoami`、群授权卡片、群上下文里显示可读名字，再补 `contact:contact.base:readonly`、`contact:user.base:readonly`
-   如需让 `/whoami` 和日志里稳定看到 `user_id`，再补 `contact:user.employee_id:readonly`；缺少时 `user_id` 允许为空
+   标准权限集还必须包含 `contact:user.employee_id:readonly`，用于让 `/whoami` 和日志稳定返回 `user_id`
    如需让 `focusctl binding list --refresh-names` 刷新 `CHAT` 列群名缓存，再补 `im:chat:readonly`；缺少时允许回退为短 chat id
    如需用 `/bot-status` 实时探测机器人 `open_id`，再补 `application:application:self_manage`
 3. 确认事件与回调已启用：
@@ -43,7 +43,7 @@
 
 ## 4. 私聊基础检查
 
-1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`open_id`，以及仅用于排障的 `user_id`；若未开 `contact:user.employee_id:readonly`，`user_id` 允许为空。若未开通讯录权限，`name` 允许退化成 open_id 前缀。
+1. `Admin` 私聊发送 `/whoami`。预期：返回 `name`、`open_id`，以及仅用于排障的非空 `user_id`。若未开通讯录权限，`name` 允许退化成 open_id 前缀。
 2. `Admin` 私聊发送 `/debug-contact <open_id>`。预期：能看到 cache 命中情况、live resolved name，以及 fallback 原因 / API 错误；若未开通讯录权限，应能明确看到 fallback。
 3. `Admin` 私聊发送 `/help group`。预期：帮助文本提到 `assistant`、`mention-only`、`all`、`/group`、`/group-mode`，且不再提旧群授权命令。
 4. `MemberA` 私聊发送普通文本。预期：被拒绝，并提示“如需协作使用，请让管理员在群里先执行 `/group activate`”。
@@ -156,7 +156,7 @@
 
 ## 14. 日志与可观测性
 
-1. 群聊发送一条普通文本。预期：日志里可看到 `name/open_id/user_id/chat_type/msg_type/message_id`；若未开 `contact:user.employee_id:readonly`，`user_id` 允许为 `-`。
+1. 群聊发送一条普通文本。预期：日志里可看到 `name/open_id/user_id/chat_type/msg_type/message_id`，其中 `user_id` 不应为 `-`。
 2. 发送一张外部卡片。预期：日志里 `msg_type=interactive`。
 3. `assistant` 模式下有效 `@` 时观察日志。预期：能看到历史回捞成功或失败日志。
 4. 让 `OtherBot` 发言后再由人类 `@机器人`。预期：日志里能看到这次人类触发前的上下文准备过程，但不会出现“其他机器人直接触发成功”的记录。

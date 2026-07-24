@@ -40,7 +40,7 @@
 - 管理员即使在群未激活时，仍可先使用机器人完成初始化与管理
 - 运行时身份判定统一使用 `open_id`
 - `user_id` 仅保留在日志与 `/whoami` 里做排障展示
-- 若希望 `/whoami` 和日志稳定返回 `user_id`，需要额外开 `contact:user.employee_id:readonly`
+- 支持的标准权限集包含 `contact:user.employee_id:readonly`，用于让 `/whoami` 和日志稳定返回 `user_id`；该字段即使缺失，也绝不能参与授权或身份判定
 
 ## 3. 群激活边界
 

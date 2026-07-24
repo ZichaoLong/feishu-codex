@@ -166,6 +166,9 @@ flowchart TD
 - 如果上游先发出 non-retry `error` 通知，而该 turn 最终又没有产生任何文本型 `agentMessage`，则本地必须把这条错误消息保留下来，作为该 turn 的 fail-closed 文本收口；如果后续 snapshot 仍拿到了权威 `final_reply_text`，则以后者为准
 - 只有在终态结果载体已经成功送达后，才允许把旧 execution card 中的最终答案段剔除；如果只能回退本地 transcript，或结果载体发送失败，则必须保留旧 execution card 里的最终回复
 - 如果剔除最终答案后，旧 execution card 已经不再有任何过程日志或过程性回复可展示，则应把它收口为一张极简终态卡，而不是删除消息；这张极简卡当前固定显示单字 `无`
+- display-only execution card markdown 在发送给飞书前必须中和 fenced code 和已闭合行内代码之外的原始 HTML/XML；合法 URI/email autolink 应去掉尖括号并保留目标文本。如果飞书仍以内容非法为由拒绝完整终态执行卡，Focus 应再用同一张极简终态卡重试一次，不能让旧卡永久保留“执行中”和取消按钮
+- 极简终态执行卡 patch 成功，只能证明陈旧运行中 UI 已经收口，不能证明被省略的终态文本已经送达；对于没有独立 terminal-result 载体的同步失败路径，仍必须通过现有幂等 follow-up 路径补发该文本
+- 如果极简降级 patch 被限流，dispatcher 必须重试极简模型，不能重新发送已经明确被拒绝的完整模型；等待期间如果提交了更新模型，仍以更新模型为准
 - 从终态 thread snapshot 里发现的生成图片，只能作为独立的飞书图片消息后续补发；如果该 turn 同时有权威文本终态结果，则必须先送达文本结果，再发送图片。它们不参与 execution card patch，也不改变执行卡片锚点合同
 - 如果后续 reconcile 拿到不同于先前载体的权威 `final_reply_text`，必须再次发送更正后的终态结果载体，而不能只修旧 execution card
 - 这条终态结果发送路径不重新打开执行锚点，也不改变“同一会话任一时刻最多只有一张当前执行卡片”的约束

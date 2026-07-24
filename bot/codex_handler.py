@@ -83,6 +83,7 @@ from bot.owner_binding_queue import OwnerBindingQueue, OwnerBindingQueueItem
 from bot.prompt_turn_entry_controller import PromptTurnEntryController, PromptTurnEntryPorts
 from bot.runtime_admin_controller import RuntimeAdminController
 from bot.runtime_card_publisher import (
+    ExecutionCardPatchOutcome,
     ExecutionCardPatchDispatcher,
     RuntimeCardPublisher,
 )
@@ -3724,7 +3725,7 @@ class CodexHandler(BotHandler):
         running: bool,
         elapsed: int,
         cancelled: bool,
-    ) -> bool:
+    ) -> ExecutionCardPatchOutcome:
         return self._execution_output.patch_execution_card_message(
             message_id,
             transcript=transcript,

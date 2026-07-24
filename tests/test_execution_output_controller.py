@@ -9,6 +9,7 @@ from bot.card_text_projection import TERMINAL_RESULT_CARD_MARKER, terminal_resul
 from bot.cards import build_terminal_result_card_message_content
 from bot.binding_runtime_manager import BindingRuntimeManager
 from bot.execution_output_controller import ExecutionOutputController
+from bot.message_patch_result import MessagePatchResult
 from bot.runtime_card_publisher import RuntimeCardPublisher
 from bot.runtime_state import ExecutionStateChanged, apply_runtime_state_message
 from bot.runtime_view import build_runtime_view
@@ -24,6 +25,7 @@ class _FakeBot:
         self.sent_messages: list[tuple[str, str, str]] = []
         self.patches: list[tuple[str, str]] = []
         self.patch_results: dict[str, bool] = {}
+        self.patch_result_sequences: dict[str, list[MessagePatchResult]] = {}
 
     def reply_to_message(self, parent_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> str:
         self.reply_refs.append((parent_id, msg_type, content, reply_in_thread))
@@ -36,6 +38,15 @@ class _FakeBot:
     def patch_message(self, message_id: str, content: str) -> bool:
         self.patches.append((message_id, content))
         return self.patch_results.get(message_id, True)
+
+    def patch_message_result(self, message_id: str, content: str) -> MessagePatchResult:
+        self.patches.append((message_id, content))
+        sequence = self.patch_result_sequences.get(message_id)
+        if sequence:
+            return sequence.pop(0)
+        if self.patch_results.get(message_id, True):
+            return MessagePatchResult.success()
+        return MessagePatchResult.failure()
 
 
 class ExecutionOutputControllerTests(unittest.TestCase):
@@ -132,6 +143,32 @@ class ExecutionOutputControllerTests(unittest.TestCase):
 
         self.assertEqual(replies, [("c1", "123456789", "msg-1", True)])
         self.assertTrue(state["followup_sent"])
+
+    def test_flush_execution_card_minimal_fallback_still_sends_terminal_text_once(self) -> None:
+        state = self._make_state()
+        controller, bot, replies, _, _ = self._make_controller(state)
+        state["current_message_id"] = "card-1"
+        state["current_prompt_message_id"] = "msg-1"
+        state["current_prompt_reply_in_thread"] = True
+        state["started_at"] = time.monotonic() - 2
+        state["execution_transcript"].set_reply_text("启动失败：后端不可用")
+        bot.patch_result_sequences["card-1"] = [
+            MessagePatchResult.invalid_content(),
+            MessagePatchResult.success(),
+        ]
+
+        controller.flush_execution_card("ou_user", "c1", immediate=True)
+
+        self.assertEqual(replies, [("c1", "启动失败：后端不可用", "msg-1", True)])
+        self.assertTrue(state["followup_sent"])
+        self.assertEqual(len(bot.patches), 2)
+        minimal_card = json.loads(bot.patches[1][1])
+        self.assertEqual(minimal_card["body"]["elements"], [{"tag": "markdown", "content": "无"}])
+
+        controller.flush_execution_card("ou_user", "c1", immediate=True)
+
+        self.assertEqual(replies, [("c1", "启动失败：后端不可用", "msg-1", True)])
+        self.assertEqual(len(bot.patches), 3)
 
     def test_publish_terminal_result_prefers_terminal_result_card_when_reply_fits_budget(self) -> None:
         state = self._make_state()

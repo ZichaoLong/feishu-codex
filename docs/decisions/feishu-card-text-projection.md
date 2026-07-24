@@ -516,6 +516,31 @@ The most important implementation guidance here is:
   display**
 - generate `final_reply_text` separately from authoritative terminal data
 
+Execution-card process logs are also an untrusted display projection. Command
+and tool output may contain raw HTML/XML such as RSS responses; Feishu can reject
+the entire card patch when that text is passed through as markdown. The sender
+therefore neutralizes markup openers outside fenced code while preserving Feishu
+`<br>` tags and ordinary comparisons such as `1 < 2`. It does not attempt to
+parse complete HTML/XML declarations: a `<` followed by `!`, `?`, `/`, or an
+ASCII letter is enough to neutralize the opener. That projection cannot cover
+every future Feishu parser edge case, so an explicitly rejected full terminal
+execution card is retried once as a minimal terminal card.
+
+During this opener-neutralization step, closed single-line backtick code spans
+are a protected markdown context and remain unchanged. Valid URI and email
+autolinks are normalized to their target text without angle brackets instead of
+being treated as markup. Unclosed code spans, unclosed autolinks, and malformed
+autolinks are not protected; their markup-like openers continue through the
+fail-closed neutralization path.
+
+The minimal patch has a deliberately narrower meaning than a successful full
+patch. It closes stale running UI and removes obsolete controls, but it does not
+claim that omitted terminal text was delivered. A synchronous failure flow that
+has no independent terminal-result carrier therefore sends an idempotent text
+follow-up. If the minimal patch is rate-limited, the dispatcher retries that
+minimal projection; any newer submitted execution-card model still wins. The
+separate terminal-result carrier remains authoritative whenever it exists.
+
 ### 11.3 Recommended source of `final_reply_text`
 
 If upstream does not expose a dedicated "final answer" field, use this priority

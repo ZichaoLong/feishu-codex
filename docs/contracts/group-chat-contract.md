@@ -43,8 +43,9 @@ Those remain owned by their dedicated documents.
 - admins may still bootstrap and manage a group before it is activated
 - runtime identity decisions use `open_id` only
 - `user_id` is retained only for logs and `/whoami` diagnostics
-- `contact:user.employee_id:readonly` is required if you want `user_id` to be
-  populated reliably
+- the supported permission set includes `contact:user.employee_id:readonly` so
+  `/whoami` and logs populate `user_id` reliably; a missing value must never be
+  used for authorization or identity decisions
 
 ## 3. Group Activation Boundary
 

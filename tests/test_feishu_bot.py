@@ -2327,3 +2327,27 @@ class FeishuBotPatchMessageTests(unittest.TestCase):
             result,
             MessagePatchResult.retry_later(2.0),
         )
+
+    def test_patch_message_result_classifies_invalid_card_content(self) -> None:
+        bot = self._make_bot()
+
+        class _Response:
+            code = 230099
+            msg = "Failed to create card content: markdown content parse error"
+            raw = {"ext": "ErrCode: 11311"}
+
+            @staticmethod
+            def success() -> bool:
+                return False
+
+        bot.client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=SimpleNamespace(patch=lambda request: _Response())
+                )
+            )
+        )
+
+        result = bot.patch_message_result("om_invalid", "{}")
+
+        self.assertEqual(result, MessagePatchResult.invalid_content())

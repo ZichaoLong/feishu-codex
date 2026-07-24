@@ -486,6 +486,25 @@
 - **不要从“当前卡片里显示了什么”反推 `final_reply_text`**
 - `final_reply_text` 应从 turn 终态时的权威数据源单独生成
 
+execution card 的过程日志同样只是“不可信的展示投影”。命令和工具输出可能带有 RSS
+响应一类原始 HTML/XML；如果直接作为 markdown 送入飞书，飞书可能拒绝整次卡片 patch。
+因此发送侧会中和 fenced code 之外的 markup opener，同时保留飞书合法的 `<br>` 以及
+`1 < 2` 一类普通比较文本。这里不尝试解析完整 HTML/XML 声明：只要 `<` 后紧跟 `!`、
+`?`、`/` 或英文字母，就足以中和 opener。该投影不可能预知飞书解析器未来的全部边角
+规则，所以当完整终态 execution card 被飞书明确判定为内容非法时，发送侧还会用极简
+终态卡重试一次。
+
+在这一步 opener 中和中，已闭合的单行 backtick 行内代码属于受保护的 markdown 上下文，
+保持原文。合法 URI/email autolink 不作为 markup 处理，而是去掉尖括号并保留目标文本。
+未闭合的行内代码、未闭合 autolink 和格式非法的 autolink 不受保护，其中类似 markup 的
+opener 仍按 fail-closed 路径中和。
+
+极简 patch 的语义刻意弱于完整 patch：它只负责关闭陈旧的运行中 UI 和移除已经失效的
+操作按钮，不表示被省略的终态文本已成功送达。因此，没有独立 terminal-result 载体的
+同步失败路径仍需通过幂等文本 follow-up 补发正文。如果极简 patch 被限流，dispatcher
+重试的是极简投影；等待期间出现更新的 execution-card 模型时，仍以更新模型为准。存在
+独立 terminal-result 载体时，它继续作为权威结果。
+
 ### 11.3 `final_reply_text` 的建议来源
 
 如果上游没有单独提供“final answer”字段，建议按下面顺序取值：

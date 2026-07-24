@@ -12,6 +12,7 @@ import logging
 import queue
 import threading
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Callable, Protocol
 
 from bot.cards import build_execution_card, build_plan_card, build_terminal_result_card_message_content
@@ -41,6 +42,70 @@ class ExecutionCardModel:
             elapsed=0,
             cancelled=False,
         )
+
+
+class ExecutionCardPatchStatus(StrEnum):
+    FULL_APPLIED = "full_applied"
+    MINIMAL_APPLIED = "minimal_applied"
+    RETRYABLE = "retryable"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCardPatchOutcome:
+    status: ExecutionCardPatchStatus
+    retry_after_seconds: float = 0.0
+    retry_model: ExecutionCardModel | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, ExecutionCardPatchStatus):
+            raise TypeError("status must be an ExecutionCardPatchStatus")
+        if self.status == ExecutionCardPatchStatus.RETRYABLE:
+            if self.retry_model is None:
+                raise ValueError("retryable execution-card patches require retry_model")
+            return
+        if self.retry_model is not None or self.retry_after_seconds != 0.0:
+            raise ValueError("only retryable execution-card patches may carry retry state")
+
+    @classmethod
+    def full_applied(cls) -> ExecutionCardPatchOutcome:
+        return cls(status=ExecutionCardPatchStatus.FULL_APPLIED)
+
+    @classmethod
+    def minimal_applied(cls) -> ExecutionCardPatchOutcome:
+        return cls(status=ExecutionCardPatchStatus.MINIMAL_APPLIED)
+
+    @classmethod
+    def retry_later(
+        cls,
+        retry_after_seconds: float,
+        *,
+        retry_model: ExecutionCardModel,
+    ) -> ExecutionCardPatchOutcome:
+        return cls(
+            status=ExecutionCardPatchStatus.RETRYABLE,
+            retry_after_seconds=max(float(retry_after_seconds), 0.0),
+            retry_model=retry_model,
+        )
+
+    @classmethod
+    def failed(cls) -> ExecutionCardPatchOutcome:
+        return cls(status=ExecutionCardPatchStatus.FAILED)
+
+    @property
+    def applied(self) -> bool:
+        return self.status in {
+            ExecutionCardPatchStatus.FULL_APPLIED,
+            ExecutionCardPatchStatus.MINIMAL_APPLIED,
+        }
+
+    @property
+    def full_content_applied(self) -> bool:
+        return self.status == ExecutionCardPatchStatus.FULL_APPLIED
+
+    @property
+    def retryable(self) -> bool:
+        return self.status == ExecutionCardPatchStatus.RETRYABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,24 +243,67 @@ class RuntimeCardPublisher:
             )
         return self._bot.send_message_get_id(chat_id, "interactive", content)
 
-    def patch_execution_card(self, message_id: str, model: ExecutionCardModel) -> MessagePatchResult:
+    def patch_execution_card(
+        self,
+        message_id: str,
+        model: ExecutionCardModel,
+    ) -> ExecutionCardPatchOutcome:
         normalized_message_id = str(message_id or "").strip()
         if not normalized_message_id:
-            return MessagePatchResult.failure()
-        result = self._patch_message_result(
+            return ExecutionCardPatchOutcome.failed()
+        full_result = self._patch_message_result(
             normalized_message_id,
             json.dumps(render_execution_card(model), ensure_ascii=False),
         )
-        if result.ok and not model.running:
+        if full_result.ok:
+            outcome = ExecutionCardPatchOutcome.full_applied()
+        elif full_result.retryable:
+            outcome = ExecutionCardPatchOutcome.retry_later(
+                full_result.retry_after_seconds,
+                retry_model=model,
+            )
+        elif (
+            full_result.content_rejected
+            and not model.running
+            and (model.log_text or model.reply_segments)
+        ):
+            logger.warning(
+                "执行卡片完整终态内容被飞书拒绝，尝试极简终态卡: message_id=%s",
+                normalized_message_id,
+            )
+            minimal_model = ExecutionCardModel(
+                log_text="",
+                reply_segments=(),
+                running=False,
+                elapsed=model.elapsed,
+                cancelled=model.cancelled,
+            )
+            minimal_result = self._patch_message_result(
+                normalized_message_id,
+                json.dumps(render_execution_card(minimal_model), ensure_ascii=False),
+            )
+            if minimal_result.ok:
+                outcome = ExecutionCardPatchOutcome.minimal_applied()
+            elif minimal_result.retryable:
+                outcome = ExecutionCardPatchOutcome.retry_later(
+                    minimal_result.retry_after_seconds,
+                    retry_model=minimal_model,
+                )
+            else:
+                outcome = ExecutionCardPatchOutcome.failed()
+        else:
+            outcome = ExecutionCardPatchOutcome.failed()
+        if outcome.applied and not model.running:
             logger.info(
-                "执行卡片终态更新成功: message_id=%s elapsed=%s cancelled=%s log_chars=%s reply_segments=%s",
+                "执行卡片终态更新成功: message_id=%s elapsed=%s cancelled=%s log_chars=%s reply_segments=%s outcome=%s",
                 normalized_message_id,
                 model.elapsed,
                 model.cancelled,
                 len(model.log_text),
                 len(model.reply_segments),
+                outcome.status,
             )
-        return result
+        return outcome
 
     def delete_card_message(self, message_id: str) -> bool:
         normalized_message_id = str(message_id or "").strip()
@@ -270,7 +378,7 @@ class RuntimeCardPublisher:
 class ExecutionCardPatchDispatcher:
     def __init__(
         self,
-        publish_patch: Callable[[str, ExecutionCardModel], MessagePatchResult],
+        publish_patch: Callable[[str, ExecutionCardModel], ExecutionCardPatchOutcome],
         *,
         worker_count: int = 2,
     ) -> None:
@@ -340,7 +448,7 @@ class ExecutionCardPatchDispatcher:
                         self._slots.pop(message_id, None)
                     continue
                 slot.inflight = True
-            result = MessagePatchResult.failure()
+            result = ExecutionCardPatchOutcome.failed()
             try:
                 result = self._publish_patch(message_id, model)
             finally:
@@ -348,9 +456,16 @@ class ExecutionCardPatchDispatcher:
                     slot = self._slots.setdefault(message_id, _ExecutionCardPatchSlot())
                     slot.inflight = False
                     if result.retryable and not self._closed:
-                        if message_id not in self._pending:
-                            self._pending[message_id] = model
-                        self._schedule_retry_locked(message_id, result.retry_after_seconds)
+                        retry_model = result.retry_model
+                        if retry_model is None:
+                            logger.error(
+                                "执行卡片 patch 返回了缺少 retry_model 的可重试结果，已拒绝重试: message_id=%s",
+                                message_id,
+                            )
+                        else:
+                            if message_id not in self._pending:
+                                self._pending[message_id] = retry_model
+                            self._schedule_retry_locked(message_id, result.retry_after_seconds)
                     if (
                         self._pending.get(message_id) is not None
                         and not slot.queued
