@@ -46,6 +46,17 @@ describe('ConversationPane bounded history navigation surface', () => {
     expect(zh).toContain("tocTruncated: '仅显示最近 200 条 Prompt'");
   });
 
+  it('keeps the wide-rail load-more control above its transparent hover bridge', () => {
+    const toc = source('../src/components/chat/ConversationToc.vue');
+    const hoverBridge = between(toc, '.conversation-toc::before {', '\n}');
+    const loadMoreControl = between(toc, '.toc-more {', '\n}');
+
+    expect(hoverBridge).toContain('z-index: 0;');
+    expect(loadMoreControl).toContain('position: relative;');
+    expect(loadMoreControl).toContain('z-index: 1;');
+    expect(toc).toContain('@click="emit(\'loadMore\')"');
+  });
+
   it('keeps the wide rail and adds one shared compact Prompt history dialog', () => {
     const pane = source('../src/components/chat/ConversationPane.vue');
     const toc = source('../src/components/chat/ConversationToc.vue');

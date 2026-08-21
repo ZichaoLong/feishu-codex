@@ -319,6 +319,8 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .toc-more {
+  position: relative;
+  z-index: 1;
   max-width: 220px;
   margin: 4px 0 0 13px;
   padding: 0;
