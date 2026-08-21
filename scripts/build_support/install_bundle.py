@@ -29,6 +29,7 @@ CHANNEL_MANIFEST_NAMES = {
     "development": "focus-install-development.json",
     "local": "focus-install-local.json",
 }
+DEVELOPMENT_RELEASE_TAG_PREFIX = "development-build-"
 REMOTE_CHANNELS = frozenset({"stable", "development"})
 ALL_CHANNELS = frozenset(CHANNEL_MANIFEST_NAMES)
 
@@ -37,6 +38,7 @@ _MAX_EXPANDED_BYTES = 512 * 1024 * 1024
 _MAX_MANIFEST_BYTES = 64 * 1024
 _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REQUIRED_WEB_FILES = (
     "bot/web_assets/dist/index.html",
@@ -179,6 +181,55 @@ def _require_string(value: Any, *, label: str, identifier: bool = False) -> str:
     return value
 
 
+def development_release_tag(build_id: str) -> str:
+    """Return the only development Release tag allowed for one build."""
+
+    build_id = _require_string(build_id, label="build_id", identifier=True)
+    return _require_string(
+        f"{DEVELOPMENT_RELEASE_TAG_PREFIX}{build_id}",
+        label="development release tag",
+        identifier=True,
+    )
+
+
+def is_development_release_tag(value: object) -> bool:
+    if not isinstance(value, str) or not value.startswith(
+        DEVELOPMENT_RELEASE_TAG_PREFIX
+    ):
+        return False
+    build_id = value.removeprefix(DEVELOPMENT_RELEASE_TAG_PREFIX)
+    return (
+        _SAFE_IDENTIFIER.fullmatch(value) is not None
+        and _SAFE_IDENTIFIER.fullmatch(build_id) is not None
+    )
+
+
+def _validate_remote_channel_identity(
+    *,
+    channel: str,
+    release_tag: str,
+    version: str,
+    build_id: str,
+    source_revision: str,
+) -> None:
+    if _COMMIT_SHA.fullmatch(source_revision) is None:
+        raise InstallBundleError(
+            "remote channel source_revision必须是完整40位小写commit SHA"
+        )
+    if channel == "development":
+        expected = development_release_tag(build_id)
+        if release_tag != expected:
+            raise InstallBundleError(
+                f"development release tag必须由build_id确定：{expected}"
+            )
+        return
+    normalized_tag = release_tag[1:] if release_tag.startswith("v") else release_tag
+    if normalized_tag != version:
+        raise InstallBundleError(
+            f"stable release tag {release_tag!r}与wheel version {version!r}不一致"
+        )
+
+
 def _require_positive_int(value: Any, *, label: str, maximum: int) -> int:
     if type(value) is not int or value <= 0 or value > maximum:
         raise InstallBundleError(f"{label}必须是1到{maximum}之间的整数")
@@ -315,6 +366,14 @@ def channel_manifest_payload(
 ) -> dict[str, Any]:
     if metadata.channel not in REMOTE_CHANNELS:
         raise InstallBundleError("只有stable/development bundle可生成远端channel manifest")
+    release_tag = _require_string(release_tag, label="release tag", identifier=True)
+    _validate_remote_channel_identity(
+        channel=metadata.channel,
+        release_tag=release_tag,
+        version=metadata.version,
+        build_id=metadata.build_id,
+        source_revision=metadata.source_revision,
+    )
     return {
         "build_id": metadata.build_id,
         "bundle": {
@@ -327,7 +386,7 @@ def channel_manifest_payload(
             ),
         },
         "channel": metadata.channel,
-        "release_tag": _require_string(release_tag, label="release tag", identifier=True),
+        "release_tag": release_tag,
         "schema": CHANNEL_SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "source_revision": metadata.source_revision,
@@ -367,20 +426,39 @@ def parse_channel_manifest(raw: bytes, *, expected_channel: str) -> ChannelManif
         {"name", "sha256", "size"},
         label="channel manifest bundle",
     )
+    release_tag = _require_string(
+        payload["release_tag"],
+        label="channel release_tag",
+        identifier=True,
+    )
+    version = _require_string(
+        payload["version"],
+        label="channel version",
+        identifier=True,
+    )
+    build_id = _require_string(
+        payload["build_id"],
+        label="channel build_id",
+        identifier=True,
+    )
+    source_revision = _require_string(
+        payload["source_revision"],
+        label="channel source_revision",
+        identifier=True,
+    )
+    _validate_remote_channel_identity(
+        channel=expected_channel,
+        release_tag=release_tag,
+        version=version,
+        build_id=build_id,
+        source_revision=source_revision,
+    )
     return ChannelManifest(
         channel=expected_channel,
-        release_tag=_require_string(
-            payload["release_tag"],
-            label="channel release_tag",
-            identifier=True,
-        ),
-        version=_require_string(payload["version"], label="channel version", identifier=True),
-        build_id=_require_string(payload["build_id"], label="channel build_id", identifier=True),
-        source_revision=_require_string(
-            payload["source_revision"],
-            label="channel source_revision",
-            identifier=True,
-        ),
+        release_tag=release_tag,
+        version=version,
+        build_id=build_id,
+        source_revision=source_revision,
         bundle=ChannelBundle(
             name=_safe_basename(
                 raw_bundle["name"],
@@ -482,14 +560,10 @@ def build_install_bundle(
         label="source_revision",
         identifier=True,
     )
-    if channel in REMOTE_CHANNELS and not release_tag:
-        raise InstallBundleError("stable/development bundle必须声明release_tag")
-    if channel == "local" and release_tag is not None:
-        raise InstallBundleError("local bundle不能声明release_tag")
-    if channel == "development" and release_tag != "development-builds":
-        raise InstallBundleError(
-            "development bundle必须使用固定release_tag development-builds"
-        )
+    if channel == "stable" and not release_tag:
+        raise InstallBundleError("stable bundle必须声明release_tag")
+    if channel in {"local", "development"} and release_tag is not None:
+        raise InstallBundleError(f"{channel} bundle不能声明release_tag")
 
     source_dir = source_dir.resolve()
     output_dir = output_dir.resolve()
@@ -525,12 +599,6 @@ def build_install_bundle(
             raise InstallBundleError(str(exc)) from exc
         _, version = _read_wheel_identity(wheel_path)
         version = _require_string(version, label="wheel version", identifier=True)
-        if channel == "stable" and release_tag is not None:
-            normalized_tag = release_tag[1:] if release_tag.startswith("v") else release_tag
-            if normalized_tag != version:
-                raise InstallBundleError(
-                    f"stable release tag {release_tag!r}与wheel version {version!r}不一致"
-                )
         wheel_bytes = wheel_path.read_bytes()
         if not wheel_bytes or len(wheel_bytes) > _MAX_EXPANDED_BYTES:
             raise InstallBundleError("Focus wheel大小不符合bundle上限")
@@ -539,6 +607,16 @@ def build_install_bundle(
                 wheel_bytes + b"\0" + lock_bytes + b"\0" + channel.encode("ascii")
             ).hexdigest()[:16]
         build_id = _require_string(build_id, label="build_id", identifier=True)
+        if channel == "development":
+            release_tag = development_release_tag(build_id)
+        if channel in REMOTE_CHANNELS:
+            _validate_remote_channel_identity(
+                channel=channel,
+                release_tag=release_tag or "",
+                version=version,
+                build_id=build_id,
+                source_revision=source_revision,
+            )
         metadata = BundleMetadata(
             channel=channel,
             version=version,

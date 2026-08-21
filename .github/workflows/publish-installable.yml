@@ -37,7 +37,7 @@ jobs:
             exit 2
           fi
           if [[ "$CHANNEL" == "development" && -n "$RELEASE_TAG_INPUT" ]]; then
-            echo "development uses the fixed development-builds tag; leave release_tag empty" >&2
+            echo "development derives a unique tag from build_id; leave release_tag empty" >&2
             exit 2
           fi
 
@@ -118,18 +118,18 @@ jobs:
           RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
         run: |
           source_revision="$(git rev-parse HEAD)"
+          release_tag_args=()
           if [[ "$CHANNEL" == "development" ]]; then
-            release_tag="development-builds"
-            build_id="${source_revision:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            build_id="${source_revision:0:12}-${GITHUB_RUN_ID}"
           else
-            release_tag="$RELEASE_TAG_INPUT"
             build_id="${source_revision:0:12}"
+            release_tag_args=(--release-tag "$RELEASE_TAG_INPUT")
           fi
           python scripts/build_install_bundle.py \
             --channel "$CHANNEL" \
-            --release-tag "$release_tag" \
             --build-id "$build_id" \
             --source-revision "$source_revision" \
+            "${release_tag_args[@]}" \
             --output-dir build/install-publish
           bundle="$(find build/install-publish -maxdepth 1 -type f -name '*.zip' -print -quit)"
           manifest="build/install-publish/focus-install-${CHANNEL}.json"

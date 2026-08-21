@@ -85,10 +85,11 @@ and missing fields:
 | `bundle` | Contains only `name`, `size`, and `sha256`, identifying one ZIP asset in the same Release |
 
 The installer cross-checks GitHub asset metadata, downloaded byte counts, the
-outer SHA-256, inner/outer manifest identity, and wheel identity. The outer digest
-binds the channel pointer to exact bundle bytes under the same repository authority.
-It is not an independent signature or trust root from GitHub and HTTPS, and this
-contract does not claim otherwise.
+outer SHA-256, inner/outer manifest identity, and wheel identity. The remote Release
+tag must also resolve to the exact commit declared by `source_revision`. The outer
+digest binds the channel descriptor to exact bundle bytes under the same repository
+authority. It is not an independent signature or trust root from GitHub and HTTPS,
+and this contract does not claim otherwise.
 
 ## 4. Three Installation Authorities
 
@@ -97,9 +98,9 @@ contract does not claim otherwise.
 With no explicit source, the installer behaves as `--channel stable`: it reads the
 repository's latest non-draft, non-prerelease GitHub Release and requires exactly
 one stable channel manifest plus its referenced bundle. Removing an optional
-leading `v`, the stable Release tag equals the wheel version. Stable bundle and
-channel-manifest assets are immutable; publication rejects an existing name with
-different bytes.
+leading `v`, the stable Release tag equals the wheel version and resolves to the
+bundle's `source_revision`. Stable bundle and channel-manifest assets are immutable;
+publication rejects an existing name with different bytes.
 
 Stable publication uses an already-created formal Release. If the latest Release
 has no bundle, the installer does not fall back to development, checkout sources,
@@ -107,15 +108,20 @@ or an older Release.
 
 ### Development
 
-`--channel development` reads only the non-draft prerelease at the fixed
-`development-builds` tag. That tag remains in `main` history and is never moved to
-a feature branch merely to publish its build. The bundle's `source_revision` still
-records the actual build commit.
+Every explicitly published development build creates a separate non-draft
+prerelease. Its tag is exactly `development-build-<build_id>` and resolves to the bundle's
+`source_revision`, so the Release page, GitHub-generated source archives, and
+installable bundle identify the same source snapshot. The installer selects the
+newest published entry by `published_at` and Release id from the GitHub Release
+list, then requires it to be a complete development prerelease. Validation failure
+does not fall back to an older prerelease or the legacy fixed `development-builds`
+Release.
 
-Each development bundle has a unique, immutable filename.
-`focus-install-development.json` is the replaceable pointer to the latest successful
-build. Publication then retains the newest five development bundles on a best-effort
-basis. Cleanup failure warns but does not revoke the committed latest pointer.
+Each development Release contains only that build's uniquely named immutable bundle
+and immutable `focus-install-development.json` descriptor. Publication retains the
+newest five development prereleases on a best-effort basis by deleting each older
+Release together with its tag. Cleanup failure warns but does not revoke the newly
+published prerelease.
 
 ### Local Artifact
 
@@ -177,22 +183,25 @@ bundle builds never publish artifacts. GitHub upload is explicit: manually dispa
 `publish-installable.yml`, or deliberately invoke the sole upload command with an
 already-built and validated bundle plus its matching channel manifest.
 
-Publication completes bundle, channel-manifest, source-revision, and target-Release
-preflight first. It uploads the uniquely named bundle before the channel manifest.
-A bundle alone is not channel authority; successful upload and read-back of the
-channel manifest is the publication commit point. An ambiguous upload result is
-reconciled from GitHub by size and SHA-256, and fails closed if identical bytes
-cannot be proved.
+Publication completes bundle, channel-manifest, and source-revision preflight first.
+Stable then verifies the existing formal Release and tag, and uploads the immutable
+bundle followed by its channel manifest; successful manifest upload and read-back is
+the stable publication commit point. Development creates a unique draft prerelease
+targeting the exact `source_revision`, uploads and reconciles both immutable assets,
+then publishes the draft. Only that visibility transition is the development
+publication commit point. An ambiguous upload or publication result is reconciled
+from GitHub by commit, size, and SHA-256, and fails closed if the same result cannot
+be proved.
 
-The formal workflow writes the checked-out, gated `HEAD` to `source_revision`.
-The standalone upload command can prove only a 40-character commit SHA and
-inner/outer equality; it cannot independently prove a clean caller worktree or
-that the commit is reachable from a particular remote ref.
+The formal workflow writes the checked-out, gated `HEAD` to `source_revision` and
+derives the development tag from `build_id`. The standalone upload command cannot
+prove a clean caller worktree, but publication must prove that the target GitHub tag
+resolves to that exact commit.
 
-Stable requires an existing formal Release and immutable assets. Development uses
-the fixed prerelease and may replace only its channel manifest. Ordinary validation
-must not become publication by reusing upload side effects or implicitly creating
-tags.
+Stable requires an existing formal Release and immutable assets. Each development
+publication creates a unique draft, keeps every asset immutable, and publishes only
+after complete verification. Ordinary validation must not become publication by
+reusing upload side effects or implicitly creating tags.
 
 ## 7. Maintenance Closure
 

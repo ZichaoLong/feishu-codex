@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import subprocess
@@ -23,13 +24,14 @@ from typing import Any
 
 _GITHUB_REPOSITORY = "ZichaoLong/focus"
 _GITHUB_API_ROOT = f"https://api.github.com/repos/{_GITHUB_REPOSITORY}"
-_DEVELOPMENT_RELEASE_TAG = "development-builds"
 _GITHUB_API_VERSION = "2022-11-28"
+_GITHUB_RELEASE_PAGE_SIZE = 100
 _MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_CHANNEL_MANIFEST_BYTES = 64 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 60
 _PIP_DESTINATION_OPTIONS = frozenset({"target", "prefix", "root", "user"})
 _FALSE_CONFIG_VALUES = frozenset({"", "0", "false", "no", "off"})
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -39,7 +41,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog=(
             "来源：\n"
             "  默认等同于 --channel stable，下载最新正式 GitHub Release 的 Focus bundle。\n"
-            "  --channel development 下载显式发布的最新 development bundle。\n"
+            "  --channel development 下载最新独立 development prerelease 的 bundle。\n"
             "  --artifact PATH 使用已下载或本地构建的 bundle，不访问 GitHub。\n"
             "\n"
             "bundle 是 GitHub Release 可下载的 Focus ZIP 制品，包含 Focus wheel（含 Web）、\n"
@@ -280,16 +282,85 @@ def _read_response_bytes(
     return payload
 
 
-def _download_github_json(url: str) -> dict[str, Any]:
+def _download_github_json(url: str) -> Any:
     request = urllib.request.Request(url, headers=_github_headers())
     raw = _read_response_bytes(request, maximum=_MAX_RELEASE_RESPONSE_BYTES)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SystemExit("GitHub Release API没有返回有效JSON。") from exc
+    return payload
+
+
+def _github_json_object(url: str) -> dict[str, Any]:
+    payload = _download_github_json(url)
     if not isinstance(payload, dict):
         raise SystemExit("GitHub Release API响应必须是object。")
     return payload
+
+
+def _latest_development_release(raw_releases: Any) -> dict[str, Any]:
+    from scripts.build_support.install_bundle import is_development_release_tag
+
+    if not isinstance(raw_releases, list):
+        raise SystemExit("GitHub Release列表响应必须是array。")
+    candidates: list[dict[str, Any]] = []
+    for release in raw_releases:
+        if not isinstance(release, dict):
+            raise SystemExit("GitHub Release列表包含非object条目。")
+        tag = release.get("tag_name")
+        if not is_development_release_tag(tag):
+            continue
+        if type(release.get("draft")) is not bool or type(
+            release.get("prerelease")
+        ) is not bool:
+            raise SystemExit("development Release状态字段无效。")
+        if release["draft"]:
+            continue
+        release_id = release.get("id")
+        published_at = release.get("published_at")
+        if (
+            type(release_id) is not int
+            or release_id <= 0
+            or not isinstance(published_at, str)
+            or not published_at
+        ):
+            raise SystemExit("development Release发布时间或id无效。")
+        candidates.append(release)
+    if not candidates:
+        raise SystemExit("GitHub上没有已发布的Focus development prerelease。")
+    latest = max(
+        candidates,
+        key=lambda release: (release["published_at"], release["id"]),
+    )
+    if not latest["prerelease"]:
+        raise SystemExit("最新development tag没有发布为prerelease。")
+    return latest
+
+
+def _release_tag_commit(tag: str) -> str:
+    encoded_tag = urllib.parse.quote(tag, safe="")
+    payload = _github_json_object(
+        f"{_GITHUB_API_ROOT}/git/ref/tags/{encoded_tag}"
+    )
+    if payload.get("ref") != f"refs/tags/{tag}":
+        raise SystemExit("GitHub Release tag ref与请求不一致。")
+    git_object = payload.get("object")
+    for _ in range(5):
+        if not isinstance(git_object, dict):
+            raise SystemExit("GitHub Release tag缺少git object。")
+        object_type = git_object.get("type")
+        revision = git_object.get("sha")
+        if not isinstance(revision, str) or _COMMIT_SHA.fullmatch(revision) is None:
+            raise SystemExit("GitHub Release tag object缺少完整SHA。")
+        if object_type == "commit":
+            return revision
+        if object_type != "tag":
+            raise SystemExit("GitHub Release tag没有解析到commit。")
+        git_object = _github_json_object(
+            f"{_GITHUB_API_ROOT}/git/tags/{revision}"
+        ).get("object")
+    raise SystemExit("GitHub Release annotated tag嵌套过深。")
 
 
 def _asset_download_url(asset: dict[str, Any], *, expected_name: str) -> tuple[str, int]:
@@ -315,14 +386,32 @@ def _release_asset(release: dict[str, Any], name: str) -> dict[str, Any]:
     return matches[0]
 
 
+def _require_development_release_assets(
+    release: dict[str, Any],
+    *,
+    bundle_name: str,
+    channel_manifest_name: str,
+) -> None:
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        raise SystemExit("GitHub Release缺少assets列表。")
+    names = [item.get("name") for item in assets if isinstance(item, dict)]
+    expected = {bundle_name, channel_manifest_name}
+    if len(names) != len(expected) or set(names) != expected:
+        raise SystemExit("development Release必须只包含bundle与channel manifest。")
+
+
 def _release_for_channel(channel: str) -> dict[str, Any]:
     if channel == "stable":
-        url = f"{_GITHUB_API_ROOT}/releases/latest"
+        release = _github_json_object(f"{_GITHUB_API_ROOT}/releases/latest")
     elif channel == "development":
-        url = f"{_GITHUB_API_ROOT}/releases/tags/{_DEVELOPMENT_RELEASE_TAG}"
+        release = _latest_development_release(
+            _download_github_json(
+                f"{_GITHUB_API_ROOT}/releases?per_page={_GITHUB_RELEASE_PAGE_SIZE}"
+            )
+        )
     else:
         raise SystemExit(f"不受支持的安装channel：{channel}")
-    release = _download_github_json(url)
     tag = release.get("tag_name")
     if (
         release.get("draft") is not False
@@ -333,10 +422,8 @@ def _release_for_channel(channel: str) -> dict[str, Any]:
         raise SystemExit("GitHub Release状态或tag无效。")
     if channel == "stable" and release["prerelease"]:
         raise SystemExit("stable channel不能使用prerelease。")
-    if channel == "development" and (
-        not release["prerelease"] or tag != _DEVELOPMENT_RELEASE_TAG
-    ):
-        raise SystemExit("development channel必须使用固定development prerelease。")
+    if channel == "development" and not release["prerelease"]:
+        raise SystemExit("development channel必须使用prerelease。")
     return release
 
 
@@ -380,6 +467,14 @@ def _resolved_install_bundle(args: argparse.Namespace) -> Iterator[Any]:
             manifest = parse_channel_manifest(channel_raw, expected_channel=channel)
             if manifest.release_tag != release_tag:
                 raise SystemExit("channel manifest的release_tag与GitHub Release不一致。")
+            if channel == "development":
+                _require_development_release_assets(
+                    release,
+                    bundle_name=manifest.bundle.name,
+                    channel_manifest_name=channel_name,
+                )
+            if _release_tag_commit(release_tag) != manifest.source_revision:
+                raise SystemExit("GitHub Release tag与bundle source_revision不一致。")
             bundle_asset = _release_asset(release, manifest.bundle.name)
             bundle_url, bundle_size = _asset_download_url(
                 bundle_asset,

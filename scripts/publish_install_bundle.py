@@ -37,7 +37,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--development-retention",
         type=int,
         default=DEFAULT_DEVELOPMENT_RETENTION,
-        help="Number of development bundles retained after publication (default: 5).",
+        help="Number of development prereleases retained after publication (default: 5).",
     )
     return parser.parse_args(argv)
 

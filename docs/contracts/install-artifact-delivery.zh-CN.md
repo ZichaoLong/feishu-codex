@@ -74,7 +74,8 @@ bundle 必须恰好包含三个普通、未加密、无目录层级的 ZIP entry
 | `bundle` | 只含 `name`、`size`、`sha256`，精确指向同一 Release 中的一个 ZIP asset |
 
 安装器同时核对 GitHub asset metadata、下载字节数、外层 SHA-256、内外 manifest identity 和 wheel
-identity。外层 SHA-256 能把 channel 指针绑定到同一仓库 authority 下的精确 bundle 字节，但它与
+identity。远端 Release tag 还必须解析到 `source_revision` 声明的精确 commit。外层 SHA-256 能把 channel
+descriptor 绑定到同一仓库 authority 下的精确 bundle 字节，但它与
 GitHub/HTTPS 不是相互独立的签名或信任根；本合同不把它描述成独立防篡改证明。
 
 ## 4. 三种安装 authority
@@ -83,21 +84,24 @@ GitHub/HTTPS 不是相互独立的签名或信任根；本合同不把它描述�
 
 未指定来源时，安装器等同于 `--channel stable`：读取本仓库 GitHub 的 latest 非 draft、非 prerelease
 Release，并要求其中恰好存在 stable channel manifest 及其指向的 bundle。stable Release tag 去掉可选前导
-`v` 后必须等于 wheel version。stable bundle 和 stable channel manifest 都是 immutable asset；已有同名
-不同内容时拒绝覆盖。
+`v` 后必须等于 wheel version，而且必须解析到 bundle 的 `source_revision`。stable bundle 和 stable channel
+manifest 都是 immutable asset；已有同名不同内容时拒绝覆盖。
 
 stable 发布只使用已经显式创建的正式 Release。安装器不会因为 latest Release 尚无 bundle 而回退到
 development、checkout 源码或另一旧 Release。
 
 ### development
 
-`--channel development` 只读取固定 tag `development-builds` 的非 draft prerelease。这个 tag 必须位于
-`main` 历史中，不能为了发布 feature build 而重新锚到 feature branch；bundle 自己的 `source_revision`
-仍记录实际构建 commit。
+每次显式发布 development build 都创建一个独立的非 draft prerelease。其 tag 必须是
+`development-build-<build_id>`，并精确解析到 bundle 的 `source_revision`；Release 页面、GitHub 自动生成的
+source archives 和可安装 bundle 因而指向同一次源码快照。安装器从 GitHub Release 列表中按
+`published_at` 和 Release id 选择最新发布项，并要求它是完整的 development prerelease；验证失败时不回退
+到更旧 prerelease，也不读取旧的固定 `development-builds` Release。
 
-每个 development bundle 使用唯一文件名且不覆盖。`focus-install-development.json` 是可替换的最新成功
-build 指针。发布完成后只 best-effort 保留最近五个 development bundle；清理旧 bundle 失败只产生告警，
-不得撤销已经提交的最新指针。
+每个 development Release 只承载该 build 唯一命名且不可覆盖的 bundle，以及不可覆盖的
+`focus-install-development.json` descriptor。发布完成后 best-effort 只保留最近五个 development
+prerelease；清理会同时删除整个旧 Release 及其 tag。清理失败只产生告警，不得撤销已经发布的新
+prerelease。
 
 ### local artifact
 
@@ -140,16 +144,19 @@ Web payload 与 `requirements.lock`，并构建、核验一个包含它们的确
 显式动作：手动触发 `publish-installable.yml`，或明确调用唯一上传命令并提供已经构建、验证的 bundle 与
 matching channel manifest。
 
-发布先对 bundle、channel manifest、source revision 和目标 Release 做完整 preflight，再上传唯一 bundle；
-最后上传 channel manifest。bundle 单独存在不构成 channel authority，channel manifest 上传并读回核验成功才是
-发布 commit point。上传结果不明确时，发布器从 GitHub 读回并按 size/SHA-256 reconciliation；无法证明相同
-内容就失败关闭。
+发布先对 bundle、channel manifest 和 source revision 做完整 preflight。stable 再核验已存在的正式 Release
+及其 tag，依次上传不可变 bundle 和 channel manifest；channel manifest 上传并读回核验成功是 stable 发布
+commit point。development 则以精确 `source_revision` 为 target 创建唯一 draft prerelease，依次上传并读回
+核验两个不可变 asset，最后把 draft 发布为 prerelease；只有这个可见性切换才是 development 发布 commit
+point。上传或发布结果不明确时，发布器从 GitHub 读回 Release、tag 与 asset，并按 commit、size 和 SHA-256
+reconciliation；无法证明相同结果就失败关闭。
 
-正式 workflow 把已 checkout、通过门禁的 `HEAD` 写入 `source_revision`。独立上传命令只能验证该字段是
-40 位 commit SHA 以及内外一致，不能独立证明调用者 worktree clean 或该 commit 在哪个远端 ref 可达。
+正式 workflow 把已 checkout、通过门禁的 `HEAD` 写入 `source_revision`，并由 `build_id` 派生 development
+tag。独立上传命令不能证明调用者 worktree clean，但发布时必须证明目标 GitHub tag 精确解析到该 commit。
 
-stable 发布要求目标正式 Release 已存在且 assets immutable。development 使用固定 prerelease，只允许替换其
-channel manifest。普通验证不得通过复用发布脚本、workflow side effect 或隐式 tag 创建而升级为发布。
+stable 发布要求目标正式 Release 已存在且 assets immutable。development 每次创建唯一 draft，所有 asset
+immutable，且只在完整核验后发布。普通验证不得通过复用发布脚本、workflow side effect 或隐式 tag 创建而升级
+为发布。
 
 ## 7. 维护闭环
 

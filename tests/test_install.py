@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
+import hashlib
+import json
 import os
 import pathlib
 import shutil
@@ -13,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import install
+from scripts.build_support.install_bundle import development_release_tag
 
 
 class _FakeManagedInstallTransaction:
@@ -392,21 +395,38 @@ class InstallTests(unittest.TestCase):
             "assets": [],
         }
         development = {
+            "id": 22,
             "draft": False,
             "prerelease": True,
-            "tag_name": install._DEVELOPMENT_RELEASE_TAG,
+            "tag_name": development_release_tag("build-2"),
+            "published_at": "2026-08-21T10:00:00Z",
             "assets": [],
+        }
+        older_development = {
+            **development,
+            "id": 21,
+            "tag_name": development_release_tag("build-1"),
+            "published_at": "2026-08-20T10:00:00Z",
+        }
+        legacy_fixed = {
+            **development,
+            "id": 23,
+            "tag_name": "development-builds",
+            "published_at": "2026-08-22T10:00:00Z",
         }
         with patch(
             "install._download_github_json",
-            side_effect=(stable, development),
+            side_effect=(
+                stable,
+                [legacy_fixed, older_development, development],
+            ),
         ) as download:
             self.assertIs(install._release_for_channel("stable"), stable)
             self.assertIs(install._release_for_channel("development"), development)
         self.assertTrue(download.call_args_list[0].args[0].endswith("/releases/latest"))
         self.assertTrue(
             download.call_args_list[1].args[0].endswith(
-                "/releases/tags/development-builds"
+                "/releases?per_page=100"
             )
         )
 
@@ -416,11 +436,79 @@ class InstallTests(unittest.TestCase):
             return_value={
                 "draft": False,
                 "prerelease": True,
-                "tag_name": "development-builds",
+                "tag_name": development_release_tag("build-1"),
             },
         ):
             with self.assertRaisesRegex(SystemExit, "stable channel"):
                 install._release_for_channel("stable")
+
+    def test_development_release_discovery_ignores_drafts_and_fails_without_published(self) -> None:
+        draft = {
+            "id": 1,
+            "draft": True,
+            "prerelease": True,
+            "tag_name": development_release_tag("build-1"),
+            "published_at": None,
+            "assets": [],
+        }
+        with self.assertRaisesRegex(SystemExit, "没有已发布"):
+            install._latest_development_release([draft])
+
+    def test_development_release_discovery_validates_only_latest_namespace_entry(self) -> None:
+        older_formal = {
+            "id": 1,
+            "draft": False,
+            "prerelease": False,
+            "tag_name": development_release_tag("old"),
+            "published_at": "2026-08-20T10:00:00Z",
+            "assets": [],
+        }
+        latest = {
+            **older_formal,
+            "id": 2,
+            "prerelease": True,
+            "tag_name": development_release_tag("current"),
+            "published_at": "2026-08-21T10:00:00Z",
+        }
+        self.assertIs(
+            install._latest_development_release([older_formal, latest]),
+            latest,
+        )
+
+    def test_release_tag_commit_uses_exact_release_ref(self) -> None:
+        revision = "a" * 40
+        tag = development_release_tag("build-1")
+        with patch(
+            "install._download_github_json",
+            return_value={
+                "ref": f"refs/tags/{tag}",
+                "object": {"type": "commit", "sha": revision},
+            },
+        ) as download:
+            self.assertEqual(
+                install._release_tag_commit(tag),
+                revision,
+            )
+        self.assertTrue(
+            download.call_args.args[0].endswith(
+                f"/git/ref/tags/{tag}"
+            )
+        )
+
+    def test_release_tag_commit_dereferences_annotated_tag(self) -> None:
+        tag_sha = "b" * 40
+        revision = "a" * 40
+        with patch(
+            "install._download_github_json",
+            side_effect=(
+                {
+                    "ref": "refs/tags/4.0.0",
+                    "object": {"type": "tag", "sha": tag_sha},
+                },
+                {"object": {"type": "commit", "sha": revision}},
+            ),
+        ):
+            self.assertEqual(install._release_tag_commit("4.0.0"), revision)
 
     def test_asset_url_is_confined_to_repository_release_downloads(self) -> None:
         asset = {
@@ -437,6 +525,89 @@ class InstallTests(unittest.TestCase):
         asset["browser_download_url"] = "https://example.com/focus.zip"
         with self.assertRaisesRegex(SystemExit, "不受信任"):
             install._asset_download_url(asset, expected_name="focus.zip")
+
+    def test_development_release_rejects_assets_from_another_build(self) -> None:
+        release = {
+            "assets": [
+                {"name": "focus-install-development.json"},
+                {"name": "focus.zip"},
+                {"name": "unowned.txt"},
+            ]
+        }
+        with self.assertRaisesRegex(SystemExit, "只包含"):
+            install._require_development_release_assets(
+                release,
+                bundle_name="focus.zip",
+                channel_manifest_name="focus-install-development.json",
+            )
+
+    def test_remote_development_resolution_binds_release_tag_manifest_and_bundle(self) -> None:
+        source_revision = "a" * 40
+        build_id = "build-1"
+        release_tag = development_release_tag(build_id)
+        bundle_name = "focus-install-4.0.0.dev0-build-1.zip"
+        bundle_raw = b"validated bundle bytes"
+        manifest_raw = json.dumps(
+            {
+                "schema": "focus-install-channel",
+                "schema_version": 1,
+                "channel": "development",
+                "release_tag": release_tag,
+                "version": "4.0.0.dev0",
+                "build_id": build_id,
+                "source_revision": source_revision,
+                "bundle": {
+                    "name": bundle_name,
+                    "size": len(bundle_raw),
+                    "sha256": hashlib.sha256(bundle_raw).hexdigest(),
+                },
+            }
+        ).encode()
+        manifest_name = "focus-install-development.json"
+        release = {
+            "tag_name": release_tag,
+            "assets": [
+                {
+                    "name": manifest_name,
+                    "size": len(manifest_raw),
+                    "browser_download_url": (
+                        f"https://github.com/ZichaoLong/focus/releases/download/"
+                        f"{release_tag}/{manifest_name}"
+                    ),
+                },
+                {
+                    "name": bundle_name,
+                    "size": len(bundle_raw),
+                    "browser_download_url": (
+                        f"https://github.com/ZichaoLong/focus/releases/download/"
+                        f"{release_tag}/{bundle_name}"
+                    ),
+                },
+            ],
+        }
+        sentinel = object()
+        args = SimpleNamespace(artifact=None, channel="development")
+        with patch("install._release_for_channel", return_value=release):
+            with patch(
+                "install._read_response_bytes",
+                side_effect=(manifest_raw, bundle_raw),
+            ):
+                with patch(
+                    "install._release_tag_commit",
+                    return_value=source_revision,
+                ):
+                    with patch(
+                        "scripts.build_support.install_bundle.validate_install_bundle",
+                        return_value=sentinel,
+                    ) as validate:
+                        with install._resolved_install_bundle(args) as resolved:
+                            self.assertIs(resolved, sentinel)
+
+        self.assertEqual(
+            validate.call_args.kwargs["expected_source_revision"],
+            source_revision,
+        )
+        self.assertEqual(validate.call_args.kwargs["expected_build_id"], build_id)
 
     def test_artifact_failure_happens_before_managed_transaction(self) -> None:
         @contextlib.contextmanager

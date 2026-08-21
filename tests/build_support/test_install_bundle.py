@@ -14,6 +14,7 @@ from scripts.build_support.install_bundle import (
     CHANNEL_MANIFEST_NAMES,
     InstallBundleError,
     build_install_bundle,
+    development_release_tag,
     parse_bundle_manifest,
     parse_channel_manifest,
     sha256_file,
@@ -74,10 +75,8 @@ class InstallBundleTests(unittest.TestCase):
         if not source.exists():
             source = self._write_source(root)
         kwargs = {}
-        if channel != "local":
-            kwargs["release_tag"] = (
-                "4.0.0" if channel == "stable" else "development-builds"
-            )
+        if channel == "stable":
+            kwargs["release_tag"] = "4.0.0"
         with patch(
             "scripts.build_support.install_bundle.build_validated_wheel",
             side_effect=self._fake_wheel_builder,
@@ -126,7 +125,10 @@ class InstallBundleTests(unittest.TestCase):
                 built.channel_manifest_path.read_bytes(),
                 expected_channel="development",
             )
-            self.assertEqual(parsed.release_tag, "development-builds")
+            self.assertEqual(
+                parsed.release_tag,
+                development_release_tag(parsed.build_id),
+            )
             self.assertEqual(parsed.bundle.name, built.bundle_path.name)
             self.assertEqual(parsed.bundle.size, built.bundle_path.stat().st_size)
             self.assertEqual(parsed.bundle.sha256, sha256_file(built.bundle_path))
@@ -248,12 +250,30 @@ class InstallBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(InstallBundleError, "wheel version"):
                 self._build(root, channel="stable")
 
+    def test_development_build_derives_release_tag_and_rejects_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            source = self._write_source(root)
+            with patch(
+                "scripts.build_support.install_bundle.build_validated_wheel",
+                side_effect=self._fake_wheel_builder,
+            ):
+                with self.assertRaisesRegex(InstallBundleError, "不能声明release_tag"):
+                    build_install_bundle(
+                        source_dir=source,
+                        output_dir=root / "output",
+                        channel="development",
+                        source_revision="a" * 40,
+                        build_id="build-1",
+                        release_tag="development-custom",
+                    )
+
     def test_channel_manifest_rejects_cross_channel_and_unknown_fields(self) -> None:
         payload = {
             "build_id": "build-1",
             "bundle": {"name": "focus.zip", "sha256": "0" * 64, "size": 12},
             "channel": "development",
-            "release_tag": "development-builds",
+            "release_tag": development_release_tag("build-1"),
             "schema": "focus-install-channel",
             "schema_version": 1,
             "source_revision": "a" * 40,
