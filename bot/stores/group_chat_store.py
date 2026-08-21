@@ -9,7 +9,7 @@ import os
 import pathlib
 import threading
 import time
-from typing import Any
+from typing import Any, TypedDict
 
 from bot.feishu_types import BoundaryState, GroupChatStoreData, GroupMessageEntry, GroupState
 
@@ -18,6 +18,15 @@ GROUP_MODES = {"mention_only", "assistant", "all"}
 MAIN_SCOPE = "main"
 GROUP_CHAT_STORE_SCHEMA_VERSION = 2
 SUPPORTED_GROUP_CHAT_STORE_SCHEMA_VERSIONS = frozenset({1, GROUP_CHAT_STORE_SCHEMA_VERSION})
+
+
+class _LoadedGroupChatStoreData(TypedDict):
+    """Validated groups plus record-local failures retained for safe rewrites."""
+
+    schema_version: int
+    groups: dict[str, GroupState]
+    invalid_groups: dict[str, Any]
+    invalid_errors: dict[str, str]
 
 
 class GroupChatStore:
@@ -69,10 +78,17 @@ class GroupChatStore:
         activated_by: str,
         activated_at: int | None = None,
     ) -> dict[str, object]:
-        normalized_activated_by = str(activated_by or "").strip()
+        if not isinstance(activated_by, str):
+            raise ValueError("activated_by 必须是字符串")
+        normalized_activated_by = activated_by.strip()
         if not normalized_activated_by:
             raise ValueError("activated_by 不能为空")
-        normalized_activated_at = max(int(activated_at or int(time.time() * 1000)), 0)
+        if activated_at is None:
+            normalized_activated_at = int(time.time() * 1000)
+        elif type(activated_at) is int and activated_at > 0:
+            normalized_activated_at = activated_at
+        else:
+            raise ValueError("activated_at 必须是正整数")
         with self._lock:
             data = self._read_all()
             group = self._group_state(chat_id, data=data)
@@ -215,14 +231,18 @@ class GroupChatStore:
         before_seq: int | None = None,
         scope: str | None = None,
     ) -> list[GroupMessageEntry]:
-        path = self._log_path(chat_id)
-        if not path.exists():
-            return []
         lower = max(int(after_seq), 0)
         upper = int(before_seq) if before_seq is not None else None
         normalized_scope = self.normalize_scope(scope) if scope is not None else ""
         messages: list[GroupMessageEntry] = []
         with self._lock:
+            data = self._read_all()
+            # A malformed durable group must not make unrelated groups
+            # unavailable, but its own history remains fail-closed.
+            self._group_state(chat_id, data=data)
+            path = self._log_path(chat_id)
+            if not path.exists():
+                return []
             with path.open(encoding="utf-8") as handle:
                 for line in handle:
                     line = line.strip()
@@ -268,8 +288,12 @@ class GroupChatStore:
         with self._lock:
             data = self._read_all()
             if data["groups"].pop(normalized_chat_id, None) is not None:
-                self._write_all(data)
                 removed = True
+            if data.get("invalid_groups", {}).pop(normalized_chat_id, None) is not None:
+                data.get("invalid_errors", {}).pop(normalized_chat_id, None)
+                removed = True
+            if removed:
+                self._write_all(data)
         log_path = self._log_path(normalized_chat_id)
         if log_path.exists():
             log_path.unlink()
@@ -315,10 +339,12 @@ class GroupChatStore:
         }
 
     @classmethod
-    def _default_store_data(cls) -> GroupChatStoreData:
+    def _default_store_data(cls) -> _LoadedGroupChatStoreData:
         return {
             "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
             "groups": {},
+            "invalid_groups": {},
+            "invalid_errors": {},
         }
 
     @classmethod
@@ -331,9 +357,21 @@ class GroupChatStore:
         activated_at: int,
     ) -> GroupState:
         updated = cls._clone_group_state(group)
-        updated["activated"] = bool(activated)
-        updated["activated_by"] = str(activated_by or "").strip()
-        updated["activated_at"] = max(int(activated_at), 0)
+        if type(activated) is not bool:
+            raise ValueError("activated 必须是 JSON boolean")
+        if activated:
+            if not isinstance(activated_by, str) or not activated_by.strip():
+                raise ValueError("activated=true 要求非空 activated_by")
+            if type(activated_at) is not int or activated_at <= 0:
+                raise ValueError("activated=true 要求正整数 activated_at")
+            updated["activated_by"] = activated_by.strip()
+            updated["activated_at"] = activated_at
+        else:
+            if activated_by != "" or activated_at != 0:
+                raise ValueError("activated=false 要求空 activated_by 与 0 activated_at")
+            updated["activated_by"] = ""
+            updated["activated_at"] = 0
+        updated["activated"] = activated
         return updated
 
     def _boundary_state(self, group: GroupState, scope: str | None) -> BoundaryState:
@@ -344,14 +382,23 @@ class GroupChatStore:
             group["boundaries"][normalized_scope] = boundary
         return boundary
 
-    def _group_state(self, chat_id: str, *, data: GroupChatStoreData | None = None) -> GroupState:
+    def _group_state(
+        self,
+        chat_id: str,
+        *,
+        data: _LoadedGroupChatStoreData | None = None,
+    ) -> GroupState:
         source = data if data is not None else self._read_all()
+        invalid_groups = source.get("invalid_groups", {})
+        if chat_id in invalid_groups:
+            detail = source.get("invalid_errors", {}).get(chat_id, "invalid group state")
+            raise ValueError(detail)
         raw = source["groups"].get(chat_id)
         if raw is None:
             return self._default_group_state()
         return self._clone_group_state(raw)
 
-    def _read_all(self) -> GroupChatStoreData:
+    def _read_all(self) -> _LoadedGroupChatStoreData:
         path = self._state_path()
         if not path.exists():
             return self._default_store_data()
@@ -361,7 +408,7 @@ class GroupChatStore:
             raise ValueError(f"invalid {path.name}: failed to parse JSON") from exc
         return self._validate_store_data(raw)
 
-    def _validate_store_data(self, raw: Any) -> GroupChatStoreData:
+    def _validate_store_data(self, raw: Any) -> _LoadedGroupChatStoreData:
         if not isinstance(raw, dict):
             raise ValueError("invalid group_chat_state.json: root must be an object")
         schema_version = raw.get("schema_version")
@@ -374,17 +421,28 @@ class GroupChatStore:
         if not isinstance(raw_groups, dict):
             raise ValueError("invalid group_chat_state.json: groups must be an object")
         groups: dict[str, GroupState] = {}
+        invalid_groups: dict[str, Any] = {}
+        invalid_errors: dict[str, str] = {}
         for chat_id, raw_group in raw_groups.items():
             if not isinstance(chat_id, str) or not chat_id.strip():
                 raise ValueError("invalid group_chat_state.json: group chat_id must be a non-empty string")
-            groups[chat_id] = self._validate_group_state(
-                raw_group,
-                chat_id=chat_id,
-                schema_version=int(schema_version),
-            )
+            try:
+                groups[chat_id] = self._validate_group_state(
+                    raw_group,
+                    chat_id=chat_id,
+                    schema_version=int(schema_version),
+                )
+            except ValueError as exc:
+                # Keep the malformed record isolated to its exact chat.  It
+                # remains in the serialized payload so a write for another
+                # chat cannot silently erase evidence or reset that chat.
+                invalid_groups[chat_id] = raw_group
+                invalid_errors[chat_id] = str(exc)
         return {
             "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
             "groups": groups,
+            "invalid_groups": invalid_groups,
+            "invalid_errors": invalid_errors,
         }
 
     def _validate_group_state(self, raw_group: Any, *, chat_id: str, schema_version: int) -> GroupState:
@@ -394,14 +452,37 @@ class GroupChatStore:
         if mode not in GROUP_MODES:
             raise ValueError(f"invalid group_chat_state.json: group {chat_id} has invalid mode")
         if schema_version >= GROUP_CHAT_STORE_SCHEMA_VERSION:
-            activated = bool(raw_group.get("activated", False))
-            activated_by = str(raw_group.get("activated_by", "") or "").strip()
-            try:
-                activated_at = max(int(raw_group.get("activated_at", 0) or 0), 0)
-            except (TypeError, ValueError) as exc:
+            required_activation_fields = {"activated", "activated_by", "activated_at"}
+            missing_activation_fields = required_activation_fields.difference(raw_group)
+            if missing_activation_fields:
                 raise ValueError(
-                    f"invalid group_chat_state.json: group {chat_id} has invalid activated_at"
-                ) from exc
+                    f"invalid group_chat_state.json: group {chat_id} is missing activation metadata"
+                )
+            activated = raw_group["activated"]
+            if type(activated) is not bool:
+                raise ValueError(
+                    f"invalid group_chat_state.json: group {chat_id} activated must be a JSON boolean"
+                )
+            activated_by = raw_group["activated_by"]
+            activated_at = raw_group["activated_at"]
+            if not isinstance(activated_by, str):
+                raise ValueError(
+                    f"invalid group_chat_state.json: group {chat_id} activated_by must be a string"
+                )
+            if type(activated_at) is not int:
+                raise ValueError(
+                    f"invalid group_chat_state.json: group {chat_id} activated_at must be an integer"
+                )
+            if activated:
+                activated_by = activated_by.strip()
+                if not activated_by or activated_at <= 0:
+                    raise ValueError(
+                        f"invalid group_chat_state.json: group {chat_id} active metadata is inconsistent"
+                    )
+            elif activated_by != "" or activated_at != 0:
+                raise ValueError(
+                    f"invalid group_chat_state.json: group {chat_id} inactive metadata is inconsistent"
+                )
         else:
             activated = False
             activated_by = ""
@@ -456,17 +537,24 @@ class GroupChatStore:
             "message_ids": message_ids,
         }
 
-    def _write_group_state(self, data: GroupChatStoreData, chat_id: str, group: GroupState) -> None:
+    def _write_group_state(
+        self,
+        data: _LoadedGroupChatStoreData,
+        chat_id: str,
+        group: GroupState,
+    ) -> None:
         data["groups"][chat_id] = self._clone_group_state(group)
         self._write_all(data)
 
-    def _write_all(self, data: GroupChatStoreData) -> None:
+    def _write_all(self, data: _LoadedGroupChatStoreData) -> None:
+        serialized_groups: dict[str, Any] = {
+            chat_id: self._clone_group_state(group)
+            for chat_id, group in data["groups"].items()
+        }
+        serialized_groups.update(data.get("invalid_groups", {}))
         payload: GroupChatStoreData = {
             "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
-            "groups": {
-                chat_id: self._clone_group_state(group)
-                for chat_id, group in data["groups"].items()
-            },
+            "groups": serialized_groups,  # type: ignore[typeddict-item]
         }
         path = self._state_path()
         path.parent.mkdir(parents=True, exist_ok=True)

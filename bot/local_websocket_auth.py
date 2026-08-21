@@ -7,10 +7,10 @@ localhost websocket surfaces between `focusctl`, `focusd`, and `focus`/`fcodex`.
 
 from __future__ import annotations
 
-import os
 import pathlib
 import secrets
 
+from bot.atomic_file import ensure_private_token
 from bot.file_permissions import ensure_private_file_permissions
 
 APP_SERVER_WEBSOCKET_TOKEN_FILENAME = "app_server_websocket.token"
@@ -19,7 +19,7 @@ FOCUS_SERVICE_TOKEN_ENV_VAR = "FOCUS_SERVICE_TOKEN"
 
 
 class MissingAppServerWebsocketAuthTokenError(RuntimeError):
-    """Raised when a remote app-server websocket token is required but missing."""
+    """Raised when an attached app-server client cannot load its local token."""
 
 
 def build_bearer_authorization_headers(token: str) -> dict[str, str]:
@@ -73,17 +73,4 @@ class AppServerWebsocketAuthTokenStore:
         )
 
     def ensure(self) -> str:
-        token = self.load()
-        if token:
-            return token
-        token = secrets.token_urlsafe(32)
-        self._atomic_write_private_text(f"{token}\n")
-        return token
-
-    def _atomic_write_private_text(self, text: str) -> None:
-        path = self.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_name(f"{path.name}.tmp")
-        tmp_path.write_text(text, encoding="utf-8")
-        ensure_private_file_permissions(tmp_path)
-        os.replace(tmp_path, path)
+        return ensure_private_token(self.path, lambda: secrets.token_urlsafe(32))

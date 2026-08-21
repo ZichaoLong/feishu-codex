@@ -55,7 +55,10 @@ def normalize_permissions_profile_id(
         return normalized
     if normalized in LEGACY_SANDBOX_TO_PERMISSION_PROFILE_ID:
         return LEGACY_SANDBOX_TO_PERMISSION_PROFILE_ID[normalized]
-    return normalized
+    choices = ", ".join(sorted(BUILTIN_PERMISSION_PROFILE_IDS))
+    raise ValueError(
+        f"unsupported permissions profile {value!r}; expected one of: {choices}"
+    )
 
 
 def permissions_profile_choice_key(profile_id: str) -> str:

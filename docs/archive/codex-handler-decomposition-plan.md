@@ -2,7 +2,12 @@
 
 Chinese version: `docs/archive/codex-handler-decomposition-plan.zh-CN.md`
 
-This document is an implementation plan, not a runtime contract.
+> Frozen archive: this plan is complete and retained only as a historical rollout
+> record. It is no longer updated with the current implementation. See
+> [`focus-design.md`](../architecture/focus-design.md) for current architecture and
+> ownership.
+
+This is a historical implementation plan, not a runtime contract.
 
 Note: some terms in the original plan predate the later command-surface
 tightening; read the runtime-release admin action here as the current
@@ -13,9 +18,6 @@ It answers:
 - why the next step should not be more scattered fixes
 - how `CodexHandler` should be split by ownership boundaries
 - what each phase changes, does not change, and must prove before it is done
-
-If the rollout order changes later, update this document rather than mixing
-planning content into the formal runtime semantics docs.
 
 ## 1. Background
 

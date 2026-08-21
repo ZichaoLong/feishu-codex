@@ -7,12 +7,12 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Callable, Protocol
 from uuid import UUID
 
 from bot.adapters.base import ThreadSummary
 from bot.adapters.codex_app_server import CodexAppServerAdapter, CodexAppServerConfig
+from bot.codex_protocol.client import AppServerEndpointMode
 
 
 class ThreadListingAdapter(Protocol):
@@ -135,20 +135,15 @@ def resolve_resume_target_by_name(
     return exact_name[0]
 
 
-def resolve_resume_name_via_remote_backend(
+def resolve_resume_name_via_attached_endpoint(
     *,
-    base_config: CodexAppServerConfig,
-    app_server_url: str,
+    config: CodexAppServerConfig,
     query_limit: int,
     target: str,
 ) -> ThreadSummary:
-    adapter = CodexAppServerAdapter(
-        replace(
-            base_config,
-            app_server_mode="remote",
-            app_server_url=app_server_url,
-        )
-    )
+    if config.endpoint_mode is not AppServerEndpointMode.ATTACHED_ENDPOINT:
+        raise ValueError("thread resume lookup requires an attached app-server endpoint")
+    adapter = CodexAppServerAdapter(config)
     try:
         return resolve_resume_target_by_name(
             adapter,

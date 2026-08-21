@@ -58,6 +58,7 @@ def ensure_env_template(path: pathlib.Path | str | None = None) -> pathlib.Path:
     resolved = env_file_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     if resolved.exists():
+        ensure_private_file_permissions(resolved)
         return resolved
     resolved.write_text(
         "\n".join(

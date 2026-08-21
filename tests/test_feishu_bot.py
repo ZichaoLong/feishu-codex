@@ -1,35 +1,67 @@
 import json
 import pathlib
 import tempfile
-import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import lark_oapi.ws.client as lark_ws_client
-from lark_oapi.api.im.v1 import (
-    P2ImChatDisbandedV1,
-    P2ImChatMemberBotDeletedV1,
-    P2ImMessageRecalledV1,
-    P2ImMessageReceiveV1,
-)
+from lark_oapi.api.im.v1 import P2ImMessageRecalledV1, P2ImMessageReceiveV1
 
 from bot.cards import build_execution_card, build_terminal_result_card
 from bot.card_text_projection import terminal_result_checksum
 from bot.execution_transcript import ExecutionReplySegment
 from bot.feishu_bot import FeishuBot
-from bot.feishu_ws_proxy import configure_feishu_ws_proxy, normalize_feishu_ws_proxy_mode
-from bot.message_patch_result import MessagePatchResult
+from bot.feishu_destination_liveness_contract import FeishuDestinationLossProof
+from bot.feishu_outbound import (
+    FeishuDestinationLiveness,
+    FeishuOutboundEffect,
+    FeishuOutboundOperation,
+    FeishuOutboundResult,
+)
+from bot.feishu_ws_proxy import (
+    configure_feishu_ws_proxy,
+    normalize_feishu_ws_proxy_mode,
+)
+from bot.system_config import SystemConfig
+
+
+def _confirmed_outbound(
+    operation: FeishuOutboundOperation,
+    *,
+    chat_id: str,
+    message_id: str,
+) -> FeishuOutboundResult:
+    return FeishuOutboundResult(
+        operation=operation,
+        effect=FeishuOutboundEffect.CONFIRMED,
+        destination_liveness=FeishuDestinationLiveness.REACHABLE,
+        chat_id=chat_id,
+        attempt_id="recording-attempt",
+        message_id=message_id,
+    )
 
 
 class _RecordingBot(FeishuBot):
-    def __init__(self, data_dir: pathlib.Path, *, system_config: dict | None = None) -> None:
-        config = {"admin_open_ids": ["ou-admin"], "bot_open_id": "ou-bot"}
-        if system_config:
-            config.update(system_config)
+    def __init__(
+        self,
+        data_dir: pathlib.Path,
+        *,
+        system_config: SystemConfig | dict | None = None,
+    ) -> None:
+        if isinstance(system_config, SystemConfig):
+            config = system_config
+        else:
+            raw_config = {
+                "app_id": "app-id",
+                "app_secret": "app-secret",
+                "admin_open_ids": ["ou-admin"],
+                "bot_open_id": "ou-bot",
+            }
+            if system_config:
+                raw_config.update(system_config)
+            config = SystemConfig.from_dict(raw_config)
         super().__init__(
-            "app-id",
-            "app-secret",
             data_dir=data_dir,
             system_config=config,
         )
@@ -49,8 +81,14 @@ class _RecordingBot(FeishuBot):
         self.raw_message_items: dict[str, list[object]] = {}
         self.allow_group_prompt_result = True
         self.route_group_followup_prompt_result = False
-        self.chat_unavailable_events: list[tuple[str, str]] = []
         self.recalled_messages: list[tuple[str, str]] = []
+        self.destination_loss_proofs: list[FeishuDestinationLossProof] = []
+        self._default_collect_assistant_context_entries = (
+            self._ingress._collect_assistant_context_entries
+        )
+        self._ingress._collect_assistant_context_entries = (
+            self._collect_assistant_context_entries
+        )
 
     def on_message(self, sender_id: str, chat_id: str, text: str, message_id: str = "") -> None:
         self.received_messages.append((sender_id, chat_id, text, message_id))
@@ -81,18 +119,48 @@ class _RecordingBot(FeishuBot):
         if parent_message_id:
             self.card_parents.append((chat_id, card, parent_message_id))
 
-    def send_message_get_id(self, chat_id: str, msg_type: str, content: str) -> str:
+    def send_message(
+        self,
+        chat_id: str,
+        msg_type: str,
+        content: str,
+    ) -> FeishuOutboundResult:
         self.sent_messages.append((chat_id, msg_type, content))
-        return "bootstrap-card-2"
+        return _confirmed_outbound(
+            FeishuOutboundOperation.CREATE_MESSAGE,
+            chat_id=chat_id,
+            message_id="bootstrap-card-2",
+        )
 
-    def reply_to_message(self, parent_id: str, msg_type: str, content: str, *, reply_in_thread: bool = False) -> str:
+    def reply_to_message(
+        self,
+        chat_id: str,
+        parent_id: str,
+        msg_type: str,
+        content: str,
+        *,
+        reply_in_thread: bool = False,
+    ) -> FeishuOutboundResult:
         self.reply_refs.append((parent_id, msg_type, content))
         self.reply_ref_thread_flags.append(reply_in_thread)
-        return "bootstrap-card-1"
+        return _confirmed_outbound(
+            FeishuOutboundOperation.REPLY_MESSAGE,
+            chat_id=chat_id,
+            message_id="bootstrap-card-1",
+        )
 
-    def patch_message(self, message_id: str, content: str) -> bool:
+    def patch_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+    ) -> FeishuOutboundResult:
         self.patches.append((message_id, content))
-        return True
+        return _confirmed_outbound(
+            FeishuOutboundOperation.PATCH_MESSAGE,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
 
     def _resolve_sender_name(self, open_id: str) -> str:
         return open_id[:8]
@@ -109,13 +177,15 @@ class _RecordingBot(FeishuBot):
         del message_id
         return bool(self.route_group_followup_prompt_result)
 
-    def on_chat_unavailable(self, chat_id: str, *, reason: str = "") -> None:
-        self.chat_unavailable_events.append((chat_id, reason))
-
     def on_message_recalled(self, chat_id: str, message_id: str) -> None:
         self.recalled_messages.append((chat_id, message_id))
 
-    def get_message_items(self, message_id: str, *, card_msg_content_type: str = "") -> list[object]:
+    def on_destination_loss_proof(self, proof: FeishuDestinationLossProof) -> None:
+        self.destination_loss_proofs.append(proof)
+
+    def get_message_items(
+        self, message_id: str, *, card_msg_content_type: str = ""
+    ) -> list[object]:
         del card_msg_content_type
         return list(self.raw_message_items.get(message_id, []))
 
@@ -141,10 +211,13 @@ class _RecordingBot(FeishuBot):
         current_seq: int,
         thread_id: str = "",
     ) -> list[dict]:
-        original_fetch = self._history_recovery.fetch_group_history_entries
-        self._history_recovery.fetch_group_history_entries = self._recorded_group_history_entries
+        history_recovery = self._ingress.history_recovery
+        original_fetch = history_recovery.fetch_group_history_entries
+        history_recovery.fetch_group_history_entries = (
+            self._recorded_group_history_entries
+        )
         try:
-            return super()._collect_assistant_context_entries(
+            return self._default_collect_assistant_context_entries(
                 chat_id=chat_id,
                 current_message_id=current_message_id,
                 current_create_time=current_create_time,
@@ -152,7 +225,7 @@ class _RecordingBot(FeishuBot):
                 thread_id=thread_id,
             )
         finally:
-            self._history_recovery.fetch_group_history_entries = original_fetch
+            history_recovery.fetch_group_history_entries = original_fetch
 
     def _recorded_group_history_entries(
         self,
@@ -211,6 +284,61 @@ class _HistoryResponse:
     def success(self) -> bool:
         return True
 
+
+class FeishuBotIngressDebugConfigTests(unittest.TestCase):
+    def test_raw_card_ingress_logging_defaults_off(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bot = _RecordingBot(pathlib.Path(raw))
+
+        self.assertFalse(bot._debug_raw_card_ingress)
+
+    def test_raw_card_ingress_logging_requires_yaml_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaisesRegex(ValueError, "debug_raw_card_ingress"):
+                _RecordingBot(
+                    pathlib.Path(raw),
+                    system_config={"debug_raw_card_ingress": "false"},
+                )
+
+    def test_feishu_bot_consumes_a_validated_typed_system_config(self) -> None:
+        config = SystemConfig.from_dict(
+            {
+                "app_id": "app-id",
+                "app_secret": "app-secret",
+                "request_timeout_seconds": 5,
+                "feishu_ws_proxy": "disabled",
+                "admin_open_ids": ["ou-admin"],
+                "bot_open_id": "ou-bot",
+                "trigger_open_ids": ["ou-trigger"],
+                "group_history_fetch_limit": 0,
+                "group_history_fetch_lookback_seconds": 0,
+                "debug_raw_card_ingress": True,
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            bot = _RecordingBot(pathlib.Path(raw), system_config=config)
+
+        self.assertEqual(bot._feishu_ws_proxy_mode, "disabled")
+        self.assertEqual(bot.list_admin_open_ids(), ["ou-admin"])
+        self.assertEqual(
+            bot._ingress.configured_group_trigger_open_ids(),
+            {"ou-bot", "ou-trigger"},
+        )
+        self.assertFalse(bot._ingress.history_recovery.history_recovery_enabled())
+        self.assertTrue(bot._debug_raw_card_ingress)
+
+    def test_feishu_bot_does_not_coerce_bad_system_config_values(self) -> None:
+        invalid_configs = (
+            {"admin_open_ids": "ou-admin"},
+            {"group_history_fetch_limit": "50"},
+            {"request_timeout_seconds": "5"},
+        )
+        for config in invalid_configs:
+            with self.subTest(config=config):
+                with tempfile.TemporaryDirectory() as raw:
+                    with self.assertRaises(ValueError):
+                        _RecordingBot(pathlib.Path(raw), system_config=config)
 
 def _message_event(
     *,
@@ -339,11 +467,19 @@ def _attachment_message_event(
 
 class FeishuWebSocketProxyTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._original_ws_connect_kwargs = lark_ws_client._ws_connect_kwargs
-        self.addCleanup(self._restore_ws_connect_kwargs)
+        self._had_ws_connect_kwargs = hasattr(lark_ws_client, "_ws_connect_kwargs")
+        self._original_ws_connect_kwargs = getattr(lark_ws_client, "_ws_connect_kwargs", None)
+        self._original_websockets = lark_ws_client.websockets
+        self.addCleanup(self._restore_ws_proxy_state)
 
-    def _restore_ws_connect_kwargs(self) -> None:
-        lark_ws_client._ws_connect_kwargs = self._original_ws_connect_kwargs
+    def _restore_ws_proxy_state(self) -> None:
+        lark_ws_client.websockets = self._original_websockets
+        if self._had_ws_connect_kwargs:
+            lark_ws_client._ws_connect_kwargs = self._original_ws_connect_kwargs
+        elif hasattr(lark_ws_client, "_ws_connect_kwargs"):
+            delattr(lark_ws_client, "_ws_connect_kwargs")
+        if hasattr(lark_ws_client, "_focus_original_websockets"):
+            delattr(lark_ws_client, "_focus_original_websockets")
 
     def _websockets_supports_proxy(self) -> bool:
         return "proxy" in lark_ws_client.inspect.signature(lark_ws_client.websockets.connect).parameters
@@ -352,27 +488,34 @@ class FeishuWebSocketProxyTests(unittest.TestCase):
         mode = configure_feishu_ws_proxy("env")
 
         self.assertEqual(mode, "env")
-        self.assertEqual(lark_ws_client._ws_connect_kwargs(), {})
+        if self._had_ws_connect_kwargs:
+            self.assertEqual(lark_ws_client._ws_connect_kwargs(), {})
+        else:
+            self.assertIs(lark_ws_client.websockets, self._original_websockets)
 
     def test_feishu_ws_proxy_disabled_preserves_direct_sdk_websocket_behavior(self) -> None:
         mode = configure_feishu_ws_proxy("disabled")
 
         self.assertEqual(mode, "disabled")
-        kwargs = lark_ws_client._ws_connect_kwargs()
-        if self._websockets_supports_proxy():
-            self.assertEqual(kwargs, {"proxy": None})
+        if self._had_ws_connect_kwargs:
+            kwargs = lark_ws_client._ws_connect_kwargs()
+            if self._websockets_supports_proxy():
+                self.assertEqual(kwargs, {"proxy": None})
+            else:
+                self.assertEqual(kwargs, {})
         else:
-            self.assertEqual(kwargs, {})
+            self.assertIsNot(lark_ws_client.websockets, self._original_websockets)
 
     def test_feishu_ws_proxy_mode_rejects_unknown_values(self) -> None:
         with self.assertRaisesRegex(ValueError, "feishu_ws_proxy"):
             normalize_feishu_ws_proxy_mode("container")
 
-    def test_feishu_ws_proxy_env_fails_loudly_when_lark_proxy_hook_is_missing(self) -> None:
-        delattr(lark_ws_client, "_ws_connect_kwargs")
+    def test_feishu_ws_proxy_env_uses_direct_sdk_behavior_when_private_hook_is_missing(self) -> None:
+        if hasattr(lark_ws_client, "_ws_connect_kwargs"):
+            delattr(lark_ws_client, "_ws_connect_kwargs")
 
-        with self.assertRaisesRegex(RuntimeError, "feishu_ws_proxy=env"):
-            configure_feishu_ws_proxy("env")
+        self.assertEqual(configure_feishu_ws_proxy("env"), "env")
+        self.assertIs(lark_ws_client.websockets, self._original_websockets)
 
     def test_start_applies_configured_feishu_ws_proxy_mode_before_connecting(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -384,9 +527,12 @@ class FeishuWebSocketProxyTests(unittest.TestCase):
             bot.start()
 
         ws_client.start.assert_called_once_with()
-        kwargs = lark_ws_client._ws_connect_kwargs()
-        if self._websockets_supports_proxy():
-            self.assertEqual(kwargs, {"proxy": None})
+        if self._had_ws_connect_kwargs:
+            kwargs = lark_ws_client._ws_connect_kwargs()
+            if self._websockets_supports_proxy():
+                self.assertEqual(kwargs, {"proxy": None})
+        else:
+            self.assertIsNot(lark_ws_client.websockets, self._original_websockets)
 
 
 class FeishuBotCardProjectionTests(unittest.TestCase):
@@ -394,21 +540,6 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
         return _RecordingBot(pathlib.Path(tempdir.name))
-
-    def test_extract_post_text_preserves_paragraph_breaks(self) -> None:
-        text = FeishuBot._extract_text(
-            "post",
-            {
-                "title": "",
-                "content": [
-                    [{"tag": "text", "text": "第一段"}],
-                    [],
-                    [{"tag": "text", "text": "- "}, {"tag": "text", "text": "第二段"}],
-                ],
-            },
-        )
-
-        self.assertEqual(text, "第一段\n\n- 第二段")
 
     def test_p2p_terminal_result_card_projects_authoritative_text(self) -> None:
         bot = self._make_bot()
@@ -538,7 +669,7 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
     def test_history_entry_projects_interactive_terminal_result_from_other_app_sender(self) -> None:
         bot = self._make_bot()
 
-        entry = bot._history_recovery.history_entry_from_message(
+        entry = bot._ingress.history_recovery.history_entry_from_message(
             SimpleNamespace(
                 message_id="hist-card",
                 msg_type="interactive",
@@ -597,7 +728,7 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
             )
         ]
 
-        object.__setattr__(bot._forward_aggregator._ports, "fetch_merge_forward_items", lambda _message_id: [
+        object.__setattr__(bot._ingress.forward_aggregator._ports, "fetch_merge_forward_items", lambda _message_id: [
             SimpleNamespace(
                 message_id="sub-card",
                 upper_message_id="merge-root",
@@ -622,7 +753,7 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
             )
         )
 
-        pending = bot._forward_aggregator.peek_pending_forward("ou-admin", "ou-admin")
+        pending = bot._ingress.forward_aggregator.peek_pending_forward("ou-admin", "ou-admin")
         assert pending is not None
         pending.timer.cancel()
 
@@ -678,7 +809,7 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
                 )
             ]
 
-        object.__setattr__(bot._forward_aggregator._ports, "fetch_merge_forward_items", _fetch_merge_forward_items)
+        object.__setattr__(bot._ingress.forward_aggregator._ports, "fetch_merge_forward_items", _fetch_merge_forward_items)
 
         bot._handle_raw_message(
             _attachment_message_event(
@@ -692,7 +823,7 @@ class FeishuBotCardProjectionTests(unittest.TestCase):
             )
         )
 
-        pending = bot._forward_aggregator.peek_pending_forward("ou-admin", "ou-admin")
+        pending = bot._ingress.forward_aggregator.peek_pending_forward("ou-admin", "ou-admin")
         assert pending is not None
         pending.timer.cancel()
 
@@ -838,7 +969,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             [("ou-user", "chat-1", "file-1", "file", "file-key-1", "spec.pdf")],
         )
         self.assertEqual(bot.received_messages, [])
-        self.assertEqual(bot._group_store.read_messages_between("chat-1"), [])
+        self.assertEqual(bot._ingress.group_store.read_messages_between("chat-1"), [])
 
     def test_assistant_mode_logs_plain_group_message_without_triggering(self) -> None:
         bot = self._make_bot()
@@ -856,7 +987,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         )
 
         self.assertEqual(bot.received_messages, [])
-        logged = bot._group_store.read_messages_between("chat-1")
+        logged = bot._ingress.group_store.read_messages_between("chat-1")
         self.assertEqual(len(logged), 1)
         self.assertEqual(logged[0]["text"], "第一条讨论")
 
@@ -877,7 +1008,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         )
 
         self.assertEqual(bot.received_messages, [])
-        logged = bot._group_store.read_messages_between("chat-1")
+        logged = bot._ingress.group_store.read_messages_between("chat-1")
         self.assertEqual(len(logged), 1)
         self.assertEqual(logged[0]["text"], "请提交")
 
@@ -918,7 +1049,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
         bot.activate_group_chat("chat-1", activated_by="ou-admin")
-        seq_1 = bot._append_group_log_entry(
+        seq_1 = bot._ingress._append_group_log_entry(
             chat_id="chat-1",
             message_id="m-prev",
             created_at=1712476700000,
@@ -928,13 +1059,13 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             msg_type="text",
             text="上一轮触发",
         )
-        bot._group_store.set_last_boundary(
+        bot._ingress.group_store.set_last_boundary(
             "chat-1",
             seq=seq_1,
             created_at=1712476700000,
             message_ids=["m-prev"],
         )
-        seq_2 = bot._append_group_log_entry(
+        seq_2 = bot._ingress._append_group_log_entry(
             chat_id="chat-1",
             message_id="m-between",
             created_at=1712476750000,
@@ -944,7 +1075,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             msg_type="text",
             text="排队前的普通消息",
         )
-        seq_3 = bot._append_group_log_entry(
+        seq_3 = bot._ingress._append_group_log_entry(
             chat_id="chat-1",
             message_id="m-queued",
             created_at=1712476800000,
@@ -954,7 +1085,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             msg_type="text",
             text="请处理",
         )
-        bot._append_group_log_entry(
+        bot._ingress._append_group_log_entry(
             chat_id="chat-1",
             message_id="m-after",
             created_at=1712476850000,
@@ -982,9 +1113,9 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("sender_name: Alice", text)
         self.assertNotIn("排队后的普通消息", text)
         self.assertEqual(seq_2, 2)
-        self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), seq_3)
-        self.assertEqual(bot._group_store.get_last_boundary_created_at("chat-1"), 1712476800000)
-        self.assertIn("m-queued", bot._group_store.get_last_boundary_message_ids("chat-1"))
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_seq("chat-1"), seq_3)
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_created_at("chat-1"), 1712476800000)
+        self.assertIn("m-queued", bot._ingress.group_store.get_last_boundary_message_ids("chat-1"))
 
     def test_assistant_mode_includes_prior_group_messages_on_authorized_mention(self) -> None:
         bot = self._make_bot()
@@ -1023,7 +1154,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("<group_chat_current_turn>", text)
         self.assertIn("sender_name: ou-user", text)
         self.assertIn("请总结一下", text)
-        self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 2)
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_seq("chat-1"), 2)
 
     def test_group_all_mode_passes_text_through_directly(self) -> None:
         bot = self._make_bot()
@@ -1181,8 +1312,8 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(bot.received_messages, [])
         self.assertIn("尚未由管理员初始化", bot.replies[-1][1])
-        self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 0)
-        self.assertEqual(bot._group_store.read_messages_between("chat-1"), [])
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_seq("chat-1"), 0)
+        self.assertEqual(bot._ingress.group_store.read_messages_between("chat-1"), [])
 
     def test_assistant_mode_preflight_can_block_history_recovery_before_fetch(self) -> None:
         bot = self._make_bot()
@@ -1249,8 +1380,8 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertEqual(len(bot.history_fetch_calls), 1)
         self.assertEqual(bot.history_fetch_calls[0]["after_created_at"], 0)
         self.assertEqual(bot.claim_reserved_execution_card("m-1"), "bootstrap-card-1")
-        self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 1)
-        self.assertEqual(bot._group_store.get_last_boundary_created_at("chat-1"), 1712476800000)
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_seq("chat-1"), 1)
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_created_at("chat-1"), 1712476800000)
         self.assertIn("第一次回捞补到的机器人消息", bot.received_messages[0][2])
 
         bot.history_entries = [
@@ -1303,45 +1434,8 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         _, _, second_text, _ = bot.received_messages[-1]
         self.assertIn("这是两次 @ 之间的人类消息", second_text)
         self.assertIn("第二次回捞补到的机器人消息", second_text)
-        self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1"), 3)
-        self.assertEqual(bot._group_store.get_last_boundary_created_at("chat-1"), 1712476920000)
-
-    def test_chat_disbanded_event_clears_local_group_state_and_notifies_subclass(self) -> None:
-        bot = self._make_bot()
-        bot.set_group_mode("chat-1", "all")
-        bot._group_store.append_message(
-            "chat-1",
-            {
-                "message_id": "m-1",
-                "created_at": 1,
-                "sender_user_id": "u-1",
-                "sender_principal_id": "ou-1",
-                "sender_type": "user",
-                "sender_name": "User",
-                "msg_type": "text",
-                "thread_id": "",
-                "text": "hello",
-            },
-        )
-        bot.remember_chat_type("chat-1", "group")
-        bot.remember_chat_display_name("chat-1", "Project Group")
-
-        bot._on_raw_chat_disbanded(P2ImChatDisbandedV1({"event": {"chat_id": "chat-1"}}))
-
-        self.assertEqual(bot.get_group_mode("chat-1"), "assistant")
-        self.assertFalse(bot._group_store.log_path("chat-1").exists())
-        self.assertEqual(bot.lookup_chat_type("chat-1"), "")
-        self.assertEqual(bot.lookup_chat_display_name("chat-1"), "")
-        self.assertEqual(bot.chat_unavailable_events[-1], ("chat-1", "disbanded"))
-
-    def test_bot_deleted_event_clears_local_group_state_and_notifies_subclass(self) -> None:
-        bot = self._make_bot()
-        bot.set_group_mode("chat-1", "all")
-
-        bot._on_raw_chat_member_bot_deleted(P2ImChatMemberBotDeletedV1({"event": {"chat_id": "chat-1"}}))
-
-        self.assertEqual(bot.get_group_mode("chat-1"), "assistant")
-        self.assertEqual(bot.chat_unavailable_events[-1], ("chat-1", "bot_removed"))
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_seq("chat-1"), 3)
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_created_at("chat-1"), 1712476920000)
 
     def test_message_recalled_event_notifies_subclass(self) -> None:
         bot = self._make_bot()
@@ -1388,104 +1482,9 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            bot._group_store.get_last_boundary_message_ids("chat-1"),
+            bot._ingress.group_store.get_last_boundary_message_ids("chat-1"),
             ["hist-same-ms", "m-1"],
         )
-
-    def test_history_fetch_prefers_most_recent_missing_entries_within_limit(self) -> None:
-        bot = self._make_bot(system_config={"group_history_fetch_limit": 2})
-        responses = {
-            "": _HistoryResponse(
-                [
-                    _history_item(message_id="hist-1", created_at=1000, text="第一条"),
-                    _history_item(message_id="hist-2", created_at=2000, text="第二条"),
-                ],
-                has_more=True,
-                page_token="next-1",
-            ),
-            "next-1": _HistoryResponse(
-                [
-                    _history_item(message_id="hist-3", created_at=3000, text="第三条"),
-                    _history_item(message_id="hist-4", created_at=4000, text="第四条"),
-                ],
-            ),
-        }
-        calls: list[str] = []
-
-        def fake_list(request):
-            token = str(getattr(request, "page_token", "") or "")
-            calls.append(token)
-            return responses[token]
-
-        bot.client = SimpleNamespace(
-            im=SimpleNamespace(
-                v1=SimpleNamespace(
-                    message=SimpleNamespace(list=fake_list),
-                )
-            )
-        )
-
-        entries = bot._history_recovery.fetch_group_history_entries(
-            chat_id="chat-1",
-            current_message_id="m-current",
-            current_create_time=5000,
-            existing_message_ids=set(),
-            after_created_at=0,
-            limit=2,
-        )
-
-        self.assertEqual(calls, ["", "next-1"])
-        self.assertEqual([item["message_id"] for item in entries], ["hist-3", "hist-4"])
-
-    def test_thread_history_fetch_uses_desc_scan_and_stops_at_boundary(self) -> None:
-        bot = self._make_bot()
-        responses = {
-            "": _HistoryResponse(
-                [
-                    _history_item(message_id="hist-6", created_at=6000, text="第六条", thread_id="thread-1"),
-                    _history_item(message_id="hist-5", created_at=5000, text="第五条", thread_id="thread-1"),
-                ],
-                has_more=True,
-                page_token="next-1",
-            ),
-            "next-1": _HistoryResponse(
-                [
-                    _history_item(message_id="m-boundary", created_at=3000, text="边界消息", thread_id="thread-1"),
-                    _history_item(message_id="hist-old", created_at=2000, text="过旧消息", thread_id="thread-1"),
-                ],
-                has_more=True,
-                page_token="next-2",
-            ),
-        }
-        calls: list[tuple[str, str]] = []
-
-        def fake_list(request):
-            token = str(getattr(request, "page_token", "") or "")
-            sort_type = str(getattr(request, "sort_type", "") or "")
-            calls.append((token, sort_type))
-            return responses[token]
-
-        bot.client = SimpleNamespace(
-            im=SimpleNamespace(
-                v1=SimpleNamespace(
-                    message=SimpleNamespace(list=fake_list),
-                )
-            )
-        )
-
-        entries = bot._history_recovery.fetch_group_history_entries(
-            chat_id="chat-1",
-            current_message_id="m-current",
-            current_create_time=7000,
-            existing_message_ids=set(),
-            after_created_at=3000,
-            after_message_ids={"m-boundary"},
-            thread_id="thread-1",
-            limit=10,
-        )
-
-        self.assertEqual(calls, [("", "ByCreateTimeDesc"), ("next-1", "ByCreateTimeDesc")])
-        self.assertEqual([item["message_id"] for item in entries], ["hist-5", "hist-6"])
 
     def test_chat_history_fetch_applies_boundary_slack_to_start_time(self) -> None:
         bot = self._make_bot()
@@ -1505,7 +1504,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        entries = bot._history_recovery.fetch_group_history_entries(
+        entries = bot._ingress.history_recovery.fetch_group_history_entries(
             chat_id="chat-1",
             current_message_id="m-current",
             current_create_time=10000,
@@ -1537,7 +1536,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             )
         )
 
-        entries = bot._history_recovery.fetch_group_history_entries(
+        entries = bot._ingress.history_recovery.fetch_group_history_entries(
             chat_id="chat-1",
             current_message_id="m-current",
             current_create_time=2000,
@@ -1671,7 +1670,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("当前消息来自群主聊天流", text)
         self.assertIn("主聊天流消息", text)
         self.assertNotIn("话题里的旧消息", text)
-        self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1", scope="main"), 3)
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_seq("chat-1", scope="main"), 3)
 
     def test_assistant_mode_thread_context_is_scoped_to_same_thread(self) -> None:
         bot = self._make_bot()
@@ -1728,12 +1727,12 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         self.assertIn("话题里的旧消息", text)
         self.assertNotIn("主聊天流消息", text)
         self.assertEqual(bot.history_fetch_calls[-1]["thread_id"], "th-1")
-        self.assertEqual(bot._group_store.get_last_boundary_seq("chat-1", scope="thread:th-1"), 3)
+        self.assertEqual(bot._ingress.group_store.get_last_boundary_seq("chat-1", scope="thread:th-1"), 3)
 
     def test_group_history_bootstrap_card_is_shared_card(self) -> None:
         bot = self._make_bot()
 
-        bot._prepare_group_history_execution_card("chat-1", "m-1")
+        bot._ingress._prepare_group_history_execution_card("chat-1", "m-1")
 
         self.assertEqual(bot.reply_refs[-1][0], "m-1")
         card = json.loads(bot.reply_refs[-1][2])
@@ -1741,37 +1740,41 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
     def test_group_reply_to_thread_message_sets_reply_in_thread(self) -> None:
         bot = self._make_bot()
-        bot._remember_message_context("m-thread", {"thread_id": "th-1"})
-        captured: list = []
-
-        class _Response:
-            @staticmethod
-            def success() -> bool:
-                return True
-
-            data = SimpleNamespace(message_id="reply-1")
-
-        def fake_reply(request):
-            captured.append(request)
-            return _Response()
-
-        bot.client = SimpleNamespace(
-            im=SimpleNamespace(
-                v1=SimpleNamespace(
-                    message=SimpleNamespace(reply=fake_reply),
-                )
-            )
+        bot._process_cache.remember_message_context(
+            "m-thread",
+            {"thread_id": "th-1"},
+        )
+        bot._outbound = Mock()
+        bot._outbound.reply_to_message.return_value = _confirmed_outbound(
+            FeishuOutboundOperation.REPLY_MESSAGE,
+            chat_id="chat-1",
+            message_id="reply-1",
         )
 
-        reply_id = FeishuBot.reply_to_message(bot, "m-thread", "text", json.dumps({"text": "hi"}))
+        result = FeishuBot.reply_to_message(
+            bot,
+            "chat-1",
+            "m-thread",
+            "text",
+            json.dumps({"text": "hi"}),
+        )
 
-        self.assertEqual(reply_id, "reply-1")
-        self.assertEqual(len(captured), 1)
-        self.assertTrue(captured[0].request_body.reply_in_thread)
+        self.assertEqual(result.message_id, "reply-1")
+        bot._outbound.reply_to_message.assert_called_once_with(
+            chat_id="chat-1",
+            parent_id="m-thread",
+            msg_type="text",
+            content=json.dumps({"text": "hi"}),
+            reply_in_thread=True,
+            attempt_id="",
+        )
 
     def test_reply_local_image_reuses_thread_reply_shape(self) -> None:
         bot = self._make_bot()
-        bot._remember_message_context("m-thread", {"thread_id": "th-1"})
+        bot._process_cache.remember_message_context(
+            "m-thread",
+            {"thread_id": "th-1"},
+        )
         bot.upload_image = lambda local_path: "img-key-1"
 
         message_id = FeishuBot.reply_local_image(
@@ -1812,34 +1815,6 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             ),
         )
 
-    def test_get_message_context_returns_empty_after_entry_expires(self) -> None:
-        bot = self._make_bot()
-        bot._remember_message_context("m-ctx", {"thread_id": "th-1"})
-        bot._message_contexts["m-ctx"].created_at = time.time() - 601
-
-        self.assertEqual(bot.get_message_context("m-ctx"), {})
-
-    def test_lookup_chat_type_returns_empty_after_entry_expires(self) -> None:
-        bot = self._make_bot()
-        bot.remember_chat_type("chat-1", "group")
-        bot._chat_type_cache["chat-1"].created_at = time.time() - (24 * 3600 + 1)
-
-        self.assertEqual(bot.lookup_chat_type("chat-1"), "")
-
-    def test_lookup_chat_display_name_returns_empty_after_entry_expires(self) -> None:
-        bot = self._make_bot()
-        bot.remember_chat_display_name("chat-1", "Project Group")
-        bot._chat_display_name_cache["chat-1"].created_at = time.time() - (6 * 3600 + 1)
-
-        self.assertEqual(bot.lookup_chat_display_name("chat-1"), "")
-
-    def test_claim_reserved_execution_card_returns_empty_after_entry_expires(self) -> None:
-        bot = self._make_bot()
-        bot.reserve_execution_card("m-1", "card-1")
-        bot._pending_execution_cards["m-1"].created_at = time.time() - 601
-
-        self.assertEqual(bot.claim_reserved_execution_card("m-1"), "")
-
     def test_raw_handler_defensively_ignores_group_app_sender_before_logging(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": ""})
         bot.set_group_mode("chat-1", "assistant")
@@ -1866,13 +1841,13 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         )
 
         self.assertEqual(bot.received_messages, [])
-        self.assertEqual(bot._group_store.read_messages_between("chat-1"), [])
+        self.assertEqual(bot._ingress.group_store.read_messages_between("chat-1"), [])
 
     def test_forward_timeout_keeps_thread_scope(self) -> None:
         bot = self._make_bot()
         bot.set_group_mode("chat-1", "assistant")
 
-        bot._buffer_forward(
+        bot._ingress._buffer_forward(
             "u-user",
             "chat-1",
             "历史转发",
@@ -1884,13 +1859,15 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             created_at=1712476800000,
             thread_id="th-1",
         )
-        pending = bot._forward_aggregator.peek_pending_forward("u-user", "chat-1")
+        pending = bot._ingress.forward_aggregator.peek_pending_forward(
+            "u-user", "chat-1", thread_id="th-1"
+        )
         assert pending is not None
         pending.timer.cancel()
-        bot._on_forward_timeout("u-user", "chat-1")
+        bot._ingress.forward_aggregator.on_forward_timeout("u-user", "chat-1", "th-1")
 
-        main_entries = bot._group_store.read_messages_between("chat-1", scope="main")
-        thread_entries = bot._group_store.read_messages_between("chat-1", scope="thread:th-1")
+        main_entries = bot._ingress.group_store.read_messages_between("chat-1", scope="main")
+        thread_entries = bot._ingress.group_store.read_messages_between("chat-1", scope="thread:th-1")
         self.assertEqual(main_entries, [])
         self.assertEqual(len(thread_entries), 1)
         self.assertIn("历史转发", thread_entries[0]["text"])
@@ -1959,7 +1936,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
                 "trigger_open_ids": ["ou-user-alias"],
             }
         )
-        bot._remember_message_context(
+        bot._process_cache.remember_message_context(
             "m-1",
             {
                 "mentions": [
@@ -1981,32 +1958,6 @@ class FeishuBotGroupModeTests(unittest.TestCase):
             bot.extract_non_bot_mentions("m-1"),
             [{"open_id": "ou-target", "name": "Alice"}],
         )
-
-    def test_group_normalization_keeps_non_trigger_mentions(self) -> None:
-        bot = self._make_bot(
-            system_config={
-                "bot_open_id": "ou-bot",
-                "trigger_open_ids": ["ou-user-alias"],
-            }
-        )
-
-        normalized = bot._normalize_mentions(
-            "@_user_1 请和 @_user_2 一起看",
-            [
-                {
-                    "key": "@_user_1",
-                    "open_id": "ou-user-alias",
-                    "name": "ZLong",
-                },
-                {
-                    "key": "@_user_2",
-                    "open_id": "ou-other",
-                    "name": "Alice",
-                },
-            ],
-        )
-
-        self.assertEqual(normalized, "请和 @Alice 一起看")
 
     def test_group_normalization_preserves_newlines(self) -> None:
         bot = self._make_bot(system_config={"bot_open_id": "ou-bot"})
@@ -2061,7 +2012,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         )
 
         self.assertEqual(bot.received_messages, [])
-        logged = bot._group_store.read_messages_between("chat-1")
+        logged = bot._ingress.group_store.read_messages_between("chat-1")
         self.assertEqual(len(logged), 1)
         self.assertIn("@Codex", logged[0]["text"])
         self.assertIn("请总结", logged[0]["text"])
@@ -2089,7 +2040,7 @@ class FeishuBotGroupModeTests(unittest.TestCase):
         )
 
         self.assertEqual(bot.received_messages, [])
-        logged = bot._group_store.read_messages_between("chat-1")
+        logged = bot._ingress.group_store.read_messages_between("chat-1")
         self.assertEqual(len(logged), 1)
         self.assertIn("@ZLong", logged[0]["text"])
 
@@ -2188,166 +2139,3 @@ class FeishuBotGroupModeTests(unittest.TestCase):
 
         self.assertEqual(bot.fetch_runtime_chat_type("oc_topic123"), "group")
         self.assertEqual(bot.lookup_chat_type("oc_topic123"), "group")
-
-    def test_history_entry_uses_sender_principal_id_for_app_sender(self) -> None:
-        bot = self._make_bot()
-
-        entry = bot._history_recovery.history_entry_from_message(
-            _history_item(
-                message_id="hist-app",
-                created_at=1712476800000,
-                text="来自其他机器人的历史消息",
-                sender_id="cli_a1b2c3",
-                sender_type="app",
-            )
-        )
-
-        self.assertIsNotNone(entry)
-        assert entry is not None
-        self.assertEqual(entry["sender_principal_id"], "cli_a1b2c3")
-        self.assertEqual(entry["sender_type"], "app")
-
-    def test_history_entry_skips_self_app_sender(self) -> None:
-        bot = self._make_bot()
-        bot.app_id = "cli_self_bot"
-
-        entry = bot._history_recovery.history_entry_from_message(
-            _history_item(
-                message_id="hist-self-app",
-                created_at=1712476800000,
-                text="Codex Bot 自己发的卡片",
-                sender_id="cli_self_bot",
-                sender_type="app",
-            )
-        )
-
-        self.assertIsNone(entry)
-
-    def test_history_fetch_filters_self_app_messages(self) -> None:
-        bot = self._make_bot()
-        bot.app_id = "cli_self_bot"
-        bot.client = SimpleNamespace(
-            im=SimpleNamespace(
-                v1=SimpleNamespace(
-                    message=SimpleNamespace(
-                        list=lambda request: _HistoryResponse(
-                            [
-                                _history_item(
-                                    message_id="hist-self-app",
-                                    created_at=1000,
-                                    text="自己发的卡片",
-                                    sender_id="cli_self_bot",
-                                    sender_type="app",
-                                ),
-                                _history_item(
-                                    message_id="hist-other-app",
-                                    created_at=1001,
-                                    text="其他机器人消息",
-                                    sender_id="cli_other_bot",
-                                    sender_type="app",
-                                ),
-                                _history_item(
-                                    message_id="hist-user",
-                                    created_at=1002,
-                                    text="普通用户消息",
-                                ),
-                            ]
-                        )
-                    )
-                )
-            )
-        )
-
-        entries = bot._history_recovery.fetch_group_history_entries(
-            chat_id="chat-1",
-            current_message_id="m-current",
-            current_create_time=2000,
-            existing_message_ids=set(),
-            after_created_at=0,
-            limit=10,
-        )
-
-        self.assertEqual(
-            [item["message_id"] for item in entries],
-            ["hist-other-app", "hist-user"],
-        )
-
-
-class FeishuBotPatchMessageTests(unittest.TestCase):
-    def _make_bot(self) -> _RecordingBot:
-        tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tempdir.cleanup)
-        return _RecordingBot(pathlib.Path(tempdir.name))
-
-    def test_patch_message_result_retries_on_feishu_frequency_limit(self) -> None:
-        bot = self._make_bot()
-
-        class _Response:
-            code = 230020
-            msg = "This operation triggers the frequency limit"
-            raw = {"ext": ""}
-
-            @staticmethod
-            def success() -> bool:
-                return False
-
-        bot.client = SimpleNamespace(
-            im=SimpleNamespace(
-                v1=SimpleNamespace(
-                    message=SimpleNamespace(patch=lambda request: _Response())
-                )
-            )
-        )
-
-        result = bot.patch_message_result("om_123", "{}")
-
-        self.assertEqual(
-            result,
-            MessagePatchResult.retry_later(2.0),
-        )
-
-    def test_patch_message_result_retries_on_timeout_exception(self) -> None:
-        bot = self._make_bot()
-
-        def _raise_timeout(request):
-            del request
-            raise TimeoutError("Read timed out.")
-
-        bot.client = SimpleNamespace(
-            im=SimpleNamespace(
-                v1=SimpleNamespace(
-                    message=SimpleNamespace(patch=_raise_timeout)
-                )
-            )
-        )
-
-        result = bot.patch_message_result("om_456", "{}")
-
-        self.assertEqual(
-            result,
-            MessagePatchResult.retry_later(2.0),
-        )
-
-    def test_patch_message_result_classifies_invalid_card_content(self) -> None:
-        bot = self._make_bot()
-
-        class _Response:
-            code = 230099
-            msg = "Failed to create card content: markdown content parse error"
-            raw = {"ext": "ErrCode: 11311"}
-
-            @staticmethod
-            def success() -> bool:
-                return False
-
-        bot.client = SimpleNamespace(
-            im=SimpleNamespace(
-                v1=SimpleNamespace(
-                    message=SimpleNamespace(patch=lambda request: _Response())
-                )
-            )
-        )
-
-        result = bot.patch_message_result("om_invalid", "{}")
-
-        self.assertEqual(result, MessagePatchResult.invalid_content())

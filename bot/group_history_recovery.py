@@ -12,8 +12,6 @@ from bot.feishu_types import GroupMessageEntry, MentionPayload
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_GROUP_HISTORY_FETCH_LIMIT = 50
-_DEFAULT_GROUP_HISTORY_FETCH_LOOKBACK_SECONDS = 24 * 3600
 _DEFAULT_GROUP_HISTORY_BOUNDARY_SLACK_SECONDS = 5
 
 
@@ -42,9 +40,9 @@ class GroupHistoryRecovery:
         self,
         *,
         ports: GroupHistoryRecoveryPorts,
+        history_fetch_limit: int,
+        history_fetch_lookback_seconds: int,
         app_id: str | Callable[[], str] = "",
-        history_fetch_limit: int = _DEFAULT_GROUP_HISTORY_FETCH_LIMIT,
-        history_fetch_lookback_seconds: int = _DEFAULT_GROUP_HISTORY_FETCH_LOOKBACK_SECONDS,
         boundary_slack_seconds: int = _DEFAULT_GROUP_HISTORY_BOUNDARY_SLACK_SECONDS,
     ) -> None:
         self._ports = ports
@@ -52,8 +50,17 @@ class GroupHistoryRecovery:
             self._app_id_getter = app_id
         else:
             self._app_id_getter = lambda: str(app_id or "").strip()
-        self._history_fetch_limit = max(int(history_fetch_limit or 0), 0)
-        self._history_fetch_lookback_seconds = max(int(history_fetch_lookback_seconds or 0), 0)
+        if type(history_fetch_limit) is not int or history_fetch_limit < 0:
+            raise ValueError("history_fetch_limit 必须是大于等于 0 的整数")
+        if (
+            type(history_fetch_lookback_seconds) is not int
+            or history_fetch_lookback_seconds < 0
+        ):
+            raise ValueError(
+                "history_fetch_lookback_seconds 必须是大于等于 0 的整数"
+            )
+        self._history_fetch_limit = history_fetch_limit
+        self._history_fetch_lookback_seconds = history_fetch_lookback_seconds
         self._boundary_slack_seconds = max(int(boundary_slack_seconds or 0), 0)
 
     @staticmethod

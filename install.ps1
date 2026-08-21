@@ -18,7 +18,7 @@ function Test-SupportedPython {
 
   $probeArgs = @($Arguments) + @(
     "-c",
-    "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+    "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info >= (3, 11) else 1)"
   )
   & $Command @probeArgs *> $null
   return $LASTEXITCODE -eq 0
@@ -55,7 +55,7 @@ try {
   }
 
   if (-not $pythonCommand) {
-    Write-Error "需要 Python 3.11 或更高版本。"
+    Write-Error "需要 CPython 3.11 或更高版本。"
   }
 
   if (-not (Test-PowerShellProfileAutoloadAllowed)) {

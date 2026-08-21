@@ -39,3 +39,7 @@ app_secret: "your_feishu_bot_app_secret"
 # assistant 模式每次历史回捞的时间窗口（秒）。
 # 设为 0 表示禁用历史回捞。默认值：86400（24 小时）
 # group_history_fetch_lookback_seconds: 86400
+
+# 是否记录原始卡片回调 payload，仅用于短期诊断；默认关闭。
+# payload 可能包含用户输入和身份信息，请勿在生产环境长期启用。
+# debug_raw_card_ingress: false

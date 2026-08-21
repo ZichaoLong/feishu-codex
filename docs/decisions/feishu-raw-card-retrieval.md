@@ -1,6 +1,6 @@
 # Feishu Raw Card Retrieval, JSON 2.0 Terminal Cards, and Forwarded-Card Read Decisions
 
-Chinese original: `docs/decisions/feishu-raw-card-retrieval.zh-CN.md`
+Document role: synchronized English peer. Canonical Chinese: `docs/decisions/feishu-raw-card-retrieval.zh-CN.md`.
 
 See also:
 
@@ -41,7 +41,7 @@ So the real design question is not "1.0 vs 2.0", but:
 
 This repository adopts the following decisions:
 
-1. Terminal-card display moves to a JSON 2.0 first direction.
+1. Terminal-result cards use JSON 2.0.
 2. Faithful reads should not depend on default event bodies or default history-list shapes; they should prefer:
    - the target `message_id`
    - `message/get` or `message/list`
@@ -54,7 +54,8 @@ This repository adopts the following decisions:
 5. Ordinary forwarding does not guarantee preservation of the original source message ID, but if the forwarded message itself is still `interactive`, its own `message_id` may still be enough to read the full card JSON.
 6. `/last text` remains a fallback convenience path, not the only authoritative path.
 7. This phase does not introduce a new `/text` command; priority goes to directly reading the forwarded card itself.
-8. For restart-safe verification, the system must keep explicit ingress observations:
+8. For restart-safe verification, the system provides explicit ingress observations behind
+   a strict boolean configuration switch:
    - raw event `msg_type`
    - outer message `message_id`
    - child `message_id` values obtained after `merge_forward` expansion
@@ -272,35 +273,234 @@ Projection fallback remains an important compatibility path, especially for:
 - historical messages stored before this repository had raw-card support
 - partially available history records
 
-## 7. Operational Consequences
+## 7. Terminal-Card Protocol
 
-This decision leads to the following concrete repository expectations:
+### 7.1 One Authoritative Body Copy
 
-- terminal-card sending may prefer JSON 2.0 for display quality
-- terminal-card reading should prefer raw-card retrieval whenever `message_id` is available,
-  but new self-authored terminal cards treat the card body as a degraded projection unless
-  their `result_id` resolves with a matching checksum in the local bot-instance terminal result store
-- merge-forward support should be implemented as outer-message expansion plus per-child read
-- `/last text` should align with the same card-reading stack instead of using a separate weaker path
-- ingress logging should preserve enough facts to verify what message type and read path the system actually saw
+The formal contract for the current JSON 2.0 terminal result card is:
 
-## 8. Non-Goals
+- keep only one authoritative body copy
+- do not add a second hidden copy of the same body merely out of concern that
+  semantics might be lost
 
-This decision does not promise:
+The reasons are:
 
-- perfect byte-for-byte reconstruction of every historical forwarded card
-- guaranteed preservation of the original source message ID across ordinary forwarding
-- a new `/text` command in this phase
-- that raw-card retrieval is always available for every card created by every other bot
+- when raw-card retrieval is available, the card body can serve as high-fidelity
+  projection input; whether the text is authoritative still depends on a hit in
+  the local terminal result store
+- duplicate body copies were only a compensation for limitations in the default
+  projection path
 
-## 9. Maintenance Rule
+### 7.2 Structured Body Block
 
-If the repository changes:
+The terminal card uses one stable, addressable body block for:
 
-- terminal-card send format
+- user-visible display
+- machine reads
+
+The formal requirements are:
+
+- terminal body content must reside in one fixed rich-text / content block
+- the parser recognizes only that block
+- headings, lists, quotes, code, links, and other structure are recovered from
+  that block
+
+### 7.3 Role of the Structure Summary
+
+This compatibility layer has been removed.
+
+The current terminal-card protocol keeps only:
+
+- the title and template contract
+- the `final_reply_text` body
+- the hidden marker
+- the `fc_tr_<result_id>_<checksum>` reference on the body element of new cards
+
+The resulting behavior is:
+
+- when raw-card retrieval succeeds and `result_id` resolves through the local
+  terminal result store, the store body is the authoritative result
+- when raw-card retrieval succeeds but the store misses, the card body is only
+  a degraded projection fallback
+- when raw-card retrieval fails, only best-effort projection remains; no
+  structure summary is used to restore heading levels
+
+## 8. Current Implementation Status
+
+The repository has implemented the main path of this decision:
+
+- terminal result cards use JSON 2.0, have a stable body location, and carry an
+  `fc_tr_<result_id>_<checksum>` reference
+- ordinary `interactive` messages with a `message_id` first request
+  `card_msg_content_type=user_card_content`
+- after raw-card retrieval succeeds, the local terminal result store first
+  decides whether authoritative text is available; a store miss explicitly
+  degrades to card projection
+- `merge_forward` first expands child messages, then requests the raw card for
+  each `interactive` child
+- payload / historical-shape best-effort projection remains available when
+  raw-card retrieval fails
+- `/last text` remains an export and fallback entry for this bot instance; it
+  does not replace the read stack above
+
+## 9. Implementation Boundaries
+
+### 9.1 Raw and Default Reads Share One Feishu Adapter Boundary
+
+The message-query capability accepts `card_msg_content_type` explicitly. The
+raw-card path passes `user_card_content`; ordinary history and default-projection
+paths omit it. Neither path replaces the other through an implicit default.
+
+### 9.2 Read Decisions Degrade by Authority
+
+The current read order is:
+
+1. local terminal result store hit: authoritative terminal text
+2. raw card obtained by `message_id`: raw-card projection
+3. event payload or default historical shape: best-effort projection
+
+This order does not change depending on whether the card was received directly,
+ordinarily forwarded, or found as a `merge_forward` child.
+
+### 9.3 Cross-Instance Authority Is Intentionally Limited
+
+The terminal result store is a local fact source for one bot instance. Even
+when a complete raw card can be obtained, cards from other bots, other
+instances, or historical environments remain non-authoritative projections.
+An implementation must not promote text to an authoritative result merely
+because a card marker resembles this repository's protocol.
+
+## 10. Observability and Debugging
+
+Structured ingress logging is implemented, but it is an explicit debugging
+surface rather than routine business logging. This evidence chain distinguishes
+the original Feishu event shape, the raw-card query result, and the final
+projection path.
+
+### 10.1 Currently Recorded Facts
+
+When the debugging surface is enabled, the current implementation records:
+
+- ingress-event `msg_type`, `message_id`, `chat_id`, `thread_id`, `parent_id`,
+  `root_id`, and bounded raw `content`
+- whether `merge_forward` expansion succeeded, its item count, and its child
+  message IDs
+- whether an `interactive` child entered
+  `raw_card_from_merge_forward_child`
+- whether raw-card retrieval succeeded and, on success, a schema and title
+  summary
+- whether final resolution used `raw_card_direct` or
+  `best_effort_projection`, and whether the text is authoritative
+
+Logs are not another card or terminal-result fact source. They only record the
+evidence used by the read decision.
+
+### 10.2 Structured Log Events
+
+The current event names can be grepped individually:
+
+- `card_ingress_event`
+- `card_ingress_merge_forward_expansion`
+- `card_ingress_raw_card_fetch`
+- `card_ingress_resolution`
+
+The implementation may also emit `card_ingress_merge_forward_child`. It marks
+the raw-card replacement path for one `interactive` child.
+
+### 10.3 Debug Switch Contract
+
+The `debug_raw_card_ingress` contract is:
+
+- the default is `false`
+- only the YAML booleans `true` and `false` are accepted; the strings `"true"`
+  and `"false"` are configuration errors
+- the ingress events above are recorded only when the setting is explicitly
+  `true`
+- when disabled, raw-card retrieval success or failure does not emit this set
+  of INFO logs
+
+### 10.4 Boundary
+
+These logs contain message and session identifiers, title summaries, errors,
+and bounded raw content, so they must not be enabled by default. They help
+distinguish "Feishu returned only a projection", "child messages were not
+expanded", "raw-card retrieval failed", and "the repository deliberately
+degraded". They cannot prove fidelity across every forwarding shape in Feishu.
+
+## 11. Manual Verification Order
+
+### 11.1 First Pass: Receive an Ordinary Card Directly
+
+Goal:
+
+- send a JSON 2.0 terminal result card
+- confirm that its own `message_id` supports raw-card retrieval
+
+Success criteria:
+
+- the `schema` is returned
+- the raw-card body block is returned
+- terminal content can be recovered without depending on the current
+  projection logic
+
+### 11.2 Second Pass: Ordinary Forward
+
+Goal:
+
+- forward that card directly to the bot
+- observe whether the received message is:
+  - `interactive`
+  - or degraded to `text`
+
+Success criteria:
+
+- if it remains `interactive`, its own post-forward `message_id` supports
+  raw-card retrieval directly
+- if it degrades to `text`, record clearly that ordinary forwarding is not
+  suitable as the main path
+
+### 11.3 Third Pass: Merge-Forward
+
+Goal:
+
+- forward that card to the bot through `merge_forward`
+- confirm that expanding the outer message returns child messages
+
+Success criteria:
+
+- `message/get` returns `1 + N` items
+- the child messages include an `interactive` item
+- that child supports a subsequent raw-card read
+
+### 11.4 Fourth Pass: Fallback Verification
+
+Goal:
+
+- simulate a raw-card retrieval failure
+- confirm that the current best-effort projection and `/last text` still work
+
+## 12. Current Product Conclusion
+
+The repository's current formal product behavior is:
+
+- display prefers JSON 2.0
+- high-fidelity reads prefer raw-card JSON lookup by `message_id`
+- `merge_forward` is a child-expansion entry point, not the complete content
+  itself
+- ordinary-forward reliability depends on whether the forwarded message remains
+  a queryable new `interactive` message
+- `/last text` is a fallback, not the only authoritative path
+- forwarding semantics remain constrained by the actual Feishu event shape;
+  structured debugging logs support empirical verification without turning an
+  officially unguaranteed forwarding shape into a product promise
+
+## 13. Maintenance Rule
+
+If the repository changes any of the following facts, review this document and
+`docs/decisions/feishu-card-text-projection.md` together:
+
+- terminal result card send format
 - raw-card retrieval strategy
-- merge-forward expansion behavior
+- `merge_forward` child-message expansion behavior
 - `/last text` read semantics
-- ingress logging facts
-
-then this document and `docs/decisions/feishu-card-text-projection*.md` should be reviewed together.
+- the ingress debug switch's default, type, or log fields

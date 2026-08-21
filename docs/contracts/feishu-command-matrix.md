@@ -1,6 +1,6 @@
 # Feishu Command Matrix
 
-Chinese original: `docs/contracts/feishu-command-matrix.zh-CN.md`
+Document role: synchronized English peer. Canonical Chinese: `docs/contracts/feishu-command-matrix.zh-CN.md`.
 
 This file is the source-of-truth matrix for the Feishu command surface.
 
@@ -51,6 +51,7 @@ It does not redefine:
 
 | Command | Purpose | Reachable from `/help` | P2P | Group | Closest local counterpart |
 | --- | --- | --- | --- | --- | --- |
+| `/steer <text>` | Explicitly add plain text to the exact active turn mirrored by the current binding; never queue or create a successor turn | yes; `Turn Settings` form | admin only | admin only | no exact local command counterpart |
 | `/permissions [read-only\|workspace\|danger-full-access]` | Set the permission baseline independently from approval policy | yes; `Turn Settings` page | admin only | admin only | none |
 | `/model [name\|auto]` | Set the current Feishu session's turn-time model override; no-arg opens the shared model/effort card | yes; `Turn Settings` page | admin only | admin only | none |
 | `/effort [auto\|value]` | Set the current Feishu binding's turn-time effort override; known models are constrained by metadata, while auto/unknown models allow custom values; no-arg opens the shared model/effort card | yes; `Turn Settings` page | admin only | admin only | none |

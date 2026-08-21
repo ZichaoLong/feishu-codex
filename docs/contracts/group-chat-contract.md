@@ -1,6 +1,6 @@
 # Group Chat Contract
 
-Chinese version: `docs/contracts/group-chat-contract.zh-CN.md`
+Document role: synchronized English peer. Canonical Chinese: `docs/contracts/group-chat-contract.zh-CN.md`.
 
 This document defines the formal behavior contract for group-chat features in
 FOCUS.
@@ -51,15 +51,42 @@ Those remain owned by their dedicated documents.
 
 - group activation is a **chat-level** switch, not a member-level ACL
 - while a group is deactivated, non-admin users may not use the bot there
+- deactivation immediately starts fail-close for pending approval and user-input
+  requests whose turn actor is a non-admin. Once upstream confirms that
+  cancellation, the request is removed and its displayed card is invalid; it
+  does not transfer that member-origin request to an admin. A request whose
+  original turn actor is an admin remains available for that admin to handle
+- if a member-origin cancellation cannot be sent or its outcome is unknown, it
+  remains a fail-closed blocker rather than a renewed member operating right.
+  Neither the member nor an administrator inherits authority to answer it.
+  Only a request whose original turn actor is an administrator remains normal
+  administrator work
+- deactivation also discards the group binding's old in-memory FIFO, including
+  a draining head through its cancellation marker. A later re-activation must
+  not start a member's old queued follow-up
 - once a group is activated, both current members and later-joined members may
   use the bot normally
+- its practical security meaning is that the deployer trusts those members to
+  drive Codex on this machine under the current approval / permissions
+  baseline; it is not a promise that ordinary members are confined to
+  read-only chat or an isolated sandbox
+- this is the same class of deployment trust decision as sharing a Web access
+  credential: it grants ordinary agent-driving ability under the current
+  baseline, not a restricted member role
 - an activated group stays usable even if the admin later leaves the group; it
   remains so until an admin comes back and deactivates it, or the group state
   is explicitly cleared by an admin surface
 - group activation state should persist across service restarts
+- The durable `activated` field accepts only a JSON boolean. `true` requires a
+  non-empty `activated_by` and a positive integer `activated_at`; `false`
+  requires an empty `activated_by` and `activated_at = 0`. A type or metadata
+  mismatch fail-closes that exact chat's group state without making unrelated
+  chats unavailable.
 - activate / deactivate / re-activate only change the authorization state and
   activation metadata; they do not automatically clear group logs,
   `assistant` boundaries, the current thread binding, or the group mode
+- deactivation does not interrupt an active main turn. Ordinary cancellation
+  still requires the exact active-turn holder and matching turn id
 - only admins may activate or deactivate a group
 - the current activation-management surface is:
   - `/group`
@@ -146,18 +173,49 @@ Those remain owned by their dedicated documents.
   - `/approval`
   - `/permissions`
   - group activation and group-mode management commands
+- this admin-only rule is an **operational guardrail** for avoiding mistakes,
+  centralizing group configuration, and making group authorization easy to
+  revoke. It is not a member-isolation security boundary: an administrator
+  who does not trust someone must remove them from the group or deactivate the
+  group, rather than infer that command restrictions prevent them from
+  influencing the host through allowed everyday turns.
 
 ## 6. Runtime Approval and Supplemental Input
 
 - once a group is activated, ordinary members may handle approval cards or
   supplemental-input cards created by **their own turn**
-- admins may always act as the fallback operator for those cards
+- while the group is active, admins may act as the fallback operator for those
+  cards
 - ordinary non-admin members may not operate pending requests created by
   someone else's turn
-- both "allow once" and "allow for this session" approval actions remain valid
-  for the current request actor
+- command, file-change, and permission approvals additionally join the trusted
+  local shared approval domain: authenticated live Web/fcodex endpoints which
+  materialized the exact direct root may answer the same canonical request;
+  another Feishu chat may not. The first valid response wins and every other
+  surface retires its approval UI
+- supplemental input and other non-approval interactions do not join that
+  shared domain and retain the Feishu actor rules above
+- every qualified surface exposes the protocol-defined option set: command
+  approval honors request `availableDecisions`, while file and permission
+  approval include their schema-defined session choices
 - this runtime card ownership only applies to the active turn interaction; it
   does not grant shared-state management rights
+- deactivation has the stricter rule from Section 3: member-origin pending
+  requests are fail-closed, and a confirmed cancellation makes their cards
+  unanswerable by everyone. Only an admin-origin pending request continues as
+  ordinary admin work. A not-sent or unknown member-origin cancellation remains
+  a blocker; it restores authority to neither the member nor an administrator
+- for a shared approval with exact member-origin evidence, that rule revokes the
+  central current-epoch response authority after the fail-close attempt. A
+  not-sent cancel remains honestly pending/blocked; an already-rendered fcodex
+  overlay may remain
+  visible until a user action is rejected or real upstream resolution/lifecycle
+  cleanup arrives, because Focus has no service-to-fcodex presentation push
+- deactivation does not infer a Feishu member origin from a sole subscription
+  after the writer/actor fact has retired. A later writer-less autonomous
+  approval may therefore remain available to qualified trusted-local endpoints
+  without a Feishu card; adding durable cross-turn origin is outside this
+  process-local approval contract
 
 ## 7. `assistant` Context Contract
 
@@ -223,10 +281,20 @@ Those remain owned by their dedicated documents.
   whose message resolves to the current group binding may queue while that
   binding is executing; the sender's `open_id` does not need to match the actor
   that started the active turn
+- that execution may be an exact-turn mirror created after subscribing to the
+  same root for a Web/`fcodex` turn, but admission must prove the matching
+  current-process local lease and exact binding/root/turn under one lock. The
+  `all`-mode cross-chat exclusivity check still takes precedence and cannot be
+  bypassed through the mirror
 - sender identity must still be preserved on the queue item for execution
   cards, terminal cards, reply anchors, audit, and later interactions
 - the queue is process-local memory only; it does not promise restart recovery,
   listing, cancellation, or cross-binding scheduling
+- a group queue item is scoped to the binding and root that admitted it. A
+  group deactivation, binding/root invalidation, or failed submission-lease
+  admission at actual dequeue discards it; a queue is never an ownership or
+  cross-frontend takeover path. The complete binding FIFO lifecycle is in
+  [`scheduled-prompts.md`](scheduled-prompts.md#62-fifo-invalidation-and-real-dequeue)
 - in `all`, plain text may queue while the current group binding is executing
 - in `assistant`, only valid trigger mentions can trigger or queue; plain
   messages without a valid trigger mention only enter the context log

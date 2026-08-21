@@ -1,5 +1,7 @@
 # Feishu Attachment Ingress and Local Staging Boundary
 
+Document role: synchronized English peer. Canonical Chinese: `docs/decisions/feishu-attachment-ingress.zh-CN.md`.
+
 See also:
 
 - `docs/architecture/focus-design.md` for the current architecture and
@@ -16,12 +18,18 @@ See also:
 Users want to send attachments in Feishu and continue working with local Codex
 through FOCUS.
 
-The current repository baseline is:
+The historical **pre-rollout** baseline was:
 
-- file messages are still rejected explicitly
-- app-server turn input is still mostly text-centric
+- file messages were rejected explicitly
+- app-server turn input was mostly text-centric
 - complex file parsing should not become a long-term maintenance obligation of
   FOCUS itself
+
+The first two points explain why this boundary was chosen; they are not a
+description of the current implementation. The current first-stage ingress is
+implemented and summarized in Sections 4 and 12. Apart from the explicit
+native image input described below, complex attachment interpretation still
+does not become a FOCUS responsibility.
 
 If this repository tries to embed PDF extraction, Office parsing, OCR,
 audio/video transcription, and archive handling directly, it creates:
@@ -47,7 +55,8 @@ The first-phase repository decision for Feishu attachment support is:
    - local tools already available in the environment
 3. Images are the only attachment type that should receive an explicit input
    upgrade:
-   - besides being saved locally, they should also be passed as `localImage`
+   - besides being saved locally, they may be passed as `localImage` only
+     after byte-signature and current-model capability checks succeed
 4. Non-image attachments are treated uniformly as local file paths:
    - FOCUS does not guarantee that the model will understand them
      directly
@@ -91,7 +100,7 @@ can actually be downloaded**.
 
 | Feishu message type | Downloaded | Passed into Codex as | Repository guarantee |
 | --- | --- | --- | --- |
-| `image` | yes | local file + `localImage` | staged successfully and sent as native image input |
+| `image` | yes | local file; conditional `localImage` | path is always explicit; native input requires verified image bytes and explicit model capability |
 | `file` | yes | local file path | staged successfully and path made explicit to Codex |
 | `audio` | yes | local file path | staged successfully; interpretation is delegated to Codex / MCP / local tools |
 | `media` | yes | local file path | staged successfully; interpretation is delegated to Codex / MCP / local tools |
@@ -207,6 +216,15 @@ current working directory:
 
 - `_feishu_attachments/`
 
+The Focus service now always launches and owns its app-server on the same host,
+so Focus staging paths and the backend share one local filesystem. This is a
+fixed product boundary rather than a deployment-mode boolean interpreted at
+runtime. `focusctl` / `fcodex` attached clients only connect to that running
+local backend and do not change attachment delivery. If an external backend is
+ever reintroduced, it first needs a separately designed reliable file-transfer
+transaction; a URL or mode string must not be restored as shared-filesystem
+proof.
+
 They should not be scattered directly into the workspace root.
 
 Reasons:
@@ -264,13 +282,40 @@ Corollary:
 
 ### 7.1 Images
 
-When a turn starts, image attachments should be handled in two ways:
+When a turn starts, image attachments always keep their controlled local path.
+They are additionally elevated to `localImage` only when all of these facts are
+proved:
 
-1. keep the local file under `_feishu_attachments/`
-2. elevate the image into `localImage` input for `turn/start`
+1. the staged file is still a regular, non-symlink file under the expected
+   `_feishu_attachments/` directory
+2. its current bytes match one of the shared native-image signatures; Feishu
+   message type, filename extension, and Content-Type are not sufficient
+3. the current thread effective model comes from a successful `thread/start`
+   or `thread/resume` response, from `thread/settings/updated`, or from a
+   `model/rerouted` event whose `turnId` matches the current authoritative
+   active turn; the queued ACK from `thread/settings/update` is not evidence
+4. a fresh `model/list` entry for that exact model explicitly includes
+   `image` in `inputModalities`
+
+Missing model facts, missing model metadata, `inputModalities=null`, an
+explicit text-only modality list, catalog-read failure, or signature mismatch
+all keep the local-path text and omit native input. If the pending
+`turn/start` requests a model different from the known effective model, Focus
+clears the old fact and treats capability as unknown until upstream confirms
+the replacement. Disconnect/reconnect and thread unload/delete also clear the
+ephemeral fact.
 
 That preserves the local path while still using Codex's native image-input
-support.
+support only within its proved boundary.
+
+Focus repeats the regular-file, no-symlink, expected-parent, inode, and byte
+checks immediately before constructing `localImage`. The current app-server
+contract accepts a path rather than an already-verified file descriptor, so a
+local actor able to mutate the staging directory can still replace that path
+between Focus's final check and the backend opening it. Fully closing that
+residual TOCTOU requires an immutable/content-addressed handoff or an upstream
+descriptor/upload contract; the staging directory is therefore a trusted
+same-host boundary, not a hostile multi-writer upload directory.
 
 ### 7.2 Non-Image Attachments
 
@@ -328,6 +373,9 @@ At minimum, the implementation should distinguish:
   - target directory not writable
   - insufficient disk space
   - filename conflict that could not be resolved safely
+- delivery/capability boundaries:
+  - image bytes which do not match a native image signature (path-only delivery)
+  - unknown or text-only effective-model capability (path-only delivery)
 
 ## 10. Administrator and User Responsibility
 
@@ -347,33 +395,36 @@ At minimum, the implementation should distinguish:
 - not interpret "file staged locally" as "the model is guaranteed to understand
   this format directly"
 
-## 11. Implementation Checklist
+## 11. Completed First-Stage Implementation Checklist
 
-A later rollout implementing this decision should at minimum cover:
+The current first-stage implementation covers:
 
-1. expand the current file-only ingress into an attachment ingress for:
+1. expands the former file-only ingress into an attachment ingress for:
    - `image`
    - `file`
    - `audio`
    - `media`
-2. extract one unified message-resource downloader that handles:
+2. uses one unified message-resource downloader that handles:
    - `type=image`
    - `type=file`
-3. stage attachments under `cwd/_feishu_attachments/`
-4. introduce pending-attachment state keyed by `sender + chat + thread`
-5. keep attachment messages as download-and-confirm only, without starting a turn
-6. let a later text message consume the pending attachment set
-7. widen adapter / turn input so images can enter as `localImage`
-8. inject non-image paths into turn text with explicit local-path wording
-9. return clear failures for unsupported types and Feishu download errors
-10. add TTL and cleanup handling
-11. add regression coverage for at least:
+3. stages attachments under `cwd/_feishu_attachments/`
+4. keeps pending-attachment state keyed by `sender + chat + thread`
+5. keeps attachment messages as download-and-confirm only, without starting a turn
+6. lets a later text message consume the pending attachment set
+7. widens adapter / turn input so signature-verified images enter as
+   `localImage` only for an upstream-proven image-capable effective model
+8. injects non-image paths into turn text with explicit local-path wording
+9. returns clear failures for unsupported types and Feishu download errors
+10. includes TTL and cleanup handling
+11. includes regression coverage for at least:
     - p2p image
     - p2p generic file
     - group image / file
     - cross-user isolation in group chats
     - unsupported-type rejection
     - TTL expiry
+    - signature mismatch, model-capability unknown/text-only/image, and
+      requested/effective model mismatch
 
 ## 12. Implementation Entry Points
 
@@ -392,6 +443,7 @@ The repository now implements the first-stage attachment ingress described here:
 - stages attachments under `cwd/_feishu_attachments/`
 - consumes pending attachments on a later text message with the same
   `sender + chat + thread` semantics
-- upgrades images to `localImage`, while non-image attachments are injected via
-  explicit local-path text
+- always injects controlled local-path text and conditionally upgrades a
+  signature-verified image to `localImage` only when the authoritative
+  effective model explicitly supports image input
 - includes TTL cleanup and regression coverage

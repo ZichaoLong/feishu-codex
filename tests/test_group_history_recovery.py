@@ -67,6 +67,7 @@ class GroupHistoryRecoveryTests(unittest.TestCase):
             ),
             app_id=app_id,
             history_fetch_limit=history_fetch_limit,
+            history_fetch_lookback_seconds=24 * 60 * 60,
         )
         return recovery, calls
 

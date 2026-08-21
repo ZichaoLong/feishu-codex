@@ -1,6 +1,6 @@
 # Thread Next-Load 设置语义
 
-英文原文：`docs/contracts/thread-next-load-settings-semantics.md`
+文档角色：中文规范源。英文同步副本：`docs/contracts/thread-next-load-settings-semantics.md`。
 
 本文件以历史名称保留，作为退役说明。
 
@@ -34,6 +34,10 @@
 - 在恢复未 loaded thread 时，cold `thread/resume` 也可能为恢复后的第一轮
   autonomous turn 携带其中一小段 one-shot override
 - 不是 thread-level persisted restore settings
+
+这条设置时机不授权 observer resume。只有 `root-operation-owner.zh-CN.md` 中封闭、已审阅的安全 goal 预检才允许这条
+没有 record 的路径；active、空、无法读取、未来或未识别 status 都让 resume 具有 continuation 能力，必须满足
+connected writer/admission 规则。
 
 ### 2.2 上游拥有的 process 与 thread 状态
 

@@ -126,7 +126,7 @@ class InboundSurfaceControllerTests(unittest.TestCase):
             },
             prefixed_action_routes=[
                 (
-                    "command_",
+                    "answer_user_input_",
                     ActionRoute(
                         handler=lambda sender_id, chat_id, message_id, action_value: (
                             prefixed_calls.append((sender_id, chat_id, message_id, action_value)),
@@ -280,13 +280,23 @@ class InboundSurfaceControllerTests(unittest.TestCase):
             "ou_user",
             "group-1",
             "msg-2",
-            {"action": "command_allow_once", "_operator_open_id": "ou_admin"},
+            {"action": "answer_user_input_q1", "_operator_open_id": "ou_admin"},
         )
 
         self.assertEqual(self._unpack_card_response(response), {})
         self.assertEqual(
             prefixed_calls,
-            [("ou_user", "group-1", "msg-2", {"action": "command_allow_once", "_operator_open_id": "ou_admin"})],
+            [
+                (
+                    "ou_user",
+                    "group-1",
+                    "msg-2",
+                    {
+                        "action": "answer_user_input_q1",
+                        "_operator_open_id": "ou_admin",
+                    },
+                )
+            ],
         )
 
     def test_form_value_only_callback_checks_help_fallback_before_stale_warning(self) -> None:

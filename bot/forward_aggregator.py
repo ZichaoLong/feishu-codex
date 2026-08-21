@@ -38,6 +38,8 @@ class PendingForward:
     sender_type: str
     created_at: int
     thread_id: str
+    root_id: str
+    scope: str
     timer: _Timer = field(repr=False)
 
 
@@ -70,12 +72,39 @@ class ForwardAggregator:
         self._merge_forward_max = max(int(merge_forward_max or 0), 1)
         self._merge_forward_max_depth = max(int(merge_forward_max_depth or 0), 1)
         self._timer_factory = timer_factory
-        self._pending_forwards: dict[tuple[str, str], PendingForward] = {}
+        self._pending_forwards: dict[tuple[str, str, str], PendingForward] = {}
         self._pending_forwards_lock = threading.Lock()
         self._timeout_effects_lock = threading.Lock()
 
-    def peek_pending_forward(self, sender_id: str, chat_id: str) -> PendingForward | None:
-        key = (sender_id, chat_id)
+    @staticmethod
+    def _scope(thread_id: str = "", root_id: str = "") -> str:
+        """Normalize the Feishu conversation scope used by forward pairing.
+
+        ``thread_id`` is normally the topic identity.  Some event variants
+        expose only ``root_id``; using either value keeps those events in the
+        same scope.  If both disagree, retain both so a malformed envelope
+        cannot merge two topics by guesswork.
+        """
+
+        normalized_thread_id = str(thread_id or "").strip()
+        normalized_root_id = str(root_id or "").strip()
+        if (
+            normalized_thread_id
+            and normalized_root_id
+            and normalized_thread_id != normalized_root_id
+        ):
+            return f"{normalized_thread_id}|{normalized_root_id}"
+        return normalized_thread_id or normalized_root_id
+
+    def peek_pending_forward(
+        self,
+        sender_id: str,
+        chat_id: str,
+        *,
+        thread_id: str = "",
+        root_id: str = "",
+    ) -> PendingForward | None:
+        key = (sender_id, chat_id, self._scope(thread_id, root_id))
         with self._pending_forwards_lock:
             return self._pending_forwards.get(key)
 
@@ -94,8 +123,19 @@ class ForwardAggregator:
                 if pending is not None and pending.timer:
                     pending.timer.cancel()
 
-    def pop_pending_forward(self, sender_id: str, chat_id: str) -> PendingForward | None:
-        key = (sender_id, chat_id)
+    def pop_pending_forward(
+        self,
+        sender_id: str,
+        chat_id: str,
+        *,
+        thread_id: str = "",
+        root_id: str = "",
+        scope: str | None = None,
+    ) -> PendingForward | None:
+        normalized_scope = (
+            self._scope(thread_id, root_id) if scope is None else str(scope or "")
+        )
+        key = (sender_id, chat_id, normalized_scope)
         with self._pending_forwards_lock:
             pending = self._pending_forwards.pop(key, None)
             if pending is not None and pending.timer:
@@ -115,12 +155,16 @@ class ForwardAggregator:
         sender_type: str = "user",
         created_at: int = 0,
         thread_id: str = "",
+        root_id: str = "",
     ) -> None:
-        key = (sender_id, chat_id)
+        normalized_thread_id = str(thread_id or "").strip()
+        normalized_root_id = str(root_id or "").strip()
+        scope = self._scope(normalized_thread_id, normalized_root_id)
+        key = (sender_id, chat_id, scope)
         timer = self._timer_factory(
             self._aggregate_timeout_seconds,
             self.on_forward_timeout,
-            [sender_id, chat_id],
+            [sender_id, chat_id, scope],
         )
         with self._pending_forwards_lock:
             old = self._pending_forwards.get(key)
@@ -134,16 +178,27 @@ class ForwardAggregator:
                 sender_open_id=str(sender_open_id or "").strip(),
                 sender_type=str(sender_type or "user").strip() or "user",
                 created_at=max(int(created_at or 0), 0),
-                thread_id=str(thread_id or "").strip(),
+                thread_id=normalized_thread_id or normalized_root_id,
+                root_id=normalized_root_id,
+                scope=scope,
                 timer=timer,
             )
         timer.start()
         logger.info("转发消息已暂存，等待留言合并: user=%s, chat=%s", sender_id, chat_id)
 
-    def on_forward_timeout(self, sender_id: str, chat_id: str) -> None:
+    def on_forward_timeout(
+        self,
+        sender_id: str,
+        chat_id: str,
+        scope: str = "",
+    ) -> None:
         try:
             with self._timeout_effects_lock:
-                pending = self.pop_pending_forward(sender_id, chat_id)
+                pending = self.pop_pending_forward(
+                    sender_id,
+                    chat_id,
+                    scope=str(scope or ""),
+                )
                 if pending is None:
                     return
                 group_mode = self._ports.get_group_mode(chat_id) if pending.chat_type == "group" else ""

@@ -6,10 +6,13 @@ import queue
 import tempfile
 import time
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from bot.stores.thread_runtime_lease_store import (
     ThreadRuntimeLeaseHolder,
     ThreadRuntimeLeaseStore,
+    ThreadRuntimeLeaseStoreUnavailable,
 )
 
 
@@ -18,7 +21,7 @@ def _holder(*, instance_name: str, holder_id: str, service_token: str, owner_pid
         holder_id=holder_id,
         holder_type="service" if holder_id.startswith("service:") else "fcodex",
         instance_name=instance_name,
-        owner_pid=owner_pid or os.getpid(),
+        owner_pid=os.getpid() if owner_pid is None else owner_pid,
         owner_service_token=service_token,
         control_endpoint=f"tcp://127.0.0.1:{9100 if instance_name == 'corp-a' else 9200}",
         backend_url=f"ws://127.0.0.1:{9100 if instance_name == 'corp-a' else 9200}",
@@ -145,6 +148,117 @@ class ThreadRuntimeLeaseStoreTests(unittest.TestCase):
         self.assertTrue(released)
         self.assertIsNone(store.load("thread-1"))
 
+    def test_exact_release_preserves_independent_fcodex_holder(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ThreadRuntimeLeaseStore(pathlib.Path(tempdir.name))
+        service_result = store.acquire(
+            "thread-1",
+            _holder(
+                instance_name="corp-a",
+                holder_id="service:one",
+                service_token="token-a",
+            ),
+        )
+        store.acquire(
+            "thread-1",
+            _holder(
+                instance_name="corp-a",
+                holder_id="fcodex:123",
+                service_token="token-a",
+            ),
+        )
+        assert service_result.lease is not None
+        expected_holder = next(
+            holder
+            for holder in service_result.lease.holders
+            if holder.holder_id == "service:one"
+        )
+
+        released = store.release_if_matches("thread-1", expected_holder)
+
+        self.assertTrue(released)
+        lease = store.load("thread-1")
+        assert lease is not None
+        self.assertEqual(
+            {holder.holder_id for holder in lease.holders},
+            {"fcodex:123"},
+        )
+
+    def test_exact_release_rejects_same_id_refreshed_successor(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ThreadRuntimeLeaseStore(pathlib.Path(tempdir.name))
+        first = store.acquire(
+            "thread-1",
+            _holder(
+                instance_name="corp-a",
+                holder_id="service:one",
+                service_token="token-a",
+            ),
+        )
+        assert first.lease is not None
+        expected_holder = first.lease.holders[0]
+        successor = replace(
+            expected_holder,
+            backend_url="ws://127.0.0.1:9191",
+            updated_at=expected_holder.updated_at + 1.0,
+        )
+        refreshed = store.acquire("thread-1", successor)
+
+        released = store.release_if_matches("thread-1", expected_holder)
+
+        self.assertTrue(refreshed.granted)
+        self.assertFalse(refreshed.acquired)
+        self.assertFalse(released)
+        lease = store.load("thread-1")
+        assert lease is not None
+        self.assertEqual(lease.holders, (successor,))
+
+    def test_generation_cleanup_releases_all_matching_holders(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        store = ThreadRuntimeLeaseStore(pathlib.Path(tempdir.name))
+        store.acquire(
+            "thread-1",
+            _holder(
+                instance_name="corp-a",
+                holder_id="service:current",
+                service_token="token-current",
+            ),
+        )
+        store.acquire(
+            "thread-1",
+            _holder(
+                instance_name="corp-a",
+                holder_id="fcodex:process-local",
+                service_token="token-current",
+                owner_pid=0,
+            ),
+        )
+        store.acquire(
+            "thread-other",
+            _holder(
+                instance_name="corp-b",
+                holder_id="service:other",
+                service_token="token-other",
+            ),
+        )
+
+        changed = store.release_holders_for_service_generation(
+            instance_name="corp-a",
+            owner_service_token="token-current",
+        )
+
+        self.assertEqual(changed, ["thread-1"])
+        self.assertIsNone(store.load("thread-1"))
+        other = store.load("thread-other")
+        assert other is not None
+        self.assertEqual(
+            {holder.holder_id for holder in other.holders},
+            {"service:other"},
+        )
+
     def test_purge_instance_removes_matching_owner_holders(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(tempdir.cleanup)
@@ -249,7 +363,7 @@ class ThreadRuntimeLeaseStoreTests(unittest.TestCase):
         self.assertEqual(removed, ["thread-1"])
         self.assertIsNone(store.load("thread-1"))
         raw = json.loads((root_dir / "thread_runtime_leases.json").read_text(encoding="utf-8"))
-        self.assertEqual(raw, {})
+        self.assertEqual(raw["records"], {})
 
     def test_concurrent_process_acquire_preserves_all_holders(self) -> None:
         tempdir = tempfile.TemporaryDirectory()
@@ -332,7 +446,84 @@ class ThreadRuntimeLeaseStoreTests(unittest.TestCase):
         assert lease is not None
         self.assertEqual(lease.owner_instance, "corp-a")
         payload = json.loads((root_dir / "thread_runtime_leases.json").read_text(encoding="utf-8"))
-        self.assertNotIn("transfer", payload["thread-1"])
+        self.assertNotIn("transfer", payload["records"]["thread-1"])
+
+    def test_corrupted_json_fails_closed_without_read_rewrite(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        path = root_dir / "thread_runtime_leases.json"
+        original = b"{broken"
+        path.write_bytes(original)
+        store = ThreadRuntimeLeaseStore(root_dir)
+
+        with self.assertRaises(ThreadRuntimeLeaseStoreUnavailable):
+            store.load("thread-1")
+        with self.assertRaises(ThreadRuntimeLeaseStoreUnavailable):
+            store.acquire(
+                "thread-1",
+                _holder(
+                    instance_name="corp-a",
+                    holder_id="service:one",
+                    service_token="token-a",
+                ),
+            )
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_future_schema_fails_closed_without_overwrite(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        path = root_dir / "thread_runtime_leases.json"
+        original = b'{"schema_version": 999, "records": {}}\n'
+        path.write_bytes(original)
+        store = ThreadRuntimeLeaseStore(root_dir)
+
+        with self.assertRaises(ThreadRuntimeLeaseStoreUnavailable):
+            store.acquire(
+                "thread-1",
+                _holder(
+                    instance_name="corp-a",
+                    holder_id="service:one",
+                    service_token="token-a",
+                ),
+            )
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_pid_reuse_identity_prunes_old_holder(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        now = time.time()
+        _write_raw_lease(
+            root_dir,
+            thread_id="thread-1",
+            owner_instance="corp-a",
+            owner_service_token="token-a",
+            holders=[
+                {
+                    "holder_id": "service:one",
+                    "holder_type": "service",
+                    "instance_name": "corp-a",
+                    "owner_pid": os.getpid(),
+                    "owner_service_token": "token-a",
+                    "control_endpoint": "tcp://127.0.0.1:9100",
+                    "backend_url": "ws://127.0.0.1:9100",
+                    "updated_at": now,
+                    "owner_process_identity": "old-incarnation",
+                },
+            ],
+        )
+        store = ThreadRuntimeLeaseStore(root_dir)
+
+        with patch("bot.stores.thread_runtime_lease_store.process_exists", return_value=True):
+            with patch(
+                "bot.stores.thread_runtime_lease_store.process_identity",
+                return_value="new-incarnation",
+            ):
+                self.assertIsNone(store.load("thread-1"))
 
 
 if __name__ == "__main__":

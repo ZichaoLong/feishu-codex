@@ -1,6 +1,6 @@
 # Thread Memory Semantics (Retired)
 
-Chinese original: `docs/contracts/thread-memory-semantics.zh-CN.md`
+Document role: synchronized English peer. Canonical Chinese: `docs/contracts/thread-memory-semantics.zh-CN.md`.
 
 This file is retained only as a retirement note under its historical name.
 

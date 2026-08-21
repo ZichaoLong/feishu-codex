@@ -1,0 +1,41 @@
+{
+  "name": "@focus/web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check:dependency-direction": "node scripts/check-focus-dependency-direction.mjs",
+    "check:notices": "node scripts/third-party-notices.mjs --verify",
+    "check:kimi-provenance": "node scripts/kimi-upstream-provenance.mjs --verify",
+    "sync:kimi-provenance": "node scripts/kimi-upstream-provenance.mjs --refresh",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "check:style": "node scripts/check-style.mjs"
+  },
+  "dependencies": {
+    "@chenglou/pretext": "0.0.8",
+    "@fontsource-variable/inter": "5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "katex": "^0.17.0",
+    "markstream-vue": "^1.0.4",
+    "mermaid": "^11.15.0",
+    "shiki": "^4.3.0",
+    "stream-markdown": "^0.0.16",
+    "vue": "^3.5.35",
+    "vue-i18n": "^11.4.5"
+  },
+  "devDependencies": {
+    "@iconify-json/ri": "^1.2.10",
+    "@iconify-json/tabler": "^1.2.35",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "@vue/compiler-sfc": "3.5.40",
+    "typescript": "6.0.2",
+    "unplugin-icons": "^23.0.0",
+    "vite": "^6.3.3",
+    "vitest": "4.1.4",
+    "vue-tsc": "~3.2.0"
+  }
+}

@@ -8,8 +8,9 @@ from pathlib import Path
 from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
 
 from bot.codex_handler import CodexHandler
-from bot.constants import DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS
+from bot.feishu_destination_liveness_contract import FeishuDestinationLossProof
 from bot.feishu_bot import FeishuBot
+from bot.system_config import SystemConfig
 
 
 class CodexBot(FeishuBot):
@@ -17,18 +18,12 @@ class CodexBot(FeishuBot):
 
     def __init__(
         self,
-        app_id: str,
-        app_secret: str,
-        request_timeout_seconds: float = DEFAULT_FEISHU_REQUEST_TIMEOUT_SECONDS,
         *,
-        system_config: dict | None = None,
+        system_config: SystemConfig,
     ):
         config_dir = Path(os.environ["FOCUS_CONFIG_DIR"]) if "FOCUS_CONFIG_DIR" in os.environ else None
         data_dir = Path(os.environ["FOCUS_DATA_DIR"]) if "FOCUS_DATA_DIR" in os.environ else None
         super().__init__(
-            app_id,
-            app_secret,
-            request_timeout_seconds=request_timeout_seconds,
             data_dir=data_dir,
             system_config=system_config,
         )
@@ -70,5 +65,5 @@ class CodexBot(FeishuBot):
     def should_route_group_followup_prompt(self, sender_id: str, chat_id: str, *, message_id: str = "") -> bool:
         return self._handler.should_route_group_followup_prompt(sender_id, chat_id, message_id=message_id)
 
-    def on_chat_unavailable(self, chat_id: str, *, reason: str = "") -> None:
-        self._handler.handle_chat_unavailable(chat_id, reason=reason)
+    def on_destination_loss_proof(self, proof: FeishuDestinationLossProof) -> None:
+        self._handler.accept_destination_loss_proof(proof)

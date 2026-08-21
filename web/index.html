@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%231783ff'/%3E%3Cpath d='M20 15h28v8H29v9h16v8H29v17h-9z' fill='white'/%3E%3C/svg%3E" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)" />
+    <link rel="license" href="/THIRD_PARTY_NOTICES.html" />
+    <!-- Apply the persisted color scheme BEFORE the bundle loads to avoid a
+         theme flash before the Vue appearance owner applies the same DOM state.
+         Loaded from external /boot.js (a classic
+         script, so still render-blocking) because the server's Content-Security-
+         Policy forbids inline scripts. -->
+    <script src="/boot.js"></script>
+    <title>Focus Web</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

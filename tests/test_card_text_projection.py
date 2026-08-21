@@ -373,6 +373,6 @@ class CardTextProjectionTests(unittest.TestCase):
         card = build_terminal_result_card("```bash\necho ok\n```")
         content = card["body"]["elements"][-1]["content"]
 
-        self.assertIn(f"```\n", content)
+        self.assertIn("```\n", content)
         self.assertIn(TERMINAL_RESULT_CARD_MARKER, content)
         self.assertNotIn(f"```{TERMINAL_RESULT_CARD_MARKER}", content)

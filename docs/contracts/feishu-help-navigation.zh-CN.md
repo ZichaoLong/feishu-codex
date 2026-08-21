@@ -1,6 +1,6 @@
 # Feishu `/help` 导航合同
 
-英文原文：`docs/contracts/feishu-help-navigation.md`
+文档角色：中文规范源。英文同步副本：`docs/contracts/feishu-help-navigation.md`。
 
 本文件只定义 `/help` 与 `/commands` 的导航合同。
 
@@ -45,8 +45,8 @@
 
 正文应提醒用户：
 
-- 同一 thread 可以被多个端观察，但在同一实例内，同一 live turn 只有一个 interaction owner
-- 本地继续同一个 live thread 使用 `focus resume <thread_id|thread_name>` 或 `fcodex resume <thread_id|thread_name>`
+- 同一 thread 可以被多个端观察；飞书 next-turn/FIFO 与 review/compact 等 exclusive action 仍由 exact main-turn lease 串行化，普通 Web/`fcodex` prompt 则保持 upstream-routed start-or-steer，不取得 writer。live 且已 attach exact direct root 的 `fcodex` endpoint，或已连接并 materialize 该 root 的可信本机 Web document，可以 steer exact current regular turn；二者也可按 [canonical main-turn owner 合同](root-operation-owner.zh-CN.md) interrupt exact current/startup turn，但不会 takeover 或转移 writer；只有 exact pending-request capability 可以回答交互
+- 本地接入同一个 live thread 使用 `focus resume <thread_id|thread_name>` 或 `fcodex resume <thread_id|thread_name>`；可能自主开工的 resume 与 exclusive action 仍走 blank-submission / active-main-turn admission，普通输入与 canonical steer/interrupt 走各自 effect-specific 边界，均不会自动授予 takeover
 
 ### 3.2 Thread Settings
 

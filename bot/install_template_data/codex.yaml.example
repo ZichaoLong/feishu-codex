@@ -2,6 +2,8 @@
 # 命名实例不会继承 default 实例的这份文件。
 # 真实配置文件只会保留显式设置过的键。
 # 完整可配项始终以同目录 `codex.yaml.example` 为准。
+# 配置按严格 schema 读取：未知键、错误类型和显式 null 会直接报错；
+# 布尔值/数字不要加引号，列表必须使用 YAML 列表写法。
 #
 # 默认工作目录；默认值：当前用户 Home 目录
 # default_working_dir: /path/to/workspace
@@ -12,18 +14,42 @@
 # 如果通过 Node 版本管理器管理 Codex，建议填写稳定安装路径，不要写 /run/user/.../fnm_multishells/... 这类临时 shim。
 # codex_command: codex
 
-# app-server 连接模式；默认值：managed
-# managed: FOCUS 自己拉起并维护 shared app-server；
-#          默认优先监听 ws://127.0.0.1:8765，若被占用会自动切到空闲本地端口
-# remote:  FOCUS 连接到一个已存在的 app-server endpoint
-# app_server_mode: managed
-
 # app-server 地址；默认值：ws://127.0.0.1:8765
-# 说明：在 managed 模式下，这是默认目标地址；若默认端口不可用，
-# FOCUS 会自动改用空闲端口，并把实际地址写入本地运行时状态。
+# FOCUS 始终在本机拉起并拥有 shared app-server。若默认端口不可用，
+# 会自动改用空闲端口，并把实际地址写入本地运行时状态。
+# 这里只接受上游支持的 ws://loopback-IP:port（不能写 localhost、wss 或 path）。
 # 本地若希望与飞书安全共用同一线程，可使用 focus 或 fcodex；当这里仍是默认值时，
 # 它会自动发现当前实际运行的 shared backend 地址。
 # app_server_url: ws://127.0.0.1:8765
+
+# Focus Web；新安装默认开启，始终只监听本机 loopback。
+# 本机/SSH 使用 focusctl web open；外部访问使用 configured trusted HTTPS proxy，不能直接暴露该端口。
+web_enabled: true
+
+# Web Gateway 当前只接受 127.0.0.1、localhost 或 ::1。
+# web_host: 127.0.0.1
+
+# Web Gateway 端口；0 表示每次启动自动选择空闲端口。
+# web_port: 0
+
+# Trusted proxy remote mode 仍只监听 loopback，并要求 web_enabled: true 与固定非零 web_port。
+# 两项必须同时配置；origin 可使用 canonical DNS、IPv4 或 compressed IPv6 literal，但必须为 HTTPS 且无 path。
+# Proxy/private network 必须先拥有认证/ACL；并行访问多实例请使用不同 external host（DNS name 或 IP literal）。
+# 完整清单见项目 README 链接的“Focus Web 自部署外部访问”。
+# proof verifier 是 proxy 专有随机 proof 的 SHA-256，不要把原始 proof 写入本配置。
+# web_trusted_proxy_origin: https://focus.example.com
+# web_trusted_proxy_proof_sha256: <64-lowercase-hex-sha256>
+
+# 浏览器会话有效期（秒）；最小值：60；默认值：28800（8 小时）
+# web_session_ttl_seconds: 28800
+
+# 浏览器 WebSocket 断开后，同一已认证 document identity 的重连宽限期（秒）；默认值：15。
+# 该宽限期只维护 document capability 与页面连续性，不创建或延长 main-turn writer。
+# active main turn 仍由 exact interaction lease 与 matching completion 独立结算。
+# web_disconnect_grace_seconds: 15
+
+# 仅用于前端开发：覆盖内置静态资源目录。
+# web_static_dir: /path/to/focus/web/dist
 
 # app-server 连接超时（秒）；默认值：15
 # connect_timeout_seconds: 15
@@ -45,10 +71,10 @@
 # 说明：仓库不再暴露 deprecated 的 on-failure；如旧配置里仍写了它，会自动按 on-request 处理。
 # approval_policy: never
 
-# 审批审阅者；默认值：user
+# 审批审阅者；当前仅支持：user
 # approvals_reviewer: user
 
-# 默认 personality；默认值：pragmatic
+# 默认 personality；可选值：friendly / pragmatic / none；默认值：pragmatic
 # personality: pragmatic
 
 # 默认模型；默认值：空，表示沿用 Codex 默认
@@ -94,19 +120,12 @@
 # mirror_watchdog_seconds: 8
 
 # /compact 出队后等待上游启动通知的最长秒数；默认值：60
-# 说明：如果 turn/started 和 contextCompaction item/started 都丢失，超时后会按“状态不可确认”收口本地卡片并释放队列。
+# 说明：如果 turn/started 和 contextCompaction item/started 都丢失，超时后会按“状态不可确认”收口本地卡片；当前进程等待 exact lifecycle 证据，不会自动重试。
 # compact_start_timeout_seconds: 60
 
 # 运行中主卡片最小 patch 间隔（毫秒）；默认值：700
 # stream_patch_interval_ms: 700
 
-# 主卡片中回复区最大字符数；默认值：12000
-# 超出后卡片会截断，完整回复会额外以文本消息发送。
-# card_reply_limit: 12000
-
 # 终态结果卡实际 interactive payload 的 UTF-8 字节预算；默认值：26000
-# 只影响 terminal result card / 文本兜底，不影响 execution card 的 reply 面板截断。
+# 只影响 terminal result card / 文本兜底；execution card 按完整 payload 自动分页。
 # terminal_result_card_limit: 26000
-
-# 主卡片中执行日志区最大字符数；默认值：8000
-# card_log_limit: 8000

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TypeAlias
+import logging
+from typing import Callable, TypeAlias
 
 ChatBindingKey: TypeAlias = tuple[str, str]
+ThreadMembershipChanged: TypeAlias = Callable[[str], None]
+logger = logging.getLogger(__name__)
 
 
 class ThreadSubscriptionRegistry:
@@ -17,8 +20,13 @@ class ThreadSubscriptionRegistry:
     contract change and this type should gain its own synchronization.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        membership_changed: ThreadMembershipChanged | None = None,
+    ) -> None:
         self._subscribers_by_thread_id: dict[str, set[ChatBindingKey]] = {}
+        self._membership_changed = membership_changed
 
     @staticmethod
     def _normalize_thread_id(thread_id: str) -> str:
@@ -31,6 +39,8 @@ class ThreadSubscriptionRegistry:
         subscribers = self._subscribers_by_thread_id.setdefault(normalized_thread_id, set())
         before = len(subscribers)
         subscribers.add(binding)
+        if len(subscribers) != before:
+            self._notify_membership_changed(normalized_thread_id)
         return before == 0
 
     def unsubscribe(self, binding: ChatBindingKey, thread_id: str) -> bool:
@@ -38,11 +48,15 @@ class ThreadSubscriptionRegistry:
         if not normalized_thread_id:
             return False
 
+        changed = False
         subscribers = self._subscribers_by_thread_id.get(normalized_thread_id)
         if subscribers is not None and binding in subscribers:
             subscribers.remove(binding)
+            changed = True
             if not subscribers:
                 self._subscribers_by_thread_id.pop(normalized_thread_id, None)
+        if changed:
+            self._notify_membership_changed(normalized_thread_id)
 
         return normalized_thread_id not in self._subscribers_by_thread_id
 
@@ -52,4 +66,20 @@ class ThreadSubscriptionRegistry:
         return tuple(sorted(subscribers))
 
     def clear(self) -> None:
+        changed_thread_ids = tuple(self._subscribers_by_thread_id)
         self._subscribers_by_thread_id.clear()
+        for thread_id in changed_thread_ids:
+            self._notify_membership_changed(thread_id)
+
+    def _notify_membership_changed(self, thread_id: str) -> None:
+        if self._membership_changed is None:
+            return
+        try:
+            self._membership_changed(thread_id)
+        except Exception:
+            # Subscription state is lifecycle authority; presentation fan-out
+            # must never turn a committed binding mutation into a failure.
+            logger.exception(
+                "Thread subscription membership listener failed: thread_id=%s",
+                thread_id,
+            )

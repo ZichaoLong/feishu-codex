@@ -1,4 +1,0 @@
-lark-oapi>=1.4.23
-PyYAML>=6.0
-websockets>=15.0
-pytest>=8.0

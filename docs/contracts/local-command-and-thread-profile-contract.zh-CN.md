@@ -1,6 +1,6 @@
 # 本地命令与运行时设置合同
 
-英文原文：`docs/contracts/local-command-and-thread-profile-contract.md`
+文档角色：中文规范源。英文同步副本：`docs/contracts/local-command-and-thread-profile-contract.md`。
 
 本文件保留历史文件名，但已不再定义任何项目自管 `profile` 面。它现在定义本地
 入口与剩余设置模型之间的边界。
@@ -62,13 +62,37 @@
 - 人日常手敲的管理命令
 - 本地 Codex TUI wrapper
 
-## 2. 只剩一个项目自管可写设置族
+## 2. 飞书与 Web 的可写设置边界
 
 ### 2.1 binding-wise next-turn settings
 
 - scope：Feishu binding
 - 飞书入口：`/model`、`/effort`、`/approval`、`/permissions`
 - 本地 `focus` / `fcodex` / 上游 TUI 仍保持各自本地状态，不会自动与飞书侧持久化 binding 设置合并
+
+### 2.2 Web 有独立的 instance-wide next-turn settings
+
+Focus Web 的 model、effort、approval 与 permissions 属于一份 durable `WebNextTurnSettings`，由同一 Focus
+instance 的所有 browser、F5 后 document 与 thread 共享。它不是 Feishu binding 或 local-TUI profile，也不会自动与
+Feishu、`focus` 或 `fcodex` 合并。main-turn lease 只授权具体 submission/active turn；它不拥有这份设置，也不阻止
+connected browser 为下一次 eligible Web turn 修改设置。
+
+具体 seed、持久化、mutation 与消费边界只由
+[`runtime-settings-fact-sources.zh-CN.md`](./runtime-settings-fact-sources.zh-CN.md) 定义。本地命令合同只明确：
+`focus` / `fcodex` / `focusctl` 都不是这份 Web 设置的写入口，main-turn lease 也不拥有它。
+
+独立的 Web navigation state 中，`WebWriterProfileStore.selected_thread_id` 是唯一 durable semantic selection。
+Web `/cd`、attachment scope、meta 与 scope generation 只读取该值，绝不读取进程缓存作为替代。
+独立的 `WebDocumentRegistry.materialized_thread_id` 只证明 bounded-history readiness；加载 older history
+要求两个值都等于请求 target。desired subscription edge 只归 `WebRuntimeInterestRegistry` 所有，不是
+另一份 selection。
+
+当上游使已选 target 变得不可用时，Focus 只把 exact durable match 原子清为 draft，并让 generation 恰好
+加一；重复清理是 no-op。它会保留 replacement materialization，并收敛每个被清 document 的全部
+runtime-interest edge。这种自动 clear 不等同于用户请求的 same-cwd `/cd` rebind：archive、not-found、
+loaded-elsewhere records 继续 isolated 在旧 thread scope；确认 delete 与非法 direct `ThreadSpawn` 则删除
+该 scope。commit 后的 `profile_changed` invalidation 不携带 profile 副本，浏览器必须重读自己的 meta。navigation
+generation 与 settings generation 互不排序或结算。
 
 ## 3. 已移除的项目自管设置
 
@@ -100,6 +124,17 @@
 - live-runtime-owner / loaded-gate fail-close 行为
 - 接到正确的实例 backend
 
+它们是 continuation entry point，不是 ownership credential。live `fcodex` endpoint 的普通
+`turn/start` 只要求 exact direct root 与 exact request tracking，随后保持上游 start-or-steer 语义，
+不读取或取得 main-turn lease。review、compact、autonomous continuation，以及可能 autostart 的 resume
+仍分别服从 [main-turn owner 合同](root-operation-owner.zh-CN.md)与
+[`fcodex` owner 合同](fcodex-operation-owner.zh-CN.md)定义的 method-specific admission。live `fcodex`
+endpoint attach exact direct root 后，可以按 effect-specific 边界 steer 或 interrupt 该 root 的 exact
+current turn，但不会取得或转移 writer；回答 server request 则须通过 `server-request-lifecycle.zh-CN.md`
+定义的 exact callback admission。自己原本是 observer、看不到明显 live frontend，或观察到
+Web/Feishu/`fcodex` surface 已断线，都不授予更宽的 active-turn takeover authority；`resume` 本身既不是
+takeover，也不是 writer credential。
+
 它不再承诺：
 
 - 恢复项目自管的 profile slice
@@ -107,9 +142,11 @@
 
 ## 6. 一条维护规则
 
-如果以后本项目要引入一个新设置，必须先被归类为且只归类为：
+如果以后本项目要引入一个新设置，必须先明确它的 owner、frontend scope 与生效边界，并且只归类为：
 
 1. binding-wise next-turn settings
-2. 只读诊断视图
+2. instance-wide `WebNextTurnSettings`
+3. 另一份有正式合同的明确 owner/scope
+4. 只读 upstream/diagnostic 视图
 
-在这个归类存在之前，本项目不得为它新增本地命令面。
+在这个归类存在之前，本项目不得为它新增本地命令面或隐式跨前端 setting。

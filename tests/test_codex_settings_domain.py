@@ -26,7 +26,7 @@ class _SettingsPortsStub:
             reasoning_effort="",
             current_thread_id="thread-1",
         )
-        self.runtime_view_calls: list[tuple[str, str, str]] = []
+        self.session_calls: list[tuple[str, str, str]] = []
         self.update_calls: list[tuple[str, str, dict[str, Any]]] = []
         self.debug_sender_snapshots: dict[str, dict[str, Any]] = {}
         self.models: list[RuntimeModelSummary] = [
@@ -87,8 +87,8 @@ class _SettingsPortsStub:
     def set_configured_bot_open_id(self, open_id: str) -> None:
         self.configured_bot_open_ids.append(open_id)
 
-    def get_runtime_view(self, sender_id: str, chat_id: str, message_id: str):
-        self.runtime_view_calls.append((sender_id, chat_id, message_id))
+    def resolve_session(self, sender_id: str, chat_id: str, message_id: str):
+        self.session_calls.append((sender_id, chat_id, message_id))
         return SimpleNamespace(**vars(self.runtime))
 
     def list_models(self) -> list[RuntimeModelSummary]:
@@ -110,7 +110,7 @@ def _make_domain(stub: _SettingsPortsStub) -> CodexSettingsDomain:
             get_bot_identity_snapshot=stub.get_bot_identity_snapshot,
             add_admin_open_id=stub.add_admin_open_id,
             set_configured_bot_open_id=stub.set_configured_bot_open_id,
-            get_runtime_view=stub.get_runtime_view,
+            resolve_session=stub.resolve_session,
             list_models=stub.list_models,
             update_runtime_settings=stub.update_runtime_settings,
         ),
@@ -164,7 +164,14 @@ class CodexSettingsDomainTests(unittest.TestCase):
         saved_configs: list[dict[str, Any]] = []
 
         with patch("bot.codex_settings_domain.ensure_init_token", return_value="token-1"):
-            with patch("bot.codex_settings_domain.load_system_config_raw", return_value={"admin_open_ids": []}):
+            with patch(
+                "bot.codex_settings_domain.load_system_config_raw",
+                return_value={
+                    "app_id": "app-id",
+                    "app_secret": "secret",
+                    "admin_open_ids": [],
+                },
+            ):
                 with patch("bot.codex_settings_domain.save_system_config", side_effect=saved_configs.append):
                     result = domain.handle_init_command("ou_user", "chat-a", "token-1", message_id="msg-1")
 
@@ -173,6 +180,73 @@ class CodexSettingsDomainTests(unittest.TestCase):
         self.assertEqual(stub.configured_bot_open_ids, ["ou_bot"])
         self.assertEqual(saved_configs[-1]["admin_open_ids"], ["ou_user"])
         self.assertEqual(saved_configs[-1]["bot_open_id"], "ou_bot")
+
+    def test_init_command_rejects_invalid_existing_system_config_before_updates(self) -> None:
+        stub = _SettingsPortsStub()
+        stub.message_contexts["msg-1"] = {
+            "sender_open_id": "ou_user",
+            "sender_user_id": "u-1",
+            "sender_type": "user",
+        }
+        stub.bot_identity = {"discovered_open_id": "ou_bot"}
+        domain = _make_domain(stub)
+
+        with patch("bot.codex_settings_domain.ensure_init_token", return_value="token-1"):
+            with patch(
+                "bot.codex_settings_domain.load_system_config_raw",
+                return_value={
+                    "app_id": "app-id",
+                    "app_secret": "secret",
+                    "admin_open_ids": "ou-admin",
+                },
+            ):
+                with patch("bot.codex_settings_domain.save_system_config") as save_config:
+                    result = domain.handle_init_command(
+                        "ou_user",
+                        "chat-a",
+                        "token-1",
+                        message_id="msg-1",
+                    )
+
+        self.assertIn("system.yaml 配置无效", result.text)
+        self.assertIn("admin_open_ids", result.text)
+        save_config.assert_not_called()
+        self.assertEqual(stub.added_admin_open_ids, [])
+        self.assertEqual(stub.configured_bot_open_ids, [])
+
+    def test_init_command_rejects_unknown_existing_system_config_key(self) -> None:
+        stub = _SettingsPortsStub()
+        stub.message_contexts["msg-1"] = {
+            "sender_open_id": "ou_user",
+            "sender_user_id": "u-1",
+            "sender_type": "user",
+        }
+        stub.bot_identity = {"discovered_open_id": "ou_bot"}
+        domain = _make_domain(stub)
+
+        with patch("bot.codex_settings_domain.ensure_init_token", return_value="token-1"):
+            with patch(
+                "bot.codex_settings_domain.load_system_config_raw",
+                return_value={
+                    "app_id": "app-id",
+                    "app_secret": "secret",
+                    "admin_open_ids": [],
+                    "admin_open_id": "ou-stale",
+                },
+            ):
+                with patch("bot.codex_settings_domain.save_system_config") as save_config:
+                    result = domain.handle_init_command(
+                        "ou_user",
+                        "chat-a",
+                        "token-1",
+                        message_id="msg-1",
+                    )
+
+        self.assertIn("system.yaml 配置无效", result.text)
+        self.assertIn("admin_open_id", result.text)
+        save_config.assert_not_called()
+        self.assertEqual(stub.added_admin_open_ids, [])
+        self.assertEqual(stub.configured_bot_open_ids, [])
 
     def test_model_command_without_arg_returns_summary_card(self) -> None:
         stub = _SettingsPortsStub()

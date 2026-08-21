@@ -1,6 +1,6 @@
 # 飞书出站图片结果边界
 
-英文原文：`docs/decisions/feishu-output-images.md`
+文档角色：中文规范源。英文同步副本：`docs/decisions/feishu-output-images.md`。
 
 另见：
 

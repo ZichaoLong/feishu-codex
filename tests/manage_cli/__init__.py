@@ -1,0 +1,1 @@
+"""Manage CLI capability tests."""

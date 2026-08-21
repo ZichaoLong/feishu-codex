@@ -146,9 +146,17 @@ def _run_systemctl(*args: str, check: bool = True) -> subprocess.CompletedProces
     return subprocess.run(command, check=check, text=True, capture_output=True)
 
 
-def _write_text(path: pathlib.Path, contents: str) -> None:
+def _write_text(path: pathlib.Path, contents: str, *, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(contents, encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(contents)
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _utc_now_iso() -> str:
@@ -219,6 +227,12 @@ def render_timer_unit(spec: ScheduledTaskSpec) -> str:
 
 def save_spec(spec: ScheduledTaskSpec, *, prompt_text: str) -> None:
     normalized_task_id = normalize_task_id(spec.task_id)
+    root = scheduled_task_root()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    directory = task_dir(normalized_task_id)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
     prompt_file = prompt_path(normalized_task_id)
     _write_text(prompt_file, prompt_text)
     stored = ScheduledTaskSpec(

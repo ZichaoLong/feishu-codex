@@ -20,5 +20,11 @@ SUPPORTED_APPROVAL_POLICIES = frozenset(
 def normalize_approval_policy(policy: str, *, fallback: str = "on-request") -> str:
     normalized = str(policy or "").strip().lower()
     if not normalized:
-        return fallback
-    return DEPRECATED_APPROVAL_POLICY_MAP.get(normalized, normalized)
+        normalized = str(fallback or "").strip().lower()
+    normalized = DEPRECATED_APPROVAL_POLICY_MAP.get(normalized, normalized)
+    if normalized not in USER_SELECTABLE_APPROVAL_POLICIES:
+        choices = ", ".join(sorted(SUPPORTED_APPROVAL_POLICIES))
+        raise ValueError(
+            f"unsupported approval policy {policy!r}; expected one of: {choices}"
+        )
+    return normalized

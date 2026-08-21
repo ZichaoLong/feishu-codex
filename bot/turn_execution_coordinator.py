@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
+from bot.execution_pages import ExecutionPageLedger, ExecutionTranscriptCursor
 from bot.execution_transcript import ExecutionTranscript
 from bot.runtime_state import (
     UNSET,
@@ -22,6 +23,8 @@ RuntimeState: TypeAlias = RuntimeStateDict
 class PreviousExecutionCardSnapshot:
     message_id: str
     transcript: ExecutionTranscript
+    cursor_start: ExecutionTranscriptCursor
+    cursor_end: ExecutionTranscriptCursor
     cancelled: bool
     elapsed: int
 
@@ -52,16 +55,28 @@ class TurnExecutionCoordinator:
 
     @staticmethod
     def has_active_execution_locked(state: RuntimeState) -> bool:
-        return bool(state["current_message_id"]) and (
+        pages = state["execution_pages"]
+        has_runtime_identity = bool(
             state["running"]
             or state["awaiting_local_turn_started"]
-            or bool(state["current_turn_id"])
+            or state["current_turn_id"]
+        )
+        return (
+            pages.has_unresolved_send
+            or (pages.active_page is not None and has_runtime_identity)
+            or (
+                state["running"]
+                and (
+                    state["awaiting_local_turn_started"]
+                    or bool(state["current_turn_id"])
+                )
+            )
         )
 
     @staticmethod
-    def awaiting_remote_turn_started_locked(state: RuntimeState) -> bool:
+    def awaiting_upstream_turn_started_locked(state: RuntimeState) -> bool:
         return (
-            bool(state["current_message_id"])
+            state["execution_pages"].has_execution_anchor
             and bool(state["awaiting_local_turn_started"])
             and (bool(state["awaiting_attach_status_settle"]) or not bool(state["current_turn_id"]))
         )
@@ -86,8 +101,9 @@ class TurnExecutionCoordinator:
                 running=False,
                 cancelled=False,
                 pending_cancel=False,
-                current_message_id="" if clear_card_message else UNSET,
-                last_execution_message_id="",
+                execution_pages=(
+                    ExecutionPageLedger.empty() if clear_card_message else UNSET
+                ),
                 current_execution_kind="",
                 current_turn_id="",
                 current_prompt_message_id="",
@@ -123,7 +139,7 @@ class TurnExecutionCoordinator:
                 pending_cancel=False,
                 current_turn_id="",
                 current_execution_kind=normalized_execution_kind,
-                last_execution_message_id="",
+                execution_pages=ExecutionPageLedger.empty(),
                 current_prompt_message_id=prompt_message_id,
                 current_prompt_reply_in_thread=prompt_reply_in_thread,
                 current_actor_open_id=actor_open_id,
@@ -162,12 +178,17 @@ class TurnExecutionCoordinator:
 
     def record_started_turn_id_locked(self, state: RuntimeState, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
-        if normalized_turn_id and not state["current_turn_id"]:
+        installs_identity = bool(normalized_turn_id and not state["current_turn_id"])
+        should_interrupt = bool(installs_identity and state["pending_cancel"])
+        if installs_identity:
             self.apply_runtime_state_message_locked(
                 state,
-                ExecutionStateChanged(current_turn_id=normalized_turn_id),
+                ExecutionStateChanged(
+                    current_turn_id=normalized_turn_id,
+                    pending_cancel=False if should_interrupt else UNSET,
+                ),
             )
-        return bool(normalized_turn_id and state["pending_cancel"])
+        return should_interrupt
 
     def mark_cancel_pending_locked(self, state: RuntimeState) -> None:
         self.apply_runtime_state_message_locked(
@@ -175,13 +196,10 @@ class TurnExecutionCoordinator:
             ExecutionStateChanged(pending_cancel=True),
         )
 
-    def confirm_cancel_requested_locked(self, state: RuntimeState) -> None:
+    def clear_cancel_pending_locked(self, state: RuntimeState) -> None:
         self.apply_runtime_state_message_locked(
             state,
-            ExecutionStateChanged(
-                cancelled=True,
-                pending_cancel=False,
-            ),
+            ExecutionStateChanged(pending_cancel=False),
         )
 
     @staticmethod
@@ -198,21 +216,47 @@ class TurnExecutionCoordinator:
     def append_process_note_locked(self, state: RuntimeState, *, text: str, marks_work: bool = False) -> None:
         state["execution_transcript"].append_process_note(text, marks_work=marks_work)
 
-    def finish_process_block_locked(self, state: RuntimeState, *, suffix: str = "") -> None:
-        state["execution_transcript"].finish_process_block(suffix)
+    def mark_continuation_work_locked(self, state: RuntimeState) -> None:
+        state["execution_transcript"].append_process_note("", marks_work=True)
+
+    def mark_process_work_locked(self, state: RuntimeState) -> None:
+        state["execution_transcript"].mark_process_work()
+
+    def finish_process_block_locked(
+        self,
+        state: RuntimeState,
+        *,
+        suffix: str = "",
+        marks_work: bool = False,
+    ) -> None:
+        state["execution_transcript"].finish_process_block(
+            suffix,
+            marks_work=marks_work,
+        )
 
     def append_assistant_delta_locked(self, state: RuntimeState, *, delta: str) -> None:
         state["execution_transcript"].append_assistant_delta(delta)
 
-    def append_process_delta_locked(self, state: RuntimeState, *, text: str) -> None:
-        state["execution_transcript"].append_process_delta(text)
-
-    def reconcile_current_assistant_text_locked(self, state: RuntimeState, *, text: str) -> bool:
+    def reconcile_current_assistant_text_locked(
+        self,
+        state: RuntimeState,
+        *,
+        text: str,
+        terminal_candidate: bool = True,
+        item_id: str = "",
+    ) -> bool:
         transcript = state["execution_transcript"]
-        if len(text) < len(transcript.reply_text()):
-            return False
-        transcript.reconcile_current_assistant_text(text)
-        return True
+        return transcript.reconcile_current_assistant_text(
+            text,
+            terminal_candidate=terminal_candidate,
+            item_id=item_id,
+        )
+
+    def record_unavailable_assistant_completion_locked(
+        self,
+        state: RuntimeState,
+    ) -> None:
+        state["execution_transcript"].record_unavailable_assistant_completion()
 
     def apply_snapshot_reply_locked(
         self,
@@ -316,6 +360,7 @@ class TurnExecutionCoordinator:
         normalized_turn_id = str(turn_id or "").strip()
         if current_turn_id and normalized_turn_id and current_turn_id != normalized_turn_id:
             return False
+        self.mark_continuation_work_locked(state)
         self.apply_runtime_state_message_locked(
             state,
             PlanStateChanged(
@@ -343,6 +388,7 @@ class TurnExecutionCoordinator:
             return False
         if len(text) < len(str(state["plan_text"] or "")):
             return False
+        self.mark_continuation_work_locked(state)
         self.apply_runtime_state_message_locked(
             state,
             PlanStateChanged(
@@ -357,6 +403,7 @@ class TurnExecutionCoordinator:
         if not normalized:
             return
         transcript = state["execution_transcript"]
+        transcript.record_terminal_error(normalized)
         if transcript.reply_text().strip() == normalized:
             return
         if not transcript.has_reply_output():
@@ -376,15 +423,28 @@ class TurnExecutionCoordinator:
     ) -> TurnStartedTransition:
         normalized_turn_id = str(turn_id or "").strip()
         reuse_existing_card = self.has_active_execution_locked(state)
-        should_interrupt_started_turn = bool(normalized_turn_id and state["pending_cancel"])
+        installs_identity = bool(normalized_turn_id and not state["current_turn_id"])
+        should_interrupt_started_turn = bool(
+            installs_identity and state["pending_cancel"]
+        )
         previous_execution_card: PreviousExecutionCardSnapshot | None = None
 
         if not reuse_existing_card:
-            previous_message_id = str(state["current_message_id"] or "").strip()
+            previous_message_id = state["execution_pages"].current_message_id
             if previous_message_id:
+                previous_page = state["execution_pages"].active_page
+                previous_cursor_end = state[
+                    "execution_pages"
+                ].active_projection_end(state["execution_transcript"])
+                if previous_page is None or previous_cursor_end is None:
+                    raise RuntimeError(
+                        "previous execution card lost its page projection"
+                    )
                 previous_execution_card = PreviousExecutionCardSnapshot(
                     message_id=previous_message_id,
                     transcript=state["execution_transcript"].clone(),
+                    cursor_start=previous_page.cursor_start,
+                    cursor_end=previous_cursor_end,
                     cancelled=bool(state["cancelled"]),
                     elapsed=int(max(0.0, started_at - float(state["started_at"] or 0.0)))
                     if state["started_at"]
@@ -395,7 +455,7 @@ class TurnExecutionCoordinator:
                 state,
                 ExecutionStateChanged(
                     cancelled=False,
-                    last_execution_message_id="",
+                    execution_pages=ExecutionPageLedger.empty(),
                     started_at=started_at,
                     last_runtime_event_at=started_at,
                     last_patch_at=0.0,
@@ -413,6 +473,9 @@ class TurnExecutionCoordinator:
             ExecutionStateChanged(
                 current_turn_id=normalized_turn_id,
                 running=True,
+                pending_cancel=(
+                    False if should_interrupt_started_turn else UNSET
+                ),
                 awaiting_local_turn_started=False,
                 awaiting_attach_status_settle=False,
             ),
@@ -438,7 +501,7 @@ class TurnExecutionCoordinator:
         self.apply_terminal_error_locked(state, error_message=error_message)
 
     def prepare_finalize_locked(self, state: RuntimeState) -> FinalizeExecutionTransition:
-        had_card = bool(state["current_message_id"])
+        had_card = bool(state["execution_pages"].current_message_id)
         self.apply_runtime_state_message_locked(
             state,
             ExecutionStateChanged(
@@ -452,5 +515,6 @@ class TurnExecutionCoordinator:
         )
         return FinalizeExecutionTransition(had_card=had_card)
 
-    def retire_execution_locked(self, state: RuntimeState) -> None:
+    def retire_execution_locked(self, state: RuntimeState) -> bool:
         self.apply_runtime_state_message_locked(state, ExecutionRetired())
+        return True

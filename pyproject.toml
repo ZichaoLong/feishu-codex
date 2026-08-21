@@ -3,19 +3,20 @@ name = "focus"
 dynamic = ["version"]
 description = "Bridge Feishu chats to Codex via the native app-server protocol."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
+  "aiohttp>=3.11,<4",
   "lark-oapi>=1.4.23",
   "PyYAML>=6.0",
-  "toml>=0.10",
   "websockets>=15.0",
 ]
 
 [project.scripts]
-focus = "bot.fcodex:main"
+focus = "bot.fcodex.cli:main"
 focusd = "bot.__main__:main"
 focusctl = "bot.focusctl:main"
-fcodex = "bot.fcodex:main"
+fcodex = "bot.fcodex.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -29,6 +30,7 @@ version = {attr = "bot.version.__version__"}
 
 [tool.setuptools.package-data]
 "bot.install_template_data" = ["*.example"]
+"bot.web_assets" = ["dist/**", "THIRD_PARTY_NOTICES.md"]
 "bot.managed_skills.feishu_send_image" = ["skill/SKILL.md", "skill/agents/openai.yaml"]
 "bot.managed_skills.feishu_scheduled_prompts" = [
   "skill/SKILL.md",

@@ -1,6 +1,6 @@
 # Feishu Card Text Projection and Round-Trip Boundary
 
-Chinese version: `docs/decisions/feishu-card-text-projection.zh-CN.md`
+Document role: synchronized English peer. Canonical Chinese: `docs/decisions/feishu-card-text-projection.zh-CN.md`.
 
 See also:
 
@@ -278,6 +278,12 @@ those remain display-only.
 
 More specifically:
 
+- `process_log` is a bounded human progress projection, not a copy of upstream
+  tool output. Command-output deltas and file-patch progress provide only
+  liveness and evidence that more work follows. Feishu projects summaries at
+  item start/completion, while Web history retains complete upstream tool
+  details. The exact events, fields, and byte budgets are defined only by
+  [Section 5.4 of `feishu-thread-lifecycle.md`](../contracts/feishu-thread-lifecycle.md#54-live-notifications-are-the-primary-runtime-truth)
 - once authoritative terminal output has already been delivered through a
   `terminal result card` or fallback plain text, the execution card should try
   to keep only staged/process reply segments
@@ -636,6 +642,31 @@ That boundary should ideally own two responsibilities:
    - input: Feishu `interactive` message content
    - output: either strong-contract text or best-effort text
 
+Under the current implementation, that boundary is further split into:
+
+1. sender-side terminal-card protocol packaging
+   - input: `final_reply_text`
+   - output: `terminal result card`
+2. receiver-side terminal-card protocol parsing
+   - input: Feishu `interactive` message content
+   - output: `final_reply_text` and `visible_text`
+3. ordinary external-card text projection
+   - input: non-terminal `interactive` message content
+   - output: best-effort text
+
+The recommended code location is:
+
+- continue to use `bot/card_text_projection.py` as the receiver-side protocol
+  parsing and ordinary text-projection boundary
+
+Do not scatter terminal-protocol logic directly across:
+
+- `bot/feishu_bot.py`
+- `bot/runtime_card_publisher.py`
+- `bot/feishu_card_markdown.py`
+
+Doing so would mix the protocol, presentation, and transport layers again.
+
 Existing modules should stay narrow:
 
 - `bot/runtime_card_publisher.py`
@@ -677,9 +708,39 @@ Do not:
 - parse self terminal results and external ordinary cards through the same rule
   path
 - turn the plain-text overflow fallback into the default path
+- hide a duplicate copy of the full terminal body solely for machine reads
+- remove best-effort external-card text fallback merely because the self-authored
+  terminal-card protocol is stable
 
 At this stage the priorities should be:
 
 - reliable terminal results
 - best-effort ordinary-card text
 - fail-closed behavior for complex cards
+
+### 11.9 Current Implementation Checklist
+
+The current implementation must continue to satisfy these constraints:
+
+1. A `terminal result card` keeps only one authoritative `final_reply_text` and
+   does not send a structure summary.
+2. Terminal delivery prioritizes the terminal-card main path. If the result is
+   over budget, it falls back directly to plain text instead of trimming the
+   protocol.
+3. The receiver first recognizes the marker and template contract of a
+   self-authored terminal card, then returns its `final_reply_text` directly.
+4. For self-authored and external cards alike, whenever a `message_id` is
+   available, the receiver tries raw-card retrieval before guessing through
+   projection.
+5. `merge_forward` does not consume the fixed outer copy; it expands child
+   messages and processes them individually.
+6. Ordinary external cards retain best-effort text fallback, without promoting
+   that projection to authoritative text.
+7. `/last text` and similar read paths must not depend on a local summary to
+   restore heading levels. They consume the raw card or authoritative body from
+   history directly.
+8. Automated tests cover at least:
+   - new-protocol terminal-card round-trip
+   - raw-card retrieval by `message_id`
+   - `merge_forward` child-message expansion
+   - best-effort fallback for ordinary external cards

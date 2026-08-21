@@ -2,7 +2,11 @@
 
 英文原文：`docs/archive/codex-handler-decomposition-plan.md`
 
-本文是实施计划，不是运行时语义合同。
+> 冻结归档：本计划已经完成，只保留为历史 rollout 记录，不再随当前实现更新。
+> 当前架构与 ownership 以
+> [`focus-design.zh-CN.md`](../architecture/focus-design.zh-CN.md) 为准。
+
+本文是历史实施计划，不是运行时语义合同。
 
 说明：本文成文时部分术语尚未收口；文中的管理面释放动作统一按当前命名读作 `unsubscribe`。
 
@@ -11,8 +15,6 @@
 - 为什么下一步不该继续做零散修补
 - `CodexHandler` 应按什么 ownership 边界继续拆
 - 每个阶段具体改什么、不改什么、什么算完成
-
-如果后续实现顺序调整，应优先更新本文，而不是把计划性内容混入正式合同文档。
 
 ## 1. 背景
 

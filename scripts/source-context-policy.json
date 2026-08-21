@@ -1,0 +1,22 @@
+{
+  "alignment_threshold_bytes": 98304,
+  "alignment_threshold_lines": 2000,
+  "review_threshold_lines": 1500,
+  "reviewed_sources": {
+    "bot/focus_runtime/runtime.py": {
+      "category": "focus_owned"
+    },
+    "bot/web_runtime/gateway.py": {
+      "category": "focus_owned"
+    },
+    "tests/test_feishu_bot.py": {
+      "category": "focus_owned"
+    },
+    "tests/test_web_thread_open_coordinator.py": {
+      "category": "focus_owned"
+    },
+    "web/src/components/chat/Composer.vue": {
+      "category": "upstream_derived"
+    }
+  }
+}

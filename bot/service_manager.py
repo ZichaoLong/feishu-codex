@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import pathlib
 import plistlib
-import shlex
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -119,6 +118,12 @@ class ServiceManager:
 
     def uninstall(self, definition: ServiceDefinition) -> None:
         raise NotImplementedError
+
+    def is_instance_uninstalled(self, definition: ServiceDefinition, status: ServiceStatus) -> bool:
+        """Return whether per-instance registration and execution are gone."""
+
+        del definition
+        return not status.installed and not status.running
 
     def uninstall_shared(self) -> None:
         return None
@@ -269,6 +274,13 @@ class SystemdUserServiceManager(ServiceManager):
                 pass
         self._run("systemctl", "--user", "daemon-reload", check=False)
 
+    def is_instance_uninstalled(self, definition: ServiceDefinition, status: ServiceStatus) -> bool:
+        if definition.instance_name != DEFAULT_INSTANCE_NAME:
+            # Named instances share focus@.service.  The template remaining
+            # installed is not a registration for this particular instance.
+            return not status.running
+        return super().is_instance_uninstalled(definition, status)
+
     def uninstall_shared(self) -> None:
         try:
             self._template_unit_path().unlink()
@@ -405,6 +417,13 @@ class LaunchdUserServiceManager(ServiceManager):
 
 class WindowsTaskSchedulerServiceManager(ServiceManager):
     _TASK_XML_NAMESPACE = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+    _TASK_STATE_LABELS = {
+        0: "unknown",
+        1: "disabled",
+        2: "queued",
+        3: "ready",
+        4: "running",
+    }
 
     def _task_name(self, definition: ServiceDefinition) -> str:
         return definition.identifier
@@ -413,7 +432,7 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
         return f"schtasks /Query /TN {self._task_name(definition)} /XML"
 
     def _status_source(self, definition: ServiceDefinition) -> str:
-        return f"schtasks /Query /TN {self._task_name(definition)} /FO LIST /V"
+        return f"Task Scheduler COM state for {self._task_name(definition)}"
 
     def _launcher_path(self, definition: ServiceDefinition) -> pathlib.Path:
         return definition.paths.data_dir / "service-launch.cmd"
@@ -473,6 +492,48 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
         if root is None:
             return False
         return root.find(f".//{{{self._TASK_XML_NAMESPACE}}}LogonTrigger") is not None
+
+    def _query_task_state(self, definition: ServiceDefinition) -> int | None:
+        # schtasks /FO LIST localizes both the "Status" field name and values.
+        # The Task Scheduler COM API exposes the stable TASK_STATE enum instead.
+        # Handle ERROR_FILE_NOT_FOUND by HRESULT so missing and access-denied
+        # cannot collapse into the same localized command failure.
+        script = (
+            "& { param([string]$TaskName) "
+            "$ErrorActionPreference = 'Stop'; "
+            "try { "
+            "$service = New-Object -ComObject 'Schedule.Service'; "
+            "$service.Connect(); "
+            "$task = $service.GetFolder('\\').GetTask($TaskName); "
+            "[Console]::Out.Write([int]$task.State) "
+            "} catch { "
+            "if ($_.Exception.HResult -eq -2147024894) { "
+            "[Console]::Out.Write('missing'); exit 0 "
+            "}; throw "
+            "} }"
+        )
+        result = self._run(
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+            self._task_name(definition),
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "Task Scheduler state query failed"
+            raise ServiceManagerError(detail)
+        rendered = result.stdout.strip()
+        if rendered == "missing":
+            return None
+        try:
+            state = int(rendered)
+        except ValueError as exc:
+            raise ServiceManagerError("Task Scheduler 返回了无法解析的 numeric state。") from exc
+        if state not in self._TASK_STATE_LABELS:
+            raise ServiceManagerError(f"Task Scheduler 返回了未知 state：{state}")
+        return state
 
     def _task_xml_bytes(self, definition: ServiceDefinition, *, autostart_enabled: bool) -> bytes:
         ET.register_namespace("", self._TASK_XML_NAMESPACE)
@@ -558,21 +619,21 @@ class WindowsTaskSchedulerServiceManager(ServiceManager):
         self._run("schtasks", "/End", "/TN", self._task_name(definition), check=False)
 
     def status(self, definition: ServiceDefinition) -> ServiceStatus:
-        result = self._run("schtasks", "/Query", "/TN", self._task_name(definition), "/FO", "LIST", "/V", check=False)
-        if result.returncode != 0:
+        state = self._query_task_state(definition)
+        if state is None:
             return ServiceStatus(
                 installed=False,
                 running=False,
                 source=self._status_source(definition),
-                detail=result.stderr.strip() or result.stdout.strip(),
+                detail="scheduled task missing",
             )
-        status_line = next((line for line in result.stdout.splitlines() if line.startswith("Status:")), "")
-        running = "Running" in status_line
         return ServiceStatus(
             installed=True,
-            running=running,
+            # Queued is a live/in-flight state for lifecycle and destructive
+            # admission purposes, even before Task Scheduler reports Running.
+            running=state in {2, 4},
             source=self._status_source(definition),
-            detail=status_line.strip(),
+            detail=f"state={state} ({self._TASK_STATE_LABELS[state]})",
         )
 
     def uninstall(self, definition: ServiceDefinition) -> None:

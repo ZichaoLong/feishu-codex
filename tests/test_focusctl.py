@@ -41,6 +41,20 @@ class FocusctlEntrypointTests(unittest.TestCase):
         self.assertIn("usage: focusctl [--instance <name>] service status", rendered)
         self.assertNotIn("usage: focusctl status", rendered)
 
+    def test_service_help_projects_action_registry_and_autostart_syntax(self) -> None:
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as exc:
+                focusctl.main(["service", "--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        rendered = stdout.getvalue()
+        for spec in focusctl.FOCUSCTL_SERVICE_ACTION_SPECS:
+            with self.subTest(action=spec.name):
+                self.assertIn(spec.name, rendered)
+        self.assertIn("autostart <enable|disable|status>", rendered)
+
     def test_service_list_is_removed(self) -> None:
         stderr = io.StringIO()
         with patch("bot.focusctl.sys.stderr", stderr):
@@ -80,6 +94,35 @@ class FocusctlEntrypointTests(unittest.TestCase):
         self.assertIn("thread list --archived --scope global", rendered)
         self.assertIn("thread unarchive --thread-id <id-1> --thread-id <id-2>", rendered)
         self.assertIn("thread delete --thread-id <id> --force", rendered)
+
+    def test_help_and_routing_share_one_complete_resource_registry(self) -> None:
+        expected = {
+            "config",
+            "instance",
+            "service",
+            "binding",
+            "prompt",
+            "thread",
+            "image",
+            "web",
+            "skill",
+            "migrate",
+            "uninstall",
+            "purge",
+        }
+        self.assertEqual(
+            {spec.name for spec in focusctl.FOCUSCTL_RESOURCE_SPECS},
+            expected,
+        )
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit):
+                focusctl.main(["--help"])
+        rendered = stdout.getvalue()
+        for resource in expected:
+            with self.subTest(resource=resource):
+                self.assertIn(f"  {resource}", rendered)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # 群聊功能合同
 
-英文原文：`docs/contracts/group-chat-contract.md`
+文档角色：中文规范源。英文同步副本：`docs/contracts/group-chat-contract.md`。
 
 本文定义 FOCUS 当前群聊能力的正式行为合同。
 
@@ -46,10 +46,20 @@
 
 - 群激活是 **chat 级** 开关，不是成员级 ACL
 - 群未激活时，非管理员不能在该群里使用机器人
+- 停用群会立即对非管理员发起 turn 的未决审批与补充输入启动 fail-close。只有上游确认取消后，请求才会删除、已展示的对应卡片才会失效；它不会把该普通成员发起的请求转交给管理员。原始 turn 发起者本来就是管理员的请求，仍由该管理员处理
+- 如果普通成员请求的取消未能发出或结果未知，它仍是 fail-closed blocker，而不是普通成员重新获得操作权。普通成员和管理员都不会继承回答它的权限；只有原始 turn 发起者本来就是管理员的请求，才作为常规管理员工作继续
+- 停用也会丢弃该群 binding 的旧内存 FIFO，包括通过 cancellation marker 取消一个正在 drain 的 head。之后重新激活时，绝不能启动普通成员此前排入的 follow-up
 - 群已激活后，当前群成员与后续新加入成员都可日常使用机器人
+- 激活的实际安全含义是：部署者信任该群成员可在当前 approval / permissions 基线内驱动这台机器上的 Codex；它不是把普通成员限制在“只读聊天”或独立 sandbox 中的隔离承诺
+- 这与把 Web access credential 分享给他人属于同一类部署信任决定：它授予的是当前基线内驱动 agent 的日常能力，而不是受限成员角色
 - 群激活后，即使管理员之后退群，群仍继续可用；直到管理员重新进群停用，或运维显式清理该群状态
 - 群激活状态应跨服务重启保留
+- 持久化的 `activated` 只接受 JSON boolean；`true` 必须同时有非空
+  `activated_by` 与正整数 `activated_at`，`false` 必须同时是空
+  `activated_by` 与 `activated_at=0`。字段类型或元数据不一致时，该 chat
+  的群状态 fail-closed；不会因此让其他 chat 的群状态一起不可用
 - 群激活 / 停用 / 再激活只改变授权状态与元数据，不会自动清空群日志、`assistant` 上下文边界、当前 thread 绑定或群工作态
+- 停用群不会中断 active main turn；普通取消仍要求 exact active-turn holder 与 matching turn id
 - 激活与停用只允许管理员执行
 - 当前群激活管理入口是：
   - `/group`
@@ -107,14 +117,26 @@
   - `/approval`
   - `/permissions`
   - 群激活与群工作态管理命令
+- 上述 admin-only 是避免误操作、集中管理群配置和便于随时收回群授权的**操作缓冲**；它不是成员隔离安全边界。管理员若不信任某人，应将其移出群或停用该群，而不是把这些命令限制误解为该成员无法通过已允许的日常 turn 影响部署机器
 
 ## 6. 运行时审批与补充输入
 
 - 群已激活后，普通成员可以日常对话，也可以处理**自己发起 turn** 产生的审批卡片或补充输入卡片
-- 管理员始终可以作为兜底处理者操作这些卡片
+- 群仍处于激活状态时，管理员可以作为这些卡片的兜底处理者
 - 非管理员普通成员不能处理别人发起 turn 的审批或补充输入
-- “允许本次” 与 “允许本会话” 这两种运行时审批动作，都属于当前请求发起者可处理的范围
+- command、file-change 与 permission approval 还进入可信本机端 shared approval domain：已 materialize
+  exact direct root 的 authenticated live Web/fcodex endpoint 可以回答同一 canonical request，其他飞书
+  chat 不可以。第一份有效 response 胜出，其他 surface 都退休审批 UI
+- 补充输入及其他非 approval interaction 不进入该 shared domain，继续遵守上述飞书 actor 规则
+- 每个合格 surface 都展示协议定义的 option set：command approval 遵守 request `availableDecisions`，
+  file 与 permission approval 包含各自 schema 定义的 session 选项
 - 这些卡片处理权只作用于当前 turn 的运行时交互，不等于获得共享状态管理权限
+- 停用后适用第 3 节更严格的规则：普通成员发起的未决请求会 fail-close；取消已经由上游确认的卡片对所有人都不可再回答。只有原始发起者本来就是管理员的未决请求，才作为常规管理员工作继续。普通成员请求若取消未发出或结果未知，仍是 blocker，普通成员和管理员都不会继承回答它的权限
+- 对有 exact 普通成员 origin 证据的 shared approval，上述规则会在 fail-close attempt 后撤销中央 current-epoch
+  response authority。cancel 明确未发送时仍如实保持 pending/blocker；由于 Focus 没有 service→fcodex 的展示推送，
+  已渲染的 fcodex overlay 可能要等用户动作被拒绝，或真实 upstream resolution/lifecycle cleanup 到来后才消失
+- writer/actor 事实已经退休后，停用不能仅凭 sole subscription 推断飞书普通成员 origin。之后的无 writer autonomous
+  approval 可能没有飞书卡，但仍可由合格可信本机端处理；引入 durable cross-turn origin 不属于当前进程内审批合同
 
 ## 7. `assistant` 模式上下文合同
 
@@ -148,8 +170,14 @@
 
 - 群聊 queued prompt 的准入边界是当前 Feishu binding，而不是发送者 actor
 - 群已激活后，只要发送者通过该群当前的使用权限检查，且消息命中当前群 binding，就可以在该 binding 正在执行时排队；不要求与当前 running turn 的发起者是同一个 `open_id`
+- 该执行也可以是订阅同一 root 后产生的 Web/`fcodex` exact-turn 镜像，但准入必须在同一锁内证明 matching
+  本进程 local lease 与 exact binding/root/turn；`all` 模式跨会话独占检查仍优先，不能借镜像旁路
 - 发送者身份仍必须随队列项保留，用于执行卡片、终态卡片、引用回复锚点、审计与后续交互归属
 - 队列只保存在当前进程内存中，不承诺服务重启恢复、列表、取消或跨 binding 排队
+- 一条群队列项同时受准入它的 binding 与 root 约束。群停用、binding/root 失效，或真正出队时
+  submission-lease admission 失败，都会丢弃该项；队列绝不是 owner 或跨 frontend takeover 路径。完整的
+  binding FIFO 生命周期见
+  [`scheduled-prompts.zh-CN.md`](scheduled-prompts.zh-CN.md#62-fifo-失效与真正出队)
 - `all` 模式下，普通文本在当前群 binding 正在执行时可排队
 - `assistant` 模式下，只有有效 mention 可以触发或排队；未有效 mention 的普通消息只写入上下文日志
 - `assistant` 的 queued mention 在入队时只冻结原始消息元数据，不立即回捞历史上下文

@@ -1,6 +1,6 @@
 # 飞书附件入口与本地暂存边界
 
-英文原文：`docs/decisions/feishu-attachment-ingress.md`
+文档角色：中文规范源。英文同步副本：`docs/decisions/feishu-attachment-ingress.md`。
 
 另见：
 
@@ -13,11 +13,13 @@
 
 用户希望在飞书里直接发送附件，然后继续通过 FOCUS 与本地 Codex 协作。
 
-本仓库当前的现状是：
+本仓库在**第一阶段落地前**的历史现状是：
 
-- 文件消息仍被显式拒绝
-- app-server turn 输入仍以纯文本为主
+- 文件消息曾被显式拒绝
+- app-server turn 输入曾以纯文本为主
 - 复杂文件解析能力并不应该由 FOCUS 自己长期维护
+
+前两项用于说明为什么要选择这条边界，并不是当前实现的描述。当前第一阶段附件入口已经落地，见第 4 节和第 12 节；除下文明确的图片原生输入外，复杂附件的解释仍不成为 FOCUS 的职责。
 
 如果把 PDF、Office、OCR、音视频转写、压缩包处理都内建进本仓库，会引入：
 
@@ -37,7 +39,7 @@
    - 用户配置的 MCP / Apps
    - 本地环境里已经可用的解析工具链
 3. 图片是唯一需要额外“升级”的附件类型：
-   - 除保存到本地外，还应在 turn 输入中提升为 `localImage`
+   - 除保存到本地外，只有字节签名与当前模型能力检查都通过时，才可在 turn 输入中提升为 `localImage`
 4. 非图片附件统一按“本地文件路径”处理：
    - FOCUS 不承诺模型一定能直接理解该文件
    - 只承诺文件已被保存到本地，且路径会被明确交给 Codex
@@ -73,7 +75,7 @@
 
 | 飞书消息类型 | 是否下载 | 进入 Codex 的方式 | 本仓库承诺 |
 | --- | --- | --- | --- |
-| `image` | 是 | 本地文件 + `localImage` | 保存成功，并作为图片输入交给 Codex |
+| `image` | 是 | 本地文件；有条件的 `localImage` | 路径始终明确；原生输入要求图片字节与模型能力都有明确证据 |
 | `file` | 是 | 本地文件路径 | 保存成功，并把路径交给 Codex |
 | `audio` | 是 | 本地文件路径 | 保存成功；是否可理解交给 Codex / MCP / 本地工具 |
 | `media` | 是 | 本地文件路径 | 保存成功；是否可理解交给 Codex / MCP / 本地工具 |
@@ -171,6 +173,12 @@ pending 附件必须有 TTL。
 
 - `_feishu_attachments/`
 
+Focus service 当前始终在同一主机拉起并拥有 app-server，因此 Focus 暂存路径与 backend
+看到的是同一个本机文件系统；这是当前产品边界的固定事实，不再由一项 deployment-mode
+布尔值在运行时分支判断。`focusctl` / `fcodex` 的 attached client 只连接这个已运行的本机
+backend，不改变附件交付边界。若未来重新引入外部 backend，必须先另行设计可靠文件传输事务，
+不能恢复一个仅靠 URL 或 mode 字符串推断 shared filesystem 的弱分支。
+
 不直接散落到工作目录根下。
 
 这样做是为了：
@@ -222,12 +230,27 @@ pending 附件必须有 TTL。
 
 ### 7.1 图片
 
-图片附件在启动 turn 时应做两件事：
+图片附件在启动 turn 时始终保留受控本地路径；只有同时证明以下全部事实时，才额外提升为 `localImage`：
 
-1. 作为普通本地文件保留在 `_feishu_attachments/`
-2. 在 `turn/start` 输入中提升为 `localImage`
+1. 暂存文件仍是预期 `_feishu_attachments/` 目录下的普通、非 symlink 文件
+2. 当前字节匹配共享 native-image 签名；飞书消息类型、文件扩展名与 Content-Type 都不能单独作为证据
+3. 当前 thread effective model 来自成功的 `thread/start` 或 `thread/resume` response、
+   `thread/settings/updated`，或来自 `turnId` 与当前权威 active turn 一致的 `model/rerouted`；
+   `thread/settings/update` 的 queued ACK 不能作为证据
+4. 针对该 exact model 的新鲜 `model/list` 项明确在 `inputModalities` 中包含 `image`
 
-这样既保留本地路径，又能利用 Codex 对图片的原生输入支持。
+model 事实缺失、model metadata 缺失、`inputModalities=null`、明确 text-only、catalog 读取失败或签名不匹配时，
+都必须保留本地路径文本并省略 native input。若待发 `turn/start` 请求的 model 与已知 effective model 不同，
+Focus 必须清除旧事实，并在上游确认替代 model 前按 unknown 处理。disconnect/reconnect 与 thread unload/delete
+同样会清除这份临时事实。
+
+这样既保留本地路径，也只在已证明边界内利用 Codex 的原生图片输入能力。
+
+Focus 会在构造 `localImage` 前再次检查普通文件、非 symlink、预期 parent、inode 与当前字节。不过当前
+app-server 合同接收的是路径，而不是已经验证的文件描述符；因此，若本地 actor 有能力并发修改暂存目录，
+仍可能在 Focus 最终检查与 backend 打开路径之间替换文件。彻底关闭这段残余 TOCTOU，需要不可变/
+content-addressed handoff 或上游 descriptor/upload 合同；所以暂存目录属于可信 same-host 边界，不能当作
+敌对多 writer upload 目录。
 
 ### 7.2 非图片附件
 
@@ -282,6 +305,9 @@ pending 附件必须有 TTL。
   - 目录不可写
   - 磁盘空间不足
   - 文件名冲突未能安全重命名
+- 交付/能力边界：
+  - 图片字节不匹配 native image 签名（仅交付路径）
+  - effective-model 能力 unknown 或 text-only（仅交付路径）
 
 ## 10. 管理员与用户职责
 
@@ -298,33 +324,34 @@ pending 附件必须有 TTL。
 - 对复杂文件格式，如果需要更强解析能力，应配合环境或 MCP 使用
 - 不应把“文件成功保存到本地”理解成“模型保证能直接理解该格式”
 
-## 11. 实现清单
+## 11. 已完成的第一阶段实现清单
 
-后续真正实现时，至少应覆盖以下项目：
+当前第一阶段实现已覆盖：
 
-1. 把当前 file-only 入口扩成 attachment ingress，纳入：
+1. 已把原来的 file-only 入口扩成 attachment ingress，纳入：
    - `image`
    - `file`
    - `audio`
    - `media`
-2. 抽出统一的消息资源下载能力，能区分：
+2. 已抽出统一的消息资源下载能力，能区分：
    - `type=image`
    - `type=file`
-3. 把附件统一保存到 `cwd/_feishu_attachments/`
-4. 引入 pending attachment 状态，并按 `sender + chat + thread` 隔离
+3. 已把附件统一保存到 `cwd/_feishu_attachments/`
+4. 已引入 pending attachment 状态，并按 `sender + chat + thread` 隔离
 5. 附件消息只下载与确认，不直接启动 turn
 6. 后续文本消息消费 pending 附件集合
-7. 扩宽 adapter / turn 输入，使图片能够进入 `localImage`
+7. 已扩宽 adapter / turn 输入，但只有签名通过且上游已证明 effective model 支持图片时才进入 `localImage`
 8. 非图片附件通过明确的本地路径说明注入 turn 文本
 9. 对不支持类型与飞书下载失败返回清晰错误
-10. 增加 TTL / 清理机制
-11. 补回归测试，至少覆盖：
+10. 已增加 TTL / 清理机制
+11. 已补回归测试，至少覆盖：
     - 单聊图片
     - 单聊普通文件
     - 群聊图片/文件
     - 群聊跨用户隔离
     - 不支持类型拒绝
     - TTL 过期
+    - 签名不匹配、model capability unknown/text-only/image、requested/effective model 不一致
 
 ## 12. 相关实现入口
 
@@ -342,5 +369,5 @@ pending 附件必须有 TTL。
 - 支持 `image`、`file`、`audio`、`media`
 - 附件先下载到 `cwd/_feishu_attachments/`
 - 后续同一 `sender + chat + thread` 语义下的文本消息消费 pending 附件
-- 图片进入 `localImage`，其他附件通过本地路径说明注入 turn 文本
+- 受控本地路径始终注入 turn 文本；只有签名通过且权威 effective model 明确支持 image 时，图片才提升为 `localImage`
 - 支持 TTL 过期清理与回归测试覆盖

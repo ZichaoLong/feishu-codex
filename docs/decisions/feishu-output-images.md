@@ -1,5 +1,7 @@
 # Feishu Outbound Image Delivery Boundary
 
+Document role: synchronized English peer. Canonical Chinese: `docs/decisions/feishu-output-images.zh-CN.md`.
+
 See also:
 
 - `docs/architecture/focus-design.md` for the current architecture and

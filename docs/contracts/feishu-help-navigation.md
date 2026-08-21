@@ -1,6 +1,6 @@
 # Feishu `/help` Navigation Contract
 
-Chinese original: `docs/contracts/feishu-help-navigation.zh-CN.md`
+Document role: synchronized English peer. Canonical Chinese: `docs/contracts/feishu-help-navigation.zh-CN.md`.
 
 This file defines only the navigation contract for `/help` and `/commands`.
 
@@ -45,11 +45,20 @@ Owns:
 
 Its body should remind the user that:
 
-- the same thread may be observed from multiple endpoints, but within one
-  instance a live turn has only one interaction owner
-- local continuation of the same live thread uses
-  `focus resume <thread_id|thread_name>` or
-  `fcodex resume <thread_id|thread_name>`
+- the same thread may be observed from multiple endpoints. Feishu
+  next-turn/FIFO and exclusive actions such as review/compact remain serialized
+  by the exact main-turn lease; ordinary Web/`fcodex` prompts keep upstream-routed
+  start-or-steer and acquire no writer. A live `fcodex` endpoint attached to the
+  exact direct root, or a connected trusted-local Web document that has
+  materialized the root, may steer its exact current regular turn. Either may
+  interrupt its exact current/startup turn under the [canonical main-turn owner
+  contract](root-operation-owner.md), without takeover or writer transfer. Only
+  an exact pending-request capability may answer an interaction
+- local access to the same live thread uses `focus resume <thread_id|thread_name>`
+  or `fcodex resume <thread_id|thread_name>`. A resume that may start autonomous
+  work and an exclusive action still pass blank-submission / active-main-turn
+  admission; ordinary input and canonical steer/interrupt use their own
+  effect-specific boundaries. None grants takeover
 
 ### 3.2 Thread Settings
 

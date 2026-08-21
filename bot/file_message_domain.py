@@ -11,6 +11,7 @@ This domain owns the Feishu-side attachment lifecycle:
 from __future__ import annotations
 
 import mimetypes
+import logging
 import os
 import pathlib
 import re
@@ -19,9 +20,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from bot.adapters.base import LocalImageTurnInputItem, TextTurnInputItem, TurnInputItem
+from bot.adapters.base import RuntimeModelSummary, TextTurnInputItem
+from bot.binding_runtime_contract import BindingSessionSnapshot
 from bot.constants import display_path
-from bot.runtime_view import RuntimeView
+from bot.input_media_contract import (
+    model_supports_input,
+    verified_local_image_media_type,
+)
+from bot.thread_effective_settings import ThreadEffectiveSettingsRegistry
 from bot.stores.pending_attachment_store import PendingAttachmentRecord, PendingAttachmentStore
 
 _ATTACHMENT_STAGE_DIRNAME = "_feishu_attachments"
@@ -38,6 +44,8 @@ _ATTACHMENT_TYPE_LABELS = {
     "audio": "音频",
     "media": "媒体",
 }
+_DEFERRED_LOCAL_IMAGE_INPUT_TYPE = "_focusLocalImageCandidate"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +61,7 @@ class IncomingAttachmentMessage:
 
 @dataclass(frozen=True, slots=True)
 class PreparedPromptInput:
-    input_items: tuple[TurnInputItem, ...]
+    input_items: tuple[dict[str, Any], ...]
     consumed_attachments: tuple[PendingAttachmentRecord, ...] = ()
     blocking_text: str = ""
 
@@ -63,7 +71,8 @@ class FileMessagePorts:
     get_message_context: Callable[[str], dict[str, Any]]
     download_message_resource: Callable[..., Any]
     reply_text: Callable[..., None]
-    get_runtime_view: Callable[[str, str, str], RuntimeView]
+    resolve_session: Callable[[str, str, str], BindingSessionSnapshot]
+    list_models: Callable[[], list[RuntimeModelSummary]]
     message_reply_in_thread: Callable[[str], bool]
 
 
@@ -76,10 +85,12 @@ class FileMessageDomain:
         ports: FileMessagePorts,
         store: PendingAttachmentStore,
         ttl_seconds: float,
+        effective_settings: ThreadEffectiveSettingsRegistry,
     ) -> None:
         self._ports = ports
         self._store = store
         self._ttl_seconds = max(float(ttl_seconds), 1.0)
+        self._effective_settings = effective_settings
 
     def handle_message(self, incoming: IncomingAttachmentMessage) -> None:
         self._cleanup_expired_attachments()
@@ -103,8 +114,7 @@ class FileMessageDomain:
                 f"{self._attachment_label(attachment_type)}消息缺少资源 key，无法下载，请重新发送。",
             )
             return
-
-        runtime = self._ports.get_runtime_view(
+        runtime = self._ports.resolve_session(
             incoming.sender_id,
             incoming.chat_id,
             incoming.message_id,
@@ -216,7 +226,7 @@ class FileMessageDomain:
                 )
             return PreparedPromptInput(input_items=(self._text_input_item(text),))
 
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
         working_dir = pathlib.Path(str(runtime.working_dir or "")).expanduser()
         blocking_text = self._validate_pending_attachments(
             attachments,
@@ -229,14 +239,83 @@ class FileMessageDomain:
             )
 
         prompt_text = self._compose_prompt_text(text, attachments)
-        input_items: list[TurnInputItem] = [self._text_input_item(prompt_text)]
+        input_items: list[dict[str, Any]] = [self._text_input_item(prompt_text)]
         for record in attachments:
             if record.attachment_type == "image":
-                input_items.append(self._local_image_input_item(record.local_path))
+                # Do not authorize native input yet.  A first prompt may still
+                # need thread/start or thread/resume, and only that response
+                # establishes the effective model.  PromptTurnEntry calls the
+                # finalizer below after that authority exists.
+                input_items.append(
+                    {
+                        "type": _DEFERRED_LOCAL_IMAGE_INPUT_TYPE,
+                        "path": record.local_path,
+                        "expectedParent": str(
+                            (working_dir / _ATTACHMENT_STAGE_DIRNAME).resolve()
+                        ),
+                    }
+                )
         return PreparedPromptInput(
             input_items=tuple(input_items),
             consumed_attachments=attachments,
         )
+
+    def finalize_prompt_input(
+        self,
+        thread_id: str,
+        requested_model: str,
+        input_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Authorize deferred images from current bytes and upstream facts."""
+
+        candidates = [
+            item
+            for item in input_items
+            if str(item.get("type", "") or "") == _DEFERRED_LOCAL_IMAGE_INPUT_TYPE
+        ]
+        ordinary_items = [
+            dict(item)
+            for item in input_items
+            if str(item.get("type", "") or "") != _DEFERRED_LOCAL_IMAGE_INPUT_TYPE
+        ]
+        if not candidates:
+            return ordinary_items
+        effective_model = self._effective_settings.resolve_model_for_request(
+            thread_id,
+            requested_model=requested_model,
+        )
+        if not effective_model:
+            return ordinary_items
+        try:
+            supports_image = model_supports_input(
+                self._ports.list_models(),
+                effective_model,
+                "image",
+            )
+        except Exception:
+            logger.warning(
+                "Could not refresh model capabilities; native Feishu image input is disabled: "
+                "thread=%s model=%s",
+                str(thread_id or "")[:12],
+                effective_model,
+                exc_info=True,
+            )
+            return ordinary_items
+        if supports_image is not True:
+            return ordinary_items
+        for candidate in candidates:
+            local_path = str(candidate.get("path", "") or "").strip()
+            expected_parent = str(candidate.get("expectedParent", "") or "").strip()
+            # Re-read the staged file at consumption time.  Extension, Feishu
+            # message type, Content-Type, and an earlier download-time check
+            # are not authority after the pending interval.
+            if not expected_parent or not verified_local_image_media_type(
+                local_path,
+                expected_parent=expected_parent,
+            ):
+                continue
+            ordinary_items.append(self._local_image_input_item(local_path))
+        return ordinary_items
 
     def restore_consumed_attachments(self, records: tuple[PendingAttachmentRecord, ...]) -> None:
         if records:
@@ -248,11 +327,14 @@ class FileMessageDomain:
         sender_id: str,
         chat_id: str,
         message_id: str,
+        working_dir: str,
     ) -> int:
-        attachments, expired = self._take_pending_attachments_for_message(
+        context = self._ports.get_message_context(message_id) if message_id else {}
+        attachments, expired = self._store.take_workspace_mismatches(
             sender_id=sender_id,
             chat_id=chat_id,
-            message_id=message_id,
+            thread_id=str(context.get("thread_id", "") or "").strip(),
+            expected_stage_dir=pathlib.Path(working_dir).expanduser() / _ATTACHMENT_STAGE_DIRNAME,
             now=time.time(),
         )
         self._delete_local_files(expired)
@@ -302,15 +384,19 @@ class FileMessageDomain:
         workspace_mismatch = False
         for record in attachments:
             local_path = pathlib.Path(record.local_path)
-            if not local_path.exists():
+            if (
+                not local_path.exists()
+                or local_path.is_symlink()
+                or not local_path.is_file()
+            ):
                 missing_local_file = True
                 continue
             try:
-                stage_dir = local_path.parent.resolve()
+                resolved_path = local_path.resolve(strict=True)
             except OSError:
                 missing_local_file = True
                 continue
-            if stage_dir != expected_stage_dir:
+            if resolved_path.parent != expected_stage_dir:
                 workspace_mismatch = True
         if missing_local_file and workspace_mismatch:
             return "待消费附件已失效，请重新发送需要处理的全部附件后再试。"
@@ -461,5 +547,5 @@ class FileMessageDomain:
         return {"type": "text", "text": text}
 
     @staticmethod
-    def _local_image_input_item(path: str) -> LocalImageTurnInputItem:
+    def _local_image_input_item(path: str) -> dict[str, Any]:
         return {"type": "localImage", "path": path}

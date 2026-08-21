@@ -1,6 +1,6 @@
 # Feishu 命令矩阵
 
-英文原文：`docs/contracts/feishu-command-matrix.md`
+文档角色：中文规范源。英文同步副本：`docs/contracts/feishu-command-matrix.md`。
 
 本文件是 Feishu 命令面的单一事实源矩阵。
 
@@ -51,6 +51,7 @@
 
 | 命令 | 用途 | 可从 `/help` 进入 | 私聊 | 群聊 | 最接近的本地对应 |
 | --- | --- | --- | --- | --- | --- |
+| `/steer <text>` | 向当前 binding 镜像的 exact active turn 显式补充纯文本；不排队、不创建下一轮 | 是；`Turn Settings` 表单 | 仅管理员 | 仅管理员 | 无完全等价的本地命令 |
 | `/permissions [read-only\|workspace\|danger-full-access]` | 独立于审批策略设置权限基线 | 是；`Turn Settings` 页 | 仅管理员 | 仅管理员 | 无 |
 | `/model [name\|auto]` | 设置当前 Feishu 会话的 turn-time model override；无参数时打开共享 model/effort 卡 | 是；`Turn Settings` 页 | 仅管理员 | 仅管理员 | 无 |
 | `/effort [auto\|value]` | 设置当前 Feishu binding 的 turn-time effort override；已知 model 按 metadata 约束，auto/未知 model 允许自定义值；无参数时打开共享 model/effort 卡 | 是；`Turn Settings` 页 | 仅管理员 | 仅管理员 | 无 |

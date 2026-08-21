@@ -93,7 +93,7 @@ Rules:
 
 - Prefer `--prompt-file` over inline prompt text when the prompt is more than one short sentence.
 - Keep task ids short, ASCII, and stable, for example `ashare-close-recap`.
-- Default to `--synthetic-source schedule` and `--display-mode silent` unless the user explicitly wants an announcement message before execution.
+- Default to `--synthetic-source schedule` and `--display-mode silent` unless the user explicitly wants a short announcement **after** the scheduled prompt has successfully started. `announce` never posts for a refused, failed, unknown, or merely queued submission.
 - Treat helper failures as authoritative. Do not paper over `systemctl --user` or control-plane errors.
 - Do not try to auto-pick a binding when multiple attached bindings exist.
 - One-shot tasks should use an absolute `OnCalendar=` timestamp when practical,

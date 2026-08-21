@@ -1,0 +1,28 @@
+# The browser bundle is committed so a released Focus installation needs only
+# Python.  It is reproducibly built and reviewed through the Web CI job, but
+# minified output is not a useful default search target for source work.
+/bot/web_assets/dist/
+/bot/web_assets/THIRD_PARTY_NOTICES.md
+/web/coverage/
+/web/dist/
+/web/node_modules/
+/web/playwright-report/
+/web/test-results/
+/web/THIRD_PARTY_NOTICES.md
+
+# Machine-generated dependency and upstream-schema projections remain tracked
+# and are checked through their dedicated tooling.  Skip them during ordinary
+# source searches; pass the exact path to rg when intentionally auditing one.
+/docs/contracts/codex-app-server-schema-baseline.json
+/web/package-lock.json
+
+# The live execution ledger and frozen audit evidence are intentionally opened
+# by exact path.  Historical _work material is not a useful default source-code
+# search surface.
+/docs/_work/
+
+**/.pytest_cache/
+**/.ruff_cache/
+**/.vite/
+**/__pycache__/
+**/*.pyc

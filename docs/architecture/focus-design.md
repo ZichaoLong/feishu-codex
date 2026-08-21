@@ -1,514 +1,501 @@
 # FOCUS Technical Design
 
+Document role: synchronized English peer. Canonical Chinese: `docs/architecture/focus-design.zh-CN.md`.
+
+This document is only the current architecture map: layers, owners, fact sources,
+and dependency direction. Product behavior belongs in `docs/contracts/`, historical
+rationale in `docs/decisions/`, and campaign progress in `docs/_work/`. A work ledger
+must not become a runtime contract.
+
 See also:
 
-- `docs/contracts/thread-profile-semantics.md`
-- `docs/architecture/focus-shared-backend-runtime.md`
-- `docs/decisions/shared-backend-resume-safety.md`
-- `docs/decisions/feishu-output-images.md`
-- `docs/archive/codex-handler-decomposition-plan.md`
-
-## 1. Background
-
-FOCUS is an independent Codex-oriented project, not a thin rename of an
-older Claude integration.
-
-Historical context still matters:
-
-- [`clfeishu`](https://github.com/ZichaoLong/clfeishu) proved the Feishu-side
-  interaction model
-- but that project depended on Claude-specific local file formats and hook
-  behavior
-- FOCUS keeps the Feishu-side transport and interaction lessons while
-  switching the agent/runtime integration to Codex-native surfaces
-
-Upstream baseline:
-
-- Codex source repository: [`openai/codex`](https://github.com/openai/codex.git)
-- Current local validation baseline: `codex-cli 0.118.0`, resolved locally to
-  upstream tag `rust-v0.118.0`
-  (`b630ce9a4e754d35a1f33e4366ba638d18626142`) and checked on 2026-04-03
-- If later revisions of this document need specific upstream source references,
-  prefer commit-pinned `openai/codex` permalinks against that baseline instead
-  of developer-local checkout paths
-
-The design is based on current Codex capabilities that are useful to a Feishu
-bridge:
-
-- `codex app-server` as the primary application-facing runtime surface
-- `codex exec --json` as a structured probe / debugging aid
-- `codex exec resume` and thread-oriented CLI / app-server flows for session
-  continuity
-
-## 2. Goals
-
-- Provide a Feishu bridge for Codex prompts, streaming output, approvals, and
-  long-lived thread management
-- Keep Codex thread metadata under Codex as the source of truth
-- Minimize coupling to private on-disk formats or shell-hook behavior
-- Keep the Feishu layer, local wrapper layer, and Codex protocol layer cleanly
-  separated
-- Preserve a low-friction path for users who need to continue the same live
-  thread from Feishu and local TUI
-- Allow one local operator to run multiple Feishu instances on one machine
-  while still sharing one `CODEX_HOME`
-
-## 3. Non-goals
-
-- Recreate the Codex TUI screen inside Feishu
-- Depend on undocumented Codex disk layouts for thread discovery or metadata
-- Support every experimental Codex feature in the first iteration
-- Reuse `clfeishu` code as a hard architectural dependency
-- Treating bare `codex` and shared-backend `focus` / `fcodex` as the same
-  operational path
-
-## 4. Current Design Principles
-
-- Native protocol first: prefer `codex app-server` behavior and APIs over local
-  scraping or reconstructed state
-- Single source of truth: thread id, cwd, title, preview, source, and runtime
-  config come from Codex
-- Feishu-specific state stays local: thread/UI binding state remains in
-  FOCUS, while machine-global shared state is limited to coordination
-  primitives such as runtime lease and instance registry
-- Shared-backend behavior is explicit: continuing the same live thread with
-  Feishu should go through the same instance backend
-- `CODEX_HOME` and Feishu runtime boundaries stay separate: the former is
-  shared, the latter is isolated per instance
-- Runtime assumptions are documented: wrapper and shared-backend behavior should
-  live in docs, not only in code
-
-## 5. Current Architecture
-
-### 5.1 Layers
-
-FOCUS is organized into four layers:
-
-1. Feishu transport layer
-   - receives user messages and card actions
-   - sends text, cards, and message patches
-2. Application layer
-   - command routing
-   - user-isolated p2p runtime state and group-shared runtime state keyed by `chat_id`
-   - card rendering
-   - session and resume coordination
-3. Codex adapter and protocol layer
-   - owns the Codex runtime connection
-   - translates handler actions into Codex requests
-   - normalizes notifications and responses
-4. Local state layer
-   - stores Feishu-only metadata and runtime discovery state
-   - deliberately does not replace Codex thread metadata
-
-### 5.2 Runtime Topology
-
-Current runtime behavior:
-
-- all instances share one `CODEX_HOME`
-- each instance owns its own:
-  - `FOCUS_CONFIG_DIR`
-  - `FOCUS_DATA_DIR`
-  - service owner
-  - control plane
-  - managed `codex app-server` backend
-- each instance's managed `codex app-server` websocket surface requires an
-  instance-private capability token; that token belongs to the backend-connect
-  layer, not the control-plane token
-- in this repository, `shared backend` means an instance-local shared backend,
-  not one global backend for the whole machine
-- one instance backend prefers `ws://127.0.0.1:8765`
-- if that default port is unavailable, that instance service falls back to
-  another free local port and publishes the active endpoint through its own
-  local runtime state
-- `focus` / `fcodex` first choose the target instance, then discover that
-  instance's active backend endpoint and attach to that same instance backend
-- `focus` / `fcodex` add a thin local websocket proxy only when they need
-  shared-backend cwd correction for upstream remote-mode behavior; that proxy
-  also gets its own per-launch bearer token injected into upstream Codex
-  through wrapper env
-- the machine also maintains two global coordination facts:
-  - the running-instance registry
-  - the thread live-runtime lease
-
-The exact wrapper/runtime mechanics are documented in
-`docs/architecture/focus-shared-backend-runtime.md`.
-
-### 5.3 Key Application Modules
-
-Current module split:
-
-- `bot/codex_handler.py`: Feishu-facing command handling and session binding
-- `bot/cards.py`: user-facing card rendering
-- `bot/card_text_projection.py`: card text projection boundary; owns the
-  terminal `final_reply_text` carrier contract and inbound `interactive`
-  strong-contract / best-effort text extraction
-- `bot/adapters/codex_app_server.py`: Codex adapter boundary
-- `bot/codex_protocol/client.py`: websocket JSON-RPC client for `codex app-server`
-- `bot/fcodex.py` and `bot/fcodex_proxy.py`: local wrapper and
-  owner-filtering proxy
-- `bot/focusctl.py`: public `focusctl` management dispatcher that routes
-  service lifecycle and runtime-management resources through one entry
-- `bot/manage_cli.py`: install, config, instance-directory, service lifecycle,
-  wrapper, and completion management
-- `bot/runtime_admin_cli.py` and `bot/service_control_plane.py`: runtime-admin
-  subcommands and the in-process control plane for the running service
-- `bot/instance_layout.py` and `bot/instance_resolution.py`: multi-instance
-  filesystem layout and current/target instance resolution
-- `bot/binding_identity.py`: stable admin-facing binding identifiers
-- `bot/binding_runtime_manager.py`: owner of `binding` / `subscribe` /
-  `attach` / `detach` runtime state and local runtime snapshots
-- `bot/thread_access_policy.py`: policy boundary for thread sharing and
-  interaction-owner admission
-- `bot/thread_runtime_coordination.py`: cross-instance live-runtime lease
-  loaded-gate admission, atomic lease claim, and reject flow
-- `bot/turn_execution_coordinator.py`,
-  `bot/execution_output_controller.py`, and
-  `bot/execution_recovery_controller.py`: execution lifecycle state transitions,
-  execution-card publishing, terminal-result delivery, and watchdog /
-  reconcile / degraded-channel handling
-- `bot/generated_image_delivery.py`: terminal-snapshot-based outbound image
-  extraction and separate Feishu image-message delivery; it does not alter the
-  authoritative text result contract or execution-card patch model
-- `bot/runtime_admin_controller.py`: `/status`, `/detach`,
-  `/attach`, and control-plane status/admin management
-- `bot/inbound_surface_controller.py`: inbound command surface, card-action
-  routing, and help-card command reuse
-- `bot/forward_aggregator.py`: merged-forward buffering, timeout dispatch, and
-  forwarded-message tree rendering; it owns this transport-local state machine
-  instead of leaving it scattered across `FeishuBot`
-- `bot/group_history_recovery.py`: assistant-mode group-history recovery,
-  local-log merging, context formatting, and boundary `message_id` derivation;
-  it does not depend on the Feishu SDK directly, so request construction and
-  API calls stay in the `FeishuBot` transport boundary and enter through
-  explicit paginated-result ports
-- `bot/prompt_turn_entry_controller.py`: prompt entry orchestration,
-  lease-acquisition, and detached -> attached recovery flow
-- `bot/adapter_notification_controller.py`: adapter-notification routing,
-  interpretation, and downstream dispatch
-- `bot/interaction_request_controller.py`: owns pending approval / user-input
-  request state and fail-closed handling for interactive requests
-- `bot/codex_threads_ui_domain.py`: owns thread-list card UI flows, including
-  transient rename-form state and RuntimeLoop-submitted resume target resolution
-- `bot/codex_goal_domain.py`: owns the thread-level `/goal` read/write surface,
-  goal-card rendering flow, and local goal projection updates for the current binding
-- `bot/codex_settings_domain.py`: owns user-facing settings and identity
-  commands such as `/model`, `/effort`, `/approval`, `/permissions`, `/whoami`,
-  and `/init`; it crosses bot/runtime boundaries through explicit
-  `SettingsDomainPorts` rather than retaining a handler owner
-- `bot/execution_transcript.py`: an internal transcript assembler for execution-card
-  presentation; it builds display-only `reply_segments` / `process_log`
-  fragments, and can support hiding the terminal final-answer segment from the
-  execution card once that answer has been delivered through a separate
-  authoritative carrier; it does not own thread, owner, or binding-level state
-- `bot/stores/generated_image_delivery_store.py`: per-instance durable ledger
-  for deduplicating generated-image deliveries by binding/thread/turn/item
-- `bot/stores/instance_registry_store.py`: machine-global running-instance registry
-- `bot/stores/thread_runtime_lease_store.py`: machine-global thread
-  live-runtime lease
-- `bot/stores/*.py`: runtime backend discovery state, group-chat state, and
-  machine-global coordination state such as runtime lease / registry data
-
-One maintenance rule should also stay explicit for the Feishu transport layer:
-
-- transport-boundary modules such as `FeishuBot` should keep their SDK
-  dependency surface visible
-- wildcard imports should not be the long-term way to hide which IM API types
-  the module actually depends on
-
-One adapter-boundary contract also needs to stay explicit:
-
-- `resume` request inputs should no longer be abstracted as the repository's
-  old `profile` semantics
-- for an unloaded thread, Feishu only carries a narrow one-shot runtime
-  override on cold `thread/resume`: `model`, `reasoning_effort`,
-  `approval_policy`, and `permissions_profile_id`
-- for a loaded thread, runtime correction still belongs to
-  `thread/settings/update`, not to treating `thread/resume` as a generic
-  live-runtime rewrite surface
-
-So the adapter boundary should describe which resume inputs are accepted by the
-request contract, rather than exposing an older abstract signature that is
-narrower than the real call surface.
-
-This first ownership-tightening pass has already landed. The boundaries that
-still need to stay explicit as the code evolves are:
-
-- thread sharing and interaction-owner admission rules should stay behind one
-  policy boundary; that boundary is now `ThreadAccessPolicy`, not scattered
-  handler/prompt/group entry logic
-- `BindingRuntimeManager` should expose snapshot / inventory / iteration style
-  read APIs to the rest of the system, rather than leaking the whole mutable
-  runtime-state map
-- orchestration components such as `PromptTurnEntryController` should be wired
-  through explicit ports, rather than growing anonymous callback lists
-- session-UI initiated resume flow should also cross the runtime boundary
-  through explicit runtime ports, rather than reaching into handler-private
-  loop helpers from inside the domain object
-- bot-facing domains such as settings, group, and attachment ingress should
-  depend on named ports for the specific bot/runtime capabilities they need,
-  rather than retaining broad owner protocols with implicit `bot: Any`
-- settings-domain commands should depend on named settings ports for bot
-  identity/context, runtime view/update, and the current binding's runtime
-  settings, rather than on a broad handler-owner protocol
-
-Thread-summary access should also keep two contracts separate:
-
-- authoritative read: direct backend read by `thread_id`, used by paths that are
-  about to perform a real operation
-- bounded-list best-effort lookup: only supplements context or error wording
-  from the current global list view, and must not be treated as proof that a
-  thread does not exist
-
-Concurrency ownership should also remain explicit:
-
-- `RuntimeLoop` is already the primary serialization mechanism for handler-side
-  runtime state mutations
-- session-UI initiated resume resolution and resume handoff should also go
-  through `RuntimeLoop`, rather than opening ad-hoc background threads that
-  touch the shared adapter/runtime boundary from the side
-- binding resolution and runtime-state hydrate/create should go through a
-  single resolver path, rather than open-coding "pick a binding key, then
-  maybe create state" in multiple call sites
-- objects such as `ThreadSubscriptionRegistry` should currently be treated as
-  runtime-owned internal state, not as general-purpose thread-safe components
-- `CodexHandler._lock` still acts as a broad shared-state fallback lock, but the
-  long-term goal should be reducing the amount of state that must be shared at
-  all, rather than first splitting that lock into smaller locks
-
-This split is no longer only a "move help/settings/group/thread/file out of one
-large flow" exercise. The ownership-decomposition direction described in the
-historical plan has now largely landed:
-
-- `BindingRuntimeManager` now owns Feishu runtime management for `binding` /
-  `subscribe` / `attach` / `detach`
-- `ThreadAccessPolicy` and the lease stores now own the admission rules for
-  interaction owner
-- `TurnExecutionCoordinator`, `ExecutionOutputController`,
-  `ExecutionRecoveryController`, `InteractionRequestController`, and
-  `AdapterNotificationController` now own the turn / execution / request-bridge
-  lifecycle slices
-- `RuntimeAdminController` now owns runtime-admin and control-plane management
-- `InboundSurfaceController` and `PromptTurnEntryController` now own the inbound
-  surface and prompt-entry orchestration layers
-
-So the earlier line "the next step should not be more file-level slicing of
-`CodexHandler`, but state-ownership decomposition" should now be read as an
-architectural direction that has already been executed, not as a still-pending
-roadmap item.
-
-The main ownership that still remains at the top-level `CodexHandler` is now:
-
-- runtime lifecycle bootstrap / shutdown and service-instance ownership
-- assembly of controllers / domains / adapter and cross-domain orchestration
-- a small set of helpers and fallback synchronization that still belongs in the
-  top-level orchestrator
-
-That means the next cleanup step is no longer "decompose the planned ownership
-slices once more". It is to keep shrinking the amount of shared state and
-cross-domain coordination that the top-level orchestrator must hold directly,
-and to avoid reintroducing new implicit ordering rules into `CodexHandler`.
-
-The rollout order and phase boundaries remain documented in
-`docs/archive/codex-handler-decomposition-plan.md`, but that document should now
-be treated as historical rollout material rather than a statement of unfinished
-current work.
-
-## 6. Data and Behavioral Boundaries
-
-### 6.1 Codex-Owned Data
-
-Codex remains the authority for:
-
-- thread id
-- cwd
-- thread name
-- preview text
-- source kind and status
-- thread timestamps
-- runtime config and model/provider state
-
-### 6.2 Feishu-Local Data
-
-FOCUS keeps only data that is Feishu- or integration-specific:
-
-- machine-global coordination data such as runtime lease
-- per-instance runtime shared-backend discovery state
-- per-instance shared-backend websocket capability token files
-- p2p thread bindings and group-shared thread bindings keyed by `chat_id`
-- group-chat mode, group activation state, group context logs, and boundary state
-- transient approval, rename, and card state
-
-There are also two machine-global coordination states:
-
-- the running-instance registry
-- the thread live-runtime lease
-
-They live under shared `FOCUS_GLOBAL_DATA_DIR`.
-They are neither Feishu-chat state nor Codex-owned thread metadata; they exist
-only for local CLI discovery and multi-instance runtime coordination.
-
-This token boundary also needs to stay explicit:
-
-- the control-plane / service token is only for local service control and
-  ownership coordination
-- the backend websocket token is only for connecting to an instance app-server
-- the proxy websocket token is only for one wrapper-launched local `focus` /
-  `fcodex` proxy
-- these three tokens must not be reused, and they shouldn't be exposed on
-  command lines again for convenience
-
-Within that set, `binding` is intentionally a restart-persistent local bookmark:
-
-- it answers which thread a Feishu chat should continue by default next time
-- it is not the same thing as whether Feishu is still attached to the thread
-- it is not the same thing as whether the backend is still loaded
-
-So:
-
-- persistent `binding` is a formal product requirement
-- explicit clearing of one or all bindings is also a legitimate local admin need
-- those reset actions belong to the `focusctl` binding-management surface
-- they should no longer be treated as a separate architectural concept of
-  directly deleting `chat_bindings.json`
-- the persisted binding schema should fail closed; the retired v4
-  `current_thread_write_owner_thread_id` field is only accepted as explicit
-  migration input and is not written back
-- whenever `current_thread_id` is non-empty, `feishu_runtime_state`
-  must be explicitly present
-- `feishu_runtime_state` may only be `attached` or `detached`
-- violations should be treated as storage corruption and fail fast instead of
-  being silently normalized during load
-
-`system.yaml.admin_open_ids` follows the same single-source-of-truth rule:
-
-- it is the only authoritative source for the admin set
-- the in-memory admin set in a running service is only a cache, not a second
-  source of truth
-- `/init <token>` is only a controlled convenience write path, and it still
-  writes `system.yaml`
-- manual edits to `system.yaml` do not require hot reload; the authoritative
-  value takes effect after service restart or an explicit reload path
-- the cache must never write back into the authority, and a later
-  "config + runtime merge" must not silently restore admins that were removed
-  from config
-
-### 6.3 Session and Directory Semantics
-
-Exact command semantics are documented outside this design document:
-
-- `docs/contracts/thread-profile-semantics.md` covers `/threads`, `/resume`,
-  `/archive`, and wrapper semantics
-- `docs/decisions/shared-backend-resume-safety.md` covers current `/resume` semantics and
-  backend safety rules
-
-This document only fixes the boundary:
-
-- thread metadata comes from Codex
-- Feishu chat state decides the current working context
-- shared-backend continuation is explicit rather than implicit
-
-### 6.4 Approval Model
-
-The current project uses Codex-native approval and sandbox concepts:
-
-- app-server approval requests and responses
-- Codex approval policy and sandbox policy fields
-- Feishu-facing presets layered on top of those primitives
-
-The integration does not depend on Claude-style shell hook interception.
-
-### 6.5 Group Chat Contract
-
-The detailed group-chat behavior contract no longer lives inline in this design
-document.
-
-At the design level, the important boundaries are:
-
-- group backend state is shared by `chat_id`, not split by human member
-- `assistant` keeps separate context boundaries for the main chat flow and each
-  group thread, while still sharing one backend session
-- group activation answers whether the chat is open to non-admin members;
-  whether a mention is still required is decided by the group mode
-- other bots do not directly trigger FOCUS; their messages enter
-  context only through history recovery
-
-The formal behavior contract is now:
-
-- `docs/contracts/group-chat-contract.md`
-- manual regression checklist:
-  `docs/verification/group-chat-manual-test-checklist.zh-CN.md`
-
-## 7. Current Repository Structure
-
-The repository is easier to understand by responsibility than by a frozen
-full-tree dump.
-
-- repository root
-  - operator-facing material and packaging live in `README.md`, `install.py`,
-    `install.sh`, `install.ps1`, and `pyproject.toml`
-  - the tracked agent-preference template lives in `AGENTS.example.md`
-  - real local override files such as `AGENTS.md` and `AGENTS.zh-CN.md`
-    remain intentionally gitignored
-- `bot/`
-  - entrypoints and transport boundaries: `__main__.py`, `standalone.py`,
-    `handler.py`, `feishu_bot.py`
-  - top-level orchestration and user-facing domains:
-    `codex_handler.py`, `codex_group_domain.py`, `codex_help_domain.py`,
-    `codex_threads_ui_domain.py`, `codex_settings_domain.py`,
-    `file_message_domain.py`, `inbound_surface_controller.py`
-  - runtime state, execution flow, and coordination:
-    `runtime_loop.py`, `runtime_state.py`, `runtime_view.py`,
-    `binding_runtime_manager.py`, `thread_access_policy.py`,
-    `thread_subscription_registry.py`, `thread_runtime_coordination.py`,
-    `turn_execution_coordinator.py`, `execution_output_controller.py`,
-    `execution_recovery_controller.py`, `execution_transcript.py`,
-    `generated_image_delivery.py`,
-    `interaction_request_controller.py`, `adapter_notification_controller.py`,
-    `runtime_admin_controller.py`, `runtime_card_publisher.py`,
-    `prompt_turn_entry_controller.py`
-  - within that runtime slice, `runtime_state.py` is the code-level single
-    source of truth for the mutable runtime-state schema, reducer messages, and
-    canonical Feishu/backend runtime status vocabulary; other modules should
-    import those symbols rather than redefining partial local variants
-  - shared UI / helper boundaries: `cards.py`, `card_text_projection.py`,
-    `shared_command_surface.py`, `feishu_types.py`
-  - wrapper and local-management path: `fcodex.py`, `fcodex_proxy.py`,
-    `focusctl.py`, `manage_cli.py`, `runtime_admin_cli.py`,
-    `service_control_plane.py`, `instance_layout.py`, `instance_resolution.py`,
-    `thread_resolution.py`, `binding_identity.py`
-  - Codex adapter / protocol boundary:
-    `adapters/base.py`, `adapters/codex_app_server.py`,
-    `codex_protocol/client.py`
-  - persisted local state: `stores/app_server_runtime_store.py`,
-    `stores/chat_binding_store.py`, `stores/group_chat_store.py`,
-    `stores/instance_registry_store.py`, `stores/interaction_lease_store.py`,
-    `stores/pending_attachment_store.py`, `stores/service_instance_lease.py`,
-    `stores/thread_runtime_lease_store.py`
-- `config/`
-  - example local config files: `system.yaml.example`, `codex.yaml.example`
-- `docs/`
-  - formal contracts: `docs/contracts/`
-  - current architecture/runtime shape: `docs/architecture/`
-  - design decisions and safety boundaries: `docs/decisions/`
-  - manual verification material: `docs/verification/`
-  - archived rollout/history material: `docs/archive/`
-  - local working notes that are not repository truth: `docs/_work/`
-- `tests/`
-  - unit coverage for adapter/wrapper behavior, handler/controller flows,
-    runtime state transitions, stores, cards, and Feishu transport helpers
-
-This grouped view should stay aligned with the ownership split in §5.3.
-When a new module materially changes ownership boundaries, update both sections
-in the same change.
-
-## 8. Evolution Boundaries
-
-- Upstream Codex app-server and remote behavior may evolve; keep the adapter and
-  wrapper boundaries isolated
-- Shared-backend wrapper behavior depends on current upstream remote semantics,
-  especially around `thread/start`, `cwd`, and reconnect timing
-- `codex exec --json` remains useful for probes, smoke checks, and debugging,
-  but it is not the current primary runtime path
-- Future feature work should preserve the current document split:
-  semantics, runtime model, safety model, and design constraints are separate
-  concerns
+- [main-turn owner contract](../contracts/root-operation-owner.md)
+- [`thread/create` local-commit contract](../contracts/thread-create-local-commit.md)
+- [`thread/resume` local-commit contract](../contracts/thread-resume-local-commit.md)
+- [server-request lifecycle contract](../contracts/server-request-lifecycle.md)
+- [Feishu thread lifecycle contract](../contracts/feishu-thread-lifecycle.md)
+- [`focus` / `fcodex` shared-backend runtime](./focus-shared-backend-runtime.md)
+- [active architecture debt register](./architecture-debt-register.md)
+
+## 1. Design Baseline
+
+FOCUS is a multi-frontend integration layer for Codex. Codex app-server owns
+thread, turn, item, goal, pending server-request, and effective-runtime facts.
+FOCUS owns only the integration state required by Feishu, Web, wrappers, and the
+local service.
+
+The default rules are:
+
+- align with observed upstream Codex behavior first and add only the smallest rule
+  required by a real Focus multi-frontend race;
+- give each mutable fact one owner; a coordinator orders owners but does not mirror
+  their facts;
+- keep authority, read models, projections, delivery, and cleanup separate;
+- confine an unknown outcome to the exact request/effect that cannot safely be
+  repeated; do not turn it into vague thread-, surface-, or service-wide outage;
+- require a named safety object and evidence for fail-closed behavior; do not invent
+  tree, incarnation, cursor, or exactly-once capabilities absent upstream;
+- never infer Codex persisted/effective facts from local intent, caches, or UI state.
+
+FOCUS adds only one general turn rule beyond a single upstream TUI: on one root
+thread, a submission/activity that still declares Feishu next-turn/FIFO or
+exclusive/autonomous semantics has at most one holder. Ordinary Web/`fcodex`
+input is an upstream-routed contributor and acquires no writer. Matching
+`turn/completed` releases the exact active lease immediately. Children,
+interactions, cards, and delivery do not extend it.
+
+## 2. Layers and Dependency Direction
+
+```text
+Feishu / Focus Web / focusctl / focus-fcodex
+                    |
+                    v
+surface ingress and presentation
+                    |
+                    v
+application transaction owners
+                    |
+          +---------+---------+
+          v                   v
+ process/durable state     Codex adapter
+ owners and stores             |
+                               v
+                         codex app-server
+```
+
+### 2.1 Surfaces and transports
+
+- The Feishu adapter owns events, messages, cards, and outbound-effect
+  classification.
+- Focus Web Gateway owns loopback HTTP/WebSocket transport, browser sessions, and
+  DTO transport.
+- `focusctl` is the local management surface. The `focus` / `fcodex` wrapper reaches
+  the selected instance backend through a local proxy.
+
+A surface authenticates, translates input, and presents outcomes. It may not mutate
+another owner's state directly or infer writer authority from a live connection, a
+remaining card, or a trusted user.
+
+Within the Feishu surface, `FeishuProcessCache` is the sole owner of transient
+process-local message deduplication, message context, chat metadata, reserved-card,
+sender-name, and warning-throttle facts. `FeishuMessageCodec` owns message/card
+schema decoding, mention normalization, and terminal-card text projection; it
+obtains raw card content and sender names through named ports and never owns the
+Lark SDK client. `FeishuIngressController` owns group activation/admin/trigger
+policy, local history boundaries, forward aggregation, history recovery, and the
+complete inbound dispatch and destination-loss cleanup order. `FeishuBot` only
+translates SDK callbacks into a neutral `FeishuInboundMessage`, retains SDK
+chat/message/raw-card/sender/outbound effects, and exposes the required surface
+façades; it does not mirror ingress, store, recovery, or aggregation facts.
+
+### 2.2 Application transaction owners
+
+Named services and coordinators own fixed cross-owner orderings, including thread
+create/resume, Feishu binding transitions, Web open/turn/mutation, backend reset,
+server-request projection, and execution-page rollover. They may consume typed
+receipts but may not retain mirrors of participating facts.
+
+`RuntimeAdminControlRouter` is the sole local control-plane method and wire-parameter
+catalog. It normalizes one request and dispatches through named service, binding, and
+thread ports; domain facts and transactions remain behind those ports.
+
+`RuntimeAdminBindingApplication` owns the surface-neutral Runtime Admin binding use
+cases: inventory/read models, prompt admission, attach/detach, clear, and stale
+cleanup. It coordinates the existing binding fact, clear-transaction, and thread
+lifecycle owners without mirroring their state; `RuntimeAdminController` only
+presents Feishu commands/cards and delegates its public binding façade.
+
+`RuntimeAdminOfflineLifecycle` owns the surface-neutral `focusctl` offline lifecycle
+transaction: archive target resolution, local binding preflight, lifecycle-result
+validation, archive/unarchive/delete mutation, and cross-instance binding settlement.
+It uses named infrastructure ports and returns immutable receipts; it neither keeps
+runtime facts nor reads terminal input or presents output.
+`bot/runtime_admin/cli_inputs.py` owns the argparse grammar and normalization of
+argv, prompt-file, and `CODEX_THREAD_ID` inputs. The CLI retains delete confirmation,
+dispatch, rendering, batch presentation, exit-code policy, and effect invocation.
+These boundaries keep input admission and filesystem/control-plane mutation order
+out of the presentation surface without adding another durable state machine.
+
+`CodexThreadTargetService` in `bot/focus_runtime/thread_targets.py` is the stateless
+application boundary for authoritative thread-target reads, direct-root validation,
+and target selection. It also coordinates the existing Web resume-target path and
+keeps the existing error classifiers and exact interrupt forwarding together. It
+owns no thread, binding, or runtime fact: Codex app-server and the participating
+runtime owners remain authoritative.
+
+`WebThreadOpenCoordinator` owns the fixed staged order for the Web thread
+directory, open, and bounded-history transactions. RuntimeLoop prepare,
+settlement, and final checks alone read or write owner facts; app-server/store
+I/O and detached DTO materialization run on the external-transaction worker.
+`WebThreadInspectionService` applies the same prepare/effect/settle boundary to
+tool detail and conversation search. `bot/web_runtime/thread_read_projection.py`
+owns only the pure list/open/history DTO projection from frozen typed inputs. It
+owns no runtime fact and cannot decide whether the response is still
+installable; the coordinator's exact final check retains that authority.
+`WebDirectThreadTargetCoordinator` centralizes authoritative direct-target
+snapshots and Web-local convergence after a proven `ThreadSpawn` rejection;
+only a current document/backend settlement may invoke that cleanup.
+
+`BindingRuntimeCoordinator` in `bot/focus_runtime/binding_coordinator.py` is the
+stateless cross-owner boundary for the 17 transactions kept at the binding/runtime
+coordination boundary. Where a transaction combines local state with effects, it
+preserves the existing shared-lock boundary: reads, revalidation, and commit that
+require the binding lock remain inside it, while timer cancellation, unsubscribe,
+or runtime-lease release follows outside that critical section. Web contributes
+only a typed runtime-interest port with the `Callable[[str], bool]` shape; the
+coordinator imports neither `WebRuntimeController` nor Web state.
+`BindingRuntimeManager` retains binding/session facts,
+`FeishuBindingTransitionOwner` and `RuntimeBindingBatchDeactivationOwner` retain
+their commits, `InteractionLeaseStore` retains main-turn leases, and the existing
+thread and service-runtime authorities retain their narrower authority. The
+coordinator stores only injected capabilities and no mutable fact of its own.
+
+`FocusRuntime` exposes none of the former 29 private binding helpers: 17 are now
+coordinator operations, while consumers of the other 12 thin pass-throughs call the
+existing owner directly. Frontend timer cancellation is one of the coordinator
+operations. The presentation factory is outside this boundary and now belongs to
+the `FeishuPlatform` capability described below.
+
+`FeishuPlatform` in `bot/focus_runtime/feishu_platform.py` is the sole owner of
+the runtime-attached Feishu bot reference and the platform-specific chat, actor,
+reply, and card-publisher routing that consumes it. It stores only that attached
+bot fact; it owns neither inbound route catalogs nor persisted presentation facts.
+
+`FeishuSurface` in `bot/focus_runtime/feishu_surface.py` is the Feishu ingress,
+group-policy, command, and card-action application boundary and the sole installer
+of the runtime's inbound route catalogs. It composes the existing domain and
+capability owners; queue admission and drain still enter through
+`FeishuExecutionQueueService`, and their mutable facts remain with those owners.
+
+`TerminalResults` in `bot/focus_runtime/terminal_results.py` coordinates the five
+terminal-result lookup, record, resolution, duplicate-check, and publication
+operations through `FeishuPlatform`, `TerminalResultStore`, and typed binding and
+publication ports. `TerminalResultStore` remains the persisted terminal-result fact
+owner; this boundary neither mirrors its records nor owns execution-output state.
+
+### 2.3 Protocol boundary
+
+`bot/adapters/` and `bot/codex_protocol/` isolate app-server wire shape, connection
+generations, RPC outcomes, and schema drift. Application code consumes typed
+responses and notifications and does not depend on Codex private disk layout.
+
+`CodexRpcConnection` owns the websocket, identity lock, handshake state and
+generation, pending response map, reader/callback producers, and inbound JSON-RPC
+dispatch. `CodexRpcClient` is a typed façade with one connection capability and no
+mutable transport facts.
+
+`ManagedAppServerProcess` owns the exact local guardian process generation, selected
+listen endpoint, startup lock, cleanup token, stream threads, and runtime
+publication. `CodexRpcConnection` coordinates backend connection and shutdown
+through that single capability; it does not retain copies of process handles or
+cleanup state.
+
+`CodexRpcStopBarrier` owns the stop-request fence, one single-flight drain attempt,
+the exact websocket/producer/process capabilities transferred out of the live
+connection, and any retryable cleanup outcome. It shares the connection identity
+lock only to make that transfer atomic; it does not mirror connection generation,
+handshake, or pending RPC facts.
+
+### 2.4 State owners
+
+`RuntimeLoop` normally serializes process-local state. Only cross-process
+coordination or product facts that must survive restart belong in `bot/stores/`.
+Persistence alone does not promote a record into business authority; discovery,
+projection, and delivery ledgers retain their narrower roles.
+
+An explicitly staged external transaction keeps one `ServiceRuntimeLifecycle`
+ingress receipt on its external caller thread. For that transaction, RuntimeLoop
+serializes only short prepare/settle transitions over mutable facts: it first
+issues an immutable receipt pinned to the exact target and generation, the
+potentially blocking I/O runs outside the loop, and only that original receipt
+may settle back on the loop. A late, replaced, or retired receipt has no new
+effect. This process-local staging capability does not itself migrate a caller,
+create a durable operation ledger, or automatically replay an unknown outcome.
+
+After authoritative settlement, a Web staged read may also leave CPU- or
+attachment-heavy DTO projection outside the loop. Before return it performs one
+O(1) final check using the original document, connection generation, projection
+revision, and read observation. This decides only whether the DTO is deliverable
+and cannot roll back an earlier committed resume/runtime interest. Gateway
+releases its per-client lock after prepare, while the prepared service-ingress
+receipt continues across the external worker and final settlement. Gateway
+handoff cancellation or executor failure abandons only an unclaimed receipt; a
+claimed transaction performs its own settlement, and shutdown waits for it to
+exit.
+
+Web live notifications that require turn/task or attachment materialization use
+the same boundary. Inside RuntimeLoop, `WebRuntimeEventCoordinator` only applies
+the notification/cache mutation and freezes an immutable receipt pinned to the
+exact read observation and runtime epoch. On a service-ingress background
+worker, `bot/web_runtime/notification_projection.py` performs turn/task DTO
+projection, image hashing/copying, and attachment-URL materialization. Each
+thread has at most one projection in flight and one latest-wins successor.
+Settlement publishes only while the original observation/epoch still matches;
+it drops stale results. A successor does not reuse its predecessor's ingress
+receipt: settlement admits it as a new external transaction. If service ingress
+is already stopping, that admission fails, the flight retires, and only a
+lightweight `thread_invalidated` is emitted, so presentation arriving after the
+shutdown fence cannot extend the old barrier indefinitely. Initial worker-
+admission failure, or projection failure with no successor, uses the same
+lightweight invalidation and never blocks the notification. Physical attachment-scope cleanup after authoritative
+`thread/deleted` or a known successful Web delete runs under the same shutdown
+barrier. These flights are not
+durable, are not replayed, and gain no thread-lifecycle authority.
+
+Web runtime cleanup uses the same staged external-transaction boundary even
+though a RuntimeLoop transition discovers the work.
+`WebRuntimeLifecycleCoordinator` owns one cleanup flight per thread and
+coalesces arrivals during that flight
+into at most one successor. RuntimeLoop freezes and rechecks exact local facts;
+the external worker probes backend/holder state, sends at most one claimed
+canonical unsubscribe, and compare-and-sets the complete service-holder record
+captured by the probe. The coordinator rechecks immediately before unsubscribe
+send and again before holder release, then finalizes local interest/cache only
+under the original generation and facts. A new desire, canonical Feishu
+subscriber, pending interaction, backend generation, or holder successor
+retains the runtime at the corresponding stage; mismatch never replays the
+unsubscribe.
+
+## 3. Runtime Topology
+
+- Local instances share `CODEX_HOME` and the persisted thread namespace.
+- Each Focus instance independently owns configuration, data, a service lease,
+  control plane, Web Gateway, and a local
+  `service -> guardian -> codex app-server` backend lifecycle.
+- A machine-level instance registry and thread-runtime lease coordinate Focus
+  instances. They do not grant an in-instance main-turn writer.
+- Browsers connect only to Focus Gateway, never directly to app-server.
+- `focus` / `fcodex` selects a running instance and connects the upstream TUI to its
+  published backend through a per-launch local proxy.
+- Focus does not support external app-server deployment. An internal attached client
+  does not gain backend lifecycle authority.
+
+See [the shared-backend runtime](./focus-shared-backend-runtime.md) for the complete
+topology, wrapper, cwd proxy, credential, and platform-containment boundaries.
+
+## 4. Current Fact Sources and Owners
+
+| Question | Sole fact source / owner | Explicitly not authority |
+| --- | --- | --- |
+| What are the thread, turn, item, goal, title, cwd, status, and effective runtime? | Codex app-server through typed adapter reads/notifications | requested settings, caches, cards, browser snapshots |
+| Does the service admit ingress, and when may resources be released? | `ServiceRuntimeLifecycle` and its exact external-ingress receipts | Handler, Gateway, or adapter-local ready flags |
+| Who owns one local app-server process generation and its durable runtime publication? | `ManagedAppServerProcess` | `CodexRpcConnection` websocket, pending RPC, or stop-barrier state |
+| Who owns the live websocket generation, handshake, pending responses, and reader producers? | `CodexRpcConnection` | the `CodexRpcClient` façade, adapter read models, or surface callbacks |
+| Who owns a requested or incomplete Codex RPC shutdown? | `CodexRpcStopBarrier` and its exact transferred resource capabilities | live connection fields, cards, service phase, or copied process handles |
+| May an ordinary RPC use the current websocket/backend generation? | the `AdapterIngressGate` outbound permit, actual-send guard, and response confirmation together with adapter transport-generation authority | callback arrival order or cached endpoints |
+| Which instance may materialize a live thread? | machine instance registry, global loaded gate, and `ThreadRuntimeLeaseStore` | in-instance main-turn lease or cached thread lists |
+| Who owns a lease-bearing Feishu/exclusive/autonomous main-turn holder? | `InteractionLeaseStore` | ordinary Web/`fcodex` input, child, socket/document liveness, delivery, goal, runtime lease |
+| Who may steer, interrupt, or answer an interactive server request on the exact current turn/request? | the app-server exact turn/request fact plus the relevant surface/domain owner; `WebPromptSubmissionCoordinator` freezes the exact turn/backend generation for a Web prompt and `WebPromptResultRegistry` bounds its mutation to one effect slot while its receipt remains retained | the main-turn writer relation alone, presentation, caches, or generic local identity |
+| How are local consequences of one create/resume committed? | immediate process-local receipts from `ThreadCreateTransaction` / `ThreadRuntimeAuthority` | durable journals, cross-thread quarantine, automatic replay |
+| Is an app-server callback pending? | Codex app-server; `ServerRequestRegistry` only projects the current connection epoch | cards, browser action locks, main-turn leases |
+| Which thread is a Feishu chat bound to by default? | `ChatBindingStore`; resident transitions belong to `BindingRuntimeManager`, `BindingOwnerAuthority`, and typed commands | execution card, subscriber, or sender cache |
+| What is the input order for one Feishu binding? | `FeishuExecutionQueueController` | main-turn writer or backend residency |
+| What content and page ranges are displayed for an execution? | `ExecutionTranscript` and `ExecutionPageLedger`, each for its presentation facts | turn completion, FIFO, or thread lifecycle authority |
+| Is a Feishu destination authoritatively lost? | `FeishuDestinationLossStore` and `FeishuDestinationLivenessCoordinator` | generic timeout, unknown send error, main-turn state |
+| What are Web's durable navigation workspace/selection and attachments? | `WebWriterProfileStore` and `WebAttachmentStore`; the latter also owns process-local exact file pins for in-flight submissions | browser components, read models, event sockets, next-turn settings |
+| What are the instance-wide Web next-turn settings? | `WebNextTurnSettingsStore`; `WebNextTurnSettingsCoordinator` closes the mutation/projection transaction | `WebWriterProfileStore`, selection/navigation generation, main-turn leases, thread effective settings, browser overlays/events |
+| What are a Web document, runtime interest, read model, and prompt-result evidence? | `WebDocumentRegistry`, `WebRuntimeInterestRegistry`, `WebThreadReadModel`, and `WebPromptResultRegistry`, independently | each other's projection; none is a durable writer or replay authority |
+| Who owns canonical Web-triggered subscription and runtime cleanup? | `WebRuntimeLifecycleCoordinator` owns the per-thread cleanup flight and exact local rechecks; `ThreadRuntimeAuthority` owns the same-thread resume/start/unsubscribe effect fence; the thread-runtime lease owner alone performs full-record holder CAS | an `fcodex` connection, read cache, or the background worker thread |
+| Who constructs Web thread list/open/history DTOs and decides whether they remain deliverable? | `thread_read_projection.py` projects frozen inputs without state; `WebThreadOpenCoordinator` performs settlement and final admission against exact document/generation/revision/observation | the external worker, browser components, or an already-stale DTO |
+| Is an fcodex endpoint/request/interaction current? | `FcodexParticipantRuntimeRegistry`, `FcodexOperationService`, and `FcodexInteractionInbox`, independently | participant `connected/grace/orphaned` endpoint state is not a main-turn writer |
+| Where do component-config seeds come from? | `system_config.py` and `codex_config.py`; the runtime-settings contract decides when a value is only a seed and when a durable settings owner wins | UI echoes, settings ACKs, or rereading config on every read/turn |
+
+This table defines ownership only. State transitions, failure classification, and
+user-visible outcomes belong to the linked contracts; this architecture document
+must not recreate parallel state machines.
+
+## 5. Key Lifecycle Boundaries
+
+### 5.1 Service and backend
+
+`ServiceRuntimeLifecycle` activates RuntimeLoop, adapter, control plane, Gateway,
+and workers only after acquiring the service lease. Shutdown closes new ingress,
+waits for admitted callbacks, stops producers, drains RuntimeLoop, then stops the
+adapter and releases authority. Components retain narrower transport barriers but
+do not mirror the top-level phase.
+
+A transaction admitted through external ingress and crossing loop-external I/O retains the same external-ingress
+receipt from admission through final settlement. Shutdown can therefore close new
+admission and wait for those transactions while RuntimeLoop continues to process
+notifications, interrupts, and short state transitions during the pending effect.
+The receipt proves only in-process admission and liveness; it does not prove that
+an upstream effect succeeded. The relevant adapter/domain contract still owns the
+pre-send, known-response, and outcome-unknown classification.
+
+When Gateway separates prepare and execute across its per-client lifecycle
+lock, it still retains this receipt. If a request is cancelled before worker
+claim, or the executor cannot admit it, Gateway abandons the exact receipt so
+shutdown cannot wait forever. Cancellation after claim stops only the HTTP
+waiter: it cannot cancel the running worker or settle twice, and the service
+continues waiting for the original transaction to exit.
+
+A RuntimeLoop-discovered Web runtime cleanup launched through
+`start_background_external_transaction` is still an external transaction: it
+acquires its service-ingress receipt before starting the daemon thread, and that
+receipt is its shutdown barrier. It is not one of the long-lived internal
+scheduled workers below and needs no second worker registry. Internal scheduled
+workers do not acquire an external-ingress receipt; their unique worker registry
+remains their producer-stop and join barrier before RuntimeLoop drains.
+
+`ServiceRuntimeLifecycle` remains the sole owner of the service phase and of this
+startup, rollback, and shutdown order. `ServiceRuntimeAuthority` is a lower
+coordination capability: at lifecycle-defined boundaries it invokes the existing
+machine instance registry, global loaded gate, and service/thread-runtime lease
+owners. It neither owns nor mirrors those facts and does not depend on presentation or the
+`FocusRuntime` composition root.
+
+The minimal backend-reset order is: fence ordinary ingress, read-only capture the
+current process's exact main-turn leases, wait for owned-child OS exit/wait,
+retire the capture centrally by full-record CAS, retire registry/fcodex/Web facts,
+run binding detach and execution interruption/finalization, and then retire
+Feishu root/request facts. Every participating owner is idempotent and retains
+its own mutable facts. Focus then clears
+this instance's runtime holders,
+starts and verifies the replacement, and finally publishes and admits it. An
+unconfirmed stop retires no old-backend facts. If a later authoritative
+retirement or structural projection fails, already completed earlier retirements
+remain in effect, the
+replacement is not started, and an idempotent retry begins the ordered stage
+again while ingress stays fenced. Other PIDs and successor leases installed
+after capture are unaffected. Old callbacks, writers, and unknown evidence are
+not migrated.
+
+### 5.2 Main turn
+
+A blank submission lease is acquired only for a lease-bearing
+Feishu/exclusive/autonomous effect. Ordinary Web/`fcodex` `turn/start` is
+upstream-routed input and does not read or write a lease. A validated
+`turn/start` success preserves the authoritative upstream `turn.id`, but the
+response alone neither activates nor transfers a Focus lease nor establishes
+lifecycle/completion authority across notifications or reset. Matching
+`turn/started` still binds the actual `turn_id`, and matching completion releases
+only the exact active lease. If started was missed, completion cannot bind a
+blank from the start response alone. Feishu may settle its exact ordinary-prompt
+blank after an authoritative inactive-root reread without attributing a
+completion. Its process-local admission token is a transaction receipt, not a
+second writer fact. When ordinary fcodex start races an existing fcodex
+exclusive/autonomous blank, later lifecycle may still activate that blank. This
+accepted narrow race adds no correlation state machine. Inline-review response
+identity and compact's empty response keep their method-specific paths; only the
+main-turn owner contract defines the details. A live `fcodex`
+endpoint attached to the exact direct root, or a connected Web document that has
+materialized that root, may steer or interrupt the exact current/startup turn under the
+canonical effect-specific boundaries without becoming or changing the writer.
+An existing-thread Web prompt uses one POST. Inside RuntimeLoop,
+`WebPromptSubmissionCoordinator` freezes the exact document/target/backend
+generation and the active turn then visible. If A exists, that attempt may call
+`turn/steer` once for A only; only an attempt with no exact active id may call
+`turn/start` once. A successor-B mismatch or no-active result is
+`known_no_effect`, never a retarget to B or a fallback start.
+`WebPromptResultRegistry` retains only bounded, process-local
+`pending / succeeded / known_no_effect / outcome_unknown` receipts. It stores no
+payload, is not persisted, never replays, and blocks neither a new mutation on
+the same thread nor passive reads, shared server-request responses, or exact
+interrupt. F5 may only read the bounded result using `(thread_id, mutation_id)`.
+A duplicate POST cannot acquire a second effect slot only while that receipt
+remains retained. Terminal eviction, confirmed backend retirement, or service
+restart removes the seen-identity evidence; the same UUID may then acquire a new
+slot, but the official browser only GETs or creates a new UUID for a new gesture.
+Such a miss proves no negative effect and grants no replay authority. See the [Focus Web prompt mutation recovery
+contract](../contracts/focus-web-prompt-mutation-recovery.md).
+Disconnect does not convert a writer into durable grace/orphan state,
+and service restart does not recover an old writer. See the [main-turn owner
+contract](../contracts/root-operation-owner.md).
+
+### 5.3 Create, resume, and server request
+
+Create and resume use process-local receipts only between one call and its immediate
+local commit. Unknown outcomes are not automatically retried and do not create a
+durable recovery state machine. The upstream app-server owns callback lifetime;
+Focus adds current-generation identity and one-shot surface tokens only to reject
+stale actions.
+
+The outer read and projection for a Web cold open may continue after this resume
+local commit. A known resume first commits runtime interest. A later document
+reissue, notification, projection revision, or backend replacement only makes
+the read DTO stale and cannot compensate, roll back, or reclassify that
+confirmed resume as unknown. See the
+[`thread/resume` local-commit contract](../contracts/thread-resume-local-commit.md).
+
+### 5.4 Presentation and delivery
+
+Feishu execution pages, terminal results, generated images, Web projections, and
+destination liveness are independent product capabilities. They may reconcile their
+own exact effects asynchronously, but cannot delay matching main-turn completion,
+extend a writer, or spread a local delivery unknown into a later turn.
+
+## 6. Repository Responsibility Map
+
+- `bot/`: surfaces, application owners, runtime owners, adapters, CLIs, and the
+  composition root. Its physical layout remains broad, so paths alone do not define
+  every owner. The dependency-direction guard does enforce the stable boundaries:
+  stores and Codex protocol/adapter packages cannot depend upward on surfaces or
+  composition; Web, Feishu, and fcodex cannot import one another's presentation
+  domains; surface-neutral Runtime Admin transactions cannot import a surface.
+- `bot/stores/`: durable authority, intent, coordination, delivery ledgers, and
+  rebuildable discovery stores.
+- `bot/runtime_admin/`: surface-neutral binding/control/offline-lifecycle
+  transactions plus the explicit CLI and Feishu presentation modules. The neutral
+  modules are protected from importing any surface.
+- `bot/focus_runtime/thread_targets.py`: the `CodexThreadTargetService` boundary for
+  authoritative thread-target reads, validation and selection, Web resume-target
+  coordination, error classification, and interrupt forwarding; it stores no
+  mutable authority.
+- `bot/focus_runtime/binding_coordinator.py`: the `BindingRuntimeCoordinator`
+  boundary for 17 cross-owner binding/runtime transactions; through existing owner
+  capabilities, it preserves shared-lock critical sections and commit/effect order
+  while storing no mutable authority.
+- `bot/focus_runtime/feishu_platform.py`: the `FeishuPlatform` owner for the one
+  attached Feishu bot fact and platform-specific chat/actor/presentation routing;
+  it stores no route, persistence, or domain facts.
+- `bot/focus_runtime/feishu_surface.py`: the `FeishuSurface` boundary for Feishu
+  message/recall/card/attachment ingress, group checks, command and action routes,
+  and prompt/FIFO entry through existing capability owners.
+- `bot/focus_runtime/terminal_results.py`: the `TerminalResults` boundary for
+  terminal-result lookup, persistence coordination, and publication; the existing
+  `TerminalResultStore` remains the persisted fact owner.
+- `bot/web_runtime/thread_open_coordinator.py`: the Web list/open/history staged
+  transaction owner; `bot/web_runtime/thread_read_projection.py`: stateless
+  external projection from frozen inputs into list/open/history DTOs;
+  `bot/web_runtime/direct_thread_target_coordinator.py`: direct-target proof and
+  exact invalid-target convergence; and
+  `bot/web_runtime/gateway_external_transaction.py`: the thin bridge from
+  aiohttp cancellation to lifecycle-owned prepared receipts.
+- `bot/fcodex/control_dispatcher.py`: the service-side `operation/*` protocol
+  boundary. It runs inside the caller's `RuntimeLoop` turn, authority-reads direct
+  targets, and delegates mutable facts to the existing operation owner.
+- `bot/feishu_continuation_controller.py`: the serialized Feishu continuation
+  boundary. It orders direct-root reads, root-operation admission, explicit thread
+  resume, Runtime Admin attach, goal mutation/resume/compensation, settings fencing,
+  settlement, and history/card projection while leaving every mutable fact with the
+  existing runtime owners.
+- `web/src/focus/`: Focus-owned transport, projection, navigation/profile, and
+  mutation/action owners. Generic UI components consume view projections only.
+- `docs/contracts/`: formal source for current behavior semantics.
+- `docs/architecture/`: current owners, layers, dependencies, and active debt.
+- `docs/decisions/`: rationale. Superseded decisions must be visibly marked and may
+  not pose as current contracts.
+- `docs/_work/`: temporary plans and evidence ledgers, not durable fact sources.
+- `tests/`: owner/contract tests; only small composition suites may depend on wiring.
+
+`FocusRuntime` is the current composition root at
+`bot/focus_runtime/runtime.py`. The root must not become a new domain-fact owner. The
+`bot/focus_runtime/__init__.py` package root stays empty and does not re-export the
+runtime; capability owners below that package must not import the composition root.
+New behavior belongs in an existing owner, or must first explain why no existing
+boundary can own the new fact.
+
+## 7. Evolution Rules
+
+- Follow the [repository navigation and change-cone discipline](./development-navigation.md)
+  for every diagnosis, review, implementation, and refactor.
+- Inspect pinned upstream code or official protocol material before changing Codex
+  behavior, then decide whether Focus truly needs a deviation.
+- A new coordinator must name the owners it orders and explain why it stores no
+  second copy of their facts.
+- A new durable record must state its restart requirement, write authority,
+  corruption policy, and deletion condition.
+- Any stronger-than-upstream rule must identify the real multi-frontend scenario,
+  minimal increment, observable evidence, and user cost.
+- Track unresolved owner, aggregate, schema, test, and package work only in the
+  [active architecture debt register](./architecture-debt-register.md).

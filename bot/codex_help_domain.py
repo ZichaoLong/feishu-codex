@@ -13,6 +13,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.cards import CommandResult, make_card_response
+from bot.binding_runtime_contract import BindingSessionSnapshot
 from bot.constants import display_path
 from bot.feishu_command_syntax import feishu_visible_command_syntax
 from bot.permissions_profile import permissions_profile_choice_key
@@ -30,6 +31,7 @@ _SHARED_ATTACH_COMMAND = get_shared_command("attach")
 _SHARED_COMMANDS_COMMAND = get_shared_command("commands")
 _SHARED_GOAL_COMMAND = get_shared_command("goal")
 _SHARED_LAST_COMMAND = get_shared_command("last")
+_SHARED_STEER_COMMAND = get_shared_command("steer")
 _SHARED_MODEL_COMMAND = get_shared_command("model")
 _SHARED_EFFORT_COMMAND = get_shared_command("effort")
 _SHARED_COMPACT_COMMAND = get_shared_command("compact")
@@ -97,13 +99,13 @@ class CodexHelpDomain:
         self,
         *,
         local_thread_safety_rule: str,
-        get_runtime_state,
+        resolve_session: Callable[[str, str, str], BindingSessionSnapshot],
         is_group_chat: Callable[[str, str], bool] | None = None,
         get_group_mode: Callable[[str], str] | None = None,
         get_group_activation_snapshot: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self._local_thread_safety_rule = local_thread_safety_rule
-        self._get_runtime_state = get_runtime_state
+        self._resolve_session = resolve_session
         self._is_group_chat = is_group_chat
         self._get_group_mode = get_group_mode
         self._get_group_activation_snapshot = get_group_activation_snapshot
@@ -306,7 +308,9 @@ class CodexHelpDomain:
             "turn-settings": _HelpPageSpec(
                 title="Codex 工作台：本轮设置",
                 markdown=(
-                    "调整当前飞书会话后续 turn 的设置。\n\n"
+                    "向当前 active turn 显式补充文本，或调整当前飞书会话后续 turn 的设置。\n\n"
+                    f"`{_SHARED_STEER_COMMAND.feishu_usage}` 只作用于当前 exact turn；"
+                    "不会排队、创建下一轮或携带附件与设置。\n\n"
                     "推荐先用“权限基线”；模型、推理强度与审批都从下一轮生效。\n"
                     f"`{_SHARED_LAST_COMMAND.feishu_usage}` 可导出当前会话最近一条权威终态文本；"
                     "如果还没有终态结果，会回退到最近执行卡。\n\n"
@@ -353,6 +357,15 @@ class CodexHelpDomain:
                         ),
                     ),
                     self._return_home_row(),
+                ),
+                form=_HelpFormSpec(
+                    form_name="help_steer_form",
+                    field_name="steer_text",
+                    placeholder="输入要补充给当前 turn 的文本",
+                    submit_label="补充到当前 turn",
+                    submit_command="/steer",
+                    submit_title="Codex Steer",
+                    required_text="请输入要补充给当前 turn 的文本。",
                 ),
             ),
             "connection-status": _HelpPageSpec(
@@ -587,9 +600,9 @@ class CodexHelpDomain:
         return normalized.capitalize()
 
     @staticmethod
-    def _thread_summary(state: dict[str, Any]) -> str:
-        thread_id = str(state.get("current_thread_id", "") or "").strip()
-        thread_title = str(state.get("current_thread_title", "") or "").strip()
+    def _thread_summary(session: BindingSessionSnapshot) -> str:
+        thread_id = session.current_thread_id.strip()
+        thread_title = session.current_thread_title.strip()
         if not thread_id:
             return "未绑定"
         short_id = f"{thread_id[:8]}…" if len(thread_id) > 8 else thread_id
@@ -604,13 +617,13 @@ class CodexHelpDomain:
         chat_id: str = "",
         message_id: str = "",
     ) -> str:
-        state = self._get_runtime_state(sender_id, chat_id, message_id) or {}
-        working_dir = display_path(str(state.get("working_dir", "") or "")) or "."
-        thread_summary = self._thread_summary(state)
-        push_state = str(state.get("feishu_runtime_state", "") or "").strip() or "detached"
-        permissions = self._overview_permissions_label(str(state.get("permissions_profile_id", "") or ""))
-        model = str(state.get("model", "") or "").strip() or "Auto"
-        effort = self._overview_effort_label(str(state.get("reasoning_effort", "") or ""))
+        session = self._resolve_session(sender_id, chat_id, message_id)
+        working_dir = display_path(session.working_dir) or "."
+        thread_summary = self._thread_summary(session)
+        push_state = session.thread.feishu_runtime_state.strip() or "detached"
+        permissions = self._overview_permissions_label(session.permissions_profile_id)
+        model = session.model.strip() or "Auto"
+        effort = self._overview_effort_label(session.reasoning_effort)
         turn_parts = [
             f"权限 `{permissions}`",
             f"模型 `{model}`",
@@ -728,9 +741,9 @@ class CodexHelpDomain:
         if page_id != "connection-status":
             spec = self._page_specs.get(page_id)
             return spec.action_rows if spec is not None else ()
-        runtime_state = self._get_runtime_state(sender_id, chat_id, message_id) or {}
+        session = self._resolve_session(sender_id, chat_id, message_id)
         toggle_button = self._binding_push_toggle_button(
-            str(runtime_state.get("feishu_runtime_state", "") or "")
+            session.thread.feishu_runtime_state
         )
         attach_binding_button: _HelpCommandButtonSpec | _HelpDirectActionButtonSpec = toggle_button
         if isinstance(toggle_button, _HelpCommandButtonSpec) and toggle_button.command == _SHARED_ATTACH_COMMAND.slash_name:
@@ -941,6 +954,7 @@ class CodexHelpDomain:
                 "- `/rename <title>`\n"
                 f"- `{_SHARED_ARCHIVE_COMMAND.feishu_usage}`\n\n"
                 "`本轮设置`\n"
+                f"- `{_SHARED_STEER_COMMAND.feishu_usage}`\n"
                 f"- `{_SHARED_LAST_COMMAND.feishu_usage}`\n"
                 "- `/permissions [read-only|workspace|danger-full-access]`\n"
                 "- `/model [name|auto]`\n"

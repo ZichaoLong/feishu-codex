@@ -79,12 +79,71 @@ class ForwardAggregatorTests(unittest.TestCase):
             created_at=1712476800000,
             thread_id="th-1",
         )
-        aggregator.on_forward_timeout("ou-1", "chat-assistant")
+        aggregator.on_forward_timeout("ou-1", "chat-assistant", "th-1")
 
         self.assertEqual(handled_messages, [])
         self.assertEqual(len(appended_logs), 1)
         self.assertEqual(appended_logs[0]["thread_id"], "th-1")
         self.assertIn("history", appended_logs[0]["text"])
+
+    def test_pending_forwards_are_isolated_by_topic_scope(self) -> None:
+        aggregator, _logs, _handled, _items, _timers = self._make_aggregator()
+
+        aggregator.buffer_forward(
+            "ou-1", "chat-1", "main", "main-forward", "group"
+        )
+        aggregator.buffer_forward(
+            "ou-1", "chat-1", "topic-a", "topic-a-forward", "group", thread_id="topic-a"
+        )
+        aggregator.buffer_forward(
+            "ou-1", "chat-1", "topic-b", "topic-b-forward", "group", thread_id="topic-b"
+        )
+
+        self.assertEqual(
+            aggregator.pop_pending_forward("ou-1", "chat-1").forwarded_text,
+            "main",
+        )
+        self.assertEqual(
+            aggregator.pop_pending_forward(
+                "ou-1", "chat-1", thread_id="topic-a"
+            ).forwarded_text,
+            "topic-a",
+        )
+        self.assertEqual(
+            aggregator.pop_pending_forward(
+                "ou-1", "chat-1", thread_id="topic-b"
+            ).forwarded_text,
+            "topic-b",
+        )
+
+    def test_conflicting_thread_and_root_ids_do_not_merge(self) -> None:
+        aggregator, _logs, _handled, _items, _timers = self._make_aggregator()
+        aggregator.buffer_forward(
+            "ou-1",
+            "chat-1",
+            "topic-a",
+            "forward-a",
+            "group",
+            thread_id="topic-a",
+            root_id="root-a",
+        )
+
+        self.assertIsNone(
+            aggregator.pop_pending_forward(
+                "ou-1",
+                "chat-1",
+                thread_id="topic-a",
+                root_id="root-b",
+            )
+        )
+        self.assertIsNotNone(
+            aggregator.pop_pending_forward(
+                "ou-1",
+                "chat-1",
+                thread_id="topic-a",
+                root_id="root-a",
+            )
+        )
 
     def test_fetch_merge_forward_text_formats_nested_tree(self) -> None:
         aggregator, _appended_logs, _handled_messages, fetched_items, _timers = self._make_aggregator()

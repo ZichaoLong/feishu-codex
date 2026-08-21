@@ -1,0 +1,4 @@
+interface:
+  display_name: "Navigate Focus Development"
+  short_description: "Find reviewed Focus change cones and verify them"
+  default_prompt: "Use $navigate-focus-development to locate the reviewed Focus change cone, expand it only from evidence, and run scoped verification."

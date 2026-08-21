@@ -4,8 +4,15 @@ from contextlib import redirect_stderr
 from io import StringIO
 from unittest.mock import patch
 
-from bot import fcodex
-from bot.fcodex import _management_command_error, _program_name
+from bot.fcodex import cli as fcodex
+from bot.fcodex.cli import (
+    _first_positional_index,
+    _has_explicit_cwd,
+    _has_explicit_remote,
+    _management_command_error,
+    _program_name,
+    _resolve_effective_cwd,
+)
 
 
 class FcodexWrapperTests(unittest.TestCase):
@@ -39,6 +46,14 @@ class FcodexWrapperTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 2)
         load_config.assert_not_called()
+
+    def test_wrapper_terminator_hides_upstream_options_from_focus_parsing(self) -> None:
+        self.assertIsNone(_first_positional_index(["--", "resume", "thread-1"]))
+        self.assertFalse(_has_explicit_cwd(["--", "--cd=/tmp"]))
+        self.assertFalse(_has_explicit_remote(["--", "--remote", "ws://upstream"]))
+
+    def test_wrapper_terminator_does_not_change_effective_cwd(self) -> None:
+        self.assertEqual(_resolve_effective_cwd(["--", "--cd=/tmp"]), os.getcwd())
 
 
 if __name__ == "__main__":

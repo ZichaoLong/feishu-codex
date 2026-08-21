@@ -17,6 +17,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.adapters.base import ThreadGoalSummary, ThreadSummary
+from bot.binding_runtime_contract import BindingSessionSnapshot
 from bot.codex_protocol.client import CodexRpcError
 from bot.cards import (
     CommandResult,
@@ -29,13 +30,20 @@ from bot.cards import (
     make_card_response,
 )
 from bot.feishu_command_syntax import feishu_visible_command_syntax
+from bot.feishu_continuation_controller import (
+    FeishuContinuationController,
+    FeishuExplicitResumeSuccess,
+)
 from bot.runtime_state import BACKEND_THREAD_STATUS_NOT_LOADED
-from bot.runtime_view import RuntimeView
 
 logger = logging.getLogger(__name__)
 
 _RESUME_USAGE = feishu_visible_command_syntax("/resume <thread_id|thread_name>")
 _RENAME_USAGE = feishu_visible_command_syntax("/rename <新标题>")
+
+
+class ThreadMutationDenied(ValueError):
+    """A normal interaction-owner refusal, not an internal command failure."""
 
 
 def _is_goals_feature_disabled_error(exc: Exception) -> bool:
@@ -48,23 +56,8 @@ class _SubmitToRuntime(Protocol):
     def __call__(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None: ...
 
 
-class _ResumeThreadOnRuntime(Protocol):
-    def __call__(
-        self,
-        sender_id: str,
-        chat_id: str,
-        thread_id: str,
-        *,
-        original_arg: str | None = None,
-        summary: ThreadSummary | None = None,
-        pause_active_goal_on_resume: bool = False,
-        message_id: str = "",
-        refresh_threads_message_id: str = "",
-    ) -> None: ...
-
-
-class _GetRuntimeView(Protocol):
-    def __call__(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView: ...
+class _ResolveSession(Protocol):
+    def __call__(self, sender_id: str, chat_id: str, message_id: str = "") -> BindingSessionSnapshot: ...
 
 
 class _IsGroupChat(Protocol):
@@ -97,8 +90,8 @@ class _ReplyText(Protocol):
     def __call__(self, chat_id: str, text: str, *, message_id: str = "") -> None: ...
 
 
-class _ResolveResumeTarget(Protocol):
-    def __call__(self, arg: str) -> ThreadSummary: ...
+class _ReplyCard(Protocol):
+    def __call__(self, chat_id: str, card: dict, *, message_id: str = "") -> None: ...
 
 
 class _ListVisibleCurrentDirThreads(Protocol):
@@ -115,10 +108,6 @@ class _ReadThreadSummaryAuthoritatively(Protocol):
     def __call__(self, thread_id: str, *, original_arg: str) -> ThreadSummary: ...
 
 
-class _GetThreadGoal(Protocol):
-    def __call__(self, thread_id: str) -> ThreadGoalSummary | None: ...
-
-
 class _ArchiveThreadForControl(Protocol):
     def __call__(
         self,
@@ -133,7 +122,7 @@ class _RenameThread(Protocol):
 
 
 class _PatchMessage(Protocol):
-    def __call__(self, message_id: str, content: str) -> bool: ...
+    def __call__(self, chat_id: str, message_id: str, content: str) -> bool: ...
 
 
 class _IsThreadNotLoadedError(Protocol):
@@ -141,22 +130,16 @@ class _IsThreadNotLoadedError(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ThreadsUiRuntimePorts:
-    submit_to_runtime: _SubmitToRuntime
-    resume_thread_on_runtime: _ResumeThreadOnRuntime
-
-
-@dataclass(frozen=True, slots=True)
 class ThreadsUiPorts:
-    get_runtime_view: _GetRuntimeView
+    submit_to_runtime: _SubmitToRuntime
+    resolve_session: _ResolveSession
     is_group_chat: _IsGroupChat
     is_group_admin_actor: _IsGroupAdminActor
     rename_bound_thread_title: _RenameBoundThreadTitle
     reply_text: _ReplyText
-    resolve_resume_target: _ResolveResumeTarget
+    reply_card: _ReplyCard
     list_visible_current_dir_threads: _ListVisibleCurrentDirThreads
     read_thread_summary_authoritatively: _ReadThreadSummaryAuthoritatively
-    get_thread_goal: _GetThreadGoal
     archive_thread_for_control: _ArchiveThreadForControl
     rename_thread: _RenameThread
     patch_message: _PatchMessage
@@ -164,9 +147,14 @@ class ThreadsUiPorts:
     threads_initial_limit: int
 
 class CodexThreadsUiDomain:
-    def __init__(self, *, ports: ThreadsUiPorts, runtime_ports: ThreadsUiRuntimePorts) -> None:
+    def __init__(
+        self,
+        *,
+        continuation: FeishuContinuationController,
+        ports: ThreadsUiPorts,
+    ) -> None:
+        self._continuation = continuation
         self._ports = ports
-        self._runtime_ports = runtime_ports
         self._lock = threading.RLock()
         self._expanded_threads_cards: set[str] = set()
         self._pending_rename_forms: dict[str, dict[str, str]] = {}
@@ -211,8 +199,8 @@ class CodexThreadsUiDomain:
         arg: str,
         message_id: str = "",
     ) -> CommandResult | None:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
-        if runtime.running:
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
+        if runtime.execution.has_execution_anchor:
             return CommandResult(text="执行中不能切换线程，请等待结束或先执行 `/cancel`。")
         if not arg:
             return CommandResult(
@@ -220,13 +208,15 @@ class CodexThreadsUiDomain:
             )
         target = arg.strip()
         try:
-            thread = self._ports.resolve_resume_target(target)
+            thread = self._continuation.resolve_resume_target(target)
         except Exception as exc:
             logger.exception("解析恢复目标失败")
             return CommandResult(text=f"恢复线程失败：{exc}")
         goal = None
         try:
-            goal = self._ports.get_thread_goal(thread.thread_id)
+            goal = self._continuation.get_thread_goal_for_resume(
+                thread.thread_id
+            )
         except Exception as exc:
             if not _is_goals_feature_disabled_error(exc):
                 logger.exception("读取 thread goal 失败")
@@ -241,7 +231,7 @@ class CodexThreadsUiDomain:
             )
         return CommandResult(
             card=self._build_resume_pending_command_card(target),
-            after_dispatch=lambda: self._runtime_ports.submit_to_runtime(
+            after_dispatch=lambda: self._ports.submit_to_runtime(
                 self._resume_target_on_runtime,
                 sender_id,
                 chat_id,
@@ -259,13 +249,22 @@ class CodexThreadsUiDomain:
         arg: str,
         message_id: str = "",
     ) -> CommandResult:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
         if not runtime.current_thread_id:
             return CommandResult(text="当前没有绑定线程，无法重命名。")
         if not arg:
             return CommandResult(text=f"用法：`{_RENAME_USAGE}`")
         try:
+            self._require_thread_mutation_access(
+                sender_id,
+                chat_id,
+                runtime.current_thread_id,
+                message_id=message_id,
+            )
             self._ports.rename_thread(runtime.current_thread_id, arg)
+        except ThreadMutationDenied as exc:
+            logger.info("重命名线程被 interaction owner 拒绝: %s", exc)
+            return CommandResult(text=f"重命名失败：{exc}")
         except Exception as exc:
             logger.exception("重命名线程失败")
             return CommandResult(text=f"重命名失败：{exc}")
@@ -285,13 +284,13 @@ class CodexThreadsUiDomain:
         arg: str,
         message_id: str = "",
     ) -> CommandResult:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
-        if runtime.running:
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
+        if runtime.execution.has_execution_anchor:
             return CommandResult(text="执行中不能归档线程，请等待结束或先执行 `/cancel`。")
         target = arg.strip() if arg else ""
         if target:
             try:
-                thread = self._ports.resolve_resume_target(target)
+                thread = self._continuation.resolve_resume_target(target)
             except Exception as exc:
                 logger.exception("解析归档目标失败")
                 return CommandResult(text=f"归档线程失败：{exc}")
@@ -308,7 +307,16 @@ class CodexThreadsUiDomain:
                 return CommandResult(text=f"归档线程失败：{exc}")
 
         try:
+            self._require_thread_mutation_access(
+                sender_id,
+                chat_id,
+                thread.thread_id,
+                message_id=message_id,
+            )
             result = self._ports.archive_thread_for_control(thread.thread_id, summary=thread)
+        except ThreadMutationDenied as exc:
+            logger.info("归档线程被 interaction owner 拒绝: %s", exc)
+            return CommandResult(text=f"归档线程失败：{exc}")
         except Exception as exc:
             logger.exception("归档线程失败")
             return CommandResult(text=f"归档线程失败：{exc}")
@@ -375,8 +383,8 @@ class CodexThreadsUiDomain:
         message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
-        if runtime.running:
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
+        if runtime.execution.has_execution_anchor:
             return make_card_response(
                 toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
                 toast_type="warning",
@@ -392,7 +400,9 @@ class CodexThreadsUiDomain:
             return make_card_response(toast=f"恢复线程失败：{exc}", toast_type="warning")
         goal = None
         try:
-            goal = self._ports.get_thread_goal(thread.thread_id)
+            goal = self._continuation.get_thread_goal_for_resume(
+                thread.thread_id
+            )
         except Exception as exc:
             if not _is_goals_feature_disabled_error(exc):
                 logger.exception("读取 thread goal 失败")
@@ -405,7 +415,7 @@ class CodexThreadsUiDomain:
                     origin="threads_card",
                 )
             )
-        self._runtime_ports.submit_to_runtime(
+        self._ports.submit_to_runtime(
             self._resume_target_on_runtime,
             sender_id,
             chat_id,
@@ -424,8 +434,8 @@ class CodexThreadsUiDomain:
         message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
-        if runtime.running:
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
+        if runtime.execution.has_execution_anchor:
             return make_card_response(
                 toast="执行中不能切换线程，请等待结束或先执行 /cancel。",
                 toast_type="warning",
@@ -443,7 +453,7 @@ class CodexThreadsUiDomain:
         except Exception as exc:
             logger.exception("读取恢复目标失败")
             return make_card_response(toast=f"恢复线程失败：{exc}", toast_type="warning")
-        self._runtime_ports.submit_to_runtime(
+        self._ports.submit_to_runtime(
             self._resume_target_on_runtime,
             sender_id,
             chat_id,
@@ -481,16 +491,32 @@ class CodexThreadsUiDomain:
             if refresh_threads_message_id:
                 self.refresh_threads_card_message(sender_id, chat_id, refresh_threads_message_id)
             return
-        self._runtime_ports.resume_thread_on_runtime(
+        result = self._continuation.resume_thread(
             sender_id,
             chat_id,
             thread.thread_id,
             original_arg=original_arg or target,
-            summary=thread,
             pause_active_goal_on_resume=pause_active_goal_on_resume,
             message_id=message_id,
-            refresh_threads_message_id=refresh_threads_message_id,
         )
+        if isinstance(result, FeishuExplicitResumeSuccess):
+            if refresh_threads_message_id:
+                self.refresh_threads_card_message(
+                    sender_id,
+                    chat_id,
+                    refresh_threads_message_id,
+                )
+            card = self._continuation.build_explicit_resume_card(result)
+            self._ports.reply_card(chat_id, card, message_id=message_id)
+            return
+        if result.text:
+            self._ports.reply_text(chat_id, result.text, message_id=message_id)
+        if refresh_threads_message_id:
+            self.refresh_threads_card_message(
+                sender_id,
+                chat_id,
+                refresh_threads_message_id,
+            )
 
     @staticmethod
     def _resume_requires_active_goal_confirm(thread: ThreadSummary, goal: ThreadGoalSummary | None) -> bool:
@@ -570,7 +596,15 @@ class CodexThreadsUiDomain:
         if not new_title:
             return make_card_response(toast="标题不能为空", toast_type="warning")
         try:
+            self._require_thread_mutation_access(
+                sender_id,
+                chat_id,
+                thread_id,
+                message_id=message_id,
+            )
             self._ports.rename_thread(thread_id, new_title)
+        except ThreadMutationDenied as exc:
+            return make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
         except Exception as exc:
             logger.exception("卡片重命名失败")
             return make_card_response(toast=f"重命名失败：{exc}", toast_type="warning")
@@ -603,8 +637,8 @@ class CodexThreadsUiDomain:
         message_id: str,
         action_value: dict[str, Any],
     ) -> P2CardActionTriggerResponse:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
-        if runtime.running:
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
+        if runtime.execution.has_execution_anchor:
             return make_card_response(
                 toast="执行中不能归档线程，请等待结束或先执行 /cancel。",
                 toast_type="warning",
@@ -618,7 +652,15 @@ class CodexThreadsUiDomain:
             logger.exception("读取归档目标失败")
             return make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
         try:
+            self._require_thread_mutation_access(
+                sender_id,
+                chat_id,
+                thread.thread_id,
+                message_id=message_id,
+            )
             result = self._ports.archive_thread_for_control(thread.thread_id, summary=thread)
+        except ThreadMutationDenied as exc:
+            return make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
         except Exception as exc:
             logger.exception("归档线程失败")
             return make_card_response(toast=f"归档线程失败：{exc}", toast_type="warning")
@@ -664,13 +706,44 @@ class CodexThreadsUiDomain:
         except Exception:
             logger.exception("刷新线程卡片失败")
             return
-        self._ports.patch_message(normalized_message_id, json.dumps(card, ensure_ascii=False))
+        self._ports.patch_message(
+            chat_id,
+            normalized_message_id,
+            json.dumps(card, ensure_ascii=False),
+        )
 
     def _clear_pending_rename_form(self, message_id: str) -> None:
         if not message_id:
             return
         with self._lock:
             self._pending_rename_forms.pop(message_id, None)
+
+    def _require_thread_mutation_access(
+        self,
+        sender_id: str,
+        chat_id: str,
+        thread_id: str,
+        *,
+        message_id: str = "",
+    ) -> None:
+        """Apply the same active-main-turn conflict check as Feishu input.
+
+        Rename and archive are thread-scoped mutations too.  They must not
+        become a side door around a Web or fcodex active turn merely because their
+        UI entry point lives in the Feishu thread-management domain.
+        """
+
+        denial = str(
+            self._continuation.prompt_write_denial_text(
+                sender_id,
+                chat_id,
+                thread_id,
+                message_id=message_id,
+            )
+            or ""
+        ).strip()
+        if denial:
+            raise ThreadMutationDenied(denial)
 
     def _handle_threads_refresh_action(
         self,
@@ -713,7 +786,7 @@ class CodexThreadsUiDomain:
     ) -> dict:
         threads = self._list_current_dir_threads(sender_id, chat_id, message_id=message_id)
         rows, counts = self._build_thread_rows(sender_id, chat_id, threads, message_id=message_id)
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
         return build_threads_card(
             rows,
             runtime.current_thread_id,
@@ -743,7 +816,7 @@ class CodexThreadsUiDomain:
         ]
         rows.sort(key=lambda item: item["updated_at"], reverse=True)
 
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
         current_id = runtime.current_thread_id
         if current_id and all(item["thread_id"] != current_id for item in rows):
             rows.insert(

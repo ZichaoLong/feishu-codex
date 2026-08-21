@@ -8,10 +8,11 @@ controllers and stores do not redefine partial local variants.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict
 
+from bot.binding_identity import ChatBindingKey
+from bot.execution_pages import ExecutionPageLedger, ExecutionTranscriptCursor
 from bot.execution_transcript import ExecutionTranscript
 
 FEISHU_RUNTIME_ATTACHED = "attached"
@@ -39,6 +40,7 @@ BACKEND_THREAD_STATUS_SYSTEM_ERROR = "systemError"
 BACKEND_THREAD_STATUS_UNKNOWN = "unknown"
 BACKEND_THREAD_LOOKUP_MISSING = "missing"
 BACKEND_THREAD_LOOKUP_ERROR = "error"
+ACTIVE_OBSERVER_EXECUTION_KIND = "active_observer"
 LOADED_BACKEND_THREAD_STATUSES = frozenset(
     {
         BACKEND_THREAD_STATUS_IDLE,
@@ -47,12 +49,69 @@ LOADED_BACKEND_THREAD_STATUSES = frozenset(
     }
 )
 
+
+def is_confirmed_inactive_backend_thread_status(value: object) -> bool:
+    """Whether a backend status is positive evidence that a thread is idle.
+
+    This predicate deliberately has a much narrower meaning than "not
+    active".  A status notification may be malformed, from a newer
+    app-server enum, or ``systemError`` while work/interactions still need
+    reconciliation.  Such a value must retain Focus's writer and runtime
+    fences rather than silently turn into permission for another frontend.
+    """
+
+    return str(value or "").strip() in {
+        BACKEND_THREAD_STATUS_IDLE,
+        BACKEND_THREAD_STATUS_NOT_LOADED,
+    }
+
 UNSET = object()
 
 
 class PlanStepState(TypedDict):
     step: str
     status: str
+
+
+class CancelableTimer(Protocol):
+    def cancel(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ExecutionPatchTimerTicket:
+    """Process-local identity for one exact delayed execution-card patch.
+
+    Equality intentionally remains object identity.  Reconstructing the same
+    binding/execution coordinates must never authorize an old callback.
+    """
+
+    binding: ChatBindingKey
+    thread_id: str
+    card_message_id: str
+    turn_id: str
+    page_attempt_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPatchTimerRegistration:
+    ticket: ExecutionPatchTimerTicket
+    timer: CancelableTimer
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class MirrorWatchdogTicket:
+    """Process-local identity for one exact execution mirror watchdog."""
+
+    binding: ChatBindingKey
+    thread_id: str
+    card_message_id: str
+    turn_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MirrorWatchdogRegistration:
+    ticket: MirrorWatchdogTicket
+    timer: CancelableTimer
 
 
 class RuntimeStateDict(TypedDict):
@@ -72,8 +131,7 @@ class RuntimeStateDict(TypedDict):
     running: bool
     cancelled: bool
     pending_cancel: bool
-    current_message_id: str
-    last_execution_message_id: str
+    execution_pages: ExecutionPageLedger
     current_execution_kind: str
     current_prompt_message_id: str
     current_prompt_reply_in_thread: bool
@@ -83,9 +141,8 @@ class RuntimeStateDict(TypedDict):
     started_at: float
     last_runtime_event_at: float
     last_patch_at: float
-    patch_timer: threading.Timer | None
-    mirror_watchdog_timer: threading.Timer | None
-    mirror_watchdog_generation: int
+    patch_timer_registration: ExecutionPatchTimerRegistration | None
+    mirror_watchdog_registration: MirrorWatchdogRegistration | None
     followup_sent: bool
     followup_text: str
     terminal_result_text: str
@@ -189,8 +246,7 @@ class ExecutionStateChanged(RuntimeStateEvent):
     awaiting_local_turn_started: Any = UNSET
     awaiting_attach_status_settle: Any = UNSET
     current_turn_id: Any = UNSET
-    current_message_id: Any = UNSET
-    last_execution_message_id: Any = UNSET
+    execution_pages: Any = UNSET
     current_execution_kind: Any = UNSET
     current_prompt_message_id: Any = UNSET
     current_prompt_reply_in_thread: Any = UNSET
@@ -202,10 +258,8 @@ class ExecutionStateChanged(RuntimeStateEvent):
     followup_sent: Any = UNSET
     followup_text: Any = UNSET
     terminal_result_text: Any = UNSET
-    patch_timer: Any = UNSET
-    mirror_watchdog_timer: Any = UNSET
-    mirror_watchdog_generation: Any = UNSET
-    bump_mirror_watchdog_generation: bool = False
+    patch_timer_registration: Any = UNSET
+    mirror_watchdog_registration: Any = UNSET
     reset_transcript: bool = False
     transcript: Any = UNSET
     reply_text: str | None = None
@@ -316,7 +370,9 @@ def apply_runtime_state_message(state: RuntimeStateDict, message: RuntimeStateMe
             state["goal_updated_at"] = 0
         case ExecutionAnchorCleared(clear_card_message=clear_card_message):
             if clear_card_message:
-                state["current_message_id"] = ""
+                state["execution_pages"] = state[
+                    "execution_pages"
+                ].clear_known_pages()
             state["current_turn_id"] = ""
             state["current_execution_kind"] = ""
             state["current_prompt_message_id"] = ""
@@ -325,10 +381,17 @@ def apply_runtime_state_message(state: RuntimeStateDict, message: RuntimeStateMe
             state["awaiting_local_turn_started"] = False
             state["awaiting_attach_status_settle"] = False
         case ExecutionRetired(runtime_channel_state=runtime_channel_state):
-            current_message_id = str(state["current_message_id"] or "").strip()
-            if current_message_id:
-                state["last_execution_message_id"] = current_message_id
-            apply_runtime_state_message(state, ExecutionAnchorCleared(clear_card_message=True))
+            state["execution_pages"] = state[
+                "execution_pages"
+            ].retire_for_turn_completion(
+                cursor_end=ExecutionTranscriptCursor.from_transcript(
+                    state["execution_transcript"]
+                )
+            )
+            apply_runtime_state_message(
+                state,
+                ExecutionAnchorCleared(clear_card_message=False),
+            )
             state["running"] = False
             state["pending_cancel"] = False
             state["runtime_channel_state"] = runtime_channel_state
@@ -348,10 +411,10 @@ def apply_runtime_state_message(state: RuntimeStateDict, message: RuntimeStateMe
                 state["awaiting_attach_status_settle"] = change.awaiting_attach_status_settle
             if change.current_turn_id is not UNSET:
                 state["current_turn_id"] = change.current_turn_id
-            if change.current_message_id is not UNSET:
-                state["current_message_id"] = change.current_message_id
-            if change.last_execution_message_id is not UNSET:
-                state["last_execution_message_id"] = change.last_execution_message_id
+            if change.execution_pages is not UNSET:
+                if type(change.execution_pages) is not ExecutionPageLedger:
+                    raise TypeError("execution_pages must be ExecutionPageLedger")
+                state["execution_pages"] = change.execution_pages
             if change.current_execution_kind is not UNSET:
                 state["current_execution_kind"] = change.current_execution_kind
             if change.current_prompt_message_id is not UNSET:
@@ -374,14 +437,10 @@ def apply_runtime_state_message(state: RuntimeStateDict, message: RuntimeStateMe
                 state["followup_text"] = change.followup_text
             if change.terminal_result_text is not UNSET:
                 state["terminal_result_text"] = change.terminal_result_text
-            if change.patch_timer is not UNSET:
-                state["patch_timer"] = change.patch_timer
-            if change.mirror_watchdog_timer is not UNSET:
-                state["mirror_watchdog_timer"] = change.mirror_watchdog_timer
-            if change.mirror_watchdog_generation is not UNSET:
-                state["mirror_watchdog_generation"] = change.mirror_watchdog_generation
-            if change.bump_mirror_watchdog_generation:
-                state["mirror_watchdog_generation"] += 1
+            if change.patch_timer_registration is not UNSET:
+                state["patch_timer_registration"] = change.patch_timer_registration
+            if change.mirror_watchdog_registration is not UNSET:
+                state["mirror_watchdog_registration"] = change.mirror_watchdog_registration
             if change.reset_transcript:
                 state["execution_transcript"].reset()
             if change.transcript is not UNSET:

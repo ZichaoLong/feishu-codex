@@ -6,6 +6,16 @@ import shlex
 import shutil
 
 DEFAULT_CODEX_COMMAND = "codex"
+_MACH_O_MAGICS = {
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf",
+    b"\xbf\xba\xfe\xca",
+    b"\xfe\xed\xfa\xce",
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xcf\xfa\xed\xfe",
+}
 
 
 def _is_windows() -> bool:
@@ -26,6 +36,40 @@ def _current_command_path(command: str) -> pathlib.Path | None:
     if not resolved:
         return None
     return pathlib.Path(resolved).expanduser()
+
+
+def _is_native_executable(path: pathlib.Path) -> bool:
+    candidate = pathlib.Path(path)
+    if not candidate.is_file():
+        return False
+    if not _is_windows() and not os.access(candidate, os.X_OK):
+        return False
+    try:
+        with candidate.open("rb") as handle:
+            header = handle.read(4)
+            if header == b"\x7fELF" or header in _MACH_O_MAGICS:
+                return True
+            if not header.startswith(b"MZ"):
+                return False
+            handle.seek(0x3C)
+            pe_offset_raw = handle.read(4)
+            if len(pe_offset_raw) != 4:
+                return False
+            pe_offset = int.from_bytes(pe_offset_raw, byteorder="little")
+            handle.seek(pe_offset)
+            return handle.read(4) == b"PE\0\0"
+    except OSError:
+        return False
+
+
+def _native_executable_command(path: pathlib.Path | str | None) -> str | None:
+    if path is None:
+        return None
+    candidate = pathlib.Path(path).expanduser().absolute()
+    if not _is_native_executable(candidate):
+        return None
+    rendered = _render_windows_command_path(candidate) if _is_windows() else str(candidate)
+    return shlex.join([rendered])
 
 
 def _render_windows_command_path(path: pathlib.Path | str) -> str:
@@ -312,13 +356,19 @@ def detect_stable_codex_command() -> str | None:
             return (
                 _normalize_explicit_managed_command(rendered_current)
                 or _windows_npm_stable_codex_command_for_wrapper(current_codex)
+                or _native_executable_command(current_codex)
             )
         return (
             _detect_windows_npm_global_stable_codex_command()
             or _detect_fnm_stable_codex_command()
             or _detect_nvm_stable_codex_command()
         )
-    return _detect_fnm_stable_codex_command() or _detect_nvm_stable_codex_command()
+    current_codex = _current_command_path(DEFAULT_CODEX_COMMAND)
+    return (
+        _native_executable_command(current_codex)
+        or _detect_fnm_stable_codex_command()
+        or _detect_nvm_stable_codex_command()
+    )
 
 
 def resolve_managed_codex_command(configured_command: str) -> str:
@@ -335,6 +385,4 @@ def resolve_managed_codex_command(configured_command: str) -> str:
                 or rendered_current
             )
         return detect_stable_codex_command() or DEFAULT_CODEX_COMMAND
-    if shutil.which(DEFAULT_CODEX_COMMAND):
-        return DEFAULT_CODEX_COMMAND
     return detect_stable_codex_command() or DEFAULT_CODEX_COMMAND

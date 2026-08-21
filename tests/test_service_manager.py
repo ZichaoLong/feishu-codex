@@ -222,9 +222,16 @@ class ServiceManagerTests(unittest.TestCase):
             def _run(*args, **kwargs):
                 calls.append((args, kwargs))
                 if args[:2] == ("schtasks", "/Query") and "/XML" in args:
-                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="not found")
-                if args[:2] == ("schtasks", "/Query"):
-                    return subprocess.CompletedProcess(args, 0, stdout="Status: Running\n", stderr="")
+                    if len([call for call, _kwargs in calls if call[:2] == ("schtasks", "/Query")]) == 1:
+                        return subprocess.CompletedProcess(args, 1, stdout="", stderr="not found")
+                    return subprocess.CompletedProcess(
+                        args,
+                        0,
+                        stdout='''<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings /></Task>''',
+                        stderr="",
+                    )
+                if args and args[0] == "powershell.exe":
+                    return subprocess.CompletedProcess(args, 0, stdout="4", stderr="")
                 return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
             with patch.object(manager, "_run", side_effect=_run):
@@ -235,15 +242,76 @@ class ServiceManagerTests(unittest.TestCase):
 
             self.assertTrue(status.installed)
             self.assertTrue(status.running)
-            self.assertEqual(status.source, "schtasks /Query /TN focus-corp-a /FO LIST /V")
+            self.assertEqual(status.source, "Task Scheduler COM state for focus-corp-a")
+            self.assertEqual(status.detail, "state=4 (running)")
             self.assertEqual(calls[0][0][:4], ("schtasks", "/Query", "/TN", "focus-corp-a"))
             self.assertEqual(calls[1][0][:4], ("schtasks", "/Create", "/TN", "focus-corp-a"))
             self.assertEqual(calls[2][0], ("schtasks", "/Run", "/TN", "focus-corp-a"))
-            self.assertEqual(calls[3][0], ("schtasks", "/Query", "/TN", "focus-corp-a", "/FO", "LIST", "/V"))
+            self.assertEqual(calls[3][0][0], "powershell.exe")
             self.assertEqual(calls[4][0], ("schtasks", "/End", "/TN", "focus-corp-a"))
             self.assertEqual(calls[5][0], ("schtasks", "/Delete", "/TN", "focus-corp-a", "/F"))
             self.assertFalse((definition.paths.data_dir / "service-launch.cmd").exists())
             self.assertFalse((definition.paths.data_dir / "service-task.xml").exists())
+
+    def test_windows_manager_treats_queued_task_as_live(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            definition = _definition(pathlib.Path(tmpdir))
+            manager = WindowsTaskSchedulerServiceManager()
+            task_xml = '''<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings /></Task>'''
+
+            def _run(*args, **kwargs):
+                if args[:2] == ("schtasks", "/Query"):
+                    return subprocess.CompletedProcess(args, 0, stdout=task_xml, stderr="")
+                if args and args[0] == "powershell.exe":
+                    return subprocess.CompletedProcess(args, 0, stdout="2", stderr="")
+                raise AssertionError(args)
+
+            with patch.object(manager, "_run", side_effect=_run):
+                status = manager.status(definition)
+
+            self.assertTrue(status.installed)
+            self.assertTrue(status.running)
+            self.assertEqual(status.detail, "state=2 (queued)")
+
+    def test_windows_manager_rejects_unknown_numeric_task_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            definition = _definition(pathlib.Path(tmpdir))
+            manager = WindowsTaskSchedulerServiceManager()
+            task_xml = '''<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings /></Task>'''
+
+            def _run(*args, **kwargs):
+                if args[:2] == ("schtasks", "/Query"):
+                    return subprocess.CompletedProcess(args, 0, stdout=task_xml, stderr="")
+                if args and args[0] == "powershell.exe":
+                    return subprocess.CompletedProcess(args, 0, stdout="99", stderr="")
+                raise AssertionError(args)
+
+            with patch.object(manager, "_run", side_effect=_run):
+                with self.assertRaisesRegex(ServiceManagerError, "未知 state"):
+                    manager.status(definition)
+
+    def test_windows_manager_distinguishes_missing_task_from_query_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            definition = _definition(pathlib.Path(tmpdir))
+            manager = WindowsTaskSchedulerServiceManager()
+            missing = subprocess.CompletedProcess(("powershell.exe",), 0, stdout="missing", stderr="")
+
+            with patch.object(manager, "_run", return_value=missing):
+                status = manager.status(definition)
+
+            self.assertFalse(status.installed)
+            self.assertFalse(status.running)
+            self.assertEqual(status.detail, "scheduled task missing")
+
+            denied = subprocess.CompletedProcess(
+                ("powershell.exe",),
+                1,
+                stdout="",
+                stderr="Access is denied",
+            )
+            with patch.object(manager, "_run", return_value=denied):
+                with self.assertRaisesRegex(ServiceManagerError, "Access is denied"):
+                    manager.status(definition)
 
     def test_windows_autostart_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

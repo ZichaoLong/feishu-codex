@@ -1,82 +1,160 @@
+"""Parse app-server notifications and execute exact Feishu projection effects."""
+
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, TypeAlias
+from dataclasses import dataclass
+from typing import Any, Callable, Protocol
 
-from bot.constants import display_path
-from bot.execution_transcript import ExecutionTranscript
-from bot.runtime_state import (
-    BACKEND_THREAD_STATUS_ACTIVE,
-    BACKEND_THREAD_STATUS_SYSTEM_ERROR,
-    ExecutionStateChanged,
-    RuntimeStateDict,
-    RuntimeStateMessage,
-    ThreadGoalCleared,
-    ThreadGoalStateChanged,
-    ThreadStateChanged,
+from bot.adapter_notification_runtime import (
+    AdapterNotificationRuntimeTransitions,
+    AssistantDeltaNotificationCommand,
+    ErrorNotificationCommand,
+    ExecutionRuntimeEventCommand,
+    FinishProcessBlockCommand,
+    ItemStartedRuntimeEventCommand,
+    MarkProcessWorkCommand,
+    NotificationPlanStep,
+    PlanOutlineNotificationCommand,
+    PlanTextNotificationCommand,
+    ProcessItemStartedCommand,
+    ReconcileAssistantTextCommand,
+    RecordUnavailableAssistantCompletionCommand,
+    RestoreCancelPendingCommand,
+    ThreadClosedNotificationCommand,
+    ThreadGoalClearedNotificationCommand,
+    ThreadGoalNotificationCommand,
+    ThreadRuntimeEventCommand,
+    ThreadStatusNotificationCommand,
+    ThreadTitleNotificationCommand,
+    TurnCompletedNotificationCommand,
+    TurnStartedNotificationCommand,
+    TurnStartedRuntimeEventCommand,
+    WorkItemStartedCommand,
 )
-from bot.runtime_view import build_runtime_view
-from bot.turn_execution_coordinator import TurnExecutionCoordinator
+from bot.binding_identity import ChatBindingKey
+from bot.binding_runtime_contract import (
+    BindingExecutionTarget,
+    BindingSessionSnapshot,
+)
+from bot.binding_runtime_lifecycle import cancel_runtime_timer_effects
+from bot.execution_pages import ExecutionTranscriptCursor
+from bot.feishu_execution_process_projection import (
+    FeishuExecutionProcessProjection,
+)
+from bot.execution_transcript import (
+    ExecutionTranscriptSnapshot,
+    agent_message_can_be_terminal_candidate,
+    is_execution_work_item_type,
+    is_terminal_invalidating_work_item_type,
+)
+from bot.execution_page_output_contract import (
+    InitialExecutionPageOpenResult,
+    InitialExecutionPageOpenStatus,
+)
+
 
 logger = logging.getLogger(__name__)
 
-ChatBindingKey: TypeAlias = tuple[str, str]
-RuntimeState: TypeAlias = RuntimeStateDict
 
 WORK_ITEM_LABELS = {
+    "collabAgentToolCall": "协作工具调用",
     "commandExecution": "命令执行",
+    "dynamicToolCall": "动态工具调用",
+    "enteredReviewMode": "进入代码审查",
+    "exitedReviewMode": "结束代码审查",
     "fileChange": "文件修改",
+    "imageView": "查看图片",
     "imageGeneration": "图片生成",
     "contextCompaction": "上下文压缩",
     "mcpToolCall": "MCP 工具调用",
     "patchApply": "补丁应用",
-    "viewImageToolCall": "查看图片",
+    "sleep": "等待",
     "webSearch": "网页搜索",
 }
 
+_UPSTREAM_NOTICE_METHODS = frozenset(
+    {"warning", "guardianWarning", "deprecationNotice", "configWarning"}
+)
+
+
+class _FinalizeExecution(Protocol):
+    def __call__(
+        self,
+        session: BindingSessionSnapshot,
+        *,
+        thread_id: str,
+        turn_id: str = "",
+    ) -> bool: ...
+
+
+class _DispatchExecutionCard(Protocol):
+    def __call__(
+        self,
+        chat_id: str,
+        message_id: str,
+        *,
+        transcript: ExecutionTranscriptSnapshot,
+        running: bool,
+        elapsed: int,
+        cancelled: bool,
+        cursor_start: ExecutionTranscriptCursor,
+        cursor_end: ExecutionTranscriptCursor,
+    ) -> None: ...
+
+
+class _OpenInitialExecutionPage(Protocol):
+    def __call__(
+        self,
+        session: BindingSessionSnapshot,
+        parent_message_id: str,
+        *,
+        reply_in_thread: bool = False,
+        reserved_message_id: str = "",
+    ) -> InitialExecutionPageOpenResult: ...
+
+
+class _InterruptRunningTurn(Protocol):
+    def __call__(self, *, thread_id: str, turn_id: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterNotificationEffects:
+    """Effects that consume an immutable exact-session capability."""
+
+    finalize_execution_from_terminal_signal: _FinalizeExecution
+    dispatch_execution_card_message: _DispatchExecutionCard
+    open_initial_execution_page: _OpenInitialExecutionPage
+    schedule_mirror_watchdog: Callable[[BindingSessionSnapshot], None]
+    schedule_execution_card_update: Callable[[BindingSessionSnapshot], None]
+    flush_execution_card: Callable[[BindingSessionSnapshot, bool], None]
+    flush_plan_card: Callable[[BindingSessionSnapshot], None]
+    interrupt_running_turn: _InterruptRunningTurn
+    is_pre_send_error: Callable[[Exception], bool]
+
 
 class AdapterNotificationController:
+    """Own notification parsing and immutable external-effect ordering."""
+
     def __init__(
         self,
         *,
-        lock,
-        turn_execution: TurnExecutionCoordinator,
+        runtime: AdapterNotificationRuntimeTransitions,
         thread_subscribers: Callable[[str], tuple[ChatBindingKey, ...]],
-        get_runtime_state: Callable[[str, str], RuntimeState],
-        on_runtime_event_accepted: Callable[[str, str], None],
-        apply_runtime_state_message_locked: Callable[[RuntimeState, RuntimeStateMessage], None],
-        apply_persisted_runtime_state_message_locked: Callable[[ChatBindingKey, RuntimeState, RuntimeStateMessage], None],
-        cancel_mirror_watchdog_locked: Callable[[RuntimeState], None],
-        finalize_execution_from_terminal_signal: Callable[..., bool],
-        dispatch_execution_card_message: Callable[..., None],
-        send_execution_card: Callable[..., str | None],
-        schedule_mirror_watchdog: Callable[[str, str], None],
-        schedule_execution_card_update: Callable[[str, str], None],
-        flush_execution_card: Callable[[str, str, bool], None],
-        flush_plan_card: Callable[[str, str], None],
-        interrupt_running_turn: Callable[..., None],
-        on_server_request_resolved: Callable[[dict[str, Any]], None],
+        effects: AdapterNotificationEffects,
     ) -> None:
-        self._lock = lock
-        self._turn_execution = turn_execution
+        self._runtime = runtime
         self._thread_subscribers = thread_subscribers
-        self._get_runtime_state = get_runtime_state
-        self._on_runtime_event_accepted = on_runtime_event_accepted
-        self._apply_runtime_state_message_locked = apply_runtime_state_message_locked
-        self._apply_persisted_runtime_state_message_locked = apply_persisted_runtime_state_message_locked
-        self._cancel_mirror_watchdog_locked = cancel_mirror_watchdog_locked
-        self._finalize_execution_from_terminal_signal = finalize_execution_from_terminal_signal
-        self._dispatch_execution_card_message = dispatch_execution_card_message
-        self._send_execution_card = send_execution_card
-        self._schedule_mirror_watchdog = schedule_mirror_watchdog
-        self._schedule_execution_card_update = schedule_execution_card_update
-        self._flush_execution_card = flush_execution_card
-        self._flush_plan_card = flush_plan_card
-        self._interrupt_running_turn = interrupt_running_turn
-        self._on_server_request_resolved = on_server_request_resolved
+        self._effects = effects
 
     def handle_notification(self, method: str, params: dict[str, Any]) -> None:
+        if method in _UPSTREAM_NOTICE_METHODS:
+            logger.warning(
+                "Codex app-server notice: method=%s params=%r",
+                method,
+                params,
+            )
         routes: dict[str, Callable[[dict[str, Any]], None]] = {
             "error": self.handle_error_notification,
             "thread/status/changed": self.handle_thread_status_changed,
@@ -89,623 +167,592 @@ class AdapterNotificationController:
             "item/started": self.handle_item_started,
             "item/agentMessage/delta": self.handle_agent_message_delta,
             "item/commandExecution/outputDelta": self.handle_command_delta,
-            "item/fileChange/outputDelta": self.handle_file_change_delta,
+            "item/fileChange/patchUpdated": self.handle_file_change_patch_updated,
             "item/completed": self.handle_item_completed,
             "turn/completed": self.handle_turn_completed,
-            "serverRequest/resolved": self._on_server_request_resolved,
         }
         handler = routes.get(method)
-        if handler is None:
-            return
-        handler(params)
+        if handler is not None:
+            handler(params)
 
     def handle_error_notification(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
         bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
         turn_id = str(params.get("turnId", "") or "").strip()
         error = params.get("error") or {}
         message = str(error.get("message") or "").strip()
         additional_details = str(error.get("additionalDetails") or "").strip()
         if additional_details:
-            message = f"{message}\n{additional_details}".strip() if message else additional_details
-        if not message:
+            message = (
+                f"{message}\n{additional_details}".strip()
+                if message
+                else additional_details
+            )
+        if not bindings or not message:
             return
         will_retry = bool(params.get("willRetry"))
         for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            if not self._mark_runtime_event_if_current_execution_target(
-                binding,
-                state,
-                thread_id=thread_id,
-                turn_id=turn_id,
-            ):
+            marked = self._mark_execution_event(binding, thread_id, turn_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                    continue
-                if will_retry:
-                    self._turn_execution.append_process_note_locked(
-                        state,
-                        text=f"\n[重试中] {message}\n",
-                    )
-                else:
-                    self._turn_execution.apply_terminal_error_locked(
-                        state,
-                        error_message=message,
-                    )
-            self._schedule_execution_card_update(*binding)
-
-    def _bindings_for_thread(self, thread_id: str) -> tuple[ChatBindingKey, ...]:
-        normalized_thread_id = str(thread_id or "").strip()
-        if not normalized_thread_id:
-            return ()
-        return self._thread_subscribers(normalized_thread_id)
-
-    def _mark_runtime_event_if_current_execution_target(
-        self,
-        binding: ChatBindingKey,
-        state: RuntimeState,
-        *,
-        thread_id: str,
-        turn_id: str,
-        allow_missing_turn_id: bool = False,
-        allow_unbound_turn_id: bool = False,
-    ) -> bool:
-        with self._lock:
-            runtime = build_runtime_view(state)
-            if not self._resolve_current_execution_target(
-                runtime,
-                thread_id=thread_id,
-                turn_id=turn_id,
-                allow_missing_turn_id=allow_missing_turn_id,
-                allow_unbound_turn_id=allow_unbound_turn_id,
-            ):
-                return False
-            self._turn_execution.mark_runtime_event_locked(state, occurred_at=time.monotonic())
-        self._schedule_mirror_watchdog(*binding)
-        self._on_runtime_event_accepted(*binding)
-        return True
-
-    def _mark_runtime_event_if_current_thread(self, binding: ChatBindingKey, state: RuntimeState, *, thread_id: str) -> bool:
-        with self._lock:
-            runtime = build_runtime_view(state)
-            if runtime.current_thread_id.strip() != thread_id:
-                return False
-            self._turn_execution.mark_runtime_event_locked(state, occurred_at=time.monotonic())
-        self._schedule_mirror_watchdog(*binding)
-        self._on_runtime_event_accepted(*binding)
-        return True
-
-    @staticmethod
-    def _resolve_current_execution_target(
-        runtime,
-        *,
-        thread_id: str,
-        turn_id: str,
-        allow_missing_turn_id: bool = False,
-        allow_unbound_turn_id: bool = False,
-    ) -> bool:
-        if runtime.current_thread_id.strip() != thread_id:
-            return False
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return allow_missing_turn_id
-        current_turn_id = runtime.execution.current_turn_id.strip()
-        if current_turn_id and current_turn_id != normalized_turn_id:
-            return False
-        if not current_turn_id and not allow_unbound_turn_id:
-            return False
-        return True
-
-    @staticmethod
-    def _can_bind_unbound_compact_item_started(runtime, *, thread_id: str, turn_id: str, item_type: str) -> bool:
-        return (
-            item_type == "contextCompaction"
-            and bool(str(turn_id or "").strip())
-            and runtime.current_thread_id.strip() == thread_id
-            and bool(runtime.execution.current_message_id.strip())
-            and bool(runtime.execution.awaiting_local_turn_started)
-            and not bool(runtime.execution.current_turn_id.strip())
-            and runtime.execution.current_execution_kind.strip() == "compact"
-        )
+            updated = self._runtime.apply_error(
+                ErrorNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
+                    message=message,
+                    will_retry=will_retry,
+                )
+            )
+            if updated is not None:
+                self._effects.schedule_execution_card_update(updated)
 
     def handle_thread_status_changed(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
         bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
         status = params.get("status") or {}
-        status_type = status.get("type")
+        status_type = str(status.get("type") or "").strip()
         for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-                current_turn_id = runtime.execution.current_turn_id.strip()
-                current_message_id = runtime.execution.current_message_id.strip()
-                awaiting_started = self._turn_execution.awaiting_remote_turn_started_locked(state)
-                if status_type == BACKEND_THREAD_STATUS_ACTIVE and not awaiting_started:
-                    self._turn_execution.acknowledge_active_thread_locked(state)
-            if not self._mark_runtime_event_if_current_thread(binding, state, thread_id=thread_id):
+            marked = self._mark_thread_event(binding, thread_id)
+            if marked is None:
                 continue
-            if awaiting_started:
-                continue
-            if status_type != BACKEND_THREAD_STATUS_ACTIVE and (current_turn_id or current_message_id):
-                # Upstream can emit `thread/status=systemError` before the paired
-                # `error` and `turn/completed(status=failed)` notifications.
-                # Finalizing here would retire the execution anchor too early and
-                # drop the real failure text, leaving Feishu with an empty card.
-                if status_type == BACKEND_THREAD_STATUS_SYSTEM_ERROR:
-                    continue
-                self._finalize_execution_from_terminal_signal(
-                    binding[0],
-                    binding[1],
-                    thread_id=thread_id,
-                    turn_id=current_turn_id,
+            transition = self._runtime.apply_thread_status(
+                ThreadStatusNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
+                    status_type=status_type,
                 )
+            )
+            if transition is not None:
+                cancel_runtime_timer_effects(transition.timer_cancellations)
+            if transition is None or transition.action == "none":
                 continue
-            if status_type == BACKEND_THREAD_STATUS_ACTIVE:
-                self._schedule_execution_card_update(*binding)
-                continue
-            with self._lock:
-                self._turn_execution.settle_non_active_thread_locked(state)
-                self._cancel_mirror_watchdog_locked(state)
-            self._flush_execution_card(binding[0], binding[1], True)
+            if transition.action == "finalize":
+                self._effects.finalize_execution_from_terminal_signal(
+                    transition.session,
+                    thread_id=thread_id,
+                    turn_id=transition.turn_id,
+                )
+            elif transition.action == "schedule_execution_card":
+                self._effects.schedule_execution_card_update(transition.session)
+            elif transition.action == "flush_execution_card":
+                self._effects.flush_execution_card(transition.session, True)
 
     def handle_thread_closed(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-                current_turn_id = runtime.execution.current_turn_id.strip()
-                current_message_id = runtime.execution.current_message_id.strip()
-                is_running = runtime.running
-                awaiting_started = self._turn_execution.awaiting_remote_turn_started_locked(state)
-            if not self._mark_runtime_event_if_current_thread(binding, state, thread_id=thread_id):
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_thread_event(binding, thread_id)
+            if marked is None:
                 continue
-            if awaiting_started:
-                continue
-            if is_running or current_turn_id or current_message_id:
-                self._finalize_execution_from_terminal_signal(
-                    binding[0],
-                    binding[1],
-                    thread_id=thread_id,
-                    turn_id=current_turn_id,
+            transition = self._runtime.apply_thread_closed(
+                ThreadClosedNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
                 )
-                continue
-            with self._lock:
-                self._turn_execution.settle_thread_closed_locked(state)
-                self._cancel_mirror_watchdog_locked(state)
+            )
+            if transition is not None:
+                cancel_runtime_timer_effects(transition.timer_cancellations)
+            if transition is not None and transition.action == "finalize":
+                self._effects.finalize_execution_from_terminal_signal(
+                    transition.session,
+                    thread_id=thread_id,
+                    turn_id=transition.turn_id,
+                )
 
     def handle_thread_name_updated(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
-        bindings = self._thread_subscribers(thread_id)
-        if not bindings:
-            return
         new_title = str(params.get("threadName") or "").strip()
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-                resolved_title = new_title or runtime.current_thread_title.strip()
-            if not self._mark_runtime_event_if_current_thread(binding, state, thread_id=thread_id):
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_thread_event(binding, thread_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-                self._apply_persisted_runtime_state_message_locked(
-                    binding,
-                    state,
-                    ThreadStateChanged(current_thread_title=resolved_title),
+            self._runtime.apply_thread_title(
+                ThreadTitleNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
+                    title=new_title or marked.current_thread_title.strip(),
                 )
+            )
 
     def handle_thread_goal_updated(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
         goal = params.get("goal") or {}
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-            if not self._mark_runtime_event_if_current_thread(binding, state, thread_id=thread_id):
+        raw_budget = goal.get("tokenBudget")
+        token_budget = None if raw_budget is None else int(raw_budget)
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_thread_event(binding, thread_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-                self._apply_runtime_state_message_locked(
-                    state,
-                    ThreadGoalStateChanged(
-                        goal_objective=str(goal.get("objective", "") or "").strip(),
-                        goal_status=str(goal.get("status", "") or "").strip(),
-                        goal_token_budget=goal.get("tokenBudget"),
-                        goal_tokens_used=int(goal.get("tokensUsed") or 0),
-                        goal_time_used_seconds=int(goal.get("timeUsedSeconds") or 0),
-                        goal_created_at=int(goal.get("createdAt") or 0),
-                        goal_updated_at=int(goal.get("updatedAt") or 0),
-                    ),
+            self._runtime.apply_thread_goal(
+                ThreadGoalNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
+                    objective=str(goal.get("objective", "") or "").strip(),
+                    status=str(goal.get("status", "") or "").strip(),
+                    token_budget=token_budget,
+                    tokens_used=int(goal.get("tokensUsed") or 0),
+                    time_used_seconds=int(goal.get("timeUsedSeconds") or 0),
+                    created_at=int(goal.get("createdAt") or 0),
+                    updated_at=int(goal.get("updatedAt") or 0),
                 )
+            )
 
     def handle_thread_goal_cleared(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-            if not self._mark_runtime_event_if_current_thread(binding, state, thread_id=thread_id):
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_thread_event(binding, thread_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if runtime.current_thread_id.strip() != thread_id:
-                    continue
-                self._apply_runtime_state_message_locked(state, ThreadGoalCleared())
+            self._runtime.clear_thread_goal(
+                ThreadGoalClearedNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
+                )
+            )
 
     def handle_turn_started(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
         turn = params.get("turn") or {}
         turn_id = str(turn.get("id", "") or "").strip()
         interrupt_sent = False
-        interrupt_succeeded = False
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            if not self._mark_runtime_event_if_current_execution_target(
-                binding,
-                state,
-                thread_id=thread_id,
-                turn_id=turn_id,
-                allow_unbound_turn_id=True,
-            ):
+        interrupt_failure: Exception | None = None
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_turn_started_event(binding, thread_id, turn_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if not self._resolve_current_execution_target(
-                    runtime,
+            transition = self._runtime.apply_turn_started(
+                TurnStartedNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
                     thread_id=thread_id,
-                    turn_id=turn_id,
-                    allow_unbound_turn_id=True,
-                ):
-                    continue
-                transition = self._turn_execution.prepare_turn_started_locked(
-                    state,
                     turn_id=turn_id,
                     started_at=time.monotonic(),
                 )
-                self._turn_execution.clear_plan_state_locked(state)
+            )
+            if transition is None:
+                continue
+            current = transition.session
             if not transition.reuse_existing_card:
-                if transition.previous_execution_card is not None:
-                    self._dispatch_execution_card_message(
-                        transition.previous_execution_card.message_id,
-                        transcript=transition.previous_execution_card.transcript,
+                previous = transition.previous_execution_card
+                if previous is not None:
+                    self._effects.dispatch_execution_card_message(
+                        current.binding[1],
+                        previous.message_id,
+                        transcript=previous.transcript,
                         running=False,
-                        elapsed=transition.previous_execution_card.elapsed,
-                        cancelled=transition.previous_execution_card.cancelled,
+                        elapsed=previous.elapsed,
+                        cancelled=previous.cancelled,
+                        cursor_start=previous.cursor_start,
+                        cursor_end=previous.cursor_end,
                     )
-                card_id = self._send_execution_card(binding[1], "")
-                with self._lock:
-                    runtime = build_runtime_view(state)
-                    if (
-                        runtime.current_thread_id.strip() == thread_id
-                        and runtime.execution.current_turn_id.strip() == turn_id
-                    ):
-                        self._apply_runtime_state_message_locked(
-                            state,
-                            ExecutionStateChanged(
-                                current_message_id=card_id or "",
-                                last_execution_message_id="",
-                            ),
-                        )
+                    current = self._runtime.current_session(
+                        BindingExecutionTarget.from_session(current)
+                    )
+                    if current is None:
+                        continue
+                page_result = self._effects.open_initial_execution_page(
+                    current,
+                    "",
+                )
+                if page_result.session is None:
+                    continue
+                current = page_result.session
+                if page_result.status is InitialExecutionPageOpenStatus.REJECTED:
+                    logger.error(
+                        "adapter-observed turn has no Feishu execution page: "
+                        "binding=%s turn=%s",
+                        current.binding,
+                        turn_id,
+                    )
             if transition.should_interrupt_started_turn:
+                cancel_target = BindingExecutionTarget.from_session(current)
                 if not interrupt_sent:
                     interrupt_sent = True
                     try:
-                        self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
-                    except Exception:
+                        self._effects.interrupt_running_turn(
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                        )
+                    except Exception as exc:
+                        interrupt_failure = exc
                         logger.exception("turn 启动后自动取消失败")
-                    else:
-                        interrupt_succeeded = True
-                if interrupt_succeeded:
-                    with self._lock:
-                        self._turn_execution.confirm_cancel_requested_locked(state)
-            self._schedule_execution_card_update(*binding)
+                if (
+                    interrupt_failure is not None
+                    and self._effects.is_pre_send_error(interrupt_failure)
+                ):
+                    current = self._runtime.restore_cancel_pending(
+                        RestoreCancelPendingCommand(target=cancel_target)
+                    )
+                else:
+                    current = self._runtime.current_session(cancel_target)
+                if current is None:
+                    continue
+            # The turn/start response identifies the submission, not the
+            # authoritative active turn.  Reinstall the watchdog only after
+            # turn/started has bound that identity (and any execution page),
+            # otherwise its ticket can retain the blank admission identity.
+            self._effects.schedule_mirror_watchdog(current)
+            self._effects.schedule_execution_card_update(current)
 
     def handle_turn_plan_updated(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
         turn_id = str(params.get("turnId", "") or "").strip()
         plan = params.get("plan") or []
-        explanation = params.get("explanation") or ""
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            if not self._mark_runtime_event_if_current_execution_target(
-                binding,
-                state,
-                thread_id=thread_id,
-                turn_id=turn_id,
-            ):
+        steps = tuple(
+            NotificationPlanStep(
+                step=str(item.get("step", "") or "").strip(),
+                status=str(item.get("status", "") or "").strip(),
+            )
+            for item in plan
+            if str(item.get("step", "") or "").strip()
+        )
+        explanation = str(params.get("explanation") or "")
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_execution_event(binding, thread_id, turn_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                    continue
-                if not self._turn_execution.update_plan_outline_locked(
-                    state,
+            updated = self._runtime.apply_plan_outline(
+                PlanOutlineNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
                     turn_id=turn_id,
                     explanation=explanation,
-                    plan=plan,
-                ):
-                    continue
-            self._flush_plan_card(*binding)
+                    steps=steps,
+                )
+            )
+            if updated is not None:
+                self._effects.flush_plan_card(updated)
 
     def handle_item_started(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
         turn_id = str(params.get("turnId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
         item = params.get("item") or {}
         item_type = str(item.get("type", "") or "").strip()
-        if not bindings:
-            return
         interrupt_sent = False
-        interrupt_succeeded = False
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            bound_unstarted_compact = False
-            should_interrupt_started_turn = False
-            with self._lock:
-                runtime = build_runtime_view(state)
-                can_handle = self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id)
-                can_bind_compact = False
-                if not can_handle:
-                    can_bind_compact = self._can_bind_unbound_compact_item_started(
-                        runtime,
+        interrupt_failure: Exception | None = None
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_item_started_event(
+                binding,
+                thread_id,
+                turn_id,
+                item_type,
+            )
+            if marked is None:
+                continue
+            target = BindingExecutionTarget.from_session(marked)
+            if item_type == "commandExecution":
+                projection_text = FeishuExecutionProcessProjection.command_started(
+                    item,
+                    transcript=marked.execution.transcript,
+                )
+                transition = self._runtime.start_process_item(
+                    ProcessItemStartedCommand(
+                        target=target,
                         thread_id=thread_id,
                         turn_id=turn_id,
                         item_type=item_type,
-                    )
-                if not can_handle and not can_bind_compact:
-                    continue
-                self._turn_execution.mark_runtime_event_locked(state, occurred_at=time.monotonic())
-            self._schedule_mirror_watchdog(*binding)
-            self._on_runtime_event_accepted(*binding)
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                    if not self._can_bind_unbound_compact_item_started(
-                        runtime,
-                        thread_id=thread_id,
-                        turn_id=turn_id,
-                        item_type=item_type,
-                    ):
-                        continue
-                    transition = self._turn_execution.prepare_turn_started_locked(
-                        state,
-                        turn_id=turn_id,
+                        text=projection_text,
                         started_at=time.monotonic(),
                     )
-                    self._turn_execution.clear_plan_state_locked(state)
-                    bound_unstarted_compact = True
-                    should_interrupt_started_turn = transition.should_interrupt_started_turn
-                if item_type == "commandExecution":
-                    command = item.get("command") or ""
-                    cwd = item.get("cwd") or ""
-                    self._turn_execution.start_process_block_locked(
-                        state,
-                        text=f"\n$ ({display_path(cwd)}) {command}\n",
-                        marks_work=True,
+                )
+            elif item_type == "fileChange":
+                projection_text = (
+                    FeishuExecutionProcessProjection.file_change_started(
+                        transcript=marked.execution.transcript,
                     )
-                elif item_type == "fileChange":
-                    self._turn_execution.start_process_block_locked(
-                        state,
-                        text="\n[准备应用文件修改]\n",
-                        marks_work=True,
+                )
+                transition = self._runtime.start_process_item(
+                    ProcessItemStartedCommand(
+                        target=target,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_type=item_type,
+                        text=projection_text,
+                        started_at=time.monotonic(),
                     )
-                elif item_type in WORK_ITEM_LABELS:
-                    self._turn_execution.append_process_note_locked(
-                        state,
-                        text=f"\n[{WORK_ITEM_LABELS[item_type]}]\n",
-                        marks_work=True,
+                )
+            elif is_execution_work_item_type(item_type):
+                label = WORK_ITEM_LABELS.get(item_type, "")
+                transition = self._runtime.start_work_item(
+                    WorkItemStartedCommand(
+                        target=target,
+                        thread_id=thread_id,
+                        turn_id=turn_id,
+                        item_type=item_type,
+                        text=f"\n[{label}]\n" if label else "",
+                        started_at=time.monotonic(),
                     )
-                else:
-                    continue
-            if should_interrupt_started_turn:
+                )
+            else:
+                continue
+            if transition is None:
+                continue
+            current = transition.session
+            if transition.should_interrupt_started_turn:
+                cancel_target = BindingExecutionTarget.from_session(current)
                 if not interrupt_sent:
                     interrupt_sent = True
                     try:
-                        self._interrupt_running_turn(thread_id=thread_id, turn_id=turn_id)
-                    except Exception:
+                        self._effects.interrupt_running_turn(
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                        )
+                    except Exception as exc:
+                        interrupt_failure = exc
                         logger.exception("turn 启动后自动取消失败")
-                    else:
-                        interrupt_succeeded = True
-                if interrupt_succeeded:
-                    with self._lock:
-                        self._turn_execution.confirm_cancel_requested_locked(state)
-            self._schedule_execution_card_update(*binding)
+                if (
+                    interrupt_failure is not None
+                    and self._effects.is_pre_send_error(interrupt_failure)
+                ):
+                    current = self._runtime.restore_cancel_pending(
+                        RestoreCancelPendingCommand(target=cancel_target)
+                    )
+                else:
+                    current = self._runtime.current_session(cancel_target)
+                if current is None:
+                    continue
+            self._effects.schedule_execution_card_update(current)
 
     def handle_agent_message_delta(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
         turn_id = str(params.get("turnId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
         delta = str(params.get("delta", "") or "")
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            if not self._mark_runtime_event_if_current_execution_target(
-                binding,
-                state,
-                thread_id=thread_id,
-                turn_id=turn_id,
-            ):
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_execution_event(binding, thread_id, turn_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                    continue
-                self._turn_execution.append_assistant_delta_locked(
-                    state,
+            updated = self._runtime.append_assistant_delta(
+                AssistantDeltaNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
                     delta=delta,
                 )
-            self._schedule_execution_card_update(*binding)
+            )
+            if updated is not None:
+                self._effects.schedule_execution_card_update(updated)
 
     def handle_command_delta(self, params: dict[str, Any]) -> None:
-        thread_id = str(params.get("threadId", "") or "").strip()
-        turn_id = str(params.get("turnId", "") or "").strip()
-        self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""), turn_id=turn_id)
+        self._observe_process_progress_by_thread(
+            str(params.get("threadId", "") or "").strip(),
+            turn_id=str(params.get("turnId", "") or "").strip(),
+        )
 
-    def handle_file_change_delta(self, params: dict[str, Any]) -> None:
-        thread_id = str(params.get("threadId", "") or "").strip()
-        turn_id = str(params.get("turnId", "") or "").strip()
-        self._append_log_by_thread(thread_id, str(params.get("delta", "") or ""), turn_id=turn_id)
+    def handle_file_change_patch_updated(self, params: dict[str, Any]) -> None:
+        self._observe_process_progress_by_thread(
+            str(params.get("threadId", "") or "").strip(),
+            turn_id=str(params.get("turnId", "") or "").strip(),
+        )
 
     def handle_item_completed(self, params: dict[str, Any]) -> None:
         item = params.get("item") or {}
         item_type = str(item.get("type", "") or "").strip()
         thread_id = str(params.get("threadId", "") or "").strip()
         turn_id = str(params.get("turnId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            if not self._mark_runtime_event_if_current_execution_target(
-                binding,
-                state,
-                thread_id=thread_id,
-                turn_id=turn_id,
-            ):
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_execution_event(binding, thread_id, turn_id)
+            if marked is None:
                 continue
+            target = BindingExecutionTarget.from_session(marked)
             if item_type == "commandExecution":
-                with self._lock:
-                    runtime = build_runtime_view(state)
-                    if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                        continue
-                    self._turn_execution.finish_process_block_locked(
-                        state,
-                        suffix=f"\n[命令结束 status={item.get('status')} exit={item.get('exitCode')}]\n",
+                updated = self._runtime.finish_process_block(
+                    FinishProcessBlockCommand(
+                        target=target,
+                        suffix=FeishuExecutionProcessProjection.command_completed(
+                            item,
+                            transcript=marked.execution.transcript,
+                        ),
+                        marks_work=True,
                     )
-                self._schedule_execution_card_update(*binding)
+                )
+                projection = "execution"
             elif item_type == "fileChange":
-                changes = item.get("changes") or []
-                suffix = ""
-                if changes:
-                    summary = "\n".join(
-                        f"- {change.get('kind', 'update')}: {change.get('path', '')}"
-                        for change in changes[:20]
+                updated = self._runtime.finish_process_block(
+                    FinishProcessBlockCommand(
+                        target=target,
+                        suffix=(
+                            FeishuExecutionProcessProjection.file_change_completed(
+                                item,
+                                transcript=marked.execution.transcript,
+                            )
+                        ),
+                        marks_work=True,
                     )
-                    suffix = f"\n[文件变更]\n{summary}\n"
-                with self._lock:
-                    runtime = build_runtime_view(state)
-                    if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                        continue
-                    self._turn_execution.finish_process_block_locked(state, suffix=suffix)
-                self._schedule_execution_card_update(*binding)
-            elif item_type == "agentMessage" and item.get("text"):
-                with self._lock:
-                    runtime = build_runtime_view(state)
-                    if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                        continue
-                    self._turn_execution.reconcile_current_assistant_text_locked(
-                        state,
-                        text=str(item.get("text", "") or ""),
+                )
+                projection = "execution"
+            elif item_type == "agentMessage":
+                raw_text = item.get("text")
+                if type(raw_text) is not str:
+                    updated = self._runtime.record_unavailable_assistant_completion(
+                        RecordUnavailableAssistantCompletionCommand(target=target)
                     )
-                self._schedule_execution_card_update(*binding)
-            elif item_type in WORK_ITEM_LABELS:
-                with self._lock:
-                    runtime = build_runtime_view(state)
-                    if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                        continue
-                    self._turn_execution.finish_process_block_locked(state)
-                self._schedule_execution_card_update(*binding)
+                else:
+                    updated = self._runtime.reconcile_assistant_text(
+                        ReconcileAssistantTextCommand(
+                            target=target,
+                            text=raw_text,
+                            terminal_candidate=(
+                                agent_message_can_be_terminal_candidate(
+                                    item.get("phase")
+                                )
+                            ),
+                            item_id=(
+                                item.get("id", "").strip()
+                                if type(item.get("id")) is str
+                                else ""
+                            ),
+                        )
+                    )
+                projection = "execution"
             elif item_type == "plan" and item.get("text"):
-                with self._lock:
-                    runtime = build_runtime_view(state)
-                    if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                        continue
-                    if not self._turn_execution.update_plan_text_locked(
-                        state,
+                updated = self._runtime.apply_plan_text(
+                    PlanTextNotificationCommand(
+                        target=target,
                         turn_id=turn_id,
                         text=str(item.get("text", "") or ""),
-                    ):
-                        continue
-                self._flush_plan_card(*binding)
+                    )
+                )
+                projection = "plan"
+            elif is_execution_work_item_type(item_type):
+                updated = self._runtime.finish_process_block(
+                    FinishProcessBlockCommand(
+                        target=target,
+                        marks_work=is_terminal_invalidating_work_item_type(
+                            item_type
+                        ),
+                    )
+                )
+                projection = "execution"
+            else:
+                continue
+            if updated is None:
+                continue
+            if projection == "plan":
+                self._effects.flush_plan_card(updated)
+            else:
+                self._effects.schedule_execution_card_update(updated)
 
     def handle_turn_completed(self, params: dict[str, Any]) -> None:
         thread_id = str(params.get("threadId", "") or "").strip()
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
         turn = params.get("turn") or {}
         error = turn.get("error") or {}
         status = str(turn.get("status", "") or "").strip()
         turn_id = str(turn.get("id", "") or "").strip()
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            if not self._mark_runtime_event_if_current_execution_target(
-                binding,
-                state,
-                thread_id=thread_id,
-                turn_id=turn_id,
-            ):
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_execution_event(binding, thread_id, turn_id)
+            if marked is None:
                 continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                    continue
-                self._turn_execution.apply_turn_completed_locked(
-                    state,
+            updated = self._runtime.apply_turn_completed(
+                TurnCompletedNotificationCommand(
+                    target=BindingExecutionTarget.from_session(marked),
                     status=status,
-                    error_message=str(error.get("message") or "执行失败").strip() if error else "",
+                    error_message=(
+                        str(error.get("message") or "执行失败").strip()
+                        if error
+                        else ""
+                    ),
                 )
-                current_turn_id = build_runtime_view(state).execution.current_turn_id.strip()
-            self._finalize_execution_from_terminal_signal(
-                binding[0],
-                binding[1],
-                thread_id=thread_id,
-                turn_id=turn_id or current_turn_id,
+            )
+            if updated is not None:
+                self._effects.finalize_execution_from_terminal_signal(
+                    updated,
+                    thread_id=thread_id,
+                    turn_id=turn_id or updated.execution.current_turn_id.strip(),
+                )
+
+    def _observe_process_progress_by_thread(
+        self,
+        thread_id: str,
+        *,
+        turn_id: str = "",
+    ) -> None:
+        for binding in self._bindings_for_thread(thread_id):
+            marked = self._mark_execution_event(binding, thread_id, turn_id)
+            if marked is None:
+                continue
+            self._runtime.mark_process_work(
+                MarkProcessWorkCommand(
+                    target=BindingExecutionTarget.from_session(marked),
+                )
             )
 
-    def _append_log_by_thread(self, thread_id: str, text: str, *, turn_id: str = "") -> None:
-        bindings = self._bindings_for_thread(thread_id)
-        if not bindings:
-            return
-        for binding in bindings:
-            state = self._get_runtime_state(*binding)
-            if not self._mark_runtime_event_if_current_execution_target(
-                binding,
-                state,
+    def _bindings_for_thread(self, thread_id: str) -> tuple[ChatBindingKey, ...]:
+        normalized = str(thread_id or "").strip()
+        return self._thread_subscribers(normalized) if normalized else ()
+
+    def _mark_thread_event(
+        self,
+        binding: ChatBindingKey,
+        thread_id: str,
+    ) -> BindingSessionSnapshot | None:
+        captured = self._runtime.resident_session(binding)
+        if captured is None:
+            return None
+        marked = self._runtime.mark_thread_runtime_event(
+            ThreadRuntimeEventCommand(
+                target=BindingExecutionTarget.from_session(captured),
+                thread_id=thread_id,
+                occurred_at=time.monotonic(),
+            )
+        )
+        return self._after_runtime_event(marked)
+
+    def _mark_execution_event(
+        self,
+        binding: ChatBindingKey,
+        thread_id: str,
+        turn_id: str,
+    ) -> BindingSessionSnapshot | None:
+        captured = self._runtime.resident_session(binding)
+        if captured is None:
+            return None
+        marked = self._runtime.mark_execution_runtime_event(
+            ExecutionRuntimeEventCommand(
+                target=BindingExecutionTarget.from_session(captured),
                 thread_id=thread_id,
                 turn_id=turn_id,
-            ):
-                continue
-            with self._lock:
-                runtime = build_runtime_view(state)
-                if not self._resolve_current_execution_target(runtime, thread_id=thread_id, turn_id=turn_id):
-                    continue
-                self._turn_execution.append_process_delta_locked(state, text=text)
-            self._schedule_execution_card_update(*binding)
+                occurred_at=time.monotonic(),
+            )
+        )
+        return self._after_runtime_event(marked)
+
+    def _mark_turn_started_event(
+        self,
+        binding: ChatBindingKey,
+        thread_id: str,
+        turn_id: str,
+    ) -> BindingSessionSnapshot | None:
+        captured = self._runtime.resident_session(binding)
+        if captured is None:
+            return None
+        marked = self._runtime.mark_turn_started_runtime_event(
+            TurnStartedRuntimeEventCommand(
+                target=BindingExecutionTarget.from_session(captured),
+                thread_id=thread_id,
+                turn_id=turn_id,
+                occurred_at=time.monotonic(),
+            )
+        )
+        # turn/started binds the authoritative turn identity in the next
+        # transition.  Its watchdog is installed once from that post-bind
+        # snapshot in handle_turn_started().
+        return marked
+
+    def _mark_item_started_event(
+        self,
+        binding: ChatBindingKey,
+        thread_id: str,
+        turn_id: str,
+        item_type: str,
+    ) -> BindingSessionSnapshot | None:
+        captured = self._runtime.resident_session(binding)
+        if captured is None:
+            return None
+        marked = self._runtime.mark_item_started_runtime_event(
+            ItemStartedRuntimeEventCommand(
+                target=BindingExecutionTarget.from_session(captured),
+                thread_id=thread_id,
+                turn_id=turn_id,
+                item_type=item_type,
+                occurred_at=time.monotonic(),
+            )
+        )
+        return self._after_runtime_event(marked)
+
+    def _after_runtime_event(
+        self,
+        session: BindingSessionSnapshot | None,
+    ) -> BindingSessionSnapshot | None:
+        if session is None:
+            return None
+        self._effects.schedule_mirror_watchdog(session)
+        return session

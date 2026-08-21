@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from bot.__main__ import main
+from bot.system_config import SystemConfig
 from bot.version import __version__
 
 
@@ -49,10 +50,10 @@ class MainEntrypointTests(unittest.TestCase):
                                         main([])
 
         bot_cls.assert_called_once_with(
-            "app-id",
-            "app-secret",
-            request_timeout_seconds=5.0,
-            system_config={"app_id": "app-id", "app_secret": "app-secret"},
+            system_config=SystemConfig(
+                app_id="app-id",
+                app_secret="app-secret",
+            )
         )
         bot.start.assert_called_once_with()
 

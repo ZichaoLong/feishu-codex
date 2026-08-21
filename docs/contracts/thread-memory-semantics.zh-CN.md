@@ -1,6 +1,6 @@
 # Thread Memory 语义（已退役）
 
-英文原文：`docs/contracts/thread-memory-semantics.md`
+文档角色：中文规范源。英文同步副本：`docs/contracts/thread-memory-semantics.md`。
 
 本文件只作为历史名称下的退役说明保留。
 

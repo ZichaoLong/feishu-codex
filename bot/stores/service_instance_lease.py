@@ -17,7 +17,12 @@ import time
 from dataclasses import dataclass
 
 from bot.file_permissions import ensure_private_file_permissions
-from bot.file_lock import FileLockBusyError, acquire_file_lock, release_file_lock
+from bot.file_lock import (
+    FileLockBusyError,
+    acquire_file_lock,
+    open_lock_file,
+    release_file_lock,
+)
 from bot.process_utils import process_exists
 
 
@@ -58,7 +63,7 @@ class ServiceInstanceMaintenanceLease:
                 return
             lease_path = self._lease_path()
             lease_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_file = lease_path.open("a+", encoding="utf-8")
+            lock_file = open_lock_file(lease_path)
             try:
                 acquire_file_lock(lock_file, blocking=False)
             except FileLockBusyError as exc:
@@ -113,12 +118,21 @@ class ServiceInstanceLease:
         normalized_control_endpoint = str(control_endpoint or "").strip()
         with self._lock:
             current = self._read_metadata_unlocked()
-            if self._lock_file is not None and self._owner_token and current is not None:
-                return current
+            if self._lock_file is not None:
+                if (
+                    self._owner_token
+                    and current is not None
+                    and current.owner_token == self._owner_token
+                ):
+                    return current
+                raise ServiceInstanceLeaseError(
+                    "当前进程仍持有 service OS lease，但 matching metadata "
+                    "缺失或已改变；拒绝创建第二个 lease handle。"
+                )
 
             lease_path = self._lease_path()
             lease_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_file = lease_path.open("a+", encoding="utf-8")
+            lock_file = open_lock_file(lease_path)
             try:
                 acquire_file_lock(lock_file, blocking=False)
             except FileLockBusyError as exc:
@@ -130,15 +144,49 @@ class ServiceInstanceLease:
                     "当前 FOCUS_DATA_DIR 已有运行中的 FOCUS service 或 maintenance 操作持有所有权。"
                     f" owner_pid={owner_pid or 'unknown'} control={owner_endpoint or 'unknown'}"
                 ) from exc
+            except BaseException:
+                # Closing is the only portable fallback when lock acquisition
+                # itself fails after partially changing platform lock state.
+                try:
+                    lock_file.close()
+                except BaseException:
+                    pass
+                raise
 
-            owner_token = secrets.token_urlsafe(24)
-            metadata = ServiceInstanceMetadata(
-                owner_pid=os.getpid(),
-                owner_token=owner_token,
-                control_endpoint=normalized_control_endpoint,
-                started_at=time.time(),
-            )
-            self._write_metadata_unlocked(metadata)
+            owner_token = ""
+            try:
+                owner_token = secrets.token_urlsafe(24)
+                metadata = ServiceInstanceMetadata(
+                    owner_pid=os.getpid(),
+                    owner_token=owner_token,
+                    control_endpoint=normalized_control_endpoint,
+                    started_at=time.time(),
+                )
+                self._write_metadata_unlocked(metadata)
+            except BaseException:
+                # Publication and in-memory ownership are one transaction. If
+                # publication fails, do not depend on traceback/GC lifetime to
+                # release the authoritative OS lock.
+                if owner_token:
+                    try:
+                        published = self._read_metadata_unlocked()
+                        if (
+                            published is not None
+                            and published.owner_token == owner_token
+                        ):
+                            self._delete_metadata_unlocked()
+                    except BaseException:
+                        pass
+                try:
+                    release_file_lock(lock_file)
+                except BaseException:
+                    pass
+                try:
+                    lock_file.close()
+                except BaseException:
+                    pass
+                raise
+
             self._lock_file = lock_file
             self._owner_token = owner_token
             return metadata
@@ -176,17 +224,54 @@ class ServiceInstanceLease:
         with self._lock:
             lock_file = self._lock_file
             owner_token = self._owner_token
-            self._lock_file = None
-            self._owner_token = ""
+            if lock_file is None:
+                return
+            # Metadata is a projection of this exact OS-lock generation. If
+            # its matching entry cannot be removed, retain the lock and the
+            # in-memory token so lifecycle.stop() can retry without opening a
+            # second service-generation window.
             metadata = self._read_metadata_unlocked()
             if metadata is not None and metadata.owner_token == owner_token:
                 self._delete_metadata_unlocked()
-        if lock_file is None:
-            return
-        try:
-            release_file_lock(lock_file)
-        finally:
-            lock_file.close()
+
+            unlock_error: Exception | None = None
+            try:
+                release_file_lock(lock_file)
+            except Exception as exc:
+                unlock_error = exc
+
+            close_error: Exception | None = None
+            try:
+                lock_file.close()
+            except Exception as exc:
+                close_error = exc
+                try:
+                    if lock_file.closed:
+                        close_error = None
+                except Exception:
+                    pass
+
+            # Either an explicit unlock or a completed close proves the OS
+            # authority is gone. A close-only cleanup failure after a proved
+            # unlock is not allowed to masquerade as retained authority.
+            released = unlock_error is None or close_error is None
+            if released:
+                self._lock_file = None
+                self._owner_token = ""
+                if close_error is not None:
+                    # The descriptor is already unlocked. Retry close once as
+                    # non-authoritative resource cleanup; process exit remains
+                    # the final fallback for an exotic persistent close error.
+                    try:
+                        lock_file.close()
+                    except Exception:
+                        pass
+                return
+
+            # Neither operation proved release. Preserve the exact handle and
+            # token so an explicit retry remains possible and fail closed.
+            assert unlock_error is not None
+            raise unlock_error
 
     def _read_metadata_unlocked(self) -> ServiceInstanceMetadata | None:
         path = self._metadata_path()

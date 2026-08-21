@@ -1,6 +1,6 @@
 # Thread Next-Load Settings Semantics
 
-Chinese original: `docs/contracts/thread-next-load-settings-semantics.zh-CN.md`
+Document role: synchronized English peer. Canonical Chinese: `docs/contracts/thread-next-load-settings-semantics.zh-CN.md`.
 
 This file is retained as a retirement note under its historical name.
 
@@ -35,6 +35,11 @@ Their semantics:
 - on unloaded-thread recovery, cold `thread/resume` may also carry a narrow
   one-shot subset for the first post-resume autonomous turn
 - are not thread-level persisted restore settings
+
+This setting timing does not authorize an observer to resume. Only the closed
+reviewed-safe goal preflight in `root-operation-owner.md` can permit that
+record-less path; active, empty, unreadable, future, or unrecognized status
+makes resume continuation-capable and requires connected writer admission.
 
 ### 2.2 Upstream-owned process and thread state
 

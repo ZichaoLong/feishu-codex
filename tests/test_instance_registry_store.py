@@ -4,8 +4,13 @@ import pathlib
 import queue
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
+from bot.stores.instance_registry_store import (
+    InstanceRegistryStore,
+    InstanceRegistryStoreUnavailable,
+    build_instance_registry_entry,
+)
 
 
 def _register_instances_worker(
@@ -135,6 +140,86 @@ class InstanceRegistryStoreTests(unittest.TestCase):
             {entry.instance_name for entry in store.list_instances()},
             expected_instance_names,
         )
+
+    def test_corrupted_json_fails_closed_without_read_rewrite(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        path = root_dir / "instance_registry.json"
+        original = b"{broken"
+        path.write_bytes(original)
+        store = InstanceRegistryStore(root_dir)
+
+        with self.assertRaises(InstanceRegistryStoreUnavailable):
+            store.list_instances()
+        with self.assertRaises(InstanceRegistryStoreUnavailable):
+            store.register(
+                build_instance_registry_entry(
+                    instance_name="corp-a",
+                    service_token="token-a",
+                    control_endpoint="tcp://127.0.0.1:9101",
+                    app_server_url="ws://127.0.0.1:9101",
+                    config_dir=pathlib.Path("/tmp/config-a"),
+                    data_dir=pathlib.Path("/tmp/data-a"),
+                    owner_pid=os.getpid(),
+                )
+            )
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_future_schema_fails_closed_without_overwrite(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        path = root_dir / "instance_registry.json"
+        original = b'{"schema_version": 999, "records": {}}\n'
+        path.write_bytes(original)
+
+        with self.assertRaises(InstanceRegistryStoreUnavailable):
+            InstanceRegistryStore(root_dir).list_instances()
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_duplicate_json_keys_are_not_silently_collapsed(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        path = root_dir / "instance_registry.json"
+        original = b'{"schema_version": 1, "schema_version": 1, "records": {}}\n'
+        path.write_bytes(original)
+
+        with self.assertRaises(InstanceRegistryStoreUnavailable):
+            InstanceRegistryStore(root_dir).list_instances()
+
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_pid_reuse_identity_prunes_old_instance_generation(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        store = InstanceRegistryStore(root_dir)
+        with patch(
+            "bot.stores.instance_registry_store.process_identity",
+            return_value="old-incarnation",
+        ):
+            store.register(
+                build_instance_registry_entry(
+                    instance_name="corp-a",
+                    service_token="token-a",
+                    control_endpoint="tcp://127.0.0.1:9101",
+                    app_server_url="ws://127.0.0.1:9101",
+                    config_dir=pathlib.Path("/tmp/config-a"),
+                    data_dir=pathlib.Path("/tmp/data-a"),
+                    owner_pid=os.getpid(),
+                )
+            )
+
+        with patch("bot.stores.instance_registry_store.process_exists", return_value=True):
+            with patch(
+                "bot.stores.instance_registry_store.process_identity",
+                return_value="different-incarnation",
+            ):
+                self.assertIsNone(store.load("corp-a"))
 
 
 if __name__ == "__main__":

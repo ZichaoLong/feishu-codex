@@ -1,380 +1,365 @@
 # FOCUS 技术设计
 
-英文原文：`docs/architecture/focus-design.md`
+文档角色：中文规范源。英文同步副本：`docs/architecture/focus-design.md`。
+
+本文只描述当前架构地图：层、owner、事实源与依赖方向。具体产品行为属于
+`docs/contracts/`；历史取舍属于 `docs/decisions/`；阶段进度属于 `docs/_work/`，不能反向成为
+运行时合同。
 
 另见：
 
-- `docs/contracts/thread-profile-semantics.zh-CN.md`
-- `docs/architecture/focus-shared-backend-runtime.zh-CN.md`
-- `docs/decisions/shared-backend-resume-safety.zh-CN.md`
-- `docs/decisions/feishu-output-images.zh-CN.md`
-- `docs/archive/codex-handler-decomposition-plan.zh-CN.md`
-
-## 1. 背景
-
-FOCUS 是一个独立的、面向 Codex 的项目，不是旧 Claude 集成的简单改名版本。
-
-历史背景仍然重要：
-
-- [`clfeishu`](https://github.com/ZichaoLong/clfeishu) 验证了“飞书消息 + 卡片 + 审批 + 会话管理”这条交互路径是有价值的
-- 但它依赖 Claude 特有的本地文件格式和 hook 行为
-- FOCUS 保留飞书侧交互经验，同时把 agent/runtime 集成层切换到 Codex 原生能力
-
-上游基线：
-
-- Codex 源码仓库：[`openai/codex`](https://github.com/openai/codex.git)
-- 当前本地验证基线：`codex-cli 0.118.0`，本地可解析到上游 tag
-  `rust-v0.118.0`（commit
-  `b630ce9a4e754d35a1f33e4366ba638d18626142`），核对日期为 2026-04-03
-- 如果本文后续需要引用具体上游源码位置，应优先使用绑定到该基线
-  commit 的 `openai/codex` permalink，而不是开发者本机 checkout 路径
-
-本项目的当前设计，建立在这些 Codex 能力之上：
-
-- `codex app-server` 作为主要的应用侧运行时接口
-- `codex exec --json` 作为结构化探针 / 调试辅助
-- `codex exec resume` 以及 thread-oriented 的 CLI / app-server 路径，用于会话连续性
-
-## 2. 目标
-
-- 提供一个面向 Codex 的 Feishu bridge，覆盖 prompt、流式输出、审批和长生命周期线程管理
-- 让 Codex 线程元数据继续以 Codex 自身为单一事实来源
-- 尽量减少对私有磁盘格式或 shell hook 行为的依赖
-- 让飞书层、本地 wrapper 层、Codex 协议层保持清晰分离
-- 为“飞书与本地继续同一个 live thread”保留一条低认知负担的 shared-backend 路径
-- 允许同一台机器上的同一位本地操作者同时运行多个 Feishu 实例，同时继续共享一套 `CODEX_HOME`
-
-## 3. 非目标
-
-- 不在飞书里重建 Codex TUI 屏幕
-- 不依赖未公开的 Codex 磁盘布局来做线程发现或元数据同步
-- 第一版不追求覆盖 Codex 的所有实验特性
-- 不把 `clfeishu` 代码复用当作当前架构前提
-- 不把裸 `codex` 与 shared-backend `focus` / `fcodex` 视为同一条运行路径
-
-## 4. 当前设计原则
-
-- 原生协议优先：优先使用 `codex app-server` 行为和 API，而不是本地抓取或重建状态
-- 单一事实来源：thread id、cwd、title、preview、source、runtime config 来自 Codex
-- 飞书本地状态留在本地：线程/UI 绑定状态由 FOCUS 管理；机器级共享状态只保留 runtime lease、实例注册表这类协调信息
-- shared-backend 路径显式存在：如果要和飞书继续同一个 live thread，应明确走同一个**实例 backend**
-- `CODEX_HOME` 与 Feishu 运行时边界分离：前者共享，后者按实例隔离
-- 运行时假设要文档化：wrapper 与 shared-backend 行为不能只隐含在代码里
-
-## 5. 当前架构
-
-### 5.1 分层
-
-FOCUS 当前可分成四层：
-
-1. 飞书传输层
-   - 接收用户消息与卡片动作
-   - 发送文本、卡片与 patch 更新
-2. 应用层
-   - 命令路由
-   - 私聊按用户维护运行时状态，群聊按 `chat_id` 维护共享运行时状态
-   - 卡片渲染
-   - `/threads` 与 `/resume` 协调
-3. Codex adapter / protocol 层
-   - 持有 Codex 运行时连接
-   - 将 handler 的意图翻译成 Codex 请求
-   - 归一化 Codex 的通知与响应
-4. 本地状态层
-   - 存储飞书独有元数据与运行时发现状态
-   - 不替代 Codex 的线程元数据
-
-### 5.2 运行时拓扑
-
-当前运行时行为：
-
-- 所有实例共享同一个 `CODEX_HOME`
-- 每个实例各自持有：
-  - `FOCUS_CONFIG_DIR`
-  - `FOCUS_DATA_DIR`
-  - service owner
-  - control plane
-  - managed `codex app-server` backend
-- 每个实例的 managed `codex app-server` websocket 面都要求实例私有 capability token；该 token 属于 backend 连接层，不属于 control-plane token
-- `shared backend` 在当前仓库里表示“实例内共享 backend”，不是“全系统只存在一个 backend”
-- 某实例的 backend 默认优先 `ws://127.0.0.1:8765`
-- 如果默认端口不可用，该实例 service 会自动切到空闲本地端口，并把当前实际地址写入该实例自己的运行时状态
-- `focus` / `fcodex` 会先选择目标实例，再发现该实例的实际 backend 地址，并附着到同一个实例 backend
-- 当 upstream remote 模式需要 cwd 修正时，`focus` / `fcodex` 会额外加一个很薄的本地 websocket 代理；该代理也有独立的 per-launch bearer token，并通过 wrapper 环境变量注入给 upstream Codex
-- 机器级还维护两份全局协调状态：
-  - 运行中实例注册表
-  - thread live runtime lease
-
-shared backend 与 wrapper 的具体机制，见
-`docs/architecture/focus-shared-backend-runtime.zh-CN.md`。
-
-### 5.3 核心模块
-
-当前主要模块分工：
-
-- `bot/codex_handler.py`：飞书侧命令处理与线程绑定
-- `bot/cards.py`：用户可见卡片渲染
-- `bot/card_text_projection.py`：卡片文本投影边界；负责终态 `final_reply_text` 结果载体约定，以及入站 `interactive` 的强合同 / best-effort 文本提取
-- `bot/adapters/codex_app_server.py`：Codex adapter 边界
-- `bot/codex_protocol/client.py`：`codex app-server` 的 websocket JSON-RPC client
-- `bot/fcodex.py` 与 `bot/fcodex_proxy.py`：本地 wrapper 与带 owner 过滤的代理
-- `bot/focusctl.py`：公开 `focusctl` 管理入口调度器，统一路由 service lifecycle 与 runtime 管理资源
-- `bot/manage_cli.py`：安装、配置、实例目录、service lifecycle、wrapper 与 completion 管理
-- `bot/runtime_admin_cli.py` 与 `bot/service_control_plane.py`：runtime 管理子命令与运行中服务控制面
-- `bot/instance_layout.py` 与 `bot/instance_resolution.py`：多实例目录布局、当前/目标实例解析
-- `bot/binding_identity.py`：admin-facing binding 标识规范
-- `bot/binding_runtime_manager.py`：binding / subscribe / attach / detach 与本地 runtime snapshot 的 owner
-- `bot/thread_access_policy.py`：线程共享与 interaction owner 的准入 policy 边界
-- `bot/thread_runtime_coordination.py`：跨实例 live runtime 的 loaded-gate 准入、原子 lease claim 与拒绝
-- `bot/turn_execution_coordinator.py`、`bot/execution_output_controller.py`、`bot/execution_recovery_controller.py`：turn / execution 生命周期、执行卡片发布、终态结果载体发送、watchdog / reconcile / degrade 处理
-- `bot/generated_image_delivery.py`：基于终态 thread snapshot 的出站图片提取与独立飞书图片消息发送；它不改写权威文本结果合同，也不进入 execution card patch 模型
-- `bot/runtime_admin_controller.py`：`/status`、`/detach`、`/attach` 与 control-plane 查询/管理
-- `bot/inbound_surface_controller.py`：入站命令面、卡片 action 路由、help 卡片命令复用
-- `bot/forward_aggregator.py`：合并转发缓冲、超时分发与转发树文本化；它只持有这组 transport 内部状态机，不再把这部分状态散落在 `FeishuBot` 主体里
-- `bot/group_history_recovery.py`：`assistant` 群模式的历史回捞、实时日志合并、上下文格式化与边界 `message_id` 推导；它不直接依赖飞书 SDK，请求构造与 API 调用仍留在 `FeishuBot` 这一 transport 边界，并通过显式 ports 传入分页结果
-- `bot/prompt_turn_entry_controller.py`：prompt 进入、lease 准入、detached -> attached 恢复编排
-- `bot/adapter_notification_controller.py`：adapter notification 的 method 路由、语义解释与下游分发
-- `bot/interaction_request_controller.py`：审批 / 用户输入这类交互请求的 pending 状态与 fail-close 收口
-- `bot/codex_threads_ui_domain.py`：当前目录线程卡片 UI 流程，包括重命名表单这类瞬时 UI 状态，以及通过 `RuntimeLoop` 串行化的 resume 目标解析
-- `bot/codex_goal_domain.py`：thread-level `/goal` 读写面、goal 卡片生成流程，以及当前 binding 的本地 goal 投影更新
-- `bot/codex_settings_domain.py`：用户侧设置与身份命令，包括 `/model`、`/effort`、`/approval`、`/permissions`、`/whoami` 与 `/init`；它通过显式 `SettingsDomainPorts` 穿过 bot/runtime 边界，而不是继续持有宽泛的 handler owner
-- `bot/execution_transcript.py`：执行卡片展示层的内部 transcript 组装器；负责 display-only 的 `reply_segments` / `process_log` 片段拼装，并支持在权威终态结果已经单独送达后，把最后一段最终答案从 execution card 的 reply 面板里剔除；它不承担 thread、owner 或 binding 级状态职责
-- `bot/stores/generated_image_delivery_store.py`：每实例的已投递生成图片账本；按 binding/thread/turn/item 去重，避免 reconcile 或重复终态信号下重复发图
-- `bot/stores/instance_registry_store.py`：机器级运行中实例注册表
-- `bot/stores/thread_runtime_lease_store.py`：机器级 thread live runtime lease
-- `bot/stores/*.py`：shared backend 运行时发现状态、群聊状态；以及机器级的 runtime lease / registry 等协调状态
-
-对飞书传输层还应补一条维护性约束：
-
-- `FeishuBot` 这类 transport-boundary 模块，对飞书 SDK 的依赖面应尽量显式
-- 不应长期依赖通配符导入来隐含“当前到底用了哪些 IM API 类型”
-
-在 adapter 抽象层上，还有一条需要保持清晰的合同：
-
-- `resume` 的请求输入不应再被抽象成历史上的 `profile` 语义
-- 对 unloaded thread，Feishu 当前只会在 cold `thread/resume` 上携带一小段
-  one-shot runtime override：`model`、`reasoning_effort`、
-  `approval_policy`、`permissions_profile_id`
-- 对 loaded thread，运行时纠偏仍应走 `thread/settings/update`，而不是把
-  `thread/resume` 当成通用的 live-runtime 改写接口
-
-因此，adapter 边界必须准确表达“resume 可以接受哪些输入”，而不是把抽象层写成比真实调用面更窄的旧合同。
-
-线程摘要读取也应保持两类合同分离：
-
-- authoritative read：按 `thread_id` 直接向 backend 读取，供真正要落操作的路径使用
-- bounded-list best-effort lookup：只从当前全局列表视图里补充上下文或错误提示，不能反过来当作 thread 一定不存在的证明
-
-并发 ownership 这一轮已经完成了主要收口；当前仍需继续保持清晰、并在后续增量功能中继续收紧的边界是：
-
-- `RuntimeLoop` 已是当前 handler 运行时状态变更的主要串行化原语
-- session UI 发起的 resume 目标解析与后续恢复切换，也应通过 `RuntimeLoop` 进入统一串行化边界，而不是额外起裸后台线程侧向触碰共享 adapter/runtime 边界
-- binding 解析与 runtime state 的 hydrate/create 应走单一 resolver 入口，
-  不应在多个调用点里继续手写“先挑 binding key，再决定是否建 state”的两段式流程
-- `ThreadSubscriptionRegistry` 这类对象当前应视为 runtime-owned 内部状态，而不是通用线程安全组件
-- 线程共享与 interaction owner 这组准入规则，应集中在单一 policy 边界；
-  目前对应为 `ThreadAccessPolicy`，而不是继续散落在 handler / prompt / group 入口里
-- `BindingRuntimeManager` 对其他组件应优先暴露 snapshot / inventory / iteration 这类显式读取接口，
-  而不是再把整份可变 runtime-state map 直接交给外层持有
-- 像 `PromptTurnEntryController` 这类编排组件，对外依赖面应通过显式 ports 装配，
-  不应继续扩大匿名 callback 列表
-- session UI 发起的 resume 流程，也应通过显式 runtime ports 穿过运行时边界，
-  而不是在 domain 内直接触达 handler 私有的 loop helper
-- settings / group / file-message 这类 bot-facing domain，也应只依赖具名 ports 暴露的必要 bot/runtime 能力，
-  不应继续保留带隐式 `bot: Any` 的宽泛 owner protocol
-- settings domain 命令也应通过具名 settings ports 获取 bot 身份/消息上下文、runtime view/update 与当前 binding 的 runtime settings，
-  而不是依赖宽泛的 handler owner protocol
-- `CodexHandler._lock` 仍然是一个覆盖面较大的共享状态兜底锁，但长期目标不应是继续围绕它细分锁，而应是减少必须共享、必须一起上锁的状态面
-
-当前这一层拆分已经不只是“把 help/settings/group/thread/file 等领域从单体逻辑里抽出去”。历史计划里提出的 ownership 拆分主线，目前已经大体落地：
-
-- `BindingRuntimeManager` 已持有 `binding` / `subscribe` / `attach` / `detach` 这一组 Feishu runtime 管理
-- `ThreadAccessPolicy` 与 lease store 已持有 interaction owner 的准入规则
-- `TurnExecutionCoordinator`、`ExecutionOutputController`、`ExecutionRecoveryController`、`InteractionRequestController`、`AdapterNotificationController` 已共同持有 turn / execution / request bridge 这一组生命周期状态机
-- `RuntimeAdminController` 已持有 runtime admin / control-plane 查询与管理面
-- `InboundSurfaceController` 与 `PromptTurnEntryController` 已把入站 surface 和 prompt 进入编排从总 handler 中拆开
-
-因此，这里原本那句“下一步重点不应是继续把 `CodexHandler` 切成更多文件，而是继续拆状态 ownership”，在当前仓库状态下应理解为一条**已经执行过的架构方向**，而不是仍未开始的 roadmap。
-
-当前仍然保留在 `CodexHandler` 顶层的 ownership，主要是：
-
-- runtime 顶层生命周期：bootstrap / shutdown / service-instance lease / adapter 生命周期
-- controller / domain / adapter 的装配，以及跨域 orchestration
-- 少量合理保留在总编排层的 helper 与兜底同步面
-
-所以，后续重点已经不是“继续把计划里的 ownership 再拆一次”，而是：
-
-- 继续缩小 `CodexHandler` 作为总编排层必须直接持有的共享状态面
-- 避免把新的跨域规则重新堆回顶层 handler
-- 让新增功能优先落到已有 owner 边界，而不是重新制造隐式调用顺序约束
-
-历史 rollout 顺序与阶段边界仍保存在
-`docs/archive/codex-handler-decomposition-plan.zh-CN.md`，但那份文档现在应被视为归档计划，而不是“当前还未完成的下一步说明”。
-
-## 6. 数据与行为边界
-
-### 6.1 Codex 持有的数据
-
-以下信息继续由 Codex 负责：
-
-- thread id
-- cwd
-- 线程标题
-- preview 文本
-- source kind 与 status
-- thread timestamps
-- runtime config 与 model/provider 状态
-
-### 6.2 Feishu 本地数据
-
-FOCUS 只保存飞书或集成侧专属的数据：
-
-- 机器级共享的 runtime lease 等协调状态
-- 每实例 shared backend 的运行时地址发现状态
-- 每实例 shared backend websocket capability token 文件
-- 私聊当前绑定到哪个 thread，以及群聊按 `chat_id` 共享绑定到哪个 thread
-- 群聊工作态、群激活状态、群上下文日志与上下文边界状态
-- 审批、重命名、卡片等临时 UI 状态
-
-另外还有两份机器级共享协调状态：
-
-- 运行中实例注册表
-- thread live runtime lease
-
-它们都位于共享的 `FOCUS_GLOBAL_DATA_DIR` 下。
-这两份状态不属于任何单个 Feishu chat，也不属于 Codex 线程元数据；
-它们只用于本地 CLI 和多实例运行时协调。
-
-这里还需要保持一个明确边界：
-
-- control-plane / service token 只用于本地服务控制与 ownership 协调
-- backend websocket token 只用于连接实例 app-server
-- proxy websocket token 只用于单次 `focus` / `fcodex` wrapper 启动出的本地代理
-- 这三类 token 不应复用，也不应为了图省事而重新暴露在命令行参数上
-
-其中，`binding` 默认是跨重启保留的本地 bookmark：
-
-- 它解决的是“飞书会话下次默认继续哪个 thread”
-- 它不等于 Feishu 是否仍附着该 thread
-- 它也不等于 backend 当前是否仍 loaded
-
-因此：
-
-- `binding` 持久化是正式产品需求
-- 显式清空一个或全部 binding 也是合理的本地管理需求
-- 这类清理动作应归入 `focusctl` 的 binding 管理面
-- 它不应继续以“单独删除 `chat_bindings.json` 文件”的方式被定义为一个独立架构概念
-- 持久化 binding schema 也应 fail-closed；已废弃的 v4 `current_thread_write_owner_thread_id` 字段只作为显式迁移输入被忽略，不再写回
-- 只要 `current_thread_id` 非空，就必须显式写出 `feishu_runtime_state`
-- `feishu_runtime_state` 只能是 `attached` 或 `detached`
-- 这类约束若不满足，应直接视为存储损坏并报错，而不是在 load 时静默补成 `attached` 或静默清理
-
-`system.yaml.admin_open_ids` 也遵守单一事实源原则：
-
-- 它是管理员集合的唯一权威源
-- 运行中的内存管理员集合只是缓存，不是第二事实源
-- `/init <token>` 只是一个受控的便捷写入口，写入的仍是 `system.yaml`
-- 手工修改 `system.yaml` 后，不强求热更新；以重启服务或显式 reload 后的权威值为准
-- 缓存不得反向刷新权威源，也不得通过“config + runtime 合并”重新把已删除管理员写回配置
-
-### 6.3 Session 与目录语义
-
-精确命令语义不在本文展开，而是交给专门文档：
-
-- `docs/contracts/thread-profile-semantics.zh-CN.md` 说明 `/threads`、`/resume`、`/archive` 与 wrapper 语义
-- `docs/decisions/shared-backend-resume-safety.zh-CN.md` 说明当前 `/resume` 合同与 backend 安全规则
-
-本文只固定这些边界：
-
-- 线程元数据来自 Codex
-- 飞书聊天状态决定当前工作上下文
-- shared-backend 继续路径必须显式，而不是隐式假设
-
-### 6.4 审批模型
-
-当前实现使用 Codex 原生审批与沙箱概念：
-
-- app-server 的审批请求 / 响应
-- Codex 的 approval policy 与 sandbox policy 字段
-- 在这些原语之上，再叠加飞书侧用户友好的权限预设
-
-整个集成不依赖 Claude 式 shell hook 拦截。
-
-### 6.5 群聊功能合同
-
-群聊已不再埋在本设计文档里定义细则。
-
-当前设计层只保留几条架构边界：
-
-- 群底层会话按 `chat_id` 共享，而不是按群成员拆分
-- `assistant` 的主聊天流与群话题分别维护上下文边界，但共享同一个群 backend 会话
-- 群激活只决定“当前群是否对普通成员开放”；是否仍需显式 mention 由群工作态决定
-- 其他机器人不会直接触发当前机器人；如其消息要进入上下文，依赖历史回捞路径
-
-正式行为合同见：
-
-- `docs/contracts/group-chat-contract.zh-CN.md`
-- 手测清单见 `docs/verification/group-chat-manual-test-checklist.zh-CN.md`
-
-## 7. 当前仓库结构
-
-与其维护一份容易过时的完整树状清单，更适合按职责理解当前仓库：
-
-- 仓库根目录
-  - 面向操作者的说明与打包入口放在 `README.md`、`install.py`、`install.sh`、`install.ps1`、`pyproject.toml`
-  - 仓库内跟踪的 agent 偏好模板放在 `AGENTS.example.md`
-  - 真正的本地私有覆盖文件（如 `AGENTS.md`、`AGENTS.zh-CN.md`）仍应保持未跟踪，并有意加入 gitignore
-- `bot/`
-  - 入口与传输边界：`__main__.py`、`standalone.py`、`handler.py`、`feishu_bot.py`
-  - 顶层编排与用户侧 domain：
-    `codex_handler.py`、`codex_group_domain.py`、`codex_help_domain.py`、
-    `codex_threads_ui_domain.py`、`codex_settings_domain.py`、
-    `file_message_domain.py`、`inbound_surface_controller.py`
-  - 运行时状态、执行流与协调：
-    `runtime_loop.py`、`runtime_state.py`、`runtime_view.py`、
-    `binding_runtime_manager.py`、`thread_access_policy.py`、
-    `thread_subscription_registry.py`、`thread_runtime_coordination.py`、
-    `turn_execution_coordinator.py`、`execution_output_controller.py`、
-    `execution_recovery_controller.py`、`execution_transcript.py`、
-    `generated_image_delivery.py`、
-    `interaction_request_controller.py`、`adapter_notification_controller.py`、
-    `runtime_admin_controller.py`、`runtime_card_publisher.py`、
-    `prompt_turn_entry_controller.py`
-  - 在这组 runtime 模块里，`runtime_state.py` 是可变 runtime state
-    schema、reducer message 与 Feishu/backend 运行时状态词汇的代码级单一事实源；
-    其他模块应直接 import，而不是再各自定义局部 TypedDict 或半套字面量
-  - 共享 UI / helper 边界：`cards.py`、`card_text_projection.py`、
-    `shared_command_surface.py`、`feishu_types.py`
-  - wrapper 与本地管理路径：`fcodex.py`、`fcodex_proxy.py`、
-    `focusctl.py`、`manage_cli.py`、`runtime_admin_cli.py`、
-    `service_control_plane.py`、`instance_layout.py`、
-    `instance_resolution.py`、`thread_resolution.py`、`binding_identity.py`
-  - Codex adapter / protocol 边界：
-    `adapters/base.py`、`adapters/codex_app_server.py`、
-    `codex_protocol/client.py`
-  - 本地持久化状态：`stores/app_server_runtime_store.py`、
-    `stores/chat_binding_store.py`、`stores/group_chat_store.py`、
-    `stores/instance_registry_store.py`、`stores/interaction_lease_store.py`、
-    `stores/pending_attachment_store.py`、`stores/service_instance_lease.py`、
-    `stores/thread_runtime_lease_store.py`
-- `config/`
-  - 本地配置样例：`system.yaml.example`、`codex.yaml.example`
-- `docs/`
-  - 正式 contract：`docs/contracts/`
-  - 当前架构与运行时形状：`docs/architecture/`
-  - 设计决策与安全边界：`docs/decisions/`
-  - 手工验证材料：`docs/verification/`
-  - 历史 rollout / 归档材料：`docs/archive/`
-  - 不属于仓库事实源的本地工作材料：`docs/_work/`
-- `tests/`
-  - adapter/wrapper 行为、handler/controller 流程、runtime 状态迁移、
-    stores、cards 与 Feishu transport helper 的单元测试
-
-这份按职责分组的视图应与 §5.3 的 ownership 拆分保持同步。
-新增模块如果实质改变了 owner 边界，应在同一次变更里同时更新这两节。
-
-## 8. 演进边界
-
-- 上游 Codex 的 app-server 与 remote 行为仍可能变化，因此 adapter 和 wrapper 的边界要继续保持隔离
-- shared-backend wrapper 依赖当前 upstream remote 语义，尤其是 `thread/start`、`cwd`、重连时机这些细节
-- `codex exec --json` 仍然适合作为探针、smoke check 和调试手段，但它不是当前主运行时路径
-- 后续功能扩展，应继续保持当前的文档分工：语义、运行时、安全模型、设计约束分别说明，避免重新混成一篇大文档
+- [main turn owner 合同](../contracts/root-operation-owner.zh-CN.md)
+- [`thread/create` 本地提交合同](../contracts/thread-create-local-commit.zh-CN.md)
+- [`thread/resume` 本地提交合同](../contracts/thread-resume-local-commit.zh-CN.md)
+- [server request 生命周期合同](../contracts/server-request-lifecycle.zh-CN.md)
+- [Feishu thread 生命周期合同](../contracts/feishu-thread-lifecycle.zh-CN.md)
+- [`focus` / `fcodex` shared backend 运行时](./focus-shared-backend-runtime.zh-CN.md)
+- [活跃架构债务台帐](./architecture-debt-register.zh-CN.md)
+
+## 1. 设计基线
+
+FOCUS 是 Codex 的多前端集成层。Codex app-server 持有 thread、turn、item、goal、pending
+server request 与 effective runtime 事实；FOCUS 持有 Feishu、Web、wrapper 和本机服务所需的
+集成状态。
+
+默认规则是：
+
+- 先对标上游 Codex 的实际行为，只为 Focus 的真实多前端竞争增加最小规则；
+- 一份 mutable fact 只能有一个 owner，coordinator 只编排，不复制事实；
+- authority、read model、projection、delivery 与 cleanup 必须分开；
+- unknown 只限制无法安全重复的 exact request/effect，不能扩散成 thread、surface 或 service
+  的笼统不可用；
+- fail-closed 必须有明确安全对象和证据，不能用来补造上游没有的 tree、incarnation、cursor 或
+  exactly-once 能力；
+- Codex persisted/effective facts 不从本地 intent、缓存或 UI 状态反推。
+
+FOCUS 相比单一上游 TUI 只增加一条通用的多前端 turn 规则：同一 root thread 中仍声明
+Feishu next-turn/FIFO 或 exclusive/autonomous 语义的 submission/activity 至多有一个 holder。
+普通 Web/`fcodex` input 是 upstream-routed contributor，不取得 writer。matching
+`turn/completed` 立即释放 exact active lease；child、interaction、卡片和投递都不延长它。
+
+## 2. 分层与依赖方向
+
+```text
+Feishu / Focus Web / focusctl / focus-fcodex
+                    |
+                    v
+surface ingress and presentation
+                    |
+                    v
+application transaction owners
+                    |
+          +---------+---------+
+          v                   v
+ process/durable state     Codex adapter
+ owners and stores             |
+                               v
+                         codex app-server
+```
+
+### 2.1 Surface 与传输
+
+- Feishu adapter 负责事件、消息、卡片和 outbound effect 分类。
+- Focus Web Gateway 负责 loopback HTTP/WebSocket、browser session 与 DTO 传输。
+- `focusctl` 是本地管理面；`focus` / `fcodex` wrapper 经本地代理连接所选实例 backend。
+
+Surface 只做鉴权、输入翻译和结果投影。它不能直接修改另一个 owner 的状态，也不能从“连接仍在”、
+“卡片仍在”或“用户可信”推导 writer authority。
+
+在 Feishu surface 内，`FeishuProcessCache` 是 transient 进程内 message dedup、message context、chat metadata、
+reserved card、sender name 与 warning throttle 事实的唯一 owner。`FeishuMessageCodec` 持有 message/card schema
+解码、mention 归一化与 terminal-card text projection；它只经具名 port 获取原始卡片内容与 sender name，绝不持有
+Lark SDK client。`FeishuIngressController` 统一持有 group activation/admin/trigger policy、local history boundary、
+forward aggregation、history recovery，以及完整的 inbound dispatch 与 destination-loss cleanup 顺序。`FeishuBot`
+只把 SDK callback 翻译成中立的 `FeishuInboundMessage`，保留 SDK chat/message/raw-card/sender/outbound effect，并暴露
+所需 surface façade；它不再镜像 ingress、store、recovery 或 aggregation 事实。
+
+### 2.2 应用事务 owner
+
+具名 service/coordinator 持有跨 owner 的固定调用顺序，例如 thread create/resume、Feishu binding
+transition、Web open/turn/mutation、backend reset、server-request projection 与 execution-page
+rollover。事务 owner 可以消费 typed receipt，但不得保存参与方事实的镜像。
+
+`RuntimeAdminControlRouter` 是本地 control-plane method 与 wire parameter catalog 的唯一位置。它只归一化一笔
+request，并经具名 service、binding、thread port 分派；domain fact 与事务仍留在这些 port 后的 owner。
+
+`RuntimeAdminBindingApplication` 统一持有与 surface 无关的 Runtime Admin binding 用例：inventory/read model、
+prompt admission、attach/detach、clear 与 stale cleanup。它只协调既有 binding fact、clear transaction 和 thread
+lifecycle owner，不镜像其状态；`RuntimeAdminController` 只保留飞书命令/卡片展示与公开 binding façade 委托。
+
+`RuntimeAdminOfflineLifecycle` 统一持有与 surface 无关的 `focusctl` 离线 lifecycle 事务：archive target 解析、
+本地 binding preflight、lifecycle result 校验、archive/unarchive/delete mutation，以及跨实例 binding settlement。
+它只使用具名基础设施 port 并返回不可变 receipt，不保存 runtime fact，也不读取终端输入或展示输出。
+`bot/runtime_admin/cli_inputs.py` 持有 argparse grammar，以及 argv、prompt 文件和 `CODEX_THREAD_ID` 输入的归一化。
+CLI 继续持有 delete 确认、dispatch、结果渲染、batch 展示、exit-code policy 与 effect 调用。这些边界把输入 admission 和
+filesystem/control-plane mutation 顺序移出 presentation surface，同时不引入新的 durable 状态机。
+
+`bot/focus_runtime/thread_targets.py` 中的 `CodexThreadTargetService` 是无状态的应用边界，集中执行权威 thread target
+读取、direct-root 校验与 target 选择；它还协调既有 Web resume target 路径，并集中既有错误分类与 exact interrupt
+转发。它不持有 thread、binding 或 runtime fact；Codex app-server 与参与事务的 runtime owner 仍是 authority。
+
+`WebThreadOpenCoordinator` 持有 Web thread directory、open 与 bounded-history 的固定 staged 顺序：
+RuntimeLoop prepare/settle/final check 只读写 owner fact，app-server/store I/O 与 detached DTO materialization
+在 external transaction worker 上执行。`WebThreadInspectionService` 对 tool detail 与 conversation search 持有
+同样的 prepare/effect/settle 边界。`bot/web_runtime/thread_read_projection.py` 只拥有从冻结 typed inputs 构造
+list/open/history DTO 的纯投影，不持有 runtime fact，也不决定 response 最终是否仍可安装；该 authority 仍归
+coordinator 的 exact final check。`WebDirectThreadTargetCoordinator` 集中已权威证明的 direct-target snapshot 与
+`ThreadSpawn` 拒绝后的 Web-local convergence；只有 current document/backend settlement 可调用该 cleanup。
+
+`bot/focus_runtime/binding_coordinator.py` 中的 `BindingRuntimeCoordinator` 是无状态的跨 owner 边界，集中 17 个
+需要保留在 binding/runtime coordination 边界的事务。事务同时涉及本地状态与 effect 时，它保持既有 shared-lock 边界：
+需要 binding lock 的读取、复核与提交仍在锁内，timer cancellation、unsubscribe 或 runtime-lease release 则在离开
+临界区后执行。Web 只经具名、typed 的 `Callable[[str], bool]` runtime-interest port 参与；coordinator 既不导入
+`WebRuntimeController`，也不保存 Web
+状态。`BindingRuntimeManager` 继续持有 binding/session 事实，`FeishuBindingTransitionOwner` 与
+`RuntimeBindingBatchDeactivationOwner` 继续持有各自 commit，`InteractionLeaseStore` 继续持有 main-turn lease，既有
+thread 与 service-runtime authority 继续持有各自较窄的 authority。coordinator 只保存注入的 capability，不新增任何
+mutable fact。
+
+`FocusRuntime` 不再暴露原先 29 个 private binding helper：其中 17 项成为 coordinator operation，其余 12 个薄转发
+由 consumer 直接调用既有 owner。frontend timer cancellation 属于 coordinator；presentation factory 不属于
+该边界，现由下述 `FeishuPlatform` capability 持有。
+
+`bot/focus_runtime/feishu_platform.py` 中的 `FeishuPlatform` 是 runtime 所连接 Feishu bot reference 的唯一
+owner，并集中消费该 reference 的平台特定 chat、actor、reply 与 card-publisher routing。它只保存这一份 attached
+bot fact，不持有 inbound route catalog 或持久化 presentation fact。
+
+`bot/focus_runtime/feishu_surface.py` 中的 `FeishuSurface` 是飞书 ingress、group policy、command 与 card action
+的应用边界，也是 runtime inbound route catalog 的唯一安装位置。它只组合既有 domain/capability owner；queue admission
+与 drain 仍进入 `FeishuExecutionQueueService`，相关 mutable fact 仍留在这些既有 owner。
+
+`bot/focus_runtime/terminal_results.py` 中的 `TerminalResults` 经 `FeishuPlatform`、`TerminalResultStore` 与 typed
+binding/publication port 协调五项 terminal-result lookup、record、resolution、duplicate check 与 publication operation。
+`TerminalResultStore` 仍是持久化 terminal-result fact owner；该边界既不镜像 store record，也不持有 execution-output
+state。
+
+### 2.3 协议边界
+
+`bot/adapters/` 与 `bot/codex_protocol/` 隔离 app-server wire、连接 generation、RPC outcome 和
+schema drift。业务层只消费 typed response/notification，不依赖 Codex 私有磁盘布局。
+
+`CodexRpcConnection` 独占 websocket、identity lock、handshake state/generation、pending response map、
+reader/callback producer 与 inbound JSON-RPC dispatch。`CodexRpcClient` 只是持有一份 connection capability 的
+typed façade，不保存 mutable transport fact。
+
+`ManagedAppServerProcess` 独占本地 guardian process generation、选定的 listen endpoint、startup lock、
+cleanup token、stream thread 与 runtime publication。`CodexRpcConnection` 只通过这一份 capability 协调
+backend 连接与停止，不复制 process handle 或 cleanup state。
+
+`CodexRpcStopBarrier` 独占 stop-request fence、单次 single-flight drain attempt、从 live connection 原子转移
+出的 exact websocket/producer/process capability，以及失败后可重试的 cleanup outcome。它只为完成原子转移而
+共享 connection identity lock，不镜像 connection generation、handshake 或 pending RPC fact。
+
+### 2.4 状态 owner
+
+进程内状态通常由 `RuntimeLoop` 串行化；跨进程协调或产品要求跨重启保留的事实才进入
+`bot/stores/`。文件被持久化不自动使它成为业务 authority；discovery、projection 与 delivery
+ledger 仍保持各自较窄的角色。
+
+一个显式 staged external transaction 在 external caller thread 上持有同一
+`ServiceRuntimeLifecycle` ingress receipt。对这笔 transaction，RuntimeLoop 只串行化 mutable fact
+的短 prepare/settle transition：先开出不可变、绑定 exact target 与 generation 的 receipt，随后在
+loop 外执行可能阻塞的 I/O，最后只凭原 receipt 回到 RuntimeLoop 结算。迟到、replacement 或已退休
+receipt 的结果没有新 effect；这项 process-local staging 能力本身不迁移任何 caller，不建立
+durable operation ledger，也不自动 replay outcome unknown。
+
+Web staged read 在 authoritative settlement 后还可把 CPU/attachment-heavy DTO projection 留在 loop 外；返回前
+再用原 document、connection generation、projection revision 与 read observation 做一次 O(1) final check。
+这一步只决定 DTO 是否可交付，不能回滚更早已经提交的 resume/runtime interest。Gateway 在 per-client lock
+内 prepare 后释放 lock，但 prepared service-ingress receipt 继续覆盖 external worker 与 final settlement。
+Gateway handoff cancellation 或 executor failure 只 abandon 尚未 claim 的 receipt；claim 后由原 transaction
+完成 settlement，shutdown 等待它退出。
+
+需要 turn/task 与附件物化的 Web live notification 也使用该边界。`WebRuntimeEventCoordinator` 在
+RuntimeLoop 内只应用 notification/cache mutation，并冻结带 exact read observation 与 runtime epoch 的
+不可变 receipt；`bot/web_runtime/notification_projection.py` 在 service-ingress background worker 上执行
+turn/task DTO 投影、图片 hash/copy 与附件 URL 物化。每个 thread 至多一笔在途 projection 和一个
+latest-wins successor；settlement 只有在原 observation/epoch 仍精确匹配时才发布，旧结果直接丢弃。
+successor 不复用 predecessor 的 ingress receipt，而在前一笔 settlement 时独立重新准入；service 已进入
+STOPPING 时该准入失败、flight 退休并只发布轻量 `thread_invalidated`，因此 shutdown 后到达的 presentation
+工作不能无限延长旧 barrier。worker 调度或无 successor 的投影失败同样只发布轻量 invalidation，不阻塞 notification；权威
+`thread/deleted` 或 known Web delete success 的 attachment-scope 物理清理也在同一 shutdown barrier 下执行。这些 flight 不持久化，
+不 replay，也不取得 thread lifecycle authority。
+
+Web runtime cleanup 虽由 RuntimeLoop transition 发现，也使用同一 staged external-transaction 边界。
+`WebRuntimeLifecycleCoordinator` 对每个 thread 只持有一笔 cleanup flight，并把期间新到候选合并为至多一个
+successor。RuntimeLoop 冻结并重验 exact local fact；external worker 探测 backend/holder、至多发送一次已
+claim 的 canonical unsubscribe，并只对 probe 捕获的完整 service-holder record 做 CAS。coordinator 在
+unsubscribe send 前与 holder release 前分别重验，最后也只在原 generation/facts 下清理 local interest/cache。
+新 Web desire、canonical 飞书 subscriber、pending interaction、backend generation 或 holder successor 会在
+对应阶段保留 runtime；mismatch 绝不 replay unsubscribe。
+
+## 3. 运行时拓扑
+
+- 所有本机实例共享 `CODEX_HOME` 与 persisted thread namespace。
+- 每个 Focus instance 独立持有配置、数据、service lease、control plane、Web Gateway，以及一条
+  `service -> guardian -> codex app-server` 的同机 backend 生命周期。
+- 机器级 instance registry 与 thread runtime lease 协调多个 Focus instance；它们不授予实例内
+  main-turn writer。
+- 浏览器只连接 Focus Gateway，不直连 app-server。
+- `focus` / `fcodex` 选择一个运行实例，经 per-launch 本地代理把上游 TUI 接到该实例发布的 backend。
+- Focus 不支持外部 app-server deployment；内部 attached client 不取得 backend lifecycle authority。
+
+完整拓扑、wrapper、cwd proxy、credential 与平台 containment 边界见
+[shared backend 运行时](./focus-shared-backend-runtime.zh-CN.md)。
+
+## 4. 当前事实源与 owner
+
+| 问题 | 唯一事实源 / owner | 明确不是 authority 的事实 |
+| --- | --- | --- |
+| thread、turn、item、goal、title、cwd、status 与 effective runtime 是什么？ | Codex app-server；经 adapter 的 typed read/notification 投影 | 本地 requested settings、缓存、卡片、browser snapshot |
+| service 是否允许新 ingress、何时可释放资源？ | `ServiceRuntimeLifecycle` 及其 exact external-ingress receipt | Handler、Gateway 或 adapter 自己的局部 ready flag |
+| 一代本地 app-server process 及其 durable runtime publication 由谁持有？ | `ManagedAppServerProcess` | `CodexRpcConnection` 的 websocket、pending RPC 或 stop-barrier state |
+| live websocket generation、handshake、pending response 与 reader producer 由谁持有？ | `CodexRpcConnection` | `CodexRpcClient` façade、adapter read model 或 surface callback |
+| 一次已请求或尚未完成的 Codex RPC shutdown 由谁持有？ | `CodexRpcStopBarrier` 及其 exact transferred resource capability | live connection 字段、卡片、service phase 或复制的 process handle |
+| 当前 websocket/backend generation 是否可发送普通 RPC？ | `AdapterIngressGate` 的 outbound permit、actual-send guard 与 response confirmation，加 adapter transport generation authority | callback 到达顺序、缓存 endpoint |
+| 哪个实例可 materialize 一个 live thread？ | machine instance registry、global loaded gate 与 `ThreadRuntimeLeaseStore` | 实例内 main-turn lease、thread list 缓存 |
+| 谁拥有 lease-bearing Feishu/exclusive/autonomous main-turn holder？ | `InteractionLeaseStore` | 普通 Web/`fcodex` input、child、socket/document liveness、delivery、goal、runtime lease |
+| 谁可对 exact current turn 执行 steer、interrupt 或 interactive server-request response？ | app-server exact turn/request fact 加各 surface/domain owner；Web prompt 由 `WebPromptSubmissionCoordinator` 冻结 exact turn/backend generation，并由 `WebPromptResultRegistry` 在有界 receipt 留存期内限定同一 mutation 的唯一 effect slot | main-turn writer relation本身、presentation、缓存或通用本机身份 |
+| 一次 create/resume 的本地后果如何提交？ | `ThreadCreateTransaction` / `ThreadRuntimeAuthority` 的即时进程内 receipt | durable journal、跨 thread quarantine、自动 replay |
+| app-server callback 是否 pending？ | Codex app-server；`ServerRequestRegistry` 只投影当前 connection epoch | 卡片、浏览器 action lock、main-turn lease |
+| Feishu chat 默认绑定哪个 thread？ | `ChatBindingStore`；resident transition 由 `BindingRuntimeManager`、`BindingOwnerAuthority` 与 typed commands 持有 | execution card、subscriber 或 sender cache |
+| 同一 Feishu binding 的输入顺序是什么？ | `FeishuExecutionQueueController` | main-turn writer 或 backend residency |
+| execution 内容与页面范围是什么？ | `ExecutionTranscript` 与 `ExecutionPageLedger` 各持自己的展示事实 | turn completion、FIFO 或 thread lifecycle authority |
+| Feishu destination 是否已可靠丢失？ | `FeishuDestinationLossStore` 与 `FeishuDestinationLivenessCoordinator` | 一般 timeout、未知发送错误、main-turn 状态 |
+| Web 的 durable navigation workspace/selection 与 attachment 是什么？ | `WebWriterProfileStore` 与 `WebAttachmentStore`；后者另持有在途 submission 的 process-local exact file pin | browser component、read model、event socket、next-turn settings |
+| instance-wide Web next-turn settings 是什么？ | `WebNextTurnSettingsStore`；mutation/projection transaction 由 `WebNextTurnSettingsCoordinator` 收口 | `WebWriterProfileStore`、selection/navigation generation、main-turn lease、thread effective settings、browser overlay/event |
+| Web document、runtime interest、read model 与 prompt result evidence 是什么？ | `WebDocumentRegistry`、`WebRuntimeInterestRegistry`、`WebThreadReadModel`、`WebPromptResultRegistry` 各自独占 | 彼此之间的 projection；任何一项都不是 durable writer 或 replay authority |
+| canonical Web-triggered subscription/runtime cleanup 由谁持有？ | `WebRuntimeLifecycleCoordinator` 持有 per-thread cleanup flight 与 exact local recheck；`ThreadRuntimeAuthority` 持有 same-thread resume/start/unsubscribe effect fence；thread-runtime lease owner 独占 full-record holder CAS | `fcodex` connection、read cache 或 background worker thread |
+| Web thread list/open/history DTO 由谁构造并决定仍可交付？ | `thread_read_projection.py` 从冻结 inputs 做无状态投影；`WebThreadOpenCoordinator` 凭 exact document/generation/revision/observation 做 settlement 与 final admission | external worker、browser component、已经 stale 的 DTO |
+| fcodex endpoint/request/interaction 当前是否有效？ | `FcodexParticipantRuntimeRegistry`、`FcodexOperationService`、`FcodexInteractionInbox` 各自持有独立进程内事实 | participant 的 `connected/grace/orphaned` endpoint 状态不是 main-turn writer |
+| component config seed 来自哪里？ | `system_config.py`、`codex_config.py`；何时只作 seed、何时由 durable setting owner 优先，以 runtime-settings 合同为准 | UI 回显、settings ACK 或每 read/turn 重读配置 |
+
+这张表只回答 ownership。状态转换、失败分类和用户可见结果必须查看对应合同，不能在架构文档里再建一份
+平行状态机。
+
+## 5. 关键生命周期边界
+
+### 5.1 Service 与 backend
+
+`ServiceRuntimeLifecycle` 在取得 service lease 后才激活 RuntimeLoop、adapter、control plane、Gateway
+与 worker。停止时先关闭新 ingress，等待已准入 callback，停止 producer，drain RuntimeLoop，最后停止
+adapter 并释放 authority。组件仍保留自己的更窄 transport barrier，但不复制顶层 phase。
+
+经 external ingress 准入且会跨越 loop 外 I/O 的 transaction 从开始到最终 settle 一直占有同一个
+external-ingress receipt；因此
+shutdown 可以先关闭新准入并等待这些 transaction，而 RuntimeLoop 在 effect pending 时仍可处理 notification、
+interrupt 与短状态 transition。receipt 只证明本进程已准入并尚未退出，不证明上游 effect 成功；effect 的
+pre-send、known response 与 outcome-unknown 分类仍由对应 adapter/domain 合同决定。
+
+Gateway 若把 prepare 与 execute 分隔在 per-client lifecycle lock 两侧，仍必须保留这份 receipt。request 在
+worker claim 前取消或 executor 无法准入时，Gateway exact-abandon 它以免 shutdown 永久等待；claim 后的取消
+只终止 HTTP waiter，不能取消已经运行的 worker 或重复 settlement，service 继续等待原 transaction 退出。
+
+经 `start_background_external_transaction` 启动、由 RuntimeLoop 发现的 Web runtime cleanup 仍是一笔 external
+transaction：daemon thread 启动前就取得 service-ingress receipt，并以该 receipt 作为 shutdown barrier；它不属于
+下述长期 internal scheduled worker，也不需要第二份 worker registry。internal scheduled worker 不取得
+external-ingress receipt；其唯一 worker registry 仍负责在 RuntimeLoop drain 前停止 producer 并 join worker。
+
+`ServiceRuntimeLifecycle` 仍是 service phase 以及上述 startup、rollback、shutdown 顺序的唯一 owner。
+`ServiceRuntimeAuthority` 是更低层的 coordination capability：它只在 lifecycle 定义的边界调用既有
+machine instance registry、global loaded gate 与 service/thread-runtime lease owner；它不持有或复制这些
+事实，也不依赖 presentation 或 `FocusRuntime` composition root。
+
+Backend reset 的最小顺序是：fence 普通 ingress，只读捕获当前进程的 exact main-turn leases，等待旧 owned child
+完成 OS exit/wait，以 full-record CAS 集中退休 capture，依次退休 registry/fcodex/Web fact、执行 binding detach 与
+execution interrupt/finalize，再退休 Feishu root/request fact。每个既有 owner 的调用均为幂等，mutable fact 仍归原
+owner。Focus 随后清理本实例 runtime holder、启动并验证 replacement，最后发布并重新准入。stop 未确认时不退休任何旧 backend fact；
+任一后续 authoritative retirement 或 structural projection 失败时，已完成的前序退休保持
+有效但 replacement 不启动，重试从头幂等执行且 ingress 继续 fenced。其他 PID 与 capture 后的 successor lease
+不受影响。它不迁移旧 callback、writer 或 unknown evidence。
+
+### 5.2 Main turn
+
+只有 lease-bearing Feishu/exclusive/autonomous effect 在发送前取得空白 submission lease。普通 Web/`fcodex`
+`turn/start` 是 upstream-routed input，不读写 lease。validated `turn/start` success 原样保留 authoritative
+upstream `turn.id`，但 response 本身不激活或转移 Focus lease，也不建立跨 notification/reset 的
+lifecycle 或 completion authority；matching `turn/started` 仍负责绑定 actual `turn_id`，matching completion
+只释放 exact active lease。若 started 遗漏，completion 不能仅凭 start response 绑定 blank。飞书可以在
+权威重读 root 已 inactive 后结算 exact 的普通 prompt blank，但不归因 completion；其进程内
+admission token 是事务 receipt，不是第二份 writer fact。普通 fcodex start 与已有 fcodex exclusive/autonomous
+blank 并发时，后续 lifecycle 仍可能激活该 blank；这是接受的极窄竞态，不增加关联状态机。inline review
+response identity 与 compact 空 response 保持 method-specific 路径；细节只由 main-turn owner 合同定义。
+live 且已 attach exact direct root 的 `fcodex` endpoint，或已连接并 materialize 该 root 的 Web document，
+都可以按 canonical effect-specific 边界 steer 或 interrupt exact current/startup turn，且不会取得或改变 writer。
+Web existing-thread prompt 只有一个 POST。`WebPromptSubmissionCoordinator` 在 RuntimeLoop 内冻结
+exact document/target/backend generation 与当时 active turn；若存在 A，这个 attempt 只能向 A 发送一次
+`turn/steer`，不存在 exact id 时才只发送一次 `turn/start`。successor B mismatch 或 no-active
+是 `known_no_effect`，不 retarget B，也不 fallback start。`WebPromptResultRegistry` 只保存有界、进程内
+`pending / succeeded / known_no_effect / outcome_unknown` receipt，不保存 payload，不写盘，不 replay，
+也不阻塞同 thread 的新 mutation、passive read、shared server-request response 或 exact interrupt。F5 只能用
+`(thread_id, mutation_id)` 读取这份 bounded result receipt；只在 receipt 仍留存时，重复 POST 才不能取得第二个
+effect slot。terminal eviction、confirmed backend retirement 或 service restart 会删除 seen-identity evidence；此后
+同 UUID 可能取得新 slot，但官方 browser 只 GET 或为新 gesture 生成新 UUID。上述 miss 不证明 effect 未发生，
+也不开放重放。详见 [Focus Web prompt mutation 恢复合同](../contracts/focus-web-prompt-mutation-recovery.zh-CN.md)。
+前端断线不会把 writer 变成 durable grace/orphan state，service restart 也不会
+恢复旧 writer。详情以 [main turn owner 合同](../contracts/root-operation-owner.zh-CN.md) 为准。
+
+### 5.3 Create、resume 与 server request
+
+Create/resume 只在一次调用与紧随其后的本地 commit 之间使用进程内 receipt。unknown 不自动 retry，也不建立
+持久恢复状态机。Server request 的 callback lifetime 归上游；Focus 只用当前 generation identity 与一次性
+surface token 防止 stale action。
+
+Web cold open 的 outer read/projection 可以在这笔 resume local commit 之后继续。known resume 必须先提交
+runtime interest；后续 document reissue、notification、projection revision 或 backend replacement 只会使
+read DTO stale，不能 compensation、回滚或把已确认 resume 重分类为 unknown。详见
+[`thread/resume` 本地提交合同](../contracts/thread-resume-local-commit.zh-CN.md)。
+
+### 5.4 Presentation 与 delivery
+
+Feishu execution page、terminal result、generated image、Web projection 和 destination-liveness 都是独立
+产品能力。它们可以异步恢复自己的 exact effect，但不能阻止 matching main-turn completion、延长 writer，
+或把局部投递 unknown 扩散到后继 turn。
+
+## 6. 仓库职责地图
+
+- `bot/`：surface、application owner、runtime owner、adapter、CLI 与 composition root。目前物理目录仍较平，
+  不能只从路径推断每个 owner；dependency-direction guard 已强制稳定边界：store 与 Codex protocol/adapter package
+  不得反向依赖 surface 或 composition，Web、Feishu、fcodex 不得互相导入 presentation domain，surface-neutral
+  Runtime Admin transaction 不得导入 surface。
+- `bot/stores/`：durable authority、intent、coordination、delivery ledger 与可重建 discovery store。
+- `bot/runtime_admin/`：集中 surface-neutral binding/control/offline-lifecycle transaction，以及明确分开的 CLI
+  和 Feishu presentation module；方向门禁禁止 neutral module 反向导入任何 surface。
+- `bot/focus_runtime/thread_targets.py`：`CodexThreadTargetService` 边界，集中权威 thread target 读取、校验与选择、
+  Web resume target 协调、错误分类和 interrupt 转发；它不保存 mutable authority。
+- `bot/focus_runtime/binding_coordinator.py`：`BindingRuntimeCoordinator` 边界，集中 17 个跨 owner binding/runtime
+  事务，经既有 owner capability 保持 shared-lock 临界区与 commit/effect 顺序，且不保存 mutable authority。
+- `bot/focus_runtime/feishu_platform.py`：`FeishuPlatform` owner，唯一持有 attached Feishu bot fact，并集中平台特定
+  chat/actor/presentation routing；不保存 route、persistence 或 domain fact。
+- `bot/focus_runtime/feishu_surface.py`：`FeishuSurface` 边界，经既有 capability owner 承接飞书
+  message/recall/card/attachment ingress、group check、command/action route 与 prompt/FIFO entry。
+- `bot/focus_runtime/terminal_results.py`：`TerminalResults` 边界，集中 terminal-result lookup、persistence coordination
+  与 publication；既有 `TerminalResultStore` 仍是持久化 fact owner。
+- `bot/web_runtime/thread_open_coordinator.py`：Web list/open/history staged transaction owner；
+  `bot/web_runtime/thread_read_projection.py`：冻结 inputs 到 list/open/history DTO 的无状态 external projection；
+  `bot/web_runtime/direct_thread_target_coordinator.py`：direct-target proof 与 exact invalid-target convergence；
+  `bot/web_runtime/gateway_external_transaction.py`：aiohttp cancellation 到 lifecycle-owned prepared receipt 的薄 handoff。
+- `bot/fcodex/control_dispatcher.py`：service侧`operation/*`协议边界；它在调用者的`RuntimeLoop` turn内运行，
+  权威读取direct target，并把mutable fact交给既有operation owner。
+- `bot/feishu_continuation_controller.py`：串行化的飞书continuation边界；它依次编排direct-root读取、
+  root-operation准入、显式thread resume、Runtime Admin attach、goal mutation/resume/compensation、
+  settings fence、settlement与history/card projection，所有mutable fact仍由既有runtime owner持有。
+- `web/src/focus/`：Focus-owned transport、projection、navigation/profile 与 mutation/action owner；通用 UI
+  component 只消费 view projection。
+- `docs/contracts/`：当前行为语义的正式来源。
+- `docs/architecture/`：当前 owner、层次、依赖与活跃债务。
+- `docs/decisions/`：设计理由；被取代的决策必须显著标记，不能冒充当前合同。
+- `docs/_work/`：临时计划与证据台帐，不是长期事实源。
+- `tests/`：按 owner/合同验证；只有小型 composition suite 可以依赖装配细节。
+
+`FocusRuntime` 是位于 `bot/focus_runtime/runtime.py` 的当前 composition root。Root 不应成为新的
+domain-fact owner。
+`bot/focus_runtime/__init__.py` package root 保持为空且不 re-export runtime；该 package 下的 capability owner 不得
+反向 import composition root。新增行为应进入现有 owner，或先明确新事实为何不能由现有边界承担。
+
+## 7. 演进规则
+
+- 每次诊断、review、实现与重构都遵循
+  [仓库导航与变更锥纪律](./development-navigation.zh-CN.md)。
+- 修改 Codex 行为前先审阅固定上游代码或官方协议，再决定 Focus 是否真的需要偏离。
+- 新 coordinator 必须说明它编排哪些 owner，以及为什么不保存第二份事实。
+- 新持久化记录必须说明跨重启需求、写 authority、损坏策略与删除条件。
+- 任何 stronger-than-upstream 规则都必须给出真实多前端场景、最小增量、可观测证据和用户成本。
+- 当前未结 owner、aggregate、schema、测试与 package 问题只在
+  [活跃架构债务台帐](./architecture-debt-register.zh-CN.md) 维护。

@@ -1,0 +1,150 @@
+# Focus 安装制品交付合同
+
+文档角色：中文规范源。英文同步副本：`docs/contracts/install-artifact-delivery.md`。
+
+本文定义 Focus 源码、可安装 bundle、GitHub Release channel、本地构建和显式发布之间的边界。
+它解决生成的 Web production assets 不再进入 Git 历史后，clone、下载与开发构建仍然共用一条可验证
+安装路径的问题；它不承诺把 Python、第三方 wheel 或 Codex CLI 一并离线交付。
+
+## 1. 术语与 owner
+
+| 事实或动作 | 唯一 owner |
+| --- | --- |
+| bundle 与 channel manifest 的闭合 schema、构建和验证 | `scripts/build_support/install_bundle.py` |
+| stable / development / local artifact 的选择、下载与安装事务边界 | `install.py` |
+| Focus wheel 的 clean build 与 source-payload 核验 | `scripts/build_support/python_distribution.py` |
+| GitHub Release 状态核验、上传顺序与 development retention | `scripts/build_support/github_publication.py` |
+| 本地 bundle 入口 | `scripts/build_install_bundle.py` |
+| 唯一仓库制品上传入口 | `scripts/publish_install_bundle.py` |
+| 手动发布门禁 | `.github/workflows/publish-installable.yml` |
+| Python 依赖声明与 lock 语义 | [Python 依赖锁决策](../decisions/python-dependency-locking.zh-CN.md) |
+
+“bundle”是一个 ZIP 文件，不是目录，也不需要在传给 `--artifact` 前解压。源码 checkout 是构建输入，
+不是安装 payload；生成的 `bot/web_assets/dist/` 与 `build/install/` 都是 ignored 本地产物。
+
+## 2. Bundle 闭合 schema
+
+bundle 必须恰好包含三个普通、未加密、无目录层级的 ZIP entry：
+
+- `manifest.json`；
+- 一个 Focus wheel；
+- `requirements.lock`。
+
+不允许目录、绝对路径、父目录跳转、反斜杠路径、symlink、重复 entry 或额外文件。`manifest.json`
+是严格 UTF-8 JSON object，拒绝重复 key、未知字段和缺失字段。当前 schema 是：
+
+| 字段 | 合同 |
+| --- | --- |
+| `schema` | 必须为 `focus-install-bundle` |
+| `schema_version` | 必须为整数 `1` |
+| `channel` | `stable`、`development` 或 `local` |
+| `version` | Focus wheel 的非空安全版本标识 |
+| `build_id` | 本次构建的非空安全标识 |
+| `source_revision` | 构建声明的源码 revision；公开发布只接受 40 位小写 commit SHA，并要求内外 manifest 一致 |
+| `files` | 恰好两个互不重名的 file record |
+
+每个 file record 只允许 `name`、`role`、`size`、`sha256`。`name` 必须是不含目录的 POSIX 文件名，
+`size` 必须是受限正整数，`sha256` 必须是小写 SHA-256。两个 role 必须各出现一次：
+
+- `focus-wheel`：文件名以 `.whl` 结尾；wheel metadata 的 name 必须为 `focus`，其 version 必须与
+  manifest 一致，并且必须包含 Focus Web production payload 与 notices；
+- `python-dependency-lock`：文件名必须为 `requirements.lock`，内容必须是 UTF-8 locked requirements
+  投影。
+
+验证器先核对 archive 形状、展开上限、每个 payload 的 size 与 SHA-256，再只把两个声明的 payload
+写入空临时目录。任何一项不一致都拒绝整个 bundle，不进入安装事务。
+
+## 3. 外层 channel manifest
+
+远端 `stable` 和 `development` bundle 还必须在同一个 GitHub Release 中带一个外层 channel manifest：
+
+- stable：`focus-install-stable.json`；
+- development：`focus-install-development.json`。
+
+它同样是拒绝重复 key、未知字段和缺失字段的严格 UTF-8 JSON object：
+
+| 字段 | 合同 |
+| --- | --- |
+| `schema` | 必须为 `focus-install-channel` |
+| `schema_version` | 必须为整数 `1` |
+| `channel` | 必须与请求的 remote channel 精确一致 |
+| `release_tag` | 必须与承载它的 GitHub Release tag 精确一致 |
+| `version`、`build_id`、`source_revision` | 必须与内层 bundle manifest 精确一致 |
+| `bundle` | 只含 `name`、`size`、`sha256`，精确指向同一 Release 中的一个 ZIP asset |
+
+安装器同时核对 GitHub asset metadata、下载字节数、外层 SHA-256、内外 manifest identity 和 wheel
+identity。外层 SHA-256 能把 channel 指针绑定到同一仓库 authority 下的精确 bundle 字节，但它与
+GitHub/HTTPS 不是相互独立的签名或信任根；本合同不把它描述成独立防篡改证明。
+
+## 4. 三种安装 authority
+
+### stable
+
+未指定来源时，安装器等同于 `--channel stable`：读取本仓库 GitHub 的 latest 非 draft、非 prerelease
+Release，并要求其中恰好存在 stable channel manifest 及其指向的 bundle。stable Release tag 去掉可选前导
+`v` 后必须等于 wheel version。stable bundle 和 stable channel manifest 都是 immutable asset；已有同名
+不同内容时拒绝覆盖。
+
+stable 发布只使用已经显式创建的正式 Release。安装器不会因为 latest Release 尚无 bundle 而回退到
+development、checkout 源码或另一旧 Release。
+
+### development
+
+`--channel development` 只读取固定 tag `development-builds` 的非 draft prerelease。这个 tag 必须位于
+`main` 历史中，不能为了发布 feature build 而重新锚到 feature branch；bundle 自己的 `source_revision`
+仍记录实际构建 commit。
+
+每个 development bundle 使用唯一文件名且不覆盖。`focus-install-development.json` 是可替换的最新成功
+build 指针。发布完成后只 best-effort 保留最近五个 development bundle；清理旧 bundle 失败只产生告警，
+不得撤销已经提交的最新指针。
+
+### local artifact
+
+`--artifact PATH` 使用用户明确选择的 bundle ZIP，不访问 GitHub，也不需要外层 channel manifest。
+它仍完整验证内层 schema、所有 payload 字节、wheel identity 和 Web payload。`local` bundle 是开发者默认
+构建形状；显式下载的 stable/development ZIP 也可经 `--artifact` 安装，但不会因此变成另一个 channel。
+
+三种 authority 之间没有隐式 fallback。来源解析或验证失败时，用户修复该来源后重试或显式选择另一来源。
+
+## 5. 安装事务与网络边界
+
+远端 Release 查询、channel manifest 与 bundle 下载，以及本地或远端 bundle 的完整验证，都发生在 Focus
+取得 offline-maintenance admission、停止 service 或修改受管 `.venv` 之前。前置阶段失败时，当前安装和
+service 状态保持不变。
+
+验证成功后，安装器才进入既有受管安装事务：核验所有实例 idle、按需创建或重建 CPython 3.11+ `.venv`，
+以 bundle 内 `requirements.lock` 为 constraint 对已验证 wheel 执行 force reinstall，并刷新 wrapper 与
+service 定义。这个流程不是热升级，也不建立多代环境或自动回滚状态机。
+
+remote channel 需要访问 GitHub；标准 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 会由 Python 网络栈使用。
+`--artifact` 只消除 Focus bundle 的 GitHub 下载，pip 仍可能按自身 index、proxy、证书和 cache 配置下载
+第三方依赖。bundle 不含 Python 解释器、第三方 wheelhouse 或第三方 artifact hashes，因此用户可以先单独
+下载 ZIP 再转移到目标机，但本项目不承诺完整零网络安装。
+
+## 6. 构建与发布是两件事
+
+开发者本地构建时，先在 `web/` 生成 production Web assets，再运行
+`python scripts/build_install_bundle.py`。默认生成 `local` bundle 到 ignored 的 `build/install/`；随后通过
+`bash install.sh --artifact <zip>` 或 `./install.ps1 --artifact <zip>` 安装。构建器要求当前 source 中已有
+Web payload 与 `requirements.lock`，并构建、核验一个包含它们的确定性 Focus wheel。
+
+普通 commit、pull request、CI 验证、本地 Web build 和本地 bundle build 都不发布制品。GitHub 上传必须是
+显式动作：手动触发 `publish-installable.yml`，或明确调用唯一上传命令并提供已经构建、验证的 bundle 与
+matching channel manifest。
+
+发布先对 bundle、channel manifest、source revision 和目标 Release 做完整 preflight，再上传唯一 bundle；
+最后上传 channel manifest。bundle 单独存在不构成 channel authority，channel manifest 上传并读回核验成功才是
+发布 commit point。上传结果不明确时，发布器从 GitHub 读回并按 size/SHA-256 reconciliation；无法证明相同
+内容就失败关闭。
+
+正式 workflow 把已 checkout、通过门禁的 `HEAD` 写入 `source_revision`。独立上传命令只能验证该字段是
+40 位 commit SHA 以及内外一致，不能独立证明调用者 worktree clean 或该 commit 在哪个远端 ref 可达。
+
+stable 发布要求目标正式 Release 已存在且 assets immutable。development 使用固定 prerelease，只允许替换其
+channel manifest。普通验证不得通过复用发布脚本、workflow side effect 或隐式 tag 创建而升级为发布。
+
+## 7. 维护闭环
+
+改变 schema、channel authority、安装事务边界或发布顺序时，必须在同一 transaction 中同步本合同、owner
+实现、installer help、publication workflow 和 focused tests。改变 Python dependency lock 语义时同步
+[Python 依赖锁决策](../decisions/python-dependency-locking.zh-CN.md)，不要在两份文档中维护竞争性说明。

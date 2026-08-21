@@ -1,4 +1,5 @@
 import pathlib
+import stat
 import tempfile
 import types
 import unittest
@@ -16,7 +17,6 @@ from bot.managed_skills.feishu_scheduled_prompts.skill.scripts.manage_scheduled_
     scheduled_task_root,
     service_unit_path,
     show_task,
-    systemd_user_dir,
     task_dir,
     timer_unit_path,
 )
@@ -228,6 +228,17 @@ class ScheduledPromptSkillTests(unittest.TestCase):
                 self.assertTrue((scheduled_task_root() / "morning-follow-up" / "prompt.txt").exists())
                 self.assertTrue(service_unit_path("morning-follow-up").exists())
                 self.assertTrue(timer_unit_path("morning-follow-up").exists())
+                for private_path in (
+                    scheduled_task_root() / "morning-follow-up" / "task.json",
+                    scheduled_task_root() / "morning-follow-up" / "prompt.txt",
+                    service_unit_path("morning-follow-up"),
+                    timer_unit_path("morning-follow-up"),
+                ):
+                    self.assertEqual(stat.S_IMODE(private_path.stat().st_mode), 0o600)
+                self.assertEqual(
+                    stat.S_IMODE((scheduled_task_root() / "morning-follow-up").stat().st_mode),
+                    0o700,
+                )
                 specs = list_specs()
                 self.assertEqual(len(specs), 1)
                 self.assertEqual(specs[0].binding_id, "p2p:ou_user:chat-1")

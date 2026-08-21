@@ -140,3 +140,104 @@ class GroupChatStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["mode"], "assistant")
         self.assertEqual(snapshot["boundaries"]["main"]["seq"], 7)
         self.assertEqual(snapshot["boundaries"]["main"]["message_ids"], ["m-7"])
+
+    @staticmethod
+    def _raw_group(**overrides: object) -> dict[str, object]:
+        group: dict[str, object] = {
+            "mode": "assistant",
+            "activated": False,
+            "activated_by": "",
+            "activated_at": 0,
+            "boundaries": {
+                "main": {"seq": 0, "created_at": 0, "message_ids": []}
+            },
+            "last_log_seq": 0,
+        }
+        group.update(overrides)
+        return group
+
+    def test_activation_metadata_requires_exact_boolean_and_consistent_fields(self) -> None:
+        _, store, state_path = self._make_store()
+        cases = (
+            {"activated": "false"},
+            {"activated": 1, "activated_by": "ou-admin", "activated_at": 1},
+            {"activated": True, "activated_by": "", "activated_at": 1},
+            {"activated": True, "activated_by": "ou-admin", "activated_at": 0},
+            {"activated": False, "activated_by": "ou-admin", "activated_at": 0},
+            {"activated": False, "activated_by": " ", "activated_at": 0},
+            {"activated": False, "activated_by": "", "activated_at": 1},
+            {"activated": False, "activated_by": "", "activated_at": "0"},
+        )
+        for index, overrides in enumerate(cases):
+            with self.subTest(index=index):
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
+                            "groups": {"chat-bad": self._raw_group(**overrides)},
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "chat-bad"):
+                    store.activation_snapshot("chat-bad")
+
+    def test_schema_v2_requires_explicit_activation_metadata_fields(self) -> None:
+        _, store, state_path = self._make_store()
+        raw_group = self._raw_group()
+        del raw_group["activated"]
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
+                    "groups": {"chat-bad": raw_group},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "chat-bad"):
+            store.activation_snapshot("chat-bad")
+
+    def test_malformed_activation_isolated_to_exact_chat(self) -> None:
+        _, store, state_path = self._make_store()
+        malformed = self._raw_group(activated="false")
+        valid = self._raw_group(
+            mode="all",
+            activated=True,
+            activated_by="ou-admin",
+            activated_at=1712476800123,
+        )
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": GROUP_CHAT_STORE_SCHEMA_VERSION,
+                    "groups": {"chat-bad": malformed, "chat-good": valid},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(store.get_group_mode("chat-good"), "all")
+        self.assertTrue(store.is_group_activated("chat-good"))
+        with self.assertRaisesRegex(ValueError, "chat-bad"):
+            store.activation_snapshot("chat-bad")
+
+        store.set_group_mode("chat-good", "assistant")
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["groups"]["chat-bad"]["activated"], "false")
+
+        self.assertTrue(store.clear_chat("chat-bad"))
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("chat-bad", persisted["groups"])
+
+    def test_activation_mutation_rejects_non_contract_metadata(self) -> None:
+        _, store, _state_path = self._make_store()
+        with self.assertRaises(ValueError):
+            store.activate_chat("chat-1", activated_by=123)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            store.activate_chat("chat-1", activated_by="ou-admin", activated_at=0)
+        with self.assertRaises(ValueError):
+            store.activate_chat("chat-1", activated_by="ou-admin", activated_at=True)  # type: ignore[arg-type]

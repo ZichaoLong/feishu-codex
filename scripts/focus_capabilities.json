@@ -1,0 +1,2048 @@
+{
+  "schema_version": 1,
+  "capabilities": {
+    "backend-reset": {
+      "entry": [
+        {
+          "path": "bot/backend_reset/cli.py",
+          "symbol": "reset_service_backend"
+        },
+        {
+          "path": "bot/runtime_admin/controller.py",
+          "symbol": "RuntimeAdminController.handle_reset_backend_action"
+        },
+        {
+          "path": "bot/web_runtime/backend_reset_controller.py",
+          "symbol": "WebBackendResetController.execute"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/backend_reset/service.py",
+          "symbol": "BackendResetService"
+        },
+        {
+          "path": "bot/backend_reset/coordinator.py",
+          "symbol": "BackendResetCoordinator"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/runtime-control-surface.zh-CN.md",
+          "heading": "5. reset-backend 的副作用边界"
+        },
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "3. 唯一事实源与状态"
+        },
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "backend reset"
+        },
+        {
+          "path": "docs/contracts/focus-web-prompt-mutation-recovery.zh-CN.md",
+          "heading": "2. Identity、receipt 与唯一 owner"
+        },
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.8 confirmed-stop backend epoch retirement"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/backend_reset/test_cli.py",
+            "tests/backend_reset/test_contract.py",
+            "tests/backend_reset/test_coordinator.py",
+            "tests/backend_reset/test_service.py",
+            "tests/runtime_admin/test_backend_reset.py",
+            "tests/test_web_backend_reset_controller.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_startup_runtime.py",
+            "tests/test_adapter_event_bridge.py",
+            "tests/test_binding_execution_runtime.py",
+            "tests/test_codex_rpc_stop_barrier.py",
+            "tests/test_fcodex_operation_stop_composition.py",
+            "tests/test_feishu_root_operation_controller.py",
+            "tests/test_interaction_lease_store.py",
+            "tests/test_managed_app_server_process.py",
+            "tests/test_web_mutation_recovery.py",
+            "tests/test_web_operation_service.py",
+            "tests/web_runtime/test_backend_reset_retirement.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-wire"
+      ]
+    },
+    "fcodex-runtime": {
+      "entry": [
+        {
+          "path": "bot/fcodex/cli.py",
+          "symbol": "main"
+        },
+        {
+          "path": "bot/fcodex/control_dispatcher.py",
+          "symbol": "FcodexControlDispatcher.handle"
+        },
+        {
+          "path": "bot/fcodex/proxy.py",
+          "symbol": "run_proxy"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/fcodex/operation_service.py",
+          "symbol": "FcodexOperationService"
+        },
+        {
+          "path": "bot/fcodex/main_turn_owner.py",
+          "symbol": "FcodexMainTurnOwner"
+        },
+        {
+          "path": "bot/fcodex/participant_runtime_registry.py",
+          "symbol": "FcodexParticipantRuntimeRegistry"
+        },
+        {
+          "path": "bot/fcodex/interaction_inbox.py",
+          "symbol": "FcodexInteractionInbox"
+        },
+        {
+          "path": "bot/fcodex/proxy.py",
+          "symbol": "_ProxyInteractionGate"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "main turn owner"
+        },
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "2. 核心规则"
+        },
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "Response envelope"
+        },
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "直接 thread target"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_fcodex_interaction_inbox.py",
+            "tests/test_fcodex_operation_admission.py",
+            "tests/test_fcodex_operation_lifecycle_release.py",
+            "tests/test_fcodex_participant_runtime_registry.py",
+            "tests/test_fcodex_proxy.py",
+            "tests/test_fcodex_proxy_operation_receipts.py",
+            "tests/test_fcodex_proxy_server_request_resolution.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_fcodex_shared_interrupt.py",
+            "tests/test_fcodex_shared_steer.py",
+            "tests/test_fcodex_wrapper_integration.py"
+          ]
+        }
+      ],
+      "guard": [
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "feishu-execution-presentation": {
+      "entry": [
+        {
+          "path": "bot/adapter_notification_controller.py",
+          "symbol": "AdapterNotificationController.handle_item_started"
+        },
+        {
+          "path": "bot/adapter_notification_controller.py",
+          "symbol": "AdapterNotificationController.handle_command_delta"
+        },
+        {
+          "path": "bot/adapter_notification_controller.py",
+          "symbol": "AdapterNotificationController.handle_file_change_patch_updated"
+        },
+        {
+          "path": "bot/adapter_notification_controller.py",
+          "symbol": "AdapterNotificationController.handle_item_completed"
+        },
+        {
+          "path": "bot/turn_execution_coordinator.py",
+          "symbol": "TurnExecutionCoordinator.reconcile_current_assistant_text_locked"
+        },
+        {
+          "path": "bot/turn_execution_coordinator.py",
+          "symbol": "TurnExecutionCoordinator.apply_terminal_error_locked"
+        },
+        {
+          "path": "bot/execution_recovery_controller.py",
+          "symbol": "ExecutionRecoveryController.run_terminal_execution_reconcile"
+        },
+        {
+          "path": "bot/execution_recovery_controller.py",
+          "symbol": "ExecutionRecoveryController.reconcile_execution_snapshot"
+        },
+        {
+          "path": "bot/execution_recovery_controller.py",
+          "symbol": "ExecutionRecoveryController.run_mirror_watchdog"
+        },
+        {
+          "path": "bot/execution_output_controller.py",
+          "symbol": "ExecutionOutputController.present_terminal_execution_card"
+        },
+        {
+          "path": "bot/feishu_execution_finalization_controller.py",
+          "symbol": "FeishuExecutionFinalizationController.finalize"
+        },
+        {
+          "path": "bot/feishu_execution_finalization_controller.py",
+          "symbol": "FeishuExecutionFinalizationController.prepare_and_commit_if_current"
+        },
+        {
+          "path": "bot/feishu_execution_finalization_controller.py",
+          "symbol": "FeishuExecutionFinalizationController.present"
+        },
+        {
+          "path": "bot/feishu_active_observer.py",
+          "symbol": "FeishuActiveObserverController.prepare_resume_snapshot"
+        },
+        {
+          "path": "bot/feishu_active_observer.py",
+          "symbol": "FeishuActiveObserverController.present_execution"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/adapter_notification_runtime.py",
+          "symbol": "AdapterNotificationRuntimeTransitions"
+        },
+        {
+          "path": "bot/feishu_execution_process_projection.py",
+          "symbol": "FeishuExecutionProcessProjection"
+        },
+        {
+          "path": "bot/execution_transcript.py",
+          "symbol": "ExecutionTranscript"
+        },
+        {
+          "path": "bot/execution_pages.py",
+          "symbol": "ExecutionPageLedger"
+        },
+        {
+          "path": "bot/execution_pages.py",
+          "symbol": "TerminalExecutionPageReceipt"
+        },
+        {
+          "path": "bot/execution_output_controller.py",
+          "symbol": "ExecutionOutputController"
+        },
+        {
+          "path": "bot/feishu_execution_finalization_controller.py",
+          "symbol": "FeishuExecutionFinalizationController"
+        },
+        {
+          "path": "bot/cards.py",
+          "symbol": "build_execution_card"
+        },
+        {
+          "path": "bot/execution_recovery_controller.py",
+          "symbol": "ExecutionRecoveryController"
+        },
+        {
+          "path": "bot/execution_recovery_worker.py",
+          "symbol": "ExecutionRecoveryWorkerRegistry"
+        },
+        {
+          "path": "bot/execution_recovery_runtime.py",
+          "symbol": "ExecutionRecoveryRuntimeTransitions"
+        },
+        {
+          "path": "bot/adapter_ingress_gate.py",
+          "symbol": "AdapterIngressGate"
+        },
+        {
+          "path": "bot/feishu_active_observer.py",
+          "symbol": "FeishuActiveObserverController"
+        },
+        {
+          "path": "bot/binding_execution_runtime.py",
+          "symbol": "BindingExecutionRuntimeTransitions"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.3.1 active turn 中途 observer attach"
+        },
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.4 在线通知是执行中的主真相源"
+        },
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.5 执行卡片锚点合同"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_adapter_notification_controller.py",
+            "tests/test_adapter_notification_runtime.py",
+            "tests/test_feishu_execution_process_projection.py",
+            "tests/test_execution_output_controller.py",
+            "tests/test_execution_recovery_controller.py",
+            "tests/test_execution_recovery_runtime.py",
+            "tests/test_execution_recovery_worker.py",
+            "tests/test_execution_recovery_watchdog_staging.py",
+            "tests/test_execution_transcript.py",
+            "tests/test_execution_transcript_snapshot.py",
+            "tests/test_feishu_active_observer.py",
+            "tests/test_feishu_execution_finalization_controller.py",
+            "tests/test_terminal_execution_page_reconciliation.py",
+            "tests/test_terminal_reply_evidence.py",
+            "tests/test_turn_execution_coordinator.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_execution.py::CodexHandlerExecutionTests::test_terminal_signal_finalizes_immediately_before_background_reconcile",
+            "tests/focus_runtime/test_codex_handler_execution.py::CodexHandlerExecutionTests::test_live_terminal_receipts_are_scheduled_without_touching_fifo_successor",
+            "tests/focus_runtime/test_codex_handler_execution.py::CodexHandlerExecutionTests::test_background_terminal_reconcile_only_patches_old_card",
+            "tests/focus_runtime/test_codex_handler_feishu_ownership.py::CodexHandlerFeishuOwnershipTests::test_terminal_reconcile_fallback_does_not_duplicate_terminal_result_delivery",
+            "tests/test_adapter_ingress_gate_generation_settlement.py",
+            "tests/test_codex_app_server_generation_pinned_reads.py",
+            "tests/test_service_runtime_lifecycle.py::ServiceRuntimeLifecycleTests::test_execution_recovery_join_precedes_timer_cancellation"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "feishu-interaction-approvals": {
+      "entry": [
+        {
+          "path": "bot/interaction_request_controller.py",
+          "symbol": "InteractionRequestController.handle_adapter_request"
+        },
+        {
+          "path": "bot/interaction_request_controller.py",
+          "symbol": "InteractionRequestController.handle_approval_card_action"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/interaction_request_controller.py",
+          "symbol": "InteractionRequestController"
+        },
+        {
+          "path": "bot/interaction_approval_cards.py",
+          "symbol": "build_command_approval_card"
+        },
+        {
+          "path": "bot/interaction_approval_cards.py",
+          "symbol": "build_permissions_approval_card"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/server-request-lifecycle.zh-CN.md",
+          "heading": "4. Response Authority"
+        },
+        {
+          "path": "docs/contracts/codex-permissions-model.zh-CN.md",
+          "heading": "2. Approval 与 Sandbox"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_interaction_approval_cards.py",
+            "tests/test_interaction_request_controller.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_interactions.py",
+            "tests/focus_runtime/test_focus_runtime_feishu_surface.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "feishu-settings-cards": {
+      "entry": [
+        {
+          "path": "bot/codex_settings_domain.py",
+          "symbol": "CodexSettingsDomain.handle_approval_command"
+        },
+        {
+          "path": "bot/codex_settings_domain.py",
+          "symbol": "CodexSettingsDomain.handle_permissions_command"
+        },
+        {
+          "path": "bot/codex_settings_domain.py",
+          "symbol": "CodexSettingsDomain.handle_set_approval_policy"
+        },
+        {
+          "path": "bot/codex_settings_domain.py",
+          "symbol": "CodexSettingsDomain.handle_set_permissions_profile"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/codex_settings_domain.py",
+          "symbol": "CodexSettingsDomain"
+        },
+        {
+          "path": "bot/approval_settings_cards.py",
+          "symbol": "BINDING_SAFETY_BASELINE_SCOPE_TEXT"
+        },
+        {
+          "path": "bot/approval_settings_cards.py",
+          "symbol": "build_approval_policy_card"
+        },
+        {
+          "path": "bot/approval_settings_cards.py",
+          "symbol": "build_permissions_profile_card"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/feishu-command-matrix.zh-CN.md",
+          "heading": "2.2 Turn Settings 与 More"
+        },
+        {
+          "path": "docs/contracts/codex-permissions-model.zh-CN.md",
+          "heading": "2. Approval 与 Sandbox"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_approval_settings_cards.py",
+            "tests/test_codex_settings_domain.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_command_surfaces.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "feishu-turn-steer": {
+      "entry": [
+        {
+          "path": "bot/feishu_turn_steer.py",
+          "symbol": "FeishuTurnSteerController.handle_command"
+        },
+        {
+          "path": "bot/focus_runtime/feishu_surface.py",
+          "symbol": "FeishuSurface.build_command_routes"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/feishu_turn_steer.py",
+          "symbol": "FeishuTurnSteerController"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.3.2 显式 `/steer` exact-turn contribution"
+        },
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "7. 共享信任不等于 writer"
+        },
+        {
+          "path": "docs/contracts/feishu-command-matrix.zh-CN.md",
+          "heading": "2.2 Turn Settings 与 More"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_feishu_turn_steer.py",
+            "tests/focus_runtime/test_codex_handler_turn_steer.py",
+            "tests/test_shared_command_surface.py",
+            "tests/focus_runtime/test_codex_handler_help_actions.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_focus_runtime_feishu_surface.py",
+            "tests/focus_runtime/test_feishu_execution_queue_handler_integration.py",
+            "tests/test_fcodex_shared_steer.py",
+            "tests/test_codex_app_server_generation_pinned_turns.py",
+            "tests/test_codex_app_server.py::CodexAppServerAdapterTests::test_list_thread_turns_and_steer_use_explicit_v2_contracts"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "focus-runtime": {
+      "entry": [
+        {
+          "path": "bot/focus_runtime/runtime.py",
+          "symbol": "FocusRuntime"
+        },
+        {
+          "path": "bot/focus_runtime/feishu_thread_session_composition.py",
+          "symbol": "compose_feishu_thread_sessions"
+        },
+        {
+          "path": "bot/focus_runtime/execution_recovery_composition.py",
+          "symbol": "compose_execution_recovery"
+        },
+        {
+          "path": "bot/focus_runtime/web_gateway_composition.py",
+          "symbol": "compose_web_gateway"
+        },
+        {
+          "path": "bot/service_runtime_lifecycle.py",
+          "symbol": "ServiceRuntimeIngressDispatcher.run_external_transaction"
+        },
+        {
+          "path": "bot/service_runtime_lifecycle.py",
+          "symbol": "ServiceRuntimeIngressDispatcher.prepare_external_transaction"
+        },
+        {
+          "path": "bot/service_runtime_lifecycle.py",
+          "symbol": "ServiceRuntimeIngressDispatcher.start_background_external_transaction"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/service_runtime_lifecycle.py",
+          "symbol": "ServiceRuntimeLifecycle"
+        },
+        {
+          "path": "bot/focus_runtime/service_authority.py",
+          "symbol": "ServiceRuntimeAuthority"
+        },
+        {
+          "path": "bot/focus_runtime/thread_targets.py",
+          "symbol": "CodexThreadTargetService"
+        },
+        {
+          "path": "bot/focus_runtime/binding_coordinator.py",
+          "symbol": "BindingRuntimeCoordinator"
+        },
+        {
+          "path": "bot/focus_runtime/feishu_platform.py",
+          "symbol": "FeishuPlatform"
+        },
+        {
+          "path": "bot/focus_runtime/feishu_surface.py",
+          "symbol": "FeishuSurface"
+        },
+        {
+          "path": "bot/focus_runtime/terminal_results.py",
+          "symbol": "TerminalResults"
+        },
+        {
+          "path": "bot/adapter_ingress_gate.py",
+          "symbol": "AdapterIngressGate"
+        },
+        {
+          "path": "bot/web_runtime/lifecycle_coordinator.py",
+          "symbol": "WebRuntimeLifecycleCoordinator"
+        },
+        {
+          "path": "bot/thread_runtime_authority.py",
+          "symbol": "ThreadRuntimeAuthority.prepare_unsubscribe_thread"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/architecture/focus-design.zh-CN.md",
+          "heading": "2.2 应用事务 owner"
+        },
+        {
+          "path": "docs/architecture/focus-design.zh-CN.md",
+          "heading": "5.1 Service 与 backend"
+        },
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "2. 核心规则"
+        },
+        {
+          "path": "docs/contracts/thread-resume-local-commit.zh-CN.md",
+          "heading": "2. 唯一 resume 事务"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_focus_runtime_binding_coordinator.py",
+            "tests/focus_runtime/test_focus_runtime_feishu_platform.py",
+            "tests/focus_runtime/test_focus_runtime_feishu_surface.py",
+            "tests/focus_runtime/test_focus_runtime_package.py",
+            "tests/focus_runtime/test_focus_runtime_service_authority.py",
+            "tests/focus_runtime/test_focus_runtime_terminal_results.py",
+            "tests/focus_runtime/test_focus_runtime_thread_targets.py",
+            "tests/focus_runtime/test_focus_runtime_web_gateway_composition.py",
+            "tests/test_service_runtime_lifecycle.py",
+            "tests/test_thread_runtime_authority.py",
+            "tests/test_web_runtime_lifecycle_coordinator.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_execution.py",
+            "tests/focus_runtime/test_codex_handler_runtime_composition.py",
+            "tests/focus_runtime/test_feishu_execution_queue_handler_integration.py",
+            "tests/test_execution_recovery_watchdog_staging.py",
+            "tests/test_adapter_ingress_gate_generation_settlement.py",
+            "tests/test_codex_app_server_generation_pinned_reads.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "focus-web-client-state": {
+      "entry": [
+        {
+          "path": "web/src/focus/useFocusWebClient.ts",
+          "symbol": "useFocusWebClient"
+        }
+      ],
+      "owner": [
+        {
+          "path": "web/src/focus/clientIntentClock.ts",
+          "symbol": "ClientIntentClock"
+        },
+        {
+          "path": "web/src/focus/client-state/browser-turn-window.ts",
+          "symbol": "createBrowserTurnWindow"
+        },
+        {
+          "path": "web/src/focus/client-state/web-next-turn-settings.ts",
+          "symbol": "createWebNextTurnSettings"
+        },
+        {
+          "path": "web/src/focus/client-state/runtime-notices.ts",
+          "symbol": "createRuntimeNoticeOwner"
+        },
+        {
+          "path": "web/src/focus/client-state/thread-event-revisions.ts",
+          "symbol": "ThreadEventRevisionIndex"
+        },
+        {
+          "path": "web/src/focus/client-state/thread-mutations.ts",
+          "symbol": "createThreadMutationState"
+        },
+        {
+          "path": "web/src/focus/client-state/pending-request-actions.ts",
+          "symbol": "createPendingRequestActionState"
+        },
+        {
+          "path": "web/src/focus/client-state/thread-inspection.ts",
+          "symbol": "createThreadInspection"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "2. 单一事实源与 owner"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "4. Endpoint 与 event admission"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        },
+        {
+          "path": "docs/contracts/focus-web-prompt-mutation-recovery.zh-CN.md",
+          "heading": "2. Identity、receipt 与唯一 owner"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/owners/focus-projection-sync.test.ts",
+            "web/test/focus_client/owners/browser-turn-window.test.ts",
+            "web/test/focus_client/owners/client-intent-clock.test.ts",
+            "web/test/focus_client/owners/pending-request-actions.test.ts",
+            "web/test/focus_client/owners/thread-event-revisions.test.ts",
+            "web/test/focus_client/owners/thread-inspection.test.ts",
+            "web/test/focus_client/owners/thread-mutations.test.ts",
+            "web/test/focus_client/owners/web-next-turn-settings.test.ts",
+            "web/test/focus_client/owners/runtime-notices.test.ts",
+            "web/test/focus_client/owners/use-focus-web-client.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/transport-projection.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "source-context",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-context-usage": {
+      "entry": [
+        {
+          "path": "bot/web_runtime/thread_read_model.py",
+          "symbol": "WebThreadReadModel.token_usage"
+        },
+        {
+          "path": "bot/web_runtime/thread_read_model.py",
+          "symbol": "WebThreadReadModel.apply_notification"
+        },
+        {
+          "path": "web/src/types.ts",
+          "symbol": "ConversationStatus"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/web_runtime/thread_read_model.py",
+          "symbol": "WebThreadReadModel"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_thread_read_model.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/context-usage-surface.test.ts",
+            "web/test/focus_client/context-usage.test.ts",
+            "web/test/focus_client/interaction-settings.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/owners/focus-projection-sync.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-history-navigation": {
+      "entry": [
+        {
+          "path": "bot/web_runtime/gateway.py",
+          "symbol": "WebGateway._handle_thread_turns"
+        },
+        {
+          "path": "bot/web_runtime/controller.py",
+          "symbol": "WebRuntimeController.run_prepared_thread_read"
+        },
+        {
+          "path": "web/src/focus/useFocusWebClient.ts",
+          "symbol": "useFocusWebClient"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/web_runtime/thread_open_coordinator.py",
+          "symbol": "WebThreadOpenCoordinator.prepare_list_older_turns"
+        },
+        {
+          "path": "bot/web_runtime/thread_read_model.py",
+          "symbol": "WebThreadReadModel"
+        },
+        {
+          "path": "bot/web_runtime/thread_read_projection.py",
+          "symbol": "project_older_turns"
+        },
+        {
+          "path": "bot/web_runtime/turn_window.py",
+          "symbol": "SUPPORTED_TURN_WINDOW_LIMITS"
+        },
+        {
+          "path": "web/src/focus/focusHistoryNavigation.ts",
+          "symbol": "createFocusHistoryNavigation"
+        },
+        {
+          "path": "web/src/focus/client-state/browser-turn-window.ts",
+          "symbol": "createBrowserTurnWindow"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "4. Endpoint 与 event admission"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_projection.py",
+            "tests/test_web_thread_open_coordinator.py",
+            "tests/test_web_thread_read_model.py",
+            "tests/web_runtime/test_thread_history_gateway.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/conversation-history-navigation-surface.test.ts",
+            "web/test/focus-turn-window-settings-surface.test.ts",
+            "web/test/focus_client/owners/browser-turn-window.test.ts",
+            "web/test/focus_client/owners/focus-history-navigation.test.ts",
+            "web/test/focus_client/owners/use-focus-web-client.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/owners/focus-projection-sync.test.ts",
+            "web/test/focus_client/transport-projection.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-wire",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-tool-output-presentation": {
+      "entry": [
+        {
+          "path": "bot/web_runtime/projection.py",
+          "symbol": "project_turns"
+        },
+        {
+          "path": "web/src/focus/focusProjectionSync.ts",
+          "symbol": "createFocusProjectionSync"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/web_runtime/tool_output_presentation.py",
+          "symbol": "ToolOutputPresentationBudget"
+        },
+        {
+          "path": "bot/web_runtime/thread_read_model.py",
+          "symbol": "WebThreadReadModel"
+        },
+        {
+          "path": "web/src/focus/toolOutputPresentation.ts",
+          "symbol": "appendBoundedToolOutput"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_projection.py",
+            "tests/test_web_thread_read_model.py",
+            "tests/web_runtime/test_tool_output_presentation.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus-api.test.ts",
+            "web/test/focus_client/owners/focus-projection-sync.test.ts",
+            "web/test/swarm-card-rows.test.ts",
+            "web/test/tool-output-dom-window.test.ts",
+            "web/test/tool-output-presentation.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/owners/focus-history-navigation.test.ts",
+            "web/test/focus_client/transport-projection.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-wire",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-thread-inspection": {
+      "entry": [
+        {
+          "path": "web/src/focus/useFocusWebClient.ts",
+          "symbol": "useFocusWebClient"
+        },
+        {
+          "path": "bot/web_runtime/gateway_thread_inspection.py",
+          "symbol": "WebGatewayThreadInspectionMixin._handle_thread_tool_detail"
+        },
+        {
+          "path": "bot/web_runtime/gateway_thread_inspection.py",
+          "symbol": "WebGatewayThreadInspectionMixin._handle_thread_conversation_search"
+        },
+        {
+          "path": "bot/web_runtime/controller.py",
+          "symbol": "WebRuntimeController.run_prepared_thread_read"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/web_runtime/thread_inspection.py",
+          "symbol": "WebThreadInspectionService"
+        },
+        {
+          "path": "bot/web_runtime/thread_inspection_wire.py",
+          "symbol": "encode_thread_inspection_json"
+        },
+        {
+          "path": "bot/web_runtime/tool_detail_source.py",
+          "symbol": "project_tool_detail_source"
+        },
+        {
+          "path": "web/src/focus/client-state/thread-inspection.ts",
+          "symbol": "createThreadInspection"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "4. Endpoint 与 event admission"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_thread_inspection.py",
+            "tests/web_runtime/test_thread_inspection_gateway.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus-api.test.ts",
+            "web/test/focus_client/owners/thread-inspection.test.ts",
+            "web/test/focus_client/owners/use-focus-web-client.test.ts",
+            "web/test/conversation-inspection-surface.test.ts",
+            "web/test/focus-detail-panel-surface.test.ts",
+            "web/test/focus_client/owners/focus-history-navigation.test.ts",
+            "web/test/tool-output-dom-window.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_projection.py",
+            "tests/test_web_thread_open_coordinator.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/transport-projection.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-wire",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-gateway-wire": {
+      "entry": [
+        {
+          "path": "bot/web_runtime/gateway.py",
+          "symbol": "WebGateway"
+        },
+        {
+          "path": "bot/web_runtime/gateway.py",
+          "symbol": "WebGateway._staged_document_request_to_thread"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/focus_web_wire_catalog.py",
+          "symbol": "FOCUS_WEB_ENDPOINTS"
+        },
+        {
+          "path": "bot/focus_web_wire_catalog.py",
+          "symbol": "FOCUS_WEB_EVENTS"
+        },
+        {
+          "path": "bot/web_runtime/runtime_notice.py",
+          "symbol": "project_runtime_notice"
+        },
+        {
+          "path": "bot/web_runtime/event_coordinator.py",
+          "symbol": "WebRuntimeEventCoordinator.handle_notification"
+        },
+        {
+          "path": "bot/web_runtime/event_coordinator.py",
+          "symbol": "WebRuntimeEventCoordinator.settle_notification_projection"
+        },
+        {
+          "path": "bot/web_runtime/notification_projection.py",
+          "symbol": "project_notification"
+        },
+        {
+          "path": "bot/web_runtime/gateway_external_transaction.py",
+          "symbol": "WebGatewayExternalTransactionRunner"
+        },
+        {
+          "path": "bot/web_runtime/thread_read_projection.py",
+          "symbol": "project_open_thread"
+        },
+        {
+          "path": "bot/web_runtime/document_registry.py",
+          "symbol": "WebDocumentRegistry.intent_generation_floor"
+        },
+        {
+          "path": "bot/web_runtime/gateway_request_decoder.py",
+          "symbol": "decode_request_connection_generation"
+        },
+        {
+          "path": "bot/web_runtime/gateway_request_decoder.py",
+          "symbol": "decode_tool_detail_query"
+        },
+        {
+          "path": "bot/web_runtime/gateway_request_decoder.py",
+          "symbol": "decode_turn_window_limit"
+        },
+        {
+          "path": "bot/web_runtime/gateway_request_decoder.py",
+          "symbol": "decode_request_response_capability"
+        },
+        {
+          "path": "web/src/focus/httpResponseDecoder.ts",
+          "symbol": "decodeFocusDocumentRegistration"
+        },
+        {
+          "path": "web/src/focus/projectionEventDecoder.ts",
+          "symbol": "decodeFocusRuntimeNoticeDetail"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "4. Endpoint 与 event admission"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_focus_web_wire_catalog.py",
+            "tests/test_web_runtime_event_coordinator.py",
+            "tests/test_web_runtime_notice.py",
+            "tests/test_web_document_registry.py",
+            "tests/test_web_gateway.py",
+            "tests/test_web_gateway_external_transaction.py",
+            "tests/test_web_gateway_next_turn_settings.py",
+            "tests/test_web_gateway_request_decoder.py",
+            "tests/web_runtime/test_thread_history_gateway.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/web_runtime/test_document_lifecycle.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus-api.test.ts",
+            "web/test/focus-prompt-dispatch-api.test.ts",
+            "web/test/focus-runtime-notice-decoder.test.ts",
+            "web/test/focus-runtime-notice-surface.test.ts",
+            "web/test/focus_client/transport-projection.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "dependency-direction",
+        "web-wire",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-request-admission": {
+      "entry": [
+        {
+          "path": "bot/web_runtime/gateway.py",
+          "symbol": "WebGateway._start_async"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/web_runtime/gateway_request_admission.py",
+          "symbol": "WebGatewayRequestAdmission"
+        },
+        {
+          "path": "bot/web_runtime/auth.py",
+          "symbol": "WebAuthManager"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/architecture/focus-design.zh-CN.md",
+          "heading": "2.1 Surface 与传输"
+        },
+        {
+          "path": "docs/decisions/focus-web-external-access.zh-CN.md",
+          "heading": "4. Session audience 与浏览器准入"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "4. Endpoint 与 event admission"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_auth.py",
+            "tests/test_web_gateway_request_admission.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_gateway.py::WebGatewayTests::test_reissue_rejects_old_request_blocked_after_token_validation",
+            "tests/test_web_gateway.py::WebGatewayTests::test_revoked_session_rejects_request_blocked_after_authentication",
+            "tests/web_runtime/test_document_lifecycle.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-wire"
+      ]
+    },
+    "focus-web-trusted-proxy-access": {
+      "entry": [
+        {
+          "path": "bot/codex_config.py",
+          "symbol": "CodexConfig.from_dict"
+        },
+        {
+          "path": "bot/web_runtime/gateway_request_admission.py",
+          "symbol": "WebGatewayRequestAdmission._admit_request_audience"
+        },
+        {
+          "path": "web/src/focus/useFocusWebClient.ts",
+          "symbol": "useFocusWebClient"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/network_contract.py",
+          "symbol": "parse_trusted_proxy_external_origin"
+        },
+        {
+          "path": "bot/codex_config.py",
+          "symbol": "CodexConfig.from_dict"
+        },
+        {
+          "path": "bot/web_runtime/auth.py",
+          "symbol": "WebAuthManager.issue_external_session"
+        },
+        {
+          "path": "bot/web_runtime/gateway_request_admission.py",
+          "symbol": "WebGatewayRequestAdmission"
+        },
+        {
+          "path": "bot/web_runtime/gateway.py",
+          "symbol": "WebGateway._handle_events"
+        },
+        {
+          "path": "bot/web_runtime/gateway.py",
+          "symbol": "WebGateway._reserve_external_socket"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/codex-config.zh-CN.md",
+          "heading": "Trusted-proxy Web 配置"
+        },
+        {
+          "path": "docs/decisions/focus-web-external-access.zh-CN.md",
+          "heading": "2. 部署与 authority"
+        },
+        {
+          "path": "docs/decisions/focus-web-external-access.zh-CN.md",
+          "heading": "3. Proxy proof、label 与信任域"
+        },
+        {
+          "path": "docs/decisions/focus-web-external-access.zh-CN.md",
+          "heading": "4. Session audience 与浏览器准入"
+        },
+        {
+          "path": "docs/decisions/focus-web-external-access.zh-CN.md",
+          "heading": "5. 容量、撤销与失败边界"
+        },
+        {
+          "path": "docs/contracts/focusctl-command-matrix.zh-CN.md",
+          "heading": "4.8 `web`"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_network_contract.py",
+            "tests/test_codex_config.py::CodexConfigTests::test_trusted_proxy_config_is_an_atomic_exact_remote_mode",
+            "tests/focus_runtime/test_codex_handler_runtime_composition.py::CodexHandlerRuntimeCompositionTests::test_handler_projects_trusted_proxy_config_to_web_gateway",
+            "tests/test_web_gateway_trusted_proxy.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus-auth-recovery-surface.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_auth.py",
+            "tests/test_codex_config.py::CodexConfigTests::test_web_network_settings_are_admitted_by_the_schema",
+            "tests/test_web_gateway.py::WebGatewayTests::test_reissue_rejects_old_request_blocked_after_token_validation",
+            "tests/test_web_gateway.py::WebGatewayTests::test_revoked_session_rejects_request_blocked_after_authentication",
+            "tests/runtime_admin/test_cli_dispatch.py::RuntimeAdminCliDispatchTests::test_open_web_prints_bootstrap_url_and_opens_browser",
+            "tests/web_runtime/test_document_lifecycle.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/draft-create-attachment.test.ts",
+            "web/test/focus_client/transport-projection.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-wire",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-mutations": {
+      "entry": [
+        {
+          "path": "web/src/focus/FocusApp.vue",
+          "symbol": "handleSubmit"
+        },
+        {
+          "path": "web/src/focus/focusComposerSubmission.ts",
+          "symbol": "dispatchFocusComposerPayload"
+        },
+        {
+          "path": "web/src/focus/FocusApp.vue",
+          "symbol": "retryUnknownSubmission"
+        },
+        {
+          "path": "web/src/focus/mutations/actions.ts",
+          "symbol": "createFocusMutationActions"
+        }
+      ],
+      "owner": [
+        {
+          "path": "web/src/components/chat/composerSubmission.ts",
+          "symbol": "createComposerSubmission"
+        },
+        {
+          "path": "web/src/focus/mutations/actions.ts",
+          "symbol": "createFocusMutationActions"
+        },
+        {
+          "path": "web/src/focus/mutations/thread-mutation-actions.ts",
+          "symbol": "createThreadMutationActions"
+        },
+        {
+          "path": "web/src/focus/mutations/pending-request-responses.ts",
+          "symbol": "createPendingRequestResponses"
+        },
+        {
+          "path": "web/src/focus/webPromptMutation.ts",
+          "symbol": "createWebPromptMutationId"
+        },
+        {
+          "path": "web/src/focus/webPromptResultLocators.ts",
+          "symbol": "createWebPromptResultLocatorStore"
+        },
+        {
+          "path": "web/src/focus/webPromptMutationRecovery.ts",
+          "symbol": "createUnknownSubmissionDraftStore"
+        },
+        {
+          "path": "bot/web_runtime/prompt_submission.py",
+          "symbol": "WebPromptResultRegistry"
+        },
+        {
+          "path": "bot/web_runtime/prompt_submission.py",
+          "symbol": "WebPromptSubmissionCoordinator"
+        },
+        {
+          "path": "bot/web_runtime/writer_workspace_coordinator.py",
+          "symbol": "WebComposerScopeReceipt"
+        },
+        {
+          "path": "bot/web_runtime/mutation_recovery.py",
+          "symbol": "WebMutationRecoveryRegistry"
+        },
+        {
+          "path": "bot/web_runtime/operation_service.py",
+          "symbol": "WebOperationService.resolve_unknown_mutation"
+        },
+        {
+          "path": "bot/stores/web_attachment_store.py",
+          "symbol": "WebAttachmentStore.claim_pending_submission"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focus-web-prompt-mutation-recovery.zh-CN.md",
+          "heading": "1. 用户结果与 upstream 边界"
+        },
+        {
+          "path": "docs/contracts/focus-web-prompt-mutation-recovery.zh-CN.md",
+          "heading": "2. Identity、receipt 与唯一 owner"
+        },
+        {
+          "path": "docs/contracts/focus-web-prompt-mutation-recovery.zh-CN.md",
+          "heading": "3. 单 POST prepare / effect / settle"
+        },
+        {
+          "path": "docs/contracts/focus-web-prompt-mutation-recovery.zh-CN.md",
+          "heading": "4. Result receipt、F5 与 HTTP wire"
+        },
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "7. 共享信任不等于 writer"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_prompt_submission.py",
+            "tests/test_web_mutation_recovery.py",
+            "tests/test_web_operation_service.py",
+            "tests/test_web_attachment_store.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus-composer-input-surface.test.ts",
+            "web/test/focus-backend-reset-ui.test.ts",
+            "web/test/focus-prompt-dispatch-api.test.ts",
+            "web/test/focus_client/owners/focus-composer-submission.test.ts",
+            "web/test/focus_client/owners/focus-mutation-actions.test.ts",
+            "web/test/focus_client/owners/thread-mutation-actions.test.ts",
+            "web/test/focus_client/owners/pending-request-responses.test.ts",
+            "web/test/focus_client/owners/web-prompt-result-locators.test.ts",
+            "web/test/focus_client/owners/web-prompt-mutation-recovery.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_fcodex_shared_steer.py",
+            "tests/web_runtime/test_steer_projection.py",
+            "tests/test_codex_app_server_generation_pinned_turns.py"
+          ]
+        }
+      ],
+      "guard": [
+        "dependency-direction",
+        "source-context",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "focus-web-next-turn-settings": {
+      "entry": [
+        {
+          "path": "bot/web_runtime/controller.py",
+          "symbol": "WebRuntimeController.update_next_turn_settings"
+        },
+        {
+          "path": "web/src/focus/client-state/web-next-turn-settings.ts",
+          "symbol": "createWebNextTurnSettings"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/stores/web_next_turn_settings_store.py",
+          "symbol": "WebNextTurnSettingsStore"
+        },
+        {
+          "path": "bot/web_runtime/next_turn_settings_coordinator.py",
+          "symbol": "WebNextTurnSettingsCoordinator"
+        },
+        {
+          "path": "web/src/focus/client-state/web-next-turn-settings.ts",
+          "symbol": "createWebNextTurnSettings"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/runtime-settings-fact-sources.zh-CN.md",
+          "heading": "1.2 instance-wide Web next-turn settings"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "4. Endpoint 与 event admission"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_web_next_turn_settings_store.py",
+            "tests/test_web_next_turn_settings_coordinator.py",
+            "tests/test_web_gateway_next_turn_settings.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/owners/web-next-turn-settings.test.ts"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_runtime_composition.py::CodexHandlerRuntimeCompositionTests::test_web_next_turn_seed_and_feishu_binding_defaults_stay_independent",
+            "tests/test_web_turn_command_coordinator.py",
+            "tests/web_runtime/test_thread_create_attachments.py"
+          ]
+        },
+        {
+          "runner": "vitest",
+          "targets": [
+            "web/test/focus_client/interaction-settings.test.ts",
+            "web/test/focus_client/navigation-profile.test.ts",
+            "web/test/focus-next-turn-settings-surface.test.ts"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-dependency-direction",
+        "web-typecheck"
+      ]
+    },
+    "main-turn-admission": {
+      "entry": [
+        {
+          "path": "bot/prompt_turn_entry_controller.py",
+          "symbol": "PromptTurnEntryController.start_prompt_turn_result"
+        },
+        {
+          "path": "bot/web_runtime/controller.py",
+          "symbol": "WebRuntimeController.prepare_prompt"
+        },
+        {
+          "path": "bot/web_runtime/controller.py",
+          "symbol": "WebRuntimeController.run_prepared_prompt"
+        },
+        {
+          "path": "bot/web_runtime/controller.py",
+          "symbol": "WebRuntimeController.prepare_read_thread"
+        },
+        {
+          "path": "bot/web_runtime/controller.py",
+          "symbol": "WebRuntimeController.run_prepared_thread_read"
+        },
+        {
+          "path": "bot/web_runtime/gateway.py",
+          "symbol": "WebGateway._handle_thread"
+        },
+        {
+          "path": "bot/web_runtime/thread_create_coordinator.py",
+          "symbol": "WebThreadCreateCoordinator.start_thread"
+        },
+        {
+          "path": "bot/fcodex/operation_service.py",
+          "symbol": "FcodexOperationService.admit"
+        },
+        {
+          "path": "bot/fcodex/main_turn_owner.py",
+          "symbol": "FcodexMainTurnOwner.admit_exclusive_start"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/stores/interaction_lease_store.py",
+          "symbol": "InteractionLeaseStore"
+        },
+        {
+          "path": "bot/adapter_event_bridge.py",
+          "symbol": "AdapterEventBridge.reconcile_active_turn_lease_notification"
+        },
+        {
+          "path": "bot/feishu_root_operation_controller.py",
+          "symbol": "FeishuRootOperationController"
+        },
+        {
+          "path": "bot/web_runtime/operation_service.py",
+          "symbol": "WebOperationService"
+        },
+        {
+          "path": "bot/web_runtime/prompt_submission.py",
+          "symbol": "WebPromptSubmissionCoordinator"
+        },
+        {
+          "path": "bot/fcodex/main_turn_owner.py",
+          "symbol": "FcodexMainTurnOwner"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "2. 核心规则"
+        },
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "4. 提交、unknown 与释放"
+        },
+        {
+          "path": "docs/contracts/thread-create-local-commit.zh-CN.md",
+          "heading": "成功"
+        },
+        {
+          "path": "docs/contracts/thread-resume-local-commit.zh-CN.md",
+          "heading": "3. 失败边界"
+        },
+        {
+          "path": "docs/contracts/runtime-settings-fact-sources.zh-CN.md",
+          "heading": "1.2 instance-wide Web next-turn settings"
+        },
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.3 已获准的下一条消息可以重新 attach 并重新 load runtime"
+        },
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.5 执行卡片锚点合同"
+        },
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "main turn owner"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_prompt_turn_entry_controller.py",
+            "tests/test_feishu_root_operation_controller.py",
+            "tests/test_web_runtime_error_classification.py",
+            "tests/test_web_thread_open_coordinator.py",
+            "tests/test_web_turn_command_coordinator.py",
+            "tests/web_runtime/test_prompt_submission_authority.py",
+            "tests/web_runtime/test_runtime_interest_resume.py",
+            "tests/web_runtime/test_thread_create_attachments.py",
+            "tests/test_fcodex_operation_admission.py",
+            "tests/test_fcodex_operation_lifecycle_release.py",
+            "tests/test_adapter_event_bridge.py",
+            "tests/test_adapter_notification_controller.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_execution.py",
+            "tests/focus_runtime/test_feishu_execution_queue_handler_integration.py",
+            "tests/test_fcodex_shared_steer.py",
+            "tests/test_fcodex_shared_interrupt.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "main-turn-interrupt": {
+      "entry": [
+        {
+          "path": "bot/prompt_turn_entry_controller.py",
+          "symbol": "PromptTurnEntryController.cancel_current_turn"
+        },
+        {
+          "path": "bot/adapter_notification_controller.py",
+          "symbol": "AdapterNotificationController.handle_turn_started"
+        },
+        {
+          "path": "bot/web_runtime/thread_mutation_coordinator.py",
+          "symbol": "WebThreadMutationCoordinator.interrupt"
+        },
+        {
+          "path": "bot/focus_runtime/thread_targets.py",
+          "symbol": "CodexThreadTargetService.interrupt_running_turn"
+        },
+        {
+          "path": "bot/fcodex/proxy.py",
+          "symbol": "_ProxyInteractionGate.handle_client_message"
+        },
+        {
+          "path": "bot/turn_interrupt_audit.py",
+          "symbol": "record_turn_interrupt_dispatch_attempt"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/feishu_root_operation_controller.py",
+          "symbol": "FeishuRootOperationController"
+        },
+        {
+          "path": "bot/turn_execution_coordinator.py",
+          "symbol": "TurnExecutionCoordinator"
+        },
+        {
+          "path": "bot/web_runtime/thread_mutation_coordinator.py",
+          "symbol": "WebThreadMutationCoordinator.interrupt"
+        },
+        {
+          "path": "bot/focus_runtime/thread_targets.py",
+          "symbol": "CodexThreadTargetService.interrupt_running_turn"
+        },
+        {
+          "path": "bot/fcodex/operation_service.py",
+          "symbol": "FcodexOperationService.admit"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/root-operation-owner.zh-CN.md",
+          "heading": "6. 普通停止"
+        },
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "普通停止"
+        },
+        {
+          "path": "docs/contracts/feishu-thread-lifecycle.zh-CN.md",
+          "heading": "5.7 取消选择与 dispatch 结果"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_prompt_turn_entry_controller.py",
+            "tests/test_feishu_root_operation_controller.py",
+            "tests/test_turn_execution_coordinator.py",
+            "tests/test_adapter_notification_controller.py",
+            "tests/test_turn_interrupt_audit.py",
+            "tests/test_web_thread_mutation_coordinator.py",
+            "tests/focus_runtime/test_focus_runtime_thread_targets.py",
+            "tests/focus_runtime/test_codex_handler_fcodex.py",
+            "tests/test_fcodex_shared_interrupt.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_execution.py",
+            "tests/test_web_connected_writer_regressions.py",
+            "tests/test_prompt_turn_entry_controller.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "server-request-interactions": {
+      "entry": [
+        {
+          "path": "bot/server_request_surface_dispatcher.py",
+          "symbol": "ServerRequestSurfaceDispatcher.dispatch"
+        },
+        {
+          "path": "bot/web_runtime/interaction_ingress_coordinator.py",
+          "symbol": "WebInteractionIngressCoordinator.handle_adapter_request"
+        },
+        {
+          "path": "bot/fcodex/interaction_inbox.py",
+          "symbol": "FcodexInteractionInbox.service_request"
+        },
+        {
+          "path": "bot/interaction_request_controller.py",
+          "symbol": "InteractionRequestController.handle_adapter_request"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/interaction_contract.py",
+          "symbol": "INTERACTIVE_SERVER_REQUEST_METHODS"
+        },
+        {
+          "path": "bot/server_request_registry.py",
+          "symbol": "ServerRequestRegistry"
+        },
+        {
+          "path": "bot/server_request_surface_dispatcher.py",
+          "symbol": "ServerRequestSurfaceDispatcher"
+        },
+        {
+          "path": "bot/web_runtime/interaction_inbox.py",
+          "symbol": "WebInteractionInbox"
+        },
+        {
+          "path": "bot/fcodex/interaction_inbox.py",
+          "symbol": "FcodexInteractionInbox"
+        },
+        {
+          "path": "bot/interaction_request_controller.py",
+          "symbol": "InteractionRequestController"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/server-request-lifecycle.zh-CN.md",
+          "heading": "3. Reader 顺序与路由"
+        },
+        {
+          "path": "docs/contracts/server-request-lifecycle.zh-CN.md",
+          "heading": "4. Response Authority"
+        },
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "interaction 与 server request"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_server_request_surface_dispatcher.py",
+            "tests/test_web_interaction_inbox.py",
+            "tests/test_web_interaction_ingress_coordinator.py",
+            "tests/test_web_interaction_response_controller.py",
+            "tests/test_fcodex_interaction_inbox.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_adapter_event_bridge.py",
+            "tests/test_shared_approval_owner_convergence.py",
+            "tests/test_web_shared_approval.py",
+            "tests/web_runtime/test_server_request_authority.py"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context",
+        "web-wire"
+      ]
+    },
+    "thread-effective-settings": {
+      "entry": [
+        {
+          "path": "bot/adapters/codex_app_server.py",
+          "symbol": "CodexAppServerAdapter._require_thread_snapshot_result"
+        },
+        {
+          "path": "bot/fcodex/operation_service.py",
+          "symbol": "FcodexOperationService.admit"
+        },
+        {
+          "path": "bot/thread_create_transaction.py",
+          "symbol": "ThreadCreateTransaction.create_and_commit_thread"
+        },
+        {
+          "path": "bot/thread_effective_settings.py",
+          "symbol": "ThreadEffectiveSettingsRegistry.observe_notification"
+        },
+        {
+          "path": "bot/thread_runtime_authority.py",
+          "symbol": "ThreadRuntimeAuthority.begin_resume_thread"
+        },
+        {
+          "path": "bot/thread_runtime_authority.py",
+          "symbol": "ThreadRuntimeAuthority.update_thread_settings"
+        },
+        {
+          "path": "bot/thread_runtime_authority.py",
+          "symbol": "ThreadRuntimeAuthority.start_turn"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/thread_effective_settings.py",
+          "symbol": "ThreadEffectiveSettingsRegistry"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/runtime-settings-fact-sources.zh-CN.md",
+          "heading": "3.1 connection-local effective settings 事实"
+        },
+        {
+          "path": "docs/contracts/focus-web-wire.zh-CN.md",
+          "heading": "5. DTO admission 与能力值"
+        },
+        {
+          "path": "docs/contracts/fcodex-operation-owner.zh-CN.md",
+          "heading": "直接 thread target"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_thread_effective_settings.py",
+            "tests/test_codex_app_server.py",
+            "tests/test_active_turn_disclosure.py",
+            "tests/test_fcodex_operation_admission.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/test_thread_runtime_authority.py",
+            "tests/test_web_thread_open_coordinator.py",
+            "tests/focus_runtime/test_codex_handler_prompt_files.py",
+            "tests/focus_runtime/test_feishu_execution_queue_handler_integration.py::FeishuExecutionQueueHandlerIntegrationTests::test_initial_attach_resume_guard_rejects_queue_aba_at_adapter_boundary"
+          ]
+        }
+      ],
+      "guard": [
+        "import-cycles",
+        "dependency-direction",
+        "source-context"
+      ]
+    },
+    "runtime-admin-cli": {
+      "entry": [
+        {
+          "path": "bot/focusctl.py",
+          "symbol": "_run_runtime"
+        },
+        {
+          "path": "bot/runtime_admin/cli.py",
+          "symbol": "main"
+        }
+      ],
+      "owner": [
+        {
+          "path": "bot/runtime_admin/cli.py",
+          "symbol": "main"
+        },
+        {
+          "path": "bot/runtime_admin/cli_inputs.py",
+          "symbol": "build_runtime_admin_parser"
+        },
+        {
+          "path": "bot/runtime_admin/control_router.py",
+          "symbol": "RuntimeAdminControlRouter"
+        },
+        {
+          "path": "bot/runtime_admin/binding_application.py",
+          "symbol": "RuntimeAdminBindingApplication"
+        },
+        {
+          "path": "bot/runtime_admin/offline_lifecycle.py",
+          "symbol": "RuntimeAdminOfflineLifecycle"
+        }
+      ],
+      "contract": [
+        {
+          "path": "docs/contracts/focusctl-command-matrix.zh-CN.md",
+          "heading": "4. 命令表"
+        },
+        {
+          "path": "docs/architecture/focus-design.zh-CN.md",
+          "heading": "2.2 应用事务 owner"
+        }
+      ],
+      "focused-test": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/runtime_admin/test_cli_inputs.py",
+            "tests/runtime_admin/test_cli_dispatch.py",
+            "tests/runtime_admin/test_cli_presentation.py",
+            "tests/runtime_admin/test_cli_lifecycle.py",
+            "tests/test_runtime_admin_binding_application.py"
+          ]
+        }
+      ],
+      "sentinel": [
+        {
+          "runner": "pytest",
+          "targets": [
+            "tests/focus_runtime/test_codex_handler_runtime_admin.py",
+            "tests/runtime_admin/test_binding_attach.py",
+            "tests/runtime_admin/test_control_surface.py",
+            "tests/test_shell_completion.py"
+          ]
+        }
+      ],
+      "guard": [
+        "dependency-direction",
+        "source-context"
+      ]
+    }
+  }
+}

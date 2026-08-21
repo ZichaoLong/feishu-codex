@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
     P2CardActionTriggerResponse,
 )
 
 from bot.adapters.base import ThreadGoalSummary
+from bot.binding_runtime_contract import BindingSessionSnapshot
 from bot.codex_protocol.client import CodexRpcError
 from bot.cards import (
     CommandResult,
@@ -19,7 +20,6 @@ from bot.cards import (
 )
 from bot.constants import format_timestamp
 from bot.runtime_state import FEISHU_RUNTIME_DETACHED
-from bot.runtime_view import RuntimeView
 
 _GOAL_USAGE = (
     "用法：`/goal`\n"
@@ -70,14 +70,20 @@ def _render_goal_text(*, thread_id: str, thread_title: str, goal: ThreadGoalSumm
 
 @dataclass(frozen=True, slots=True)
 class GoalDomainPorts:
-    get_runtime_view: Callable[[str, str, str], RuntimeView]
+    resolve_session: Callable[[str, str, str], BindingSessionSnapshot]
     get_thread_goal: Callable[[str], ThreadGoalSummary | None]
-    set_thread_goal: Callable[..., ThreadGoalSummary]
-    clear_thread_goal: Callable[[str], bool]
+    # Goal mutations are routed through the owning frontend controller rather
+    # than directly to the adapter.  Setting an active goal can immediately
+    # start an autonomous turn, so the controller must acquire its exact
+    # blank submission lease *before* the RPC leaves Focus.
+    mutate_goal: Callable[..., ThreadGoalSummary]
+    clear_goal: Callable[..., bool]
+    thread_mutation_denial_text: Callable[..., str]
     attach_current_binding: Callable[[str, str, str], None]
     update_runtime_goal_projection: Callable[[str, str, str, ThreadGoalSummary | None], None]
     submit_to_runtime: Callable[..., None]
-    resume_goal_on_runtime: Callable[[str, str, bool, str], None]
+    resume_goal: Callable[[str, str, str, bool, str], dict]
+    reply_card: Callable[..., None]
 
 
 class CodexGoalDomain:
@@ -157,9 +163,10 @@ class CodexGoalDomain:
                 if confirm_card is not None:
                     return make_card_response(card=confirm_card)
                 self._ports.submit_to_runtime(
-                    self._ports.resume_goal_on_runtime,
+                    self.resume_goal_on_runtime,
                     sender_id,
                     chat_id,
+                    thread_id,
                     False,
                     message_id,
                 )
@@ -171,6 +178,9 @@ class CodexGoalDomain:
                 result, toast = self._apply_goal_confirmed(
                     sender_id,
                     chat_id,
+                    expected_thread_id=str(
+                        action_value.get("thread_id", "") or ""
+                    ).strip(),
                     objective=str(action_value.get("objective", "") or "").strip(),
                     status=str(action_value.get("status", "") or "").strip(),
                     attach_binding=str(action_value.get("attach_binding", "") or "").strip().lower() == "true",
@@ -184,7 +194,7 @@ class CodexGoalDomain:
         return P2CardActionTriggerResponse()
 
     def _current_thread(self, sender_id: str, chat_id: str, *, message_id: str = "") -> tuple[str, str]:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
         thread_id = runtime.current_thread_id.strip()
         if not thread_id:
             raise ValueError("当前没有绑定 thread；请先直接发送消息、执行 `/new`，或 `/resume` 目标线程。")
@@ -257,7 +267,18 @@ class CodexGoalDomain:
 
     def _clear_goal(self, sender_id: str, chat_id: str, *, message_id: str = "") -> CommandResult:
         thread_id, thread_title = self._current_thread(sender_id, chat_id, message_id=message_id)
-        cleared = self._ports.clear_thread_goal(thread_id)
+        self._require_thread_mutation_access(
+            sender_id,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
+        cleared = self._ports.clear_goal(
+            sender_id,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
         self._project_goal(sender_id, chat_id, None, message_id=message_id)
         notice = "已清除当前 thread goal。" if cleared else "当前 thread 原本就没有 goal。"
         return CommandResult(
@@ -278,9 +299,9 @@ class CodexGoalDomain:
         status: str,
         message_id: str = "",
     ) -> dict | None:
-        runtime = self._ports.get_runtime_view(sender_id, chat_id, message_id)
+        runtime = self._ports.resolve_session(sender_id, chat_id, message_id)
         thread_id = runtime.current_thread_id.strip()
-        if not thread_id or runtime.binding.feishu_runtime_state != FEISHU_RUNTIME_DETACHED:
+        if not thread_id or runtime.thread.feishu_runtime_state != FEISHU_RUNTIME_DETACHED:
             return None
         return build_goal_detached_confirm_card(
             thread_id=thread_id,
@@ -294,24 +315,37 @@ class CodexGoalDomain:
         sender_id: str,
         chat_id: str,
         *,
+        expected_thread_id: str,
         objective: str,
         status: str,
         attach_binding: bool,
         message_id: str = "",
     ) -> tuple[CommandResult, str]:
+        normalized_expected_thread_id = str(expected_thread_id or "").strip()
+        if not normalized_expected_thread_id:
+            raise ValueError("确认卡缺少 thread_id；请刷新 goal 卡后重试。")
         normalized_objective = str(objective or "").strip()
         normalized_status = str(status or "").strip()
         if normalized_status == "active":
-            thread_id, _thread_title = self._current_thread(sender_id, chat_id, message_id=message_id)
-            self._require_resumable_goal(thread_id)
             self._ports.submit_to_runtime(
-                self._ports.resume_goal_on_runtime,
+                self.resume_goal_on_runtime,
                 sender_id,
                 chat_id,
+                normalized_expected_thread_id,
                 attach_binding,
                 message_id,
             )
             return (CommandResult(card=self._build_goal_resume_pending_card()), "")
+        thread_id, _thread_title = self._current_thread(
+            sender_id,
+            chat_id,
+            message_id=message_id,
+        )
+        if thread_id != normalized_expected_thread_id:
+            raise ValueError(
+                "确认卡已过期：当前会话已切换到另一 thread；"
+                "请刷新 goal 卡后重试。"
+            )
         if attach_binding:
             self._ports.attach_current_binding(sender_id, chat_id, message_id)
         if normalized_objective:
@@ -344,16 +378,43 @@ class CodexGoalDomain:
         attach_binding: bool,
         message_id: str = "",
     ) -> CommandResult:
+        thread_id, _thread_title = self._current_thread(sender_id, chat_id, message_id=message_id)
+        self._require_thread_mutation_access(
+            sender_id,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
         return CommandResult(
             card=self._build_goal_resume_pending_card(),
             after_dispatch=lambda: self._ports.submit_to_runtime(
-                self._ports.resume_goal_on_runtime,
+                self.resume_goal_on_runtime,
                 sender_id,
                 chat_id,
+                thread_id,
                 attach_binding,
                 message_id,
             ),
         )
+
+    def resume_goal_on_runtime(
+        self,
+        sender_id: str,
+        chat_id: str,
+        expected_thread_id: str,
+        attach_binding: bool,
+        message_id: str = "",
+    ) -> None:
+        """Run one serialized goal resume, then present its settled result."""
+
+        card = self._ports.resume_goal(
+            sender_id,
+            chat_id,
+            expected_thread_id,
+            attach_binding,
+            message_id,
+        )
+        self._ports.reply_card(chat_id, card, message_id=message_id)
 
     @staticmethod
     def _build_goal_resume_pending_card() -> dict:
@@ -387,7 +448,19 @@ class CodexGoalDomain:
         attached_notice: bool = False,
     ) -> CommandResult:
         thread_id, thread_title = self._current_thread(sender_id, chat_id, message_id=message_id)
-        goal = self._ports.set_thread_goal(thread_id, objective=objective)
+        self._require_thread_mutation_access(
+            sender_id,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
+        goal = self._ports.mutate_goal(
+            sender_id,
+            chat_id,
+            thread_id,
+            objective=objective,
+            message_id=message_id,
+        )
         self._project_goal(sender_id, chat_id, goal, message_id=message_id)
         notice = "已设置当前 thread goal。"
         if attached_notice:
@@ -411,7 +484,19 @@ class CodexGoalDomain:
         attached_notice: bool = False,
     ) -> CommandResult:
         thread_id, thread_title = self._current_thread(sender_id, chat_id, message_id=message_id)
-        goal = self._ports.set_thread_goal(thread_id, status=status)
+        self._require_thread_mutation_access(
+            sender_id,
+            chat_id,
+            thread_id,
+            message_id=message_id,
+        )
+        goal = self._ports.mutate_goal(
+            sender_id,
+            chat_id,
+            thread_id,
+            status=status,
+            message_id=message_id,
+        )
         self._project_goal(sender_id, chat_id, goal, message_id=message_id)
         notice = "已暂停当前 thread goal。" if status == "paused" else "已恢复当前 thread goal。"
         if attached_notice:
@@ -424,3 +509,30 @@ class CodexGoalDomain:
                 notice=notice,
             )
         )
+
+    def _require_thread_mutation_access(
+        self,
+        sender_id: str,
+        chat_id: str,
+        thread_id: str,
+        *,
+        message_id: str = "",
+    ) -> None:
+        """Keep Feishu goal controls behind the live interaction writer.
+
+        A goal update changes the same shared Codex thread as a prompt or
+        steer.  It is therefore not a harmless local preference and cannot
+        bypass a Web/fcodex owner.
+        """
+
+        denial = str(
+            self._ports.thread_mutation_denial_text(
+                sender_id,
+                chat_id,
+                thread_id,
+                message_id=message_id,
+            )
+            or ""
+        ).strip()
+        if denial:
+            raise ValueError(denial)

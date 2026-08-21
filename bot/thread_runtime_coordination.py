@@ -15,13 +15,22 @@ from bot.runtime_state import (
     LOADED_BACKEND_THREAD_STATUSES,
 )
 from bot.service_control_plane import control_request
-from bot.stores.instance_registry_store import InstanceRegistryEntry, InstanceRegistryStore
+from bot.stores.instance_registry_store import (
+    InstanceRegistryEntry,
+    InstanceRegistryStore,
+    InstanceRegistryStoreUnavailable,
+)
 from bot.stores.thread_runtime_lease_store import (
     ThreadRuntimeLease,
     ThreadRuntimeLeaseAcquireResult,
     ThreadRuntimeLeaseHolder,
     ThreadRuntimeLeaseStore,
+    ThreadRuntimeLeaseStoreUnavailable,
 )
+
+
+MANAGED_LOADED_INVENTORY_TOTAL_TIMEOUT_SECONDS = 3.0
+MANAGED_LOADED_INVENTORY_RPC_TIMEOUT_SECONDS = 2.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +57,48 @@ class ThreadGlobalLoadedPresence:
     diagnostic: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class ManagedInstanceLoadedThreadInventory:
+    """One managed instance's request-time loaded-thread observation."""
+
+    instance_name: str
+    loaded_thread_ids: tuple[str, ...] = ()
+    error: str = ""
+
+    @property
+    def verified(self) -> bool:
+        return not self.error
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedLoadedThreadInventorySnapshot:
+    """Advisory, non-persistent inventory for other managed instances."""
+
+    instances: tuple[ManagedInstanceLoadedThreadInventory, ...] = ()
+    registry_error: str = ""
+
+    @property
+    def verified(self) -> bool:
+        return not self.registry_error and all(
+            inventory.verified for inventory in self.instances
+        )
+
+
+class ThreadRuntimeAdmissionError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        blocking_instance: str = "",
+        blocking_status: str = "",
+        reason_code: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.blocking_instance = str(blocking_instance or "").strip()
+        self.blocking_status = str(blocking_status or "").strip()
+        self.reason_code = str(reason_code or "").strip()
+
+
 def inspect_thread_global_loaded_presence(
     *,
     thread_id: str,
@@ -66,7 +117,14 @@ def inspect_thread_global_loaded_presence(
     }
     if running_instances is None:
         effective_registry_store = registry_store or InstanceRegistryStore()
-        entries = effective_registry_store.list_instances()
+        try:
+            entries = effective_registry_store.list_instances()
+        except InstanceRegistryStoreUnavailable as exc:
+            return ThreadGlobalLoadedPresence(
+                verified_clear=False,
+                blocking_status=BACKEND_THREAD_STATUS_UNKNOWN,
+                diagnostic=str(exc),
+            )
     else:
         entries = list(running_instances)
     deadline = time.monotonic() + max(float(timeout_seconds), 0.1)
@@ -126,6 +184,17 @@ def preview_thread_global_loaded_gate(
     if presence.verified_clear:
         return ThreadGlobalLoadedGatePreview(allowed=True)
     if presence.diagnostic:
+        if not presence.blocking_instance:
+            return ThreadGlobalLoadedGatePreview(
+                allowed=False,
+                reason_code=PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
+                reason_text=(
+                    "无法验证本机运行实例 registry，因而不能证明其他实例未持有 loaded runtime："
+                    f"{presence.diagnostic} 当前按 fail-close 拒绝跨实例继续。"
+                    "请先修复或显式清理损坏的协调状态后再试。"
+                ),
+                blocking_status=presence.blocking_status,
+            )
         return ThreadGlobalLoadedGatePreview(
             allowed=False,
             reason_code=PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
@@ -183,21 +252,40 @@ def acquire_thread_runtime_holder_or_raise(
     holder: ThreadRuntimeLeaseHolder,
     lease_store: ThreadRuntimeLeaseStore,
 ) -> ThreadRuntimeLeaseAcquireResult:
-    result = lease_store.acquire(thread_id, holder)
+    try:
+        result = lease_store.acquire(thread_id, holder)
+    except ThreadRuntimeLeaseStoreUnavailable as exc:
+        raise ThreadRuntimeAdmissionError(
+            str(exc),
+            reason_code=PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
+        ) from exc
     if result.granted:
         return result
 
     current = result.lease
     if current is None:
-        raise RuntimeError("当前无法获取 thread live runtime。")
+        raise ThreadRuntimeAdmissionError(
+            "当前无法获取 thread live runtime。",
+            reason_code=PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
+        )
 
     preview = preview_thread_runtime_holder_acquire_conflict(
         holder=holder,
         current=current,
     )
     if not preview.allowed:
-        raise RuntimeError(preview.reason_text)
-    raise RuntimeError(build_runtime_lease_conflict_message(current))
+        raise ThreadRuntimeAdmissionError(
+            preview.reason_text,
+            blocking_instance=current.owner_instance,
+            blocking_status=BACKEND_THREAD_STATUS_UNKNOWN,
+            reason_code=preview.reason_code,
+        )
+    raise ThreadRuntimeAdmissionError(
+        build_runtime_lease_conflict_message(current),
+        blocking_instance=current.owner_instance,
+        blocking_status=BACKEND_THREAD_STATUS_UNKNOWN,
+        reason_code=PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
+    )
 
 
 def preview_thread_runtime_holder_acquire(
@@ -206,7 +294,14 @@ def preview_thread_runtime_holder_acquire(
     holder: ThreadRuntimeLeaseHolder,
     lease_store: ThreadRuntimeLeaseStore,
 ) -> ThreadRuntimeAcquirePreview:
-    current = lease_store.load(thread_id)
+    try:
+        current = lease_store.load(thread_id)
+    except ThreadRuntimeLeaseStoreUnavailable as exc:
+        return ThreadRuntimeAcquirePreview(
+            allowed=False,
+            reason_code=PROMPT_DENIED_BY_LIVE_RUNTIME_OWNER,
+            reason_text=str(exc),
+        )
     if current is None or (
         current.owner_instance == holder.instance_name
         and current.owner_service_token == holder.owner_service_token

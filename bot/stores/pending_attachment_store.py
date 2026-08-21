@@ -76,6 +76,42 @@ class PendingAttachmentStore:
         expired.sort(key=lambda item: (item.created_at, item.message_id, item.local_path))
         return tuple(active), tuple(expired)
 
+    def take_workspace_mismatches(
+        self,
+        *,
+        sender_id: str,
+        chat_id: str,
+        thread_id: str,
+        expected_stage_dir: pathlib.Path,
+        now: float,
+    ) -> tuple[tuple[PendingAttachmentRecord, ...], tuple[PendingAttachmentRecord, ...]]:
+        """Atomically remove only records outside the committed workspace."""
+
+        normalized_sender_id = str(sender_id or "").strip()
+        normalized_chat_id = str(chat_id or "").strip()
+        normalized_thread_id = str(thread_id or "").strip()
+        expected_parent = pathlib.Path(expected_stage_dir).expanduser().resolve()
+        invalidated: list[PendingAttachmentRecord] = []
+        expired: list[PendingAttachmentRecord] = []
+        remaining: list[PendingAttachmentRecord] = []
+        with self._lock:
+            for record in self._read_all():
+                is_target = (
+                    record.sender_id == normalized_sender_id
+                    and record.chat_id == normalized_chat_id
+                    and record.thread_id == normalized_thread_id
+                )
+                if record.expires_at <= now:
+                    expired.append(record)
+                elif is_target and pathlib.Path(record.local_path).expanduser().parent.resolve() != expected_parent:
+                    invalidated.append(record)
+                else:
+                    remaining.append(record)
+            self._write_all(remaining)
+        invalidated.sort(key=lambda item: (item.created_at, item.message_id, item.local_path))
+        expired.sort(key=lambda item: (item.created_at, item.message_id, item.local_path))
+        return tuple(invalidated), tuple(expired)
+
     def cleanup_expired(self, *, now: float) -> tuple[PendingAttachmentRecord, ...]:
         expired: list[PendingAttachmentRecord] = []
         kept: list[PendingAttachmentRecord] = []

@@ -1,0 +1,537 @@
+// apps/kimi-web/src/types.ts
+
+import type { FocusToolInspectionLocator } from './focus/threadInspectionTypes';
+
+/** File content loaded for preview (text or base64-encoded binary). */
+export interface FileData {
+  path: string;
+  content: string;
+  encoding: 'utf-8' | 'base64';
+  mime: string;
+  sourceUrl?: string;
+  languageId?: string;
+  isBinary: boolean;
+  size: number;
+  lineCount?: number;
+}
+
+/** A file entry shown in the composer's @-mention menu. */
+export interface FileItem {
+  path: string;
+  name: string;
+}
+
+export interface Session {
+  id: string;
+  title: string;
+  time: string;
+  /** True while the session shows a "working" indicator — the unified
+      condition shared by the sidebar spinner, the chat moon, and the Stop
+      button: a prompt submitted but not yet terminated, or a main turn in
+      flight. Background tasks and subagent turns do NOT set it. */
+  busy: boolean;
+  /** List-level fallback for action-required badges on unopened sessions. */
+  pendingInteraction?: 'none' | 'approval' | 'question';
+  /** Main agent's latest turn outcome — drives the "aborted" tag when the
+      session is quiet and the last turn was cancelled/failed. */
+  lastTurnReason?: 'completed' | 'cancelled' | 'failed';
+  /** ISO timestamp for recency-based filtering (e.g. default visible sessions). */
+  updatedAt?: string;
+  /** Text of the most recent user prompt, used by sidebar search. */
+  lastPrompt?: string;
+  /** Workspace id this session belongs to (resolved from cwd / daemon). */
+  workspaceId?: string;
+  /** Workspace display name, joined from workspacesView. */
+  workspaceName?: string;
+  /** Focus global-directory residency. Omitted in the current-instance view. */
+  runtimeState?: 'current' | 'other' | 'unloaded' | 'unknown';
+  /** Owning Focus instance when runtimeState is current or other. */
+  runtimeInstance?: string;
+  selectable?: boolean;
+  unavailableReason?: string;
+  /** Focus supplies this from the same server-side owner snapshot as the row. */
+  actionCapabilities?: Partial<SessionActionCapabilities>;
+}
+
+export interface Workspace {
+  name: string;
+  branch: string;
+}
+
+/**
+ * Sidebar-facing workspace entry. The active workspace header + the switcher
+ * dropdown both render these.
+ */
+export interface WorkspaceView {
+  id: string;
+  /** Display name (defaults to basename of root). */
+  name: string;
+  /** Absolute path to the project root. */
+  root: string;
+  /** Home-shortened path for dim display, e.g. `~/code/kimi-code-web`. */
+  shortPath: string;
+  /** Number of sessions in this workspace. */
+  sessionCount: number;
+}
+
+/**
+ * One workspace group for the "all workspaces" sidebar view: the workspace
+ * header plus its sessions.
+ */
+export interface WorkspaceGroup {
+  workspace: WorkspaceView;
+  sessions: Session[];
+  /** True when the server has more sessions in this workspace than are loaded. */
+  hasMore: boolean;
+  /** True while the next page of sessions is being fetched for this workspace. */
+  loadingMore: boolean;
+  /** First-page capacity for the in-group show-less collapse target: the number
+   *  of sessions loaded on first paint, floored at one full page so a workspace
+   *  that was empty or sparse does not hide sessions created later. */
+  initialCount: number;
+}
+
+/** Sidebar session-list scope: only the active workspace, or all workspaces. */
+export type WorkspaceScope = 'current' | 'all';
+
+export type ToolStatus = 'ok' | 'running' | 'error';
+
+/**
+ * The documented scalar payload of a Codex app-server command action.  These
+ * are explanatory facts only: paths are inert text and never imply browser
+ * file access or terminal control.
+ */
+export interface CommandExecutionAction {
+  type?: string | null;
+  command?: string | null;
+  name?: string | null;
+  path?: string | null;
+  query?: string | null;
+}
+
+/**
+ * Command-execution facts which do not fit the generic Kimi-derived ToolCall
+ * fields.  `arg` is the command, `output` is aggregatedOutput, `status` is
+ * command status, and `timing` is duration; this preserves the remaining
+ * app-server facts without claiming a Web terminal capability.
+ */
+export interface CommandExecutionFacts {
+  cwd?: string | null;
+  processId?: string | null;
+  source?: string | null;
+  exitCode?: number | null;
+  commandActions?: CommandExecutionAction[];
+}
+
+export interface ToolCall {
+  id: string;
+  name: string; // e.g. 'read' | 'bash'
+  arg: string; // e.g. '· src/api/client.ts'
+  status: ToolStatus;
+  timing?: string; // e.g. '12ms'
+  output?: string[]; // shown line by line when expanded
+  /** Exact source characters omitted from the middle, or from the whole output at aggregate exhaustion. */
+  outputOmittedChars?: number;
+  /** Trusted marker index, or zero only when aggregate exhaustion leaves `output` empty. */
+  outputHeadLineCount?: number;
+  /** True only when output is the bounded head/marker/tail Web projection. */
+  outputTruncated?: boolean;
+  media?: ToolMedia;
+  /** Server-projected unified diff for file-change tools. */
+  diff?: {
+    path?: string;
+    lines: DiffViewLine[];
+    omittedChars?: number;
+    omissionLineIndex?: number;
+  };
+  defaultExpanded?: boolean;
+  /** Absolute path of the plan file (ExitPlanMode only) — rendered as a
+   *  clickable link that opens the plan in the file preview. */
+  planPath?: string;
+  /** App-server commandExecution facts, rendered as inert execution detail. */
+  commandExecution?: CommandExecutionFacts;
+  /** Exact Focus inspection coordinates; presentation id is not source identity. */
+  inspectionLocator?: FocusToolInspectionLocator;
+}
+
+export interface ToolMedia {
+  kind: 'image' | 'video' | 'audio';
+  url: string;
+  path?: string;
+  mimeType?: string;
+  bytes?: number;
+  dimensions?: string;
+  /** File-store id when the media is an uploaded file. The preview fetches its
+   *  bytes with the Bearer credential (a bare getFileUrl src 401s in <img>). */
+  fileId?: string;
+}
+
+export type AgentPhase = 'queued' | 'working' | 'suspended' | 'completed' | 'failed';
+
+export interface AgentMember {
+  id: string;
+  toolCallId?: string;
+  name: string;
+  subagentType?: string;
+  phase: AgentPhase;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  /** The prompt/task the subagent was given (from the Agent tool input). */
+  prompt?: string;
+  summary?: string;
+  outputLines?: string[];
+  /** The subagent's concatenated live output (assistant deltas) — grows in the
+   *  detail panel like a thinking block. */
+  text?: string;
+  suspendedReason?: string;
+  swarmIndex?: number;
+}
+
+export type DiffKind = 'ctx' | 'add' | 'rem';
+
+export interface DiffLine {
+  kind: DiffKind;
+  gutter: string; // gutter (line-number) column text, e.g. '23' or '   13' or '7   7'
+  text: string;
+}
+
+/**
+ * One row of a parsed UNIFIED diff (from the daemon's `fs:diff` action),
+ * rendered line-by-line in the ~/diff tab.
+ *
+ *   - `add`     — an added line (`+...`); has `newNo`.
+ *   - `del`     — a removed line (`-...`); has `oldNo`.
+ *   - `context` — an unchanged line; has both `oldNo` + `newNo`.
+ *   - `hunk`    — a `@@ -a,b +c,d @@` hunk header (no line numbers).
+ *
+ * `text` is the line content WITHOUT the leading +/-/space marker.
+ */
+export interface DiffViewLine {
+  type: 'add' | 'del' | 'context' | 'hunk';
+  text: string;
+  oldNo?: number;
+  newNo?: number;
+}
+
+/**
+ * Discriminated ApprovalBlock union.
+ *
+ * Phase 3 will render each kind differently; for now ApprovalCard.vue handles
+ * 'diff' (the original shape) and falls back to 'generic' for everything else.
+ */
+export type ApprovalBlock =
+  | { kind: 'diff'; path: string; diff: DiffLine[] }
+  | { kind: 'shell'; command: string; cwd?: string; danger?: string }
+  | { kind: 'file'; path: string; content: string; language?: string }
+  | { kind: 'fileop'; op: string; path: string; detail?: string }
+  | { kind: 'url'; method?: string; url: string }
+  | { kind: 'search'; query: string; scope?: string }
+  | { kind: 'invocation'; kind2: string; name: string; description?: string }
+  | { kind: 'todo'; items: { title: string; status: string }[] }
+  | {
+      kind: 'plan_review';
+      plan: string;
+      path?: string;
+      options?: { label: string; description?: string }[];
+    }
+  | { kind: 'generic'; summary: string };
+
+export type TurnRole = 'user' | 'assistant' | 'compaction' | 'cron';
+
+export interface FilePreviewRequest {
+  path: string;
+  line?: number;
+}
+
+/** Metadata carried by a cron fire — shared by a standalone cron turn and by a
+ *  cron notice embedded inside an assistant turn's blocks. Mirrors the TUI's
+ *  CronTranscriptData. `missedCount` present means a missed-fire catch-up. */
+export interface CronTurnData {
+  jobId?: string;
+  cron?: string;
+  recurring?: boolean;
+  coalescedCount?: number;
+  stale?: boolean;
+  missedCount?: number;
+}
+
+/** One ordered piece of an assistant turn: a thinking segment, a text segment
+ * OR a tool card. Built in call order so every piece renders inline where it
+ * happened (a turn can think → act → think again — nothing is hoisted).
+ *
+ * Subagents render as the spawning `Agent` tool card here; their live progress
+ * streams in the right-side detail panel, sourced from the task rather than a
+ * dedicated block. */
+export type TurnBlock =
+  | { kind: 'text'; itemId?: string; text: string }
+  | { kind: 'thinking'; itemId?: string; thinking: string }
+  | { kind: 'tool'; tool: ToolCall };
+
+/** One attachment on a user turn: an uploaded file, image or video. Images
+    and pasted media carry no name; the chip falls back to a generic label.
+    `url` is browser-loadable (a data URL, or the authed file URL). */
+export interface TurnAttachment {
+  kind: 'image' | 'video' | 'file';
+  url: string;
+  fileId?: string;
+  name?: string;
+  mediaType?: string;
+  size?: number;
+}
+
+export interface ChatTurn {
+  id: string;
+  role: TurnRole;
+  no: number; // terminal line number
+  text: string;
+  /** All thinking segments joined — aggregate convenience field; rendering
+      uses the ordered `blocks` (a turn can have MULTIPLE thinking blocks). */
+  thinking?: string;
+  tools?: ToolCall[];
+  /** Thinking + text + tool cards in original call order (assistant turns). */
+  blocks?: TurnBlock[];
+  approval?: ApprovalBlock;
+  approvalId?: string; // daemon approval id — present when approval needs a decision
+  /** Attachments sent by the user — files, images and videos, rendered as a
+      chip row above the text bubble. */
+  attachments?: TurnAttachment[];
+  /** Compaction divider data (role 'compaction'): the transcript keeps all
+      prior turns and renders this as a separator line; `text` holds the
+      LLM-generated summary, opened in the right-side panel on click. */
+  compaction?: { trigger?: 'manual' | 'auto'; tokensBefore?: number; tokensAfter?: number };
+  /** ISO timestamp when the message was created (used for the user bubble timestamp). */
+  createdAt?: string;
+  /** Client-side measured duration from turn.started to turn.ended (ms). */
+  durationMs?: number;
+  /** Upstream turn status for live/terminal projection. */
+  status?: string;
+  /** Skill activation metadata: when a user turn was triggered by a slash
+      command (/skill), this holds the skill name and args for display. */
+  skillActivation?: { name: string; args?: string };
+  /** Plugin command metadata: when a user turn was triggered by a plugin slash
+      command (/plugin:command), this holds the command identity and args. */
+  pluginCommand?: { pluginId: string; commandName: string; args?: string };
+  /** Cron fire metadata (role 'cron'): set when an agent turn was triggered by a
+      scheduled reminder rather than a real user. Mirrors the TUI's
+      CronTranscriptData. `missedCount` present means a missed-fire catch-up. */
+  cron?: CronTurnData;
+}
+
+/**
+ * One item of the model-maintained todo list (the TodoList tool). Each write
+ * replaces the whole list, so the latest tool call IS the current state.
+ */
+export interface TodoView {
+  title: string;
+  status: 'pending' | 'in_progress' | 'done';
+}
+
+export type TaskState = 'run' | 'done' | 'fail' | 'pending';
+
+export interface TaskItem {
+  id: string;
+  name: string;
+  kind: string; // 'subagent' | 'task'
+  state: TaskState;
+  timing: string;
+  meta?: string;
+  prompt?: string;
+  output?: string[];
+  progress?: string[];
+  result?: string[];
+  metadata?: string[];
+  /** Background subagents only — the dock lists these; foreground subagents
+   *  render inline as the `Agent` tool card instead. */
+  runInBackground?: boolean;
+  /** The spawning `Agent` tool-call id — used to resolve a subagent task back
+   *  to its inline tool card, so the card's "Open detail" button can be hidden
+   *  when the task is no longer available. */
+  parentToolCallId?: string;
+  threadId?: string;
+  parentThreadId?: string;
+  canAcceptDirectInput?: boolean | null;
+  ephemeral?: boolean;
+  resultAvailable?: boolean;
+  executionState?: 'active' | 'waiting_on_approval' | 'waiting_on_user_input'
+    | 'idle' | 'not_loaded' | 'system_error' | 'completed' | 'interrupted'
+    | 'failed' | 'unknown';
+}
+
+export interface ConversationStatus {
+  /** Friendly display name of the live model (for the toolbar pill). */
+  model: string;
+  /** Raw model id — the value selection lists compare against. */
+  modelId: string;
+  /** Latest active-context token count from app-server `tokenUsage.last`. */
+  ctxUsed: number;
+  ctxMax: number;
+  /** Codex `/status`-compatible remaining percentage; null means unavailable. */
+  ctxRemainingPct: number | null;
+  permission: 'manual' | 'auto' | 'yolo';
+  branch: string;
+  /** Working directory of the active session */
+  cwd: string;
+  /** True when the active session's cwd is inside a real git repository */
+  isGitRepo: boolean;
+}
+
+/** Kind of the global right-side detail layer. Only one detail is visible at a
+ *  time; opening a new one closes the previous. */
+export type DetailTarget = 'file' | 'diff' | 'thinking' | 'compaction' | 'agent' | 'btw';
+
+export interface ActivationBadges {
+  plan: boolean;
+  goal: { status: string; turnsUsed: number; elapsedMs: number } | null;
+  swarm: { done: number; total: number } | null;
+}
+
+/** A queued prompt as shown inline at the tail of the transcript. */
+export interface QueuedPromptView {
+  text: string;
+  /** Number of attachments waiting with this prompt. */
+  attachmentCount: number;
+  /** Attachments waiting with this prompt, with resolved URLs for thumbnails
+      (file attachments render an icon chip, no thumbnail). */
+  attachments?: { fileId: string; kind: 'image' | 'video' | 'file'; url: string; name?: string }[];
+}
+
+/** Horizontal alignment of the conversation reading column within the pane. */
+
+/**
+ * UI-facing question type, mapped from AppQuestionRequest in the composable.
+ */
+export interface UIQuestion {
+  questionId: string;
+  sessionId: string;
+  autoResolutionMs?: number;
+  autoResolutionVisibleAtMs?: number;
+  autoResolutionDueAtMs?: number;
+  questions: {
+    id: string;
+    question: string;
+    header?: string;
+    body?: string;
+    options: { id: string; label: string; description?: string; recommended?: boolean }[];
+    multiSelect?: boolean;
+    allowOther?: boolean;
+    otherLabel?: string;
+    secret?: boolean;
+    required?: boolean;
+  }[];
+}
+
+/** Activity state for the active session. */
+export type ActivityState =
+  | 'idle'
+  | 'running'
+  | 'awaiting-approval'
+  | 'awaiting-question';
+
+/** Connection state for the WebSocket. */
+export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
+
+/** Permission mode (client-side policy). */
+export type PermissionMode = 'manual' | 'auto' | 'yolo';
+
+/** Product-level gates for composer controls whose backend semantics differ. */
+export interface ComposerCapabilities {
+  commands: boolean;
+  permissions: boolean;
+  modes: boolean;
+  compact: boolean;
+  model: boolean;
+  effort: boolean;
+  interrupt: boolean;
+  submit: boolean;
+  submitWhileRunning: boolean;
+}
+
+export interface SessionActionCapabilities {
+  rename: boolean;
+  archive: boolean;
+  fork: boolean;
+  export: boolean;
+  review: boolean;
+  goal: boolean;
+}
+
+/** Runtime thinking level exposed by the active Focus model picker. */
+export type ThinkingLevel = 'off' | 'on' | (string & {});
+
+/** Presentation model projected from the Focus model catalog. */
+export interface AppModel {
+  id: string;
+  provider: string;
+  model: string;
+  displayName?: string;
+  maxContextSize: number;
+  capabilities?: string[];
+  supportEfforts?: readonly string[];
+  defaultEffort?: string;
+}
+
+/** A thread-scoped skill rendered by the active composer. */
+export interface AppSkill {
+  name: string;
+  description: string;
+  source: string;
+}
+
+export type AppGoalStatus =
+  | 'active'
+  | 'paused'
+  | 'blocked'
+  | 'complete'
+  | 'usageLimited'
+  | 'budgetLimited';
+
+/** Goal projection consumed by GoalStrip and the active Focus client view. */
+export interface AppGoal {
+  goalId: string;
+  objective: string;
+  completionCriterion?: string;
+  status: AppGoalStatus;
+  turnsUsed: number;
+  tokensUsed: number;
+  wallClockMs: number;
+  terminalReason?: string;
+  budget: {
+    tokenBudget: number | null;
+    remainingTokens: number | null;
+    turnBudget: number | null;
+    remainingTurns: number | null;
+    wallClockBudgetMs: number | null;
+    remainingWallClockMs: number | null;
+    overBudget: boolean;
+  };
+}
+
+export type ApprovalDecision = 'approved' | 'rejected' | 'cancelled';
+
+export interface ApprovalResponse {
+  decision: ApprovalDecision;
+  scope?: 'session';
+  feedback?: string;
+  selectedLabel?: string;
+}
+
+export type QuestionAnswer =
+  | { kind: 'single'; optionId: string }
+  | { kind: 'multi'; optionIds: string[] }
+  | { kind: 'other'; text: string }
+  | { kind: 'multiWithOther'; optionIds: string[]; otherText: string }
+  | { kind: 'skipped' };
+
+export interface QuestionResponse {
+  answers: Record<string, QuestionAnswer>;
+  method?: 'enter' | 'space' | 'number_key' | 'click';
+  note?: string;
+}
+
+/** Uploaded file identity passed from the active composer to Focus submit. */
+export interface PromptAttachment {
+  fileId: string;
+  kind: 'image' | 'video' | 'file';
+  name?: string;
+  mediaType?: string;
+  size?: number;
+}

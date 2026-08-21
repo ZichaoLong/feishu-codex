@@ -1,0 +1,3 @@
+# Build tooling used by install.py inside the managed Focus virtualenv.
+setuptools>=68,<81
+wheel>=0.45,<1

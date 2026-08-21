@@ -1,0 +1,147 @@
+name: Publish installable bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Install channel to publish
+        required: true
+        type: choice
+        options:
+          - development
+          - stable
+      release_tag:
+        description: Existing formal Release tag (required only for stable)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: focus-install-publication-${{ inputs.channel }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate publication inputs
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$CHANNEL" == "stable" && -z "$RELEASE_TAG_INPUT" ]]; then
+            echo "stable publication requires release_tag" >&2
+            exit 2
+          fi
+          if [[ "$CHANNEL" == "development" && -n "$RELEASE_TAG_INPUT" ]]; then
+            echo "development uses the fixed development-builds tag; leave release_tag empty" >&2
+            exit 2
+          fi
+
+      - name: Checkout selected source ref
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Set up dependency lock resolver
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.14"
+          enable-cache: false
+
+      - name: Install Python verification dependencies
+        run: python -m pip install -r requirements-dev.lock
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Verify Python locks and source contracts
+        run: |
+          bash scripts/lock-python-dependencies.sh
+          git diff --exit-code -- requirements.lock requirements-dev.lock
+          python -m ruff check bot tests scripts install.py
+          python -m compileall -q bot tests scripts install.py
+          python scripts/check_source_context.py
+          python scripts/check_import_cycles.py
+          python scripts/check_dependency_direction.py
+          bash scripts/check-docs.sh
+
+      - name: Verify Web source
+        working-directory: web
+        run: |
+          npm run check:dependency-direction
+          npm run typecheck
+          npm test
+          npm run check:style
+
+      - name: Fetch recorded Kimi provenance source
+        working-directory: web
+        shell: bash
+        run: |
+          upstream_url="$(node -p "require('./provenance/kimi-web-files.json').upstream.source_url")"
+          upstream_commit="$(node -p "require('./provenance/kimi-web-files.json').upstream.imported_commit")"
+          git init "${RUNNER_TEMP}/kimi-code"
+          git -C "${RUNNER_TEMP}/kimi-code" remote add origin "$upstream_url"
+          git -C "${RUNNER_TEMP}/kimi-code" fetch --depth=1 origin "$upstream_commit"
+
+      - name: Verify provenance and build production Web assets
+        working-directory: web
+        run: |
+          npm run check:kimi-provenance -- --upstream "${RUNNER_TEMP}/kimi-code"
+          npm run build
+          npm run check:notices
+
+      - name: Run complete Python tests against generated Web assets
+        run: python -m pytest
+
+      - name: Build installable bundle
+        id: artifact
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          source_revision="$(git rev-parse HEAD)"
+          if [[ "$CHANNEL" == "development" ]]; then
+            release_tag="development-builds"
+            build_id="${source_revision:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          else
+            release_tag="$RELEASE_TAG_INPUT"
+            build_id="${source_revision:0:12}"
+          fi
+          python scripts/build_install_bundle.py \
+            --channel "$CHANNEL" \
+            --release-tag "$release_tag" \
+            --build-id "$build_id" \
+            --source-revision "$source_revision" \
+            --output-dir build/install-publish
+          bundle="$(find build/install-publish -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          manifest="build/install-publish/focus-install-${CHANNEL}.json"
+          test -n "$bundle" && test -f "$manifest"
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Publish bundle before channel manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/publish_install_bundle.py
+          --channel "${{ inputs.channel }}"
+          --bundle "${{ steps.artifact.outputs.bundle }}"
+          --channel-manifest "${{ steps.artifact.outputs.manifest }}"

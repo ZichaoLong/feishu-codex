@@ -8,6 +8,7 @@ from bot.turn_execution_coordinator import TurnExecutionCoordinator
 from bot.stores.chat_binding_store import ChatBindingStore
 from bot.stores.interaction_lease_store import InteractionLeaseStore
 from bot.thread_subscription_registry import ThreadSubscriptionRegistry
+from tests.execution_page_test_support import set_execution_page_state
 
 
 class TurnExecutionCoordinatorTests(unittest.TestCase):
@@ -54,25 +55,25 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertEqual(state["execution_transcript"].reply_text(), "")
         self.assertEqual(state["terminal_result_text"], "")
 
-    def test_awaiting_remote_turn_started_includes_unbound_execution_anchor(self) -> None:
+    def test_awaiting_upstream_turn_started_includes_unbound_execution_anchor(self) -> None:
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()
-        state["current_message_id"] = "card-1"
+        set_execution_page_state(state, current_message_id="card-1")
         state["running"] = True
         state["awaiting_local_turn_started"] = True
 
-        self.assertTrue(coordinator.awaiting_remote_turn_started_locked(state))
+        self.assertTrue(coordinator.awaiting_upstream_turn_started_locked(state))
 
         state["current_turn_id"] = "turn-1"
-        self.assertFalse(coordinator.awaiting_remote_turn_started_locked(state))
+        self.assertFalse(coordinator.awaiting_upstream_turn_started_locked(state))
 
         state["awaiting_attach_status_settle"] = True
-        self.assertTrue(coordinator.awaiting_remote_turn_started_locked(state))
+        self.assertTrue(coordinator.awaiting_upstream_turn_started_locked(state))
 
     def test_prepare_turn_started_locked_reuses_existing_execution_card(self) -> None:
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()
-        state["current_message_id"] = "existing-card"
+        set_execution_page_state(state, current_message_id="existing-card")
         state["awaiting_local_turn_started"] = True
         state["running"] = True
         state["pending_cancel"] = True
@@ -86,15 +87,35 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertTrue(transition.reuse_existing_card)
         self.assertIsNone(transition.previous_execution_card)
         self.assertTrue(transition.should_interrupt_started_turn)
-        self.assertEqual(state["current_message_id"], "existing-card")
+        self.assertEqual(state["execution_pages"].current_message_id, "existing-card")
         self.assertEqual(state["current_turn_id"], "turn-1")
         self.assertTrue(state["running"])
+        self.assertFalse(state["pending_cancel"])
         self.assertFalse(state["awaiting_local_turn_started"])
+
+    def test_repeated_turn_started_does_not_consume_or_replay_pending_cancel(
+        self,
+    ) -> None:
+        coordinator = TurnExecutionCoordinator()
+        state = self._make_state()
+        set_execution_page_state(state, current_message_id="existing-card")
+        state["current_turn_id"] = "turn-1"
+        state["running"] = True
+        state["pending_cancel"] = True
+
+        transition = coordinator.prepare_turn_started_locked(
+            state,
+            turn_id="turn-1",
+            started_at=20.0,
+        )
+
+        self.assertFalse(transition.should_interrupt_started_turn)
+        self.assertTrue(state["pending_cancel"])
 
     def test_prepare_turn_started_locked_snapshots_previous_card_when_replacing_anchor(self) -> None:
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()
-        state["current_message_id"] = "old-card"
+        set_execution_page_state(state, current_message_id="old-card")
         state["cancelled"] = True
         state["started_at"] = 2.0
         state["execution_transcript"].set_reply_text("stale reply")
@@ -111,7 +132,7 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertEqual(transition.previous_execution_card.transcript.reply_text(), "stale reply")
         self.assertEqual(transition.previous_execution_card.elapsed, 6)
         self.assertTrue(transition.previous_execution_card.cancelled)
-        self.assertEqual(state["current_message_id"], "")
+        self.assertEqual(state["execution_pages"].current_message_id, "")
         self.assertEqual(state["current_turn_id"], "turn-2")
         self.assertFalse(state["cancelled"])
         self.assertEqual(state["execution_transcript"].reply_text(), "")
@@ -125,11 +146,12 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
 
         self.assertTrue(should_interrupt)
         self.assertEqual(state["current_turn_id"], "turn-3")
+        self.assertFalse(state["pending_cancel"])
 
     def test_cancel_and_thread_status_transitions_are_explicit(self) -> None:
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()
-        state["current_message_id"] = "card-1"
+        set_execution_page_state(state, current_message_id="card-1")
         state["running"] = True
         state["awaiting_local_turn_started"] = True
         state["current_turn_id"] = "turn-1"
@@ -145,8 +167,15 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         self.assertTrue(state["running"])
         self.assertFalse(state["awaiting_local_turn_started"])
 
-        coordinator.confirm_cancel_requested_locked(state)
+        coordinator.clear_cancel_pending_locked(state)
         self.assertFalse(state["pending_cancel"])
+        self.assertFalse(state["cancelled"])
+
+        coordinator.apply_turn_completed_locked(
+            state,
+            status="interrupted",
+            error_message="",
+        )
         self.assertTrue(state["cancelled"])
 
         coordinator.settle_non_active_thread_locked(state)
@@ -164,7 +193,12 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()
 
-        coordinator.append_assistant_delta_locked(state, delta="第一段")
+        commentary = "这是一段明显长于最终回复的阶段说明"
+        coordinator.append_assistant_delta_locked(state, delta=commentary)
+        coordinator.reconcile_current_assistant_text_locked(
+            state,
+            text=commentary,
+        )
         coordinator.start_process_block_locked(
             state,
             text="\n$ (/tmp/project) ls\n",
@@ -174,19 +208,33 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
             state,
             suffix="\n[命令结束 status=completed exit=0]\n",
         )
-        updated = coordinator.reconcile_current_assistant_text_locked(state, text="第二段")
+        updated = coordinator.reconcile_current_assistant_text_locked(
+            state,
+            text="完成",
+            item_id="agent-final-1",
+        )
 
         self.assertTrue(updated)
         self.assertIn("命令结束", state["execution_transcript"].process_text())
-        self.assertEqual(state["execution_transcript"].reply_text(), "第一段\n\n第二段")
+        self.assertEqual(
+            state["execution_transcript"].reply_text(),
+            f"{commentary}\n\n完成",
+        )
+        self.assertEqual(
+            state["execution_transcript"].terminal_reply_evidence(),
+            ("agent", "完成"),
+        )
+        coordinate = state["execution_transcript"].terminal_agent_reply_coordinate()
+        assert coordinate is not None
+        self.assertEqual(coordinate.item_id, "agent-final-1")
 
         coordinator.apply_snapshot_reply_locked(
             state,
-            reply_text="第一段\n\n第二段",
+            reply_text=f"{commentary}\n\n完成",
             reply_items=[
-                {"type": "agentMessage", "text": "第一段"},
+                {"type": "agentMessage", "text": commentary},
                 {"type": "commandExecution"},
-                {"type": "agentMessage", "text": "第二段"},
+                {"type": "agentMessage", "text": "完成"},
             ],
         )
 
@@ -319,7 +367,7 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
     def test_prepare_finalize_and_retire_execution_locked(self) -> None:
         coordinator = TurnExecutionCoordinator()
         state = self._make_state()
-        state["current_message_id"] = "card-1"
+        set_execution_page_state(state, current_message_id="card-1")
         state["current_turn_id"] = "turn-1"
         state["current_prompt_message_id"] = "prompt-1"
         state["running"] = True
@@ -335,6 +383,6 @@ class TurnExecutionCoordinatorTests(unittest.TestCase):
 
         coordinator.retire_execution_locked(state)
 
-        self.assertEqual(state["current_message_id"], "")
-        self.assertEqual(state["last_execution_message_id"], "card-1")
+        self.assertEqual(state["execution_pages"].current_message_id, "")
+        self.assertEqual(state["execution_pages"].last_message_id, "card-1")
         self.assertEqual(state["current_prompt_message_id"], "")

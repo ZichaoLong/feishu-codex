@@ -1,6 +1,6 @@
 # 飞书卡片文本投影与对等解析边界
 
-英文原文：`docs/decisions/feishu-card-text-projection.md`
+文档角色：中文规范源。英文同步副本：`docs/decisions/feishu-card-text-projection.md`。
 
 另见：
 
@@ -223,6 +223,11 @@
 
 更具体地说：
 
+- `process_log` 是有界人类进度投影，不是 upstream tool output 的副本。Command output delta 与 file
+  patch progress 只提供运行活性和“仍有后续工作”的证据；飞书只在 item start/completion 投影摘要，
+  Web history 继续保留 upstream 完整 tool details。精确事件、字段和 byte budget 由
+  [`feishu-thread-lifecycle.zh-CN.md` 第 5.4 节](../contracts/feishu-thread-lifecycle.zh-CN.md#54-在线通知是执行中的主真相源)
+  唯一定义
 - 一旦权威终态结果已经通过 `terminal result card` 或降级文本成功送达，execution card 里的 `reply_segments` 应尽量只保留过程性分段
 - 如果终态 snapshot 能区分“最后一段最终答案”和“更早的阶段性回复”，则应把最后那段最终答案从 execution card 中剔除
 - 如果当前只能依赖本地 transcript，无法可靠区分最后一段，则宁可保留 execution card 原文，也不要冒“把唯一可见结果删掉”的风险
@@ -263,41 +268,6 @@
 
 也就是说，接收侧强合同不再依赖任何额外的说明性提示文案，也不把用户可见提示文案本身当作合同。
 
-### 6.1.1 后续协议升级：轻量机器摘要
-
-为改善跨服务读取时对标题层级等结构信息的保留，`terminal result card` 可在保持现有 `final_reply_text` 强合同不变的前提下，逐步升级为同时携带一份**轻量机器摘要**。
-
-该摘要的设计目标是：
-
-- 不重复携带完整终态正文，避免消息体近似翻倍
-- 只补充人类可见文本里容易丢失的轻量结构语义
-- 主要覆盖：
-  - heading 文本
-  - heading level
-  - 简单 list / quote 存在性或边界信息
-- 继续允许接收侧在摘要缺失时，仅依赖 `final_reply_text` 和 `visible_text` 正常工作
-
-这份机器摘要属于：
-
-- 对 `final_reply_text` 的**结构补充**
-- 不是新的权威全文副本
-- 不是外部普通卡片的通用协议要求
-
-后续实现时必须满足：
-
-- 发送侧预算优先级始终是：
-  1. 权威 `final_reply_text`
-  2. 轻量机器摘要
-  3. display-only 补充内容
-- 一旦摘要会导致终态卡超预算，应优先裁剪或省略摘要，而不是牺牲 `final_reply_text`
-- 接收侧读取摘要失败时，必须 fail-open 回落到现有终态文本合同，而不是把整张终态卡判为不可读
-
-因此，轻量机器摘要的定位是：
-
-- 改善跨实例 / 跨服务读取质量
-- 不改变当前终态文本强合同
-- 不把普通外部卡片纳入新的强合同要求
-
 ### 6.2 best-effort：`process_log` 与 `reply_segments`
 
 如果接收侧还能稳定提取到：
@@ -328,24 +298,6 @@
 
 - 让 Codex 继续利用自己的理解能力
 - 避免本仓库自己维护复杂的卡片语义解释器
-
-即使后续自家 `terminal result card` 增加了轻量机器摘要，这条 best-effort 回落路径仍必须保留：
-
-- 外部非 FOCUS 机器人发来的卡片
-- 历史旧卡
-- 没有机器摘要的新旧普通卡片
-
-仍然应该继续走：
-
-- 标题 / 可见 markdown / plain_text 的有限提取
-- 提取失败时不影响主流程
-
-换句话说：
-
-- **自家终态卡可以逐步升级协议**
-- **普通外部卡片仍按低承诺 best-effort 提取处理**
-
-这两条路径不应互相覆盖，也不应因为自家终态协议升级而削弱外部普通卡片的默认可读性。
 
 ### 6.4 外部复杂卡片：明确不承诺
 
@@ -551,23 +503,6 @@ opener 仍按 fail-closed 路径中和。
 1. 先把自家终态结果打通
 2. 再补普通外部卡片的有效文本提取
 3. 不进入复杂卡片解析
-
-如果引入轻量机器摘要，接收侧应进一步细分为：
-
-1. 强合同终态提取
-   - 先识别 `terminal result card`
-   - 提取权威 `final_reply_text`
-2. 自家增强语义提取
-   - 若该终态卡还携带轻量机器摘要，则额外解析 heading / outline 等结构补充
-   - 解析失败时不影响第 1 步结果
-3. 普通外部卡片 best-effort
-   - 对非终态卡或非本项目协议卡继续做有限文本提取
-
-这意味着：
-
-- 新增的机器摘要协议只能增强“自家终态卡”的读取质量
-- 不能替代普通卡片文本投影
-- 更不能让普通外部卡片因为“没有摘要”而退化为不可读
 
 ### 11.5 普通外部卡片的建议提取范围
 

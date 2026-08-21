@@ -47,6 +47,12 @@ _SHARED_COMMAND_SPECS = (
         feishu_summary="导出当前会话最近一条权威终态文本；优先终态结果，若没有则回退最近执行卡。",
     ),
     SharedCommandSpec(
+        key="steer",
+        slash_name="/steer",
+        feishu_usage=feishu_visible_command_syntax("/steer <text>"),
+        feishu_summary="向当前 exact active turn 显式补充一段文本。",
+    ),
+    SharedCommandSpec(
         key="model",
         slash_name="/model",
         feishu_usage="/model [name|auto]",

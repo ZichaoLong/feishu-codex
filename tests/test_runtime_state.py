@@ -11,6 +11,7 @@ from bot.runtime_state import (
     ThreadStateChanged,
     apply_runtime_state_message,
 )
+from tests.execution_page_test_support import execution_page_ledger
 
 
 def _build_state() -> dict[str, object]:
@@ -31,8 +32,7 @@ def _build_state() -> dict[str, object]:
         "running": True,
         "cancelled": False,
         "pending_cancel": True,
-        "current_message_id": "card-1",
-        "last_execution_message_id": "",
+        "execution_pages": execution_page_ledger(current_message_id="card-1"),
         "current_execution_kind": "prompt",
         "current_prompt_message_id": "prompt-1",
         "current_prompt_reply_in_thread": True,
@@ -42,9 +42,8 @@ def _build_state() -> dict[str, object]:
         "started_at": 12.0,
         "last_runtime_event_at": 10.0,
         "last_patch_at": 2.0,
-        "patch_timer": None,
-        "mirror_watchdog_timer": None,
-        "mirror_watchdog_generation": 4,
+        "patch_timer_registration": None,
+        "mirror_watchdog_registration": None,
         "followup_sent": False,
         "followup_text": "",
         "terminal_result_text": "",
@@ -70,8 +69,8 @@ class RuntimeStateReducerTests(unittest.TestCase):
 
         self.assertFalse(state["running"])
         self.assertFalse(state["pending_cancel"])
-        self.assertEqual(state["last_execution_message_id"], "card-1")
-        self.assertEqual(state["current_message_id"], "")
+        self.assertEqual(state["execution_pages"].last_message_id, "card-1")
+        self.assertEqual(state["execution_pages"].current_message_id, "")
         self.assertEqual(state["current_turn_id"], "")
         self.assertEqual(state["current_execution_kind"], "")
         self.assertEqual(state["current_prompt_message_id"], "")

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Develop Focus"
+  short_description: "Complete Focus work under current repository disciplines"
+  default_prompt: "使用 $develop-focus 按当前仓库有效的开发、导航、汇报、请示与停止纪律完成：<任务>"
+policy:
+  allow_implicit_invocation: false

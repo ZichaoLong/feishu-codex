@@ -16,11 +16,6 @@ from bot.instance_layout import (
     validate_instance_name,
 )
 from bot.service_control_plane import ServiceControlError, control_request
-from bot.stores.app_server_runtime_store import (
-    AppServerRuntimeStore,
-    resolve_effective_app_server_url,
-    uses_default_app_server_url,
-)
 from bot.stores.instance_registry_store import InstanceRegistryEntry, InstanceRegistryStore
 
 
@@ -67,23 +62,17 @@ def _resolve_running_instance_app_server_url_via_control_plane(data_dir: pathlib
 
 def resolve_running_instance_app_server_url(
     entry: InstanceRegistryEntry,
-    *,
-    configured_app_server_url: str = "",
 ) -> str:
+    """Resolve only the READY endpoint published by the live Focus service.
+
+    Registry/configuration URLs and the owned-runtime record are discovery or
+    process-lifecycle facts, not protocol-readiness proof. Falling back to any
+    of them would let a reset or guardian-cleanup window publish a stale port,
+    which may later be occupied by an unrelated process.
+    """
+
     data_dir = pathlib.Path(entry.data_dir)
-    control_plane_url = _resolve_running_instance_app_server_url_via_control_plane(data_dir)
-    if control_plane_url:
-        return control_plane_url
-    runtime = AppServerRuntimeStore(data_dir).load_managed_runtime()
-    if runtime is not None and str(runtime.active_url or "").strip():
-        return str(runtime.active_url).strip()
-    recorded_url = str(entry.app_server_url or "").strip()
-    if recorded_url and not uses_default_app_server_url(recorded_url):
-        return recorded_url
-    normalized_configured_url = str(configured_app_server_url or "").strip()
-    if normalized_configured_url and not uses_default_app_server_url(normalized_configured_url):
-        return resolve_effective_app_server_url(configured_app_server_url, data_dir=data_dir)
-    return ""
+    return _resolve_running_instance_app_server_url_via_control_plane(data_dir)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,11 +157,9 @@ def resolve_cli_instance_target(
 
 def resolve_cli_runtime_target(
     *,
-    configured_app_server_url: str,
     explicit_instance: str | None = None,
     preferred_running_instance: str = "",
     allow_default_running_fallback: bool = True,
-    default_instance_data_dir: pathlib.Path | None = None,
 ) -> CliRuntimeTarget:
     """Resolve one runtime target for local CLI entrypoints.
 
@@ -202,22 +189,18 @@ def resolve_cli_runtime_target(
         allow_default_running_fallback=allow_default_running_fallback,
     )
     running_entry = resolved.running_entry
-    data_dir = pathlib.Path(running_entry.data_dir) if running_entry is not None else resolved.data_dir
-    if resolved.instance_name == DEFAULT_INSTANCE_NAME and default_instance_data_dir is not None:
-        data_dir = pathlib.Path(default_instance_data_dir)
-    if running_entry is not None:
-        app_server_url = resolve_running_instance_app_server_url(
-            running_entry,
-            configured_app_server_url=configured_app_server_url,
+    if running_entry is None:
+        raise ValueError(
+            f"实例 `{resolved.instance_name}` 当前未运行，未发布可连接的 app-server；"
+            "请先启动该实例的 Focus service 后再试。"
         )
-        if not app_server_url:
-            raise ValueError(
-                f"运行中的实例 `{resolved.instance_name}` 未发布可用的 app-server 地址；请重启该实例后再试。"
-            )
-        service_token = running_entry.service_token
-    else:
-        app_server_url = resolve_effective_app_server_url(configured_app_server_url, data_dir=data_dir)
-        service_token = ""
+    data_dir = pathlib.Path(running_entry.data_dir)
+    app_server_url = resolve_running_instance_app_server_url(running_entry)
+    if not app_server_url:
+        raise ValueError(
+            f"运行中的实例 `{resolved.instance_name}` 未发布可用的 app-server 地址；请重启该实例后再试。"
+        )
+    service_token = running_entry.service_token
     return CliRuntimeTarget(
         instance_name=resolved.instance_name,
         data_dir=data_dir,

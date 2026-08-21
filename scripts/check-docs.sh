@@ -51,6 +51,42 @@ check_bilingual_pairs() {
   done
 }
 
+check_active_bilingual_roles() {
+  local dir
+  for dir in docs/architecture docs/contracts docs/decisions; do
+    while IFS= read -r chinese; do
+      [[ -n "$chinese" ]] || continue
+      local english="${chinese%.zh-CN.md}.md"
+      [[ -f "$english" ]] || continue
+
+      local expected_chinese="文档角色：中文规范源。英文同步副本：\`${english}\`。"
+      local expected_english="Document role: synchronized English peer. Canonical Chinese: \`${chinese}\`."
+      local actual_chinese
+      local actual_english
+      actual_chinese="$(sed -n '3p' "$chinese")"
+      actual_english="$(sed -n '3p' "$english")"
+
+      if [[ "$actual_chinese" != "$expected_chinese" ]]; then
+        fail "invalid Chinese canonical-role metadata in $chinese; expected: $expected_chinese"
+      fi
+      if [[ "$actual_english" != "$expected_english" ]]; then
+        fail "invalid English peer-role metadata in $english; expected: $expected_english"
+      fi
+    done < <(find "$dir" -maxdepth 1 -type f -name '*.zh-CN.md' | sort)
+  done
+
+  local contradictory_roles
+  contradictory_roles="$(
+    grep -nHE \
+      '^(英文原文|英文译文|英文版本|中文原文|中文译文|中文版本|Chinese original|Chinese version|English original|English version)[：:]' \
+      docs/architecture/*.md docs/contracts/*.md docs/decisions/*.md || true
+  )"
+  if [[ -n "$contradictory_roles" ]]; then
+    fail "found ambiguous or contradictory bilingual-role claims in active docs:"
+    printf '%s\n' "$contradictory_roles" >&2
+  fi
+}
+
 check_doc_indexes_cover_docs() {
   local file
   for file in docs/architecture/*.md docs/contracts/*.md docs/decisions/*.md docs/archive/*.md; do
@@ -88,12 +124,27 @@ check_markdown_trailing_whitespace() {
   fi
 }
 
+check_portable_upstream_references() {
+  if ! python scripts/check_portable_upstream_references.py; then
+    failures=1
+  fi
+}
+
+check_document_integrity() {
+  if ! python scripts/check_document_integrity.py; then
+    failures=1
+  fi
+}
+
 check_legacy_doc_paths
 check_docs_root_layout
 check_bilingual_pairs
+check_active_bilingual_roles
 check_doc_indexes_cover_docs
 check_readme_doc_targets_exist
 check_markdown_trailing_whitespace
+check_portable_upstream_references
+check_document_integrity
 
 if (( failures != 0 )); then
   exit 1

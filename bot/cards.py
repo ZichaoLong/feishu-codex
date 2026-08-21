@@ -28,7 +28,6 @@ from bot.feishu_card_markdown import (
     sanitize_runtime_markdown_for_feishu_card,
 )
 from bot.feishu_command_syntax import feishu_visible_command_syntax
-from bot.permissions_profile import PERMISSION_PROFILE_CHOICES, permissions_profile_choice_key, permissions_profile_label
 from bot.shared_command_surface import get_shared_command
 
 
@@ -66,10 +65,6 @@ _SHARED_RESUME_COMMAND = get_shared_command("resume")
 _SHARED_RESET_BACKEND_COMMAND = get_shared_command("reset-backend")
 _LOCAL_THREAD_LIST_CWD = "focusctl thread list --scope cwd"
 _LOCAL_RESUME_COMMAND = feishu_visible_command_syntax("fcodex resume <thread_id|thread_name>")
-BINDING_SAFETY_BASELINE_SCOPE_TEXT = (
-    "这是当前 Feishu binding 的安全基线。Focus 发起每个 turn 时都会显式应用到"
-    "共享 Codex thread；其他前端可以覆盖上游状态，但下一次 Feishu turn 会重新应用本 binding 的值。"
-)
 BINDING_OPTIONAL_OVERRIDE_SCOPE_TEXT = (
     "这是当前 Feishu binding 的可选 override。非 `auto` 字段会在 Focus 发起 turn 时"
     "应用到共享 Codex thread；`auto` 不发送对应字段，因此沿用上游当前 thread 状态。"
@@ -472,6 +467,8 @@ def build_goal_detached_confirm_card(
     status: str = "",
 ) -> dict:
     normalized_thread_id = str(thread_id or "").strip()
+    if not normalized_thread_id:
+        raise ValueError("detached goal 确认卡缺少 thread_id。")
     normalized_thread_title = str(thread_title or "").strip()
     normalized_objective = str(objective or "").strip()
     normalized_status = str(status or "").strip()
@@ -512,6 +509,7 @@ def build_goal_detached_confirm_card(
                         "type": "primary",
                         "value": {
                             "action": "goal_apply_confirm",
+                            "thread_id": normalized_thread_id,
                             "attach_binding": "true",
                             "objective": normalized_objective,
                             "status": normalized_status,
@@ -523,6 +521,7 @@ def build_goal_detached_confirm_card(
                         "type": "default",
                         "value": {
                             "action": "goal_apply_confirm",
+                            "thread_id": normalized_thread_id,
                             "attach_binding": "",
                             "objective": normalized_objective,
                             "status": normalized_status,
@@ -620,6 +619,7 @@ def build_execution_card(
     running: bool = False,
     elapsed: int = 0,
     cancelled: bool = False,
+    cancelable: bool = True,
 ) -> dict:
     """构造主执行卡片。"""
     if running:
@@ -696,9 +696,9 @@ def build_execution_card(
         if log_tables > MAX_CARD_TABLES:
             log_text = limit_card_tables(log_text, MAX_CARD_TABLES)
         elements.append(_panel("执行过程", log_text, expanded=False))
-        elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=True))
+        elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=running))
     elif reply_panel_elements:
-        elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=True))
+        elements.append(_panel_with_elements("回复", reply_panel_elements, expanded=running))
     elif log_text:
         elements.append(_panel("执行过程", limit_card_tables(log_text), expanded=False))
     else:
@@ -709,7 +709,7 @@ def build_execution_card(
             }
         )
 
-    if running:
+    if running and cancelable:
         elements.append({"tag": "hr"})
         elements.append(
             {
@@ -728,345 +728,6 @@ def build_execution_card(
             "template": template,
         },
         "body": {"elements": elements},
-    }
-
-
-def build_command_approval_card(
-    request_id: str,
-    *,
-    command: str,
-    cwd: str = "",
-    reason: str = "",
-) -> dict:
-    """构造命令审批卡片。"""
-    cwd_display = display_path(cwd) if cwd else "-"
-    content = [f"**工作目录**: `{cwd_display}`", "**命令**:", f"```bash\n{command or '(空命令)'}\n```"]
-    if reason:
-        content.append(f"**原因**: {reason}")
-
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "Codex 命令执行审批"},
-            "template": "orange",
-        },
-        "elements": [
-            {"tag": "markdown", "content": "\n".join(content)},
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "允许本次"},
-                        "type": "primary",
-                        "value": {
-                            "action": "command_allow_once",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "允许本会话"},
-                        "type": "default",
-                        "value": {
-                            "action": "command_allow_session",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "拒绝"},
-                        "type": "danger",
-                        "value": {
-                            "action": "command_deny",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "中止本轮"},
-                        "type": "danger",
-                        "value": {
-                            "action": "command_abort",
-                            "request_id": request_id,
-                        },
-                    },
-                ],
-            },
-        ],
-    }
-
-
-def build_file_change_approval_card(
-    request_id: str,
-    *,
-    grant_root: str = "",
-    reason: str = "",
-) -> dict:
-    """构造文件修改审批卡片。"""
-    lines = []
-    if grant_root:
-        lines.append(f"**授权根目录**: `{display_path(grant_root)}`")
-    else:
-        lines.append("**授权范围**: 当前变更")
-    if reason:
-        lines.append(f"**原因**: {reason}")
-
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "Codex 文件修改审批"},
-            "template": "orange",
-        },
-        "elements": [
-            {"tag": "markdown", "content": "\n".join(lines)},
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "允许本次"},
-                        "type": "primary",
-                        "value": {
-                            "action": "file_change_accept",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "允许本会话"},
-                        "type": "default",
-                        "value": {
-                            "action": "file_change_accept_session",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "拒绝"},
-                        "type": "danger",
-                        "value": {
-                            "action": "file_change_decline",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "中止本轮"},
-                        "type": "danger",
-                        "value": {
-                            "action": "file_change_cancel",
-                            "request_id": request_id,
-                        },
-                    },
-                ],
-            },
-        ],
-    }
-
-
-def build_permissions_approval_card(
-    request_id: str,
-    *,
-    permissions: dict,
-    reason: str = "",
-) -> dict:
-    """构造额外权限审批卡片。"""
-    fs_profile = permissions.get("fileSystem") or {}
-    network_profile = permissions.get("network") or {}
-    lines: list[str] = []
-
-    read_paths = fs_profile.get("read") or []
-    write_paths = fs_profile.get("write") or []
-    if read_paths:
-        lines.append("**新增读权限**:")
-        lines.extend(f"- `{display_path(path)}`" for path in read_paths[:10])
-    if write_paths:
-        lines.append("**新增写权限**:")
-        lines.extend(f"- `{display_path(path)}`" for path in write_paths[:10])
-    if network_profile.get("enabled"):
-        lines.append("**新增网络权限**: 已启用")
-    if reason:
-        lines.append(f"**原因**: {reason}")
-    if not lines:
-        lines.append("*未提供具体权限详情*")
-
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "Codex 额外权限审批"},
-            "template": "orange",
-        },
-        "elements": [
-            {"tag": "markdown", "content": "\n".join(lines)},
-            {"tag": "hr"},
-            {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "允许本次"},
-                        "type": "primary",
-                        "value": {
-                            "action": "permissions_allow_once",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "允许本会话"},
-                        "type": "default",
-                        "value": {
-                            "action": "permissions_allow_session",
-                            "request_id": request_id,
-                        },
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "拒绝"},
-                        "type": "danger",
-                        "value": {
-                            "action": "permissions_deny",
-                            "request_id": request_id,
-                        },
-                    },
-                ],
-            },
-        ],
-    }
-
-
-def build_approval_handled_card(title: str, decision: str, detail: str = "") -> dict:
-    """构造已处理审批卡片。"""
-    content = f"已{decision}。"
-    if detail:
-        content = f"{content}\n{detail}"
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "template": "grey",
-        },
-        "elements": [{"tag": "markdown", "content": content}],
-    }
-
-
-def build_approval_policy_card(current_policy: str, *, running: bool = False) -> dict:
-    """构造原生审批策略选择卡片。"""
-    labels = {
-        "untrusted": "untrusted",
-        "on-request": "on-request",
-        "never": "never",
-    }
-    descs = {
-        "untrusted": "偏保守，更多操作会先停下来等你确认。",
-        "on-request": "仅在模型明确请求时，才停下来等你确认。",
-        "never": "不请求审批，直接执行。",
-    }
-
-    current_label = labels.get(current_policy, current_policy or "（未设置）")
-    current_desc = (
-        "它只决定什么时候停下来等你确认，不改变文件或网络边界。\n"
-        "多数情况下，优先使用 `/permissions`。\n"
-        f"{BINDING_SAFETY_BASELINE_SCOPE_TEXT}"
-    )
-    if running:
-        current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
-
-    buttons = []
-    elements = [
-        {
-            "tag": "markdown",
-            "content": f"当前审批策略：**{current_label}**\n{current_desc}",
-        },
-        {"tag": "hr"},
-    ]
-    for policy, label in labels.items():
-        elements.append({"tag": "markdown", "content": f"**{label}**\n{descs[policy]}"})
-        buttons.append(
-            {
-                "tag": "button",
-                "text": {
-                    "tag": "plain_text",
-                    "content": f"{'✓ ' if policy == current_policy else ''}{label}",
-                },
-                "type": "primary" if policy == current_policy else "default",
-                "value": {
-                    "action": "set_approval_policy",
-                    "policy": policy,
-                },
-            }
-        )
-    elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
-
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "Codex 审批策略"},
-            "template": "blue",
-        },
-        "elements": elements,
-    }
-
-
-def build_permissions_profile_card(
-    current_permissions_profile_id: str,
-    *,
-    running: bool = False,
-) -> dict:
-    """构造权限基线选择卡片。"""
-    current_choice = permissions_profile_choice_key(current_permissions_profile_id)
-    current_label = permissions_profile_label(current_permissions_profile_id)
-    current_desc = (
-        "它只决定执行边界，不决定是否停下来审批。\n"
-        "审批策略请单独使用 `/approval`。\n"
-        f"{BINDING_SAFETY_BASELINE_SCOPE_TEXT}\n\n"
-        f"Profile ID：`{current_permissions_profile_id or '（空）'}`"
-    )
-    if running:
-        current_desc += "\n\n当前若有执行中的 turn，切换仅对下一轮生效。"
-
-    buttons = []
-    elements = [
-        {
-            "tag": "markdown",
-            "content": f"当前权限基线：**{current_label}**\n{current_desc}",
-        },
-        {"tag": "hr"},
-    ]
-    for key, config in PERMISSION_PROFILE_CHOICES.items():
-        elements.append(
-            {
-                "tag": "markdown",
-                "content": f"**{config['label']}**\n{config['description']}",
-            }
-        )
-        buttons.append(
-            {
-                "tag": "button",
-                "text": {
-                    "tag": "plain_text",
-                    "content": f"{'✓ ' if key == current_choice else ''}{config['label']}",
-                },
-                "type": "primary" if key == current_choice else "default",
-                "value": {
-                    "action": "set_permissions_profile",
-                    "profile": key,
-                },
-            }
-        )
-    elements.append({"tag": "action", "layout": "trisection", "actions": buttons})
-    elements.append(_back_to_help_action())
-
-    return {
-        "config": _card_config(),
-        "header": {
-            "title": {"tag": "plain_text", "content": "Codex 权限基线"},
-            "template": "blue",
-        },
-        "elements": elements,
     }
 
 

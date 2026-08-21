@@ -5,6 +5,17 @@ __pycache__/
 .mypy_cache/
 .venv/
 build/
+/node_modules/
+web/node_modules/
+.playwright-cli/
+# Some developer-global ignore files use the broad `lib/` pattern.  The Web
+# frontend's source library is part of this repository and must remain visible
+# to Git in those environments.
+!web/src/lib/
+!web/src/lib/**
+!bot/web_assets/
+/bot/web_assets/dist/
+/bot/web_assets/THIRD_PARTY_NOTICES.md
 data/
 config/system.yaml
 config/codex.yaml

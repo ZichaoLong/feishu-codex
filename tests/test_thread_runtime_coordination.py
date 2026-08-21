@@ -10,10 +10,15 @@ from bot.runtime_state import (
     BACKEND_THREAD_LOOKUP_ERROR,
     BACKEND_THREAD_STATUS_IDLE,
     BACKEND_THREAD_STATUS_NOT_LOADED,
+    BACKEND_THREAD_STATUS_UNKNOWN,
 )
 from bot.stores.instance_registry_store import InstanceRegistryStore, build_instance_registry_entry
-from bot.stores.thread_runtime_lease_store import ThreadRuntimeLeaseHolder, ThreadRuntimeLeaseStore
+from bot.stores.thread_runtime_lease_store import (
+    ThreadRuntimeLeaseHolder,
+    ThreadRuntimeLeaseStore,
+)
 from bot.thread_runtime_coordination import (
+    ThreadRuntimeAdmissionError,
     acquire_thread_runtime_holder_or_raise,
     inspect_thread_global_loaded_presence,
     preview_thread_runtime_holder_acquire,
@@ -221,7 +226,7 @@ class ThreadRuntimeCoordinationTests(unittest.TestCase):
             _holder(instance_name="corp-a", holder_id="service:one", service_token="token-a"),
         )
         with patch("bot.thread_runtime_coordination.control_request") as mock_control_request:
-            with self.assertRaisesRegex(RuntimeError, "不支持跨实例继续"):
+            with self.assertRaises(ThreadRuntimeAdmissionError) as caught:
                 acquire_thread_runtime_holder_or_raise(
                     thread_id="thread-1",
                     holder=_holder(instance_name="corp-b", holder_id="service:two", service_token="token-b"),
@@ -229,6 +234,12 @@ class ThreadRuntimeCoordinationTests(unittest.TestCase):
                 )
 
         mock_control_request.assert_not_called()
+        self.assertIn("不支持跨实例继续", str(caught.exception))
+        self.assertEqual(caught.exception.blocking_instance, "corp-a")
+        self.assertEqual(
+            caught.exception.blocking_status,
+            BACKEND_THREAD_STATUS_UNKNOWN,
+        )
         lease = lease_store.load("thread-1")
         assert lease is not None
         self.assertEqual(lease.owner_instance, "corp-a")
@@ -287,7 +298,7 @@ class ThreadRuntimeCoordinationTests(unittest.TestCase):
         # before the acquire-side guard was tightened.
         raw_path = root_dir / "thread_runtime_leases.json"
         payload = json.loads(raw_path.read_text(encoding="utf-8"))
-        payload["thread-1"]["holders"].append(
+        payload["records"]["thread-1"]["holders"].append(
             {
                 "holder_id": "service:new",
                 "holder_type": "service",
@@ -320,6 +331,41 @@ class ThreadRuntimeCoordinationTests(unittest.TestCase):
         )
 
         self.assertTrue(preview.allowed)
+
+    def test_global_loaded_gate_rejects_corrupted_registry(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        (root_dir / "instance_registry.json").write_text("{broken", encoding="utf-8")
+
+        preview = preview_thread_global_loaded_gate(
+            thread_id="thread-1",
+            current_instance_name="corp-a",
+            registry_store=InstanceRegistryStore(root_dir),
+        )
+
+        self.assertFalse(preview.allowed)
+        self.assertIn("fail-close", preview.reason_text)
+        self.assertIn("instance registry", preview.reason_text)
+
+    def test_runtime_holder_preview_rejects_corrupted_lease_store(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        root_dir = pathlib.Path(tempdir.name)
+        (root_dir / "thread_runtime_leases.json").write_text("{broken", encoding="utf-8")
+
+        preview = preview_thread_runtime_holder_acquire(
+            thread_id="thread-1",
+            holder=_holder(
+                instance_name="corp-a",
+                holder_id="service:one",
+                service_token="token-a",
+            ),
+            lease_store=ThreadRuntimeLeaseStore(root_dir),
+        )
+
+        self.assertFalse(preview.allowed)
+        self.assertIn("fail-closed", preview.reason_text)
 
     def test_cross_instance_conflict_rejects_when_owner_has_service_and_fcodex_holders(self) -> None:
         tempdir = tempfile.TemporaryDirectory()

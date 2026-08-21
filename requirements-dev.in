@@ -1,0 +1,7 @@
+# Development-only dependencies. Runtime dependencies come from pyproject.toml.
+pytest>=8,<9
+ruff==0.12.12
+
+# pytest uses this on Windows; keep the universal lock complete when generated
+# on Linux or macOS.
+colorama>=0.4.6,<1 ; sys_platform == "win32"

@@ -15,23 +15,22 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from bot.adapters.base import RuntimeModelSummary
+from bot.approval_settings_cards import (
+    BINDING_SAFETY_BASELINE_SCOPE_TEXT,
+    build_approval_policy_card,
+    build_permissions_profile_card,
+)
+from bot.binding_runtime_contract import BindingSessionSnapshot
 from bot.cards import (
     BINDING_OPTIONAL_OVERRIDE_SCOPE_TEXT,
-    BINDING_SAFETY_BASELINE_SCOPE_TEXT,
     CommandResult,
-    build_approval_policy_card,
     build_model_effort_card,
-    build_permissions_profile_card,
     make_card_response,
 )
 from bot.config import ensure_init_token, load_system_config_raw, save_system_config
 from bot.feishu_command_syntax import feishu_visible_command_syntax
-from bot.runtime_view import RuntimeView
-from bot.permissions_profile import (
-    PERMISSION_PROFILE_CHOICES,
-    permissions_profile_choice_key,
-    permissions_profile_label,
-)
+from bot.system_config import SystemConfig
+from bot.permissions_profile import PERMISSION_PROFILE_CHOICES
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +63,7 @@ class SettingsDomainPorts:
     get_bot_identity_snapshot: Callable[[], dict[str, Any]]
     add_admin_open_id: Callable[[str], None]
     set_configured_bot_open_id: Callable[[str], None]
-    get_runtime_view: Callable[[str, str, str], RuntimeView]
+    resolve_session: Callable[[str, str, str], BindingSessionSnapshot]
     list_models: Callable[[], list[RuntimeModelSummary]]
     update_runtime_settings: Callable[..., None]
 
@@ -79,8 +78,8 @@ class CodexSettingsDomain:
         self._ports = ports
         self._approval_policies = approval_policies
 
-    def _runtime_view(self, sender_id: str, chat_id: str, message_id: str = "") -> RuntimeView:
-        return self._ports.get_runtime_view(sender_id, chat_id, message_id)
+    def _session(self, sender_id: str, chat_id: str, message_id: str = "") -> BindingSessionSnapshot:
+        return self._ports.resolve_session(sender_id, chat_id, message_id)
 
     def _update_runtime_settings(
         self,
@@ -131,15 +130,20 @@ class CodexSettingsDomain:
             open_id=sender_open_id,
             sender_type=sender_type,
         )
-        config = load_system_config_raw()
-        admin_open_ids = {
-            str(item).strip()
-            for item in config.get("admin_open_ids", [])
-            if isinstance(item, str) and str(item).strip()
-        }
+        try:
+            config = load_system_config_raw()
+            validated_config = SystemConfig.from_dict(
+                config,
+                require_credentials=True,
+            )
+        except Exception as exc:
+            logger.exception("读取初始化配置失败")
+            return CommandResult(text=f"初始化失败：system.yaml 配置无效：{exc}")
+
+        admin_open_ids = set(validated_config.admin_open_ids)
         admin_added = sender_open_id not in admin_open_ids
         admin_open_ids.add(sender_open_id)
-        configured_bot_open_id = str(config.get("bot_open_id", "") or "").strip()
+        configured_bot_open_id = validated_config.bot_open_id
         identity = ports.get_bot_identity_snapshot()
         discovered_bot_open_id = str(identity.get("discovered_open_id", "") or "").strip()
         bot_open_id_written = False
@@ -404,7 +408,7 @@ class CodexSettingsDomain:
     def _build_model_effort_summary_card(
         self,
         *,
-        runtime: RuntimeView,
+        runtime: BindingSessionSnapshot,
         models: list[RuntimeModelSummary] | None = None,
     ) -> dict:
         available_models = self._list_models() if models is None else models
@@ -457,7 +461,7 @@ class CodexSettingsDomain:
         )
 
     def handle_model_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         models = self._list_models()
         if not arg:
             return CommandResult(card=self._build_model_effort_summary_card(runtime=runtime, models=models))
@@ -490,7 +494,7 @@ class CodexSettingsDomain:
         return CommandResult(text=message)
 
     def handle_effort_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         models = self._list_models()
         if not arg:
             return CommandResult(card=self._build_model_effort_summary_card(runtime=runtime, models=models))
@@ -528,7 +532,7 @@ class CodexSettingsDomain:
         return CommandResult(text=message)
 
     def handle_approval_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         if arg:
             policy = arg.strip().lower()
             if policy not in self._approval_policies:
@@ -547,7 +551,7 @@ class CodexSettingsDomain:
         return CommandResult(card=build_approval_policy_card(runtime.approval_policy, running=runtime.running))
 
     def handle_permissions_command(self, sender_id: str, chat_id: str, arg: str, *, message_id: str = "") -> CommandResult:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         if arg:
             choice = arg.strip().lower()
             config = PERMISSION_PROFILE_CHOICES.get(choice)
@@ -579,7 +583,7 @@ class CodexSettingsDomain:
     def _model_effort_rejection_response(
         self,
         *,
-        runtime: RuntimeView,
+        runtime: BindingSessionSnapshot,
         models: list[RuntimeModelSummary],
         validation: ModelEffortValidation,
     ) -> P2CardActionTriggerResponse:
@@ -596,7 +600,7 @@ class CodexSettingsDomain:
         message_id: str,
         desired_model: str,
     ) -> P2CardActionTriggerResponse:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         models = self._list_models()
         validation = self._classify_model_effort(
             model=desired_model,
@@ -622,7 +626,7 @@ class CodexSettingsDomain:
             toast += "；下一轮生效"
         return make_card_response(
             card=self._build_model_effort_summary_card(
-                runtime=self._runtime_view(sender_id, chat_id, message_id),
+                runtime=self._session(sender_id, chat_id, message_id),
                 models=models,
             ),
             toast=toast,
@@ -636,7 +640,7 @@ class CodexSettingsDomain:
         message_id: str,
         desired_effort: str,
     ) -> P2CardActionTriggerResponse:
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         models = self._list_models()
         validation = self._classify_model_effort(
             model=runtime.model,
@@ -662,7 +666,7 @@ class CodexSettingsDomain:
             toast += "；下一轮生效"
         return make_card_response(
             card=self._build_model_effort_summary_card(
-                runtime=self._runtime_view(sender_id, chat_id, message_id),
+                runtime=self._session(sender_id, chat_id, message_id),
                 models=models,
             ),
             toast=toast,
@@ -769,7 +773,7 @@ class CodexSettingsDomain:
         policy = str(action_value.get("policy", "")).strip().lower()
         if policy not in self._approval_policies:
             return make_card_response(toast="非法审批策略", toast_type="warning")
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         self._update_runtime_settings(
             sender_id,
             chat_id,
@@ -797,7 +801,7 @@ class CodexSettingsDomain:
         config = PERMISSION_PROFILE_CHOICES.get(choice)
         if config is None:
             return make_card_response(toast="非法权限基线", toast_type="warning")
-        runtime = self._runtime_view(sender_id, chat_id, message_id)
+        runtime = self._session(sender_id, chat_id, message_id)
         self._update_runtime_settings(
             sender_id,
             chat_id,

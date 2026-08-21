@@ -1,0 +1,1 @@
+"""Web Runtime capability tests."""

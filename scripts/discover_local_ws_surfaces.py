@@ -148,7 +148,7 @@ def _looks_like_app_server(proc: ProcessInfo) -> bool:
 
 
 def _looks_like_proxy(proc: ProcessInfo) -> bool:
-    return "bot.fcodex_proxy" in proc.raw_args
+    return "bot.fcodex.proxy" in proc.raw_args
 
 
 def _instance_from_token_path(path_text: str) -> str:

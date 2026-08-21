@@ -1,5 +1,7 @@
 # 飞书原卡查询、JSON 2.0 终态卡与转发读取决策
 
+文档角色：中文规范源。英文同步副本：`docs/decisions/feishu-raw-card-retrieval.md`。
+
 另见：
 
 - `docs/decisions/feishu-card-text-projection.zh-CN.md`：当前 best-effort 文本投影边界
@@ -39,7 +41,7 @@
 
 本仓库关于终态卡显示与读取的决策如下：
 
-1. 终态卡显示方向切换到 **JSON 2.0 优先**。
+1. 终态卡使用 **JSON 2.0**。
 2. “高保真读取”不再依赖默认事件体或默认历史列表结构，而应优先依赖：
    - 目标消息的 `message_id`
    - `message/get` 或 `message/list`
@@ -51,8 +53,9 @@
 4. `merge_forward` 不是“完整原卡 JSON 本体”，只是“进入子消息展开链路的入口”。
 5. 普通转发不承诺保留原始源消息 ID，但若转发后的新消息本身仍为 `interactive`，则仍可能通过这条新消息的 `message_id` 读取其完整卡片 JSON。
 6. `/last text` 保留为兜底能力，不再被视为唯一权威路径。
-7. 当前阶段不设计新的 `/text` 功能；优先把“直接读取转发卡片本身”做成主路径。
-8. 为支持重启后验证，必须补充一套“原始接收观测”能力，明确记录：
+7. 本决策不新增 `/text` 功能；“直接读取转发卡片本身”是主路径。
+8. 为支持重启后验证，仓库已提供受严格布尔开关控制的“原始接收观测”能力，
+   可明确记录：
    - 原始事件体里收到的 `msg_type`
    - 外层消息 `message_id`
    - 对 `merge_forward` 展开后拿到的子消息 `message_id`
@@ -275,11 +278,11 @@ JSON 2.0 的强项是：
 - 当前 payload / best-effort 投影
 - 或 `/last text`
 
-## 7. 终态卡协议方向
+## 7. 终态卡协议
 
 ### 7.1 单份权威正文
 
-后续 JSON 2.0 terminal result card 的正式方向是：
+当前 JSON 2.0 terminal result card 的正式合同是：
 
 - 只保留单份权威正文
 - 不再为“怕丢语义”额外放一份相同正文的隐藏副本
@@ -292,12 +295,12 @@ JSON 2.0 的强项是：
 
 ### 7.2 结构化正文块
 
-终态卡应有一个稳定、可定位的正文块位，用于：
+终态卡使用一个稳定、可定位的正文块位，用于：
 
 - 用户显示
 - 机器读取
 
-推荐要求：
+正式要求：
 
 - 终态正文必须位于一个固定的 rich text / content block
 - 解析器只认这一个块位
@@ -321,158 +324,91 @@ JSON 2.0 的强项是：
 - 原卡查询成功但 store miss 时：卡片正文只作为 degraded projection 回退
 - 原卡查询失败时：只剩 best-effort 投影，不再依赖结构摘要修复标题层级
 
-## 8. 当前仓库与目标状态的差距
+## 8. 当前实现状态
 
-当前仓库现实是：
+当前仓库已完成本决策的主路径：
 
-- 历史读取主要仍走 `message.list`
-- 未设置 `card_msg_content_type=user_card_content`
-- `merge_forward` 路径只是把子消息展开后做文本提取
-- 接收入口没有一套正式的“原始事件观测日志”
+- terminal result card 使用 JSON 2.0，正文位稳定，并带有
+  `fc_tr_<result_id>_<checksum>` 引用
+- 普通 `interactive` 消息有 `message_id` 时，优先请求
+  `card_msg_content_type=user_card_content`
+- 原卡查询成功后，先用本地 terminal result store 判断是否有权威正文；
+  store miss 时明确降级为卡片投影
+- `merge_forward` 先展开子消息，再对其中的 `interactive` 子消息
+  逐条请求原卡
+- 原卡查询失败仍保留 payload / 历史结构的 best-effort 投影
+- `/last text` 继续作为本机器人实例的导出与兜底入口，不取代上述读取栈
 
-也就是说，当前实现仍处于：
+## 9. 实现边界
 
-- 默认历史结构
-- best-effort 投影
-- merge_forward 文本展开
+### 9.1 原卡与默认查询共用一个飞书适配边界
 
-而不是：
+消息查询能力显式接受 `card_msg_content_type`。原卡路径传入
+`user_card_content`，普通历史或默认投影路径则不传。两者不会通过隐式默认值
+互相替换。
 
-- 原卡读取优先
-- merge_forward 子消息原卡读取
+### 9.2 读取决策按权威性降级
 
-## 9. 实施计划
+当前读取顺序是：
 
-### 9.1 阶段一：抽象原卡读取能力
+1. 本地 terminal result store 命中：权威终态文本
+2. 按 `message_id` 取得原卡：原卡投影
+3. 事件 payload 或默认历史结构：best-effort 投影
 
-在飞书接入层新增正式能力：
+这个顺序不因卡片是直收、普通转发还是 `merge_forward` 子消息而改变。
 
-- `get_message_raw(message_id, *, card_msg_content_type="user_card_content")`
-- `list_messages_raw(..., card_msg_content_type="user_card_content")`
+### 9.3 跨实例权威性有意受限
 
-要求：
-
-- 与现有默认结构接口并存
-- 不直接替换当前 best-effort 流程
-- 对返回结构做兼容包装，避免 SDK 参数形态变化时直接炸裂
-
-### 9.2 阶段二：建立三段式读取决策
-
-正式引入一个读取决策层：
-
-1. 目标消息是否是普通 `interactive`
-2. 是否可直接按当前消息 `message_id` 读原卡
-3. 是否是 `merge_forward`
-4. 若是，是否可展开子消息
-5. 子消息中是否存在可按协议识别的 terminal result card
-6. 若都失败，再回退投影
-
-### 9.3 阶段三：终态卡升级到 JSON 2.0
-
-发送侧将 terminal result card 迁移为 JSON 2.0，要求：
-
-- 正文仅保留一份
-- 正文区块稳定可解析
-- 标题层级、列表、引用、代码、链接优先靠结构表达
-
-### 9.4 阶段四：保留 `/last text` 兜底
-
-`/last text` 继续存在，但定位改为：
-
-- 当直接读取卡片失败时的兜底
-- 当用户只想快速取最近结果时的便捷命令
-
-它不再被视为唯一权威路径。
+terminal result store 是本机器人实例的本地事实源。来自其他机器人、其他实例或
+历史环境的卡片，即使能取得完整原卡，也只能作为非权威投影。实现不会因为
+卡片 marker 形似本项目协议就自动提升为权威正文。
 
 ## 10. 观测与调试设计
 
-这部分是本决策的关键补充。
+结构化 ingress 日志已实现，但它是显式调试面，不是常态业务日志。
+这套证据链用于区分飞书原始事件形态、原卡查询结果与最终投影路径。
 
-原因是：
+### 10.1 当前记录的事实
 
-- 用户稍后会要求执行本计划中的改造
-- 执行完成后会重启服务
-- 重启后，用户会把卡片转发给机器人
-- 机器人最终看到的，可能已经是本项目处理后的文本，而不是肉眼能直接确认的原始事件形态
+开启调试面后，当前实现会记录：
 
-因此，必须在实现里增加一种“可以明确知道本项目到底收到了什么”的观测能力。
+- ingress 事件的 `msg_type`、`message_id`、`chat_id`、`thread_id`、
+  `parent_id`、`root_id` 与有界的原始 `content`
+- `merge_forward` 展开是否成功、item 数量与子消息 ID
+- `interactive` 子消息是否进入 `raw_card_from_merge_forward_child`
+- 原卡查询是否成功，以及成功时的 schema 和标题摘要
+- 最终解析走 `raw_card_direct` 还是 `best_effort_projection`，以及文本是否权威
 
-### 10.1 需要观测的事实
+日志不是另一份卡片或 terminal result 事实源；它只记录读取决策所用证据。
 
-至少要稳定记录以下事实：
+### 10.2 结构化日志事件
 
-- 原始接收事件的 `message_type`
-- 原始接收事件的外层 `message_id`
-- 原始接收事件的 `chat_id`
-- 原始接收事件的 `thread_id`
-- 原始接收事件的 `parent_id`
-- 原始接收事件的 `root_id`
-- 原始接收事件里的原始 `content`
-- 若为 `merge_forward`：
-  - 对外层 `message_id` 调 `message/get` 后得到的 `items` 数量
-  - 每个子消息的 `message_id`
-  - 每个子消息的 `msg_type`
-  - 每个子消息的 `upper_message_id`
-- 若对子消息或普通 `interactive` 做了原卡查询：
-  - 是否设置了 `card_msg_content_type=user_card_content`
-  - 查询是否成功
-  - 返回的是默认结构还是原卡 JSON
-  - 卡片 schema 是 `1.0` 还是 `2.0`
-- 最终采用的路径：
-  - `raw_card_direct`
-  - `raw_card_from_merge_forward_child`
-  - `best_effort_projection`
-  - `last_text_fallback`
-
-### 10.2 建议的实现形态
-
-不建议把完整原始事件 JSON 无差别常驻写入普通 info 日志。
-
-建议增加：
-
-- 一组结构化调试日志
-- 受配置开关控制
-- 可单独 grep
-
-推荐日志事件名：
+当前事件名可单独 grep：
 
 - `card_ingress_event`
 - `card_ingress_merge_forward_expansion`
 - `card_ingress_raw_card_fetch`
 - `card_ingress_resolution`
 
-### 10.3 最小验证开关
+实现还可以输出 `card_ingress_merge_forward_child`。它用于标记某个
+`interactive` 子消息的原卡替换路径。
 
-建议新增布尔配置，例如：
+### 10.3 调试开关合同
 
-- `debug_raw_card_ingress`
+`debug_raw_card_ingress` 的合同是：
 
-开启后：
+- 默认为 `false`
+- 只接受 YAML boolean `true` / `false`；字符串 `"true"` / `"false"` 都是配置错误
+- 只有显式设为 `true` 时才记录上述 ingress 事件
+- 关闭时不会因原卡查询成功或失败而写入这组 INFO 日志
 
-- 记录上面列出的结构化事实
-- 默认关闭，避免常态日志膨胀
+### 10.4 边界
 
-### 10.4 为什么必须加这套观测
+这套日志包含消息和会话标识、标题摘要、错误以及有界的原始内容，
+因此不得默认开启。它能帮助区分“飞书只给了投影”、“子消息未展开”、
+“原卡查询失败”和“项目主动降级”，但不能证明飞书跨所有转发形态的保真保证。
 
-因为稍后的真实验证场景是：
-
-- 服务重启后
-- 用户从飞书客户端把卡片转发给机器人
-- 机器人收到的是生产链路里的真实事件
-
-如果没有这套观测，排障时只能看到：
-
-- 处理后的文本
-- 或少量默认日志
-
-那将无法分辨：
-
-- 飞书事件本来就只给了文本
-- 还是项目在接收层把卡片压平了
-- 还是 merge_forward 已经展开，但后续没查原卡
-- 还是查了原卡，但被权限或参数问题拦住了
-
-## 11. 推荐验证顺序
+## 11. 手工验证顺序
 
 ### 11.1 第一轮：普通卡片直收
 
@@ -523,26 +459,23 @@ JSON 2.0 的强项是：
 
 ## 12. 当前产品结论
 
-基于当前文档与代码调查，本仓库的正式产品方向应更新为：
+本仓库当前的正式产品行为是：
 
 - 显示优先使用 JSON 2.0
 - 高保真读取优先使用“按 `message_id` 查询原卡 JSON”
 - `merge_forward` 作为子消息展开入口，而不是完整内容本体
 - 普通转发是否可靠，取决于转发后是否仍保留可查询的 `interactive` 新消息
 - `/last text` 是兜底，不是唯一权威路径
-- 是否真正可把“转发卡片本身”作为主路径，必须依赖后续加日志后的实测结果
+- 转发语义仍受飞书真实事件形态限制；结构化调试日志用于实测取证，
+  不把未经官方合同保证的转发形态写成产品承诺
 
-## 13. 对当前实现的直接要求
+## 13. 维护规则
 
-后续执行本方案时，至少要同时交付两类改动：
+如果仓库改变下列任一事实，必须同时审阅本文与
+`docs/decisions/feishu-card-text-projection.zh-CN.md`：
 
-1. 功能改动
-   - 原卡查询接口
-   - merge_forward 子消息原卡读取
-   - JSON 2.0 terminal result card
-
-2. 观测改动
-   - 结构化 ingress 调试日志
-   - 可确认“本项目实际收到了什么”的最小证据链
-
-如果只做功能改动，不补观测，将无法在用户后续“重启后转发卡片”的真实实验里有效定位问题。
+- terminal result card 发送格式
+- 原卡查询策略
+- `merge_forward` 子消息展开行为
+- `/last text` 读取语义
+- ingress 调试开关的默认值、类型或日志字段
