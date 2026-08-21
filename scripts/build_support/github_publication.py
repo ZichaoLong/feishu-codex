@@ -184,6 +184,25 @@ class GitHubReleaseClient:
             assets=tuple(assets),
         )
 
+    def _release_payloads(self) -> tuple[dict[str, Any], ...]:
+        releases: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = self._json_array(
+                self._run(
+                    "api",
+                    (f"repos/{self.repository}/releases?per_page=100&page={page}"),
+                ),
+                operation=f"Release列表第{page}页读取",
+            )
+            for raw_release in payload:
+                if not isinstance(raw_release, dict):
+                    raise GitHubPublicationError("GitHub Release列表包含非object条目")
+                releases.append(raw_release)
+            if len(payload) < 100:
+                return tuple(releases)
+            page += 1
+
     def release(self, tag: str) -> ReleaseState | None:
         result = self._run(
             "api",
@@ -191,12 +210,46 @@ class GitHubReleaseClient:
         )
         if result.returncode != 0:
             if "HTTP 404" in result.stderr:
-                return None
+                matches = tuple(
+                    raw_release
+                    for raw_release in self._release_payloads()
+                    if raw_release.get("tag_name") == tag
+                )
+                if len(matches) > 1:
+                    raise GitHubPublicationError(
+                        f"GitHub Release列表包含重复tag，无法判定authority：{tag}"
+                    )
+                if not matches:
+                    return None
+                return self._release_state(matches[0], expected_tag=tag)
             raise GitHubPublicationError(
                 f"无法读取GitHub Release {tag}：{result.stderr.strip() or 'unknown error'}"
             )
         payload = self._json_object(result, operation=f"Release {tag}读取")
         return self._release_state(payload, expected_tag=tag)
+
+    def release_by_id(
+        self,
+        release_id: int,
+        *,
+        expected_tag: str,
+    ) -> ReleaseState | None:
+        result = self._run(
+            "api",
+            f"repos/{self.repository}/releases/{release_id}",
+        )
+        if result.returncode != 0:
+            if "HTTP 404" in result.stderr:
+                return None
+            raise GitHubPublicationError(
+                "无法按ID读取GitHub Release "
+                f"{release_id}：{result.stderr.strip() or 'unknown error'}"
+            )
+        payload = self._json_object(
+            result,
+            operation=f"Release {release_id}读取",
+        )
+        return self._release_state(payload, expected_tag=expected_tag)
 
     def tag_commit(self, tag: str) -> str | None:
         encoded_tag = urllib.parse.quote(tag, safe="")
@@ -329,7 +382,10 @@ class GitHubReleaseClient:
                 "--draft=false",
                 "--prerelease",
             )
-            refreshed = self.release(release.tag)
+            refreshed = self.release_by_id(
+                release.release_id,
+                expected_tag=release.tag,
+            )
             if refreshed is None:
                 raise GitHubPublicationError(
                     "发布development prerelease后无法证明其存在："
@@ -414,7 +470,10 @@ class GitHubReleaseClient:
             "--repo",
             self.repository,
         )
-        refreshed = self.release(release.tag)
+        refreshed = self.release_by_id(
+            release.release_id,
+            expected_tag=release.tag,
+        )
         if refreshed is None:
             raise GitHubPublicationError(
                 f"上传{local_path.name}后Release消失，external outcome未知"
@@ -432,17 +491,8 @@ class GitHubReleaseClient:
         return refreshed
 
     def development_releases(self) -> tuple[ReleaseState, ...]:
-        payload = self._json_array(
-            self._run(
-                "api",
-                f"repos/{self.repository}/releases?per_page=100",
-            ),
-            operation="development Release列表读取",
-        )
         releases: list[ReleaseState] = []
-        for raw_release in payload:
-            if not isinstance(raw_release, dict):
-                raise GitHubPublicationError("GitHub Release列表包含非object条目")
+        for raw_release in self._release_payloads():
             tag = raw_release.get("tag_name")
             if not is_development_release_tag(tag):
                 continue
@@ -470,7 +520,10 @@ class GitHubReleaseClient:
             "--yes",
         )
         try:
-            remaining_release = self.release(release.tag)
+            remaining_release = self.release_by_id(
+                release.release_id,
+                expected_tag=release.tag,
+            )
             remaining_revision = self.tag_commit(release.tag)
         except GitHubPublicationError as exc:
             return str(exc)

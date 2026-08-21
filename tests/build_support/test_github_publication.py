@@ -211,6 +211,26 @@ class GitHubPublicationTests(unittest.TestCase):
             assets=assets,
         )
 
+    @staticmethod
+    def _api_payload(release: ReleaseState) -> dict[str, object]:
+        return {
+            "id": release.release_id,
+            "tag_name": release.tag,
+            "target_commitish": release.target_commitish,
+            "draft": release.draft,
+            "prerelease": release.prerelease,
+            "published_at": release.published_at,
+            "assets": [
+                {
+                    "name": asset.name,
+                    "size": asset.size,
+                    "digest": asset.digest,
+                    "created_at": asset.created_at,
+                }
+                for asset in release.assets
+            ],
+        }
+
     def test_development_publishes_bundle_then_pointer_and_retains_five(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -412,6 +432,63 @@ class GitHubPublicationTests(unittest.TestCase):
         self.assertIn("--draft", arguments)
         self.assertIn("--prerelease", arguments)
 
+    def test_github_client_finds_draft_when_tag_endpoint_returns_404(self) -> None:
+        client = GitHubReleaseClient(repository="owner/repository")
+        tag = development_release_tag("build-1")
+        draft = self._release(
+            channel="development",
+            release_id=42,
+            tag=tag,
+            draft=True,
+            published_at=None,
+        )
+        responses = (
+            SimpleNamespace(returncode=1, stdout="", stderr="HTTP 404: Not Found"),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([self._api_payload(draft)]),
+                stderr="",
+            ),
+        )
+
+        with patch.object(client, "_run", side_effect=responses) as run:
+            self.assertEqual(client.release(tag), draft)
+
+        self.assertIn(f"/releases/tags/{tag}", run.call_args_list[0].args[1])
+        self.assertIn("/releases?per_page=100&page=1", run.call_args_list[1].args[1])
+
+    def test_github_client_refreshes_uploaded_draft_by_release_id(self) -> None:
+        client = GitHubReleaseClient(repository="owner/repository")
+        draft = self._release(
+            channel="development",
+            release_id=42,
+            draft=True,
+            published_at=None,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle = pathlib.Path(tmpdir) / "bundle.zip"
+            bundle.write_bytes(b"bundle")
+            asset = ReleaseAsset(
+                name=bundle.name,
+                size=bundle.stat().st_size,
+                digest=f"sha256:{sha256_file(bundle)}",
+                created_at="2026-08-21T10:00:00Z",
+            )
+            refreshed = replace(draft, assets=(asset,))
+            command_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch.object(
+                client,
+                "release_by_id",
+                return_value=refreshed,
+            ) as refresh:
+                with patch.object(client, "_run", return_value=command_result):
+                    self.assertEqual(
+                        client.upload_asset(release=draft, local_path=bundle),
+                        refreshed,
+                    )
+
+        refresh.assert_called_once_with(42, expected_tag=draft.tag)
+
     def test_github_client_publishes_draft_before_accepting_tag_identity(self) -> None:
         client = GitHubReleaseClient(repository="owner/repository")
         draft = self._release(
@@ -425,7 +502,7 @@ class GitHubPublicationTests(unittest.TestCase):
             published_at="2026-08-21T10:00:00Z",
         )
         command_result = SimpleNamespace(returncode=0, stdout="", stderr="")
-        with patch.object(client, "release", return_value=published):
+        with patch.object(client, "release_by_id", return_value=published):
             with patch.object(client, "tag_commit", return_value="a" * 40):
                 with patch.object(client, "_run", return_value=command_result) as run:
                     self.assertIs(
