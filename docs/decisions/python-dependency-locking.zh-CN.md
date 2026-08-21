@@ -88,8 +88,12 @@ FOCUS data root 的固定 `.venv` 中引导 pip 并安装这些内容。该目�
 文件系统错误保持原始异常，不伪装成缺少 ensurepip。
 
 `bot/public_command_contract.py` 是四个稳定公开入口（`focus`、`focusd`、`focusctl`、`fcodex`）的命令名与
-Python module catalog。bootstrap 只从这里生成 wrapper，contract test 要求 `pyproject.toml` 的
-console-script 投影与它精确一致。
+Python module catalog。`bot/managed_python.py` 是已安装 module 的唯一隔离 argv 投影：wrapper、completion
+和 service definition 都由它生成绝对受管解释器的 `-I -m <module>` 形状。wrapper 不再用 `-c` 解释导入
+代码，service 也不再经由 `~/.local/bin/focusd` 间接启动。`-I` 阻止当前目录、用户 site 与 `PYTHONPATH`
+改变 Focus 自身 import，但不从进程环境删除这些变量；Focus 启动的 Codex 与用户工具仍可继承既有 PATH、
+provider 和工作环境。bootstrap 只从公开命令 catalog 生成 wrapper，contract test 要求 `pyproject.toml`
+的 console-script 投影与它精确一致。
 
 这仍可能是联网安装路径：remote channel 先访问 GitHub；即使使用不访问 GitHub 的 `--artifact`，pip 仍可能
 需要访问其默认或用户显式配置的 package index。安装器不会在失败后静默追加

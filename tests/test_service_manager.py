@@ -26,7 +26,14 @@ def _definition(root: pathlib.Path):
     return build_service_definition(
         instance_name="corp-a",
         paths=paths,
-        daemon_command=["/tmp/venv/bin/python", "-m", "bot.__main__", "--instance", "corp-a"],
+        daemon_command=[
+            "/tmp/venv/bin/python",
+            "-I",
+            "-m",
+            "bot.__main__",
+            "--instance",
+            "corp-a",
+        ],
     )
 
 
@@ -50,8 +57,29 @@ class ServiceManagerTests(unittest.TestCase):
             rendered = unit_path.read_text(encoding="utf-8")
             self.assertIn("Description=FOCUS (%i)", rendered)
             self.assertIn("WorkingDirectory=", rendered)
+            self.assertIn(
+                'ExecStart="/tmp/venv/bin/python" "-I" "-m" "bot.__main__" "--instance" "%i"',
+                rendered,
+            )
             self.assertIn("%i", rendered)
             self.assertEqual(run_calls, [("systemctl", "--user", "daemon-reload")])
+
+    def test_systemd_named_instance_rejects_command_without_instance_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            definition = _definition(root)
+            invalid = build_service_definition(
+                instance_name="corp-a",
+                paths=definition.paths,
+                daemon_command=["/tmp/venv/bin/python", "-I", "-m", "bot.__main__"],
+            )
+            manager = SystemdUserServiceManager()
+            with patch(
+                "bot.service_manager.default_systemd_user_dir",
+                return_value=root / "systemd",
+            ):
+                with self.assertRaisesRegex(ServiceManagerError, "--instance"):
+                    manager.ensure_service(invalid)
 
     def test_launchd_manager_writes_plist(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -65,7 +93,17 @@ class ServiceManagerTests(unittest.TestCase):
             self.assertTrue(plist_path.exists())
             payload = plistlib.loads(plist_path.read_bytes())
             self.assertEqual(payload["Label"], "io.focus.corp-a")
-            self.assertEqual(payload["ProgramArguments"][-2:], ["--instance", "corp-a"])
+            self.assertEqual(
+                payload["ProgramArguments"],
+                [
+                    "/tmp/venv/bin/python",
+                    "-I",
+                    "-m",
+                    "bot.__main__",
+                    "--instance",
+                    "corp-a",
+                ],
+            )
 
     def test_windows_manager_writes_launcher_and_registers_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -85,6 +123,7 @@ class ServiceManagerTests(unittest.TestCase):
             self.assertTrue(launcher_path.exists())
             self.assertTrue(xml_path.exists())
             rendered = launcher_path.read_text(encoding="utf-8")
+            self.assertIn('"-I" "-m" "bot.__main__"', rendered)
             self.assertIn("bot.__main__", rendered)
             self.assertEqual(run_calls[0][0:4], ("schtasks", "/Query", "/TN", "focus-corp-a"))
             self.assertEqual(run_calls[1][0:4], ("schtasks", "/Create", "/TN", "focus-corp-a"))

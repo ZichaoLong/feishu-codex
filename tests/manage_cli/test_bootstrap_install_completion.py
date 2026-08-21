@@ -4,8 +4,10 @@ import os
 import pathlib
 import shlex
 import stat
+import subprocess
 import tempfile
 import unittest
+import venv
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, patch
 
@@ -99,21 +101,36 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             commands_by_identifier = {
                 definition.identifier: definition.daemon_command for definition in ensured_definitions
             }
+            managed_python = str(data_root / ".venv" / "bin" / "python")
             self.assertEqual(
                 commands_by_identifier["focus"],
-                (str(bin_dir / "focusd"), "--instance", "default"),
+                (
+                    managed_python,
+                    "-I",
+                    "-m",
+                    "bot.__main__",
+                    "--instance",
+                    "default",
+                ),
             )
             self.assertEqual(
                 commands_by_identifier["focus-corp-a"],
-                (str(bin_dir / "focusd"), "--instance", "corp-a"),
+                (
+                    managed_python,
+                    "-I",
+                    "-m",
+                    "bot.__main__",
+                    "--instance",
+                    "corp-a",
+                ),
             )
             rendered = (bin_dir / "focus").read_text(encoding="utf-8")
             self.assertIn(
-                f'exec "{data_root / ".venv" / "bin" / "python"}" -c \'from bot.fcodex.cli import main; main()\' "$@"',
+                f'exec {shlex.join((managed_python, "-I", "-m", "bot.fcodex.cli"))} "$@"',
                 rendered,
             )
             rendered_completion = (bash_completion_dir / "focus").read_text(encoding="utf-8")
-            self.assertIn("-m bot.shell_completion complete", rendered_completion)
+            self.assertIn("-I -m bot.shell_completion complete", rendered_completion)
             self.assertIn("complete -o bashdefault -o default -F _focus_complete_focus focus", rendered_completion)
             self.assertIn('source "', zsh_rc_path.read_text(encoding="utf-8"))
             self.assertIn("Register-ArgumentCompleter", powershell_completion_path.read_text(encoding="utf-8"))
@@ -732,7 +749,10 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             self.assertTrue(wrapper_path.exists())
             rendered = wrapper_path.read_text(encoding="utf-8")
             self.assertIn('set "FOCUS_WRAPPER_COMMAND=focus"', rendered)
-            self.assertIn('"C:/Python311/python.exe" -c "from bot.manage_cli.entrypoint import main; main()" %*', rendered)
+            self.assertIn(
+                '"C:/Python311/python.exe" -I -m bot.manage_cli.entrypoint %*',
+                rendered,
+            )
 
     def test_write_wrapper_creates_unix_shell_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -746,8 +766,71 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             rendered = wrapper_path.read_text(encoding="utf-8")
             self.assertIn("FOCUS_WRAPPER_COMMAND='focus'", rendered)
             self.assertIn("export FOCUS_WRAPPER_COMMAND", rendered)
-            self.assertIn('exec "/tmp/venv/bin/python" -c \'from bot.manage_cli.entrypoint import main; main()\' "$@"', rendered)
+            self.assertIn(
+                'exec /tmp/venv/bin/python -I -m bot.manage_cli.entrypoint "$@"',
+                rendered,
+            )
             self.assertEqual(stat.S_IMODE(wrapper_path.stat().st_mode), 0o755)
+
+    @unittest.skipIf(os.name == "nt", "Unix wrapper integration")
+    def test_unix_wrapper_ignores_hostile_cwd_and_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            managed_venv = root / "managed-venv"
+            venv.EnvBuilder(with_pip=False).create(managed_venv)
+            managed_python = managed_venv / "bin" / "python"
+            purelib_result = subprocess.run(
+                [
+                    str(managed_python),
+                    "-I",
+                    "-c",
+                    "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            managed_package = (
+                pathlib.Path(purelib_result.stdout.strip()) / "focus_isolation_probe"
+            )
+            managed_package.mkdir()
+            (managed_package / "__init__.py").write_text("", encoding="utf-8")
+            (managed_package / "__main__.py").write_text(
+                "import os\nprint('managed:' + os.environ['FOCUS_TEST_VALUE'])\n",
+                encoding="utf-8",
+            )
+
+            hostile_cwd = root / "hostile"
+            hostile_package = hostile_cwd / "focus_isolation_probe"
+            hostile_package.mkdir(parents=True)
+            (hostile_package / "__init__.py").write_text("", encoding="utf-8")
+            (hostile_package / "__main__.py").write_text(
+                "print('hostile')\n",
+                encoding="utf-8",
+            )
+            wrapper = root / "focus-probe"
+            with patch(
+                "bot.manage_cli.provisioning._venv_python",
+                return_value=managed_python,
+            ):
+                _write_wrapper(wrapper, "focus_isolation_probe")
+
+            environment = {
+                **os.environ,
+                "PYTHONPATH": str(hostile_cwd),
+                "FOCUS_TEST_VALUE": "preserved",
+            }
+            result = subprocess.run(
+                [str(wrapper)],
+                cwd=hostile_cwd,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "managed:preserved")
 
     def test_purge_stops_before_deletion_when_service_uninstall_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

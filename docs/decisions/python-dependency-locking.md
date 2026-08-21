@@ -106,8 +106,13 @@ to the common Debian/Ubuntu `python3-venv` or versioned venv package. Permission
 retain their original exception instead of being relabeled as a missing ensurepip component.
 
 `bot/public_command_contract.py` is the command-name/module catalog for the four stable public surfaces (`focus`,
-`focusd`, `focusctl`, and `fcodex`). Bootstrap generates its wrappers from that catalog, and a contract test requires
-the `pyproject.toml` console-script projection to match it exactly.
+`focusd`, `focusctl`, and `fcodex`). `bot/managed_python.py` is the sole isolated argv projection for installed modules:
+wrappers, completion, and service definitions all derive the absolute managed-interpreter `-I -m <module>` shape from
+it. Wrappers no longer interpret import code through `-c`, and services no longer start indirectly through
+`~/.local/bin/focusd`. `-I` prevents cwd, user site, and `PYTHONPATH` from changing Focus imports without deleting those
+variables from the process environment, so Codex and user tools launched by Focus still inherit the established PATH,
+provider, and workspace environment. Bootstrap generates wrappers only from the public-command catalog, and a contract
+test requires the `pyproject.toml` console-script projection to match it exactly.
 
 This can remain an online installation path. A remote channel first reaches GitHub;
 even `--artifact`, which does not contact GitHub, can require pip to reach its default

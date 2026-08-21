@@ -104,7 +104,14 @@ class ManageCliInstanceLifecycleTests(ManageCliTestCase):
             self.assertEqual([definition.identifier for definition in ensured_definitions], ["focus-corp-a"])
             self.assertEqual(
                 ensured_definitions[0].daemon_command,
-                (str(bin_dir / "focusd"), "--instance", "corp-a"),
+                (
+                    str(data_root / ".venv" / "bin" / "python"),
+                    "-I",
+                    "-m",
+                    "bot.__main__",
+                    "--instance",
+                    "corp-a",
+                ),
             )
 
     def test_handle_instance_create_default_uses_root_dirs(self) -> None:
@@ -143,7 +150,14 @@ class ManageCliInstanceLifecycleTests(ManageCliTestCase):
             self.assertEqual([definition.identifier for definition in ensured_definitions], ["focus"])
             self.assertEqual(
                 ensured_definitions[0].daemon_command,
-                (str(bin_dir / "focusd"), "--instance", "default"),
+                (
+                    str(data_root / ".venv" / "bin" / "python"),
+                    "-I",
+                    "-m",
+                    "bot.__main__",
+                    "--instance",
+                    "default",
+                ),
             )
 
     def test_handle_instance_remove_rejects_default_instance(self) -> None:

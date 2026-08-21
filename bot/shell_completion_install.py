@@ -17,6 +17,7 @@ from bot.platform_paths import (
     default_user_zsh_completion_path,
     default_user_zsh_rc_path,
 )
+from bot.managed_python import isolated_python_module_command
 from bot.public_command_contract import PUBLIC_COMMAND_NAMES
 
 _ZSH_PROFILE_BLOCK_START = "# >>> focus zsh completion >>>"
@@ -133,7 +134,9 @@ def _dedupe_paths(*paths: pathlib.Path | None) -> tuple[pathlib.Path, ...]:
 
 
 def render_bash_completion_script(*, venv_python: pathlib.Path) -> str:
-    python_command = shlex.quote(str(pathlib.Path(venv_python)))
+    python_command = shlex.join(
+        isolated_python_module_command(venv_python, "bot.shell_completion")
+    )
     return textwrap.dedent(
         f"""\
         # Bash completion for FOCUS wrappers.
@@ -142,7 +145,7 @@ def render_bash_completion_script(*, venv_python: pathlib.Path) -> str:
           local command_name="$1"
           local output
           COMPREPLY=()
-          output=$({python_command} -m bot.shell_completion complete "$command_name" "$COMP_CWORD" "${{COMP_WORDS[@]}}" 2>/dev/null) || return 0
+          output=$({python_command} complete "$command_name" "$COMP_CWORD" "${{COMP_WORDS[@]}}" 2>/dev/null) || return 0
           [[ -n "$output" ]] || return 0
           while IFS= read -r line; do
             [[ -n "$line" ]] || continue
@@ -175,7 +178,9 @@ def render_bash_completion_script(*, venv_python: pathlib.Path) -> str:
 
 
 def render_zsh_completion_script(*, venv_python: pathlib.Path) -> str:
-    python_command = shlex.quote(str(pathlib.Path(venv_python)))
+    python_command = shlex.join(
+        isolated_python_module_command(venv_python, "bot.shell_completion")
+    )
     return textwrap.dedent(
         f"""\
         # zsh completion for FOCUS wrappers.
@@ -189,7 +194,7 @@ def render_zsh_completion_script(*, venv_python: pathlib.Path) -> str:
           local command_name="$1"
           local output
           local -a candidates
-          output=$({python_command} -m bot.shell_completion complete "$command_name" "$((CURRENT - 1))" "${{words[@]}}" 2>/dev/null) || return 1
+          output=$({python_command} complete "$command_name" "$((CURRENT - 1))" "${{words[@]}}" 2>/dev/null) || return 1
           [[ -n "$output" ]] || return 1
           candidates=("${{(@f)output}}")
           (( ${{#candidates[@]}} == 0 )) && return 1
@@ -221,7 +226,13 @@ def render_zsh_completion_script(*, venv_python: pathlib.Path) -> str:
 
 
 def render_powershell_completion_script(*, venv_python: pathlib.Path) -> str:
-    python_command = _powershell_quote(str(pathlib.Path(venv_python)))
+    completion_command = isolated_python_module_command(
+        venv_python, "bot.shell_completion"
+    )
+    python_command = _powershell_quote(completion_command[0])
+    python_arguments = " ".join(
+        _powershell_quote(argument) for argument in completion_command[1:]
+    )
     command_names = ", ".join(_powershell_quote(name) for name in PUBLIC_COMMAND_NAMES)
     return textwrap.dedent(
         f"""\
@@ -256,7 +267,7 @@ def render_powershell_completion_script(*, venv_python: pathlib.Path) -> str:
             $cword = [Math]::Max($words.Count - 1, 0)
           }}
 
-          $results = & $script:FocusCompletionPython -m bot.shell_completion complete $commandName $cword @words 2>$null
+          $results = & $script:FocusCompletionPython {python_arguments} complete $commandName $cword @words 2>$null
           foreach ($candidate in $results) {{
             [System.Management.Automation.CompletionResult]::new($candidate, $candidate, 'ParameterValue', $candidate)
           }}

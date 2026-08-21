@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import secrets
+import shlex
 import stat
 
 from bot.atomic_file import atomic_write_text
@@ -19,6 +20,7 @@ from bot.instance_layout import (
     resolve_instance_paths,
     validate_instance_name,
 )
+from bot.managed_python import isolated_python_module_command
 from bot.platform_paths import (
     default_config_root,
     default_data_root,
@@ -218,20 +220,13 @@ def _ensure_instance_scaffold(instance_name: str) -> None:
     _ensure_init_token(paths.config_dir / "init.token")
 
 
-def _module_command(module_name: str, *args: str) -> tuple[str, ...]:
-    return (str(_venv_python()), "-m", module_name, *args)
-
-
-def _wrapper_path(command_name: str) -> pathlib.Path:
-    bin_dir = default_user_bin_dir()
-    if is_windows():
-        return bin_dir / f"{command_name}.cmd"
-    return bin_dir / command_name
-
-
 def _service_daemon_command(instance_name: str) -> tuple[str, ...]:
-    return (
-        str(_wrapper_path("focusd")),
+    focusd_module = next(
+        spec.module for spec in PUBLIC_COMMAND_SPECS if spec.name == "focusd"
+    )
+    return isolated_python_module_command(
+        _venv_python(),
+        focusd_module,
         "--instance",
         validate_instance_name(instance_name),
     )
@@ -241,7 +236,7 @@ def _write_wrapper(
     path: pathlib.Path, module_name: str, *, wrapper_command: str = ""
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    entrypoint = f"from {module_name} import main; main()"
+    command = isolated_python_module_command(_venv_python(), module_name)
     normalized_wrapper_command = str(wrapper_command or "").strip()
     if is_windows():
         wrapper_path = path.with_suffix(".cmd")
@@ -250,7 +245,7 @@ def _write_wrapper(
             lines.append(f'set "FOCUS_WRAPPER_COMMAND={normalized_wrapper_command}"')
         lines.extend(
             [
-                f'"{_venv_python()}" -c "{entrypoint}" %*',
+                f'"{command[0]}" {" ".join(command[1:])} %*',
                 "",
             ]
         )
@@ -269,7 +264,7 @@ def _write_wrapper(
         )
     lines.extend(
         [
-            f'exec "{_venv_python()}" -c \'{entrypoint}\' "$@"',
+            f'exec {shlex.join(command)} "$@"',
             "",
         ]
     )

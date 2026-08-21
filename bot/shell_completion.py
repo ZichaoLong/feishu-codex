@@ -241,7 +241,11 @@ def _complete_candidates(prefix: str, candidates: list[str]) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) < 4 or args[0] != "complete":
-        print("usage: python -m bot.shell_completion complete <command> <cword> <comp_words...>", file=sys.stderr)
+        print(
+            "usage: python -I -m bot.shell_completion complete "
+            "<command> <cword> <comp_words...>",
+            file=sys.stderr,
+        )
         return 2
     command_name = str(args[1] or "").strip()
     try:

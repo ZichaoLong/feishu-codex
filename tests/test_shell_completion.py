@@ -40,7 +40,9 @@ class ShellCompletionTests(unittest.TestCase):
     def test_rendered_script_embeds_python_path_and_registrations(self) -> None:
         rendered = render_bash_completion_script(venv_python=pathlib.Path("/tmp/venv/bin/python"))
 
-        self.assertIn("/tmp/venv/bin/python", rendered)
+        self.assertIn(
+            "/tmp/venv/bin/python -I -m bot.shell_completion complete", rendered
+        )
         self.assertIn("complete -o bashdefault -o default -F _focus_complete_focus focus", rendered)
         self.assertIn("complete -o bashdefault -o default -F _focus_complete_focusctl focusctl", rendered)
         self.assertIn("complete -o bashdefault -o default -F _focus_complete_focusd focusd", rendered)
@@ -49,7 +51,9 @@ class ShellCompletionTests(unittest.TestCase):
     def test_rendered_zsh_script_embeds_python_path_and_compdef(self) -> None:
         rendered = render_zsh_completion_script(venv_python=pathlib.Path("/tmp/venv/bin/python"))
 
-        self.assertIn("/tmp/venv/bin/python", rendered)
+        self.assertIn(
+            "/tmp/venv/bin/python -I -m bot.shell_completion complete", rendered
+        )
         self.assertIn("autoload -Uz compinit", rendered)
         self.assertIn("compdef _focus_complete_focus focus", rendered)
         self.assertIn("compdef _focus_complete_fcodex fcodex", rendered)
@@ -63,7 +67,7 @@ class ShellCompletionTests(unittest.TestCase):
             rendered,
         )
         self.assertIn("Register-ArgumentCompleter -Native -CommandName $commandName", rendered)
-        self.assertIn("bot.shell_completion complete", rendered)
+        self.assertIn("'-I' '-m' 'bot.shell_completion' complete", rendered)
         self.assertIn("focusctl", rendered)
 
     def test_focusctl_completes_instance_option_and_remove_target(self) -> None:

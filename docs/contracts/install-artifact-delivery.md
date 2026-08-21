@@ -14,6 +14,7 @@ CLI as one offline payload.
 | --- | --- |
 | Closed bundle/channel-manifest schemas, construction, and validation | `scripts/build_support/install_bundle.py` |
 | Stable/development/local-artifact selection, download, and install-transaction boundary | `install.py` |
+| Isolated argv shape for installed Python modules | `bot/managed_python.py` |
 | Clean Focus-wheel build and source-payload verification | `scripts/build_support/python_distribution.py` |
 | GitHub Release validation, upload ordering, and development retention | `scripts/build_support/github_publication.py` |
 | Local bundle entry point | `scripts/build_install_bundle.py` |
@@ -145,9 +146,14 @@ current directory, or `PYTHONPATH` are outside the managed environment. The
 installer preserves configured index, proxy, and certificate authority, but
 rejects effective pip `target`, `prefix`, `root`, or `user` configuration before
 dependency writes so packages cannot be redirected outside the managed `.venv`.
-Wrappers and service definitions are refreshed only after isolated `pip check`
-succeeds. This is not a hot upgrade, multi-generation environment, or automatic
-rollback state machine.
+Wrappers, completion, and service definitions are refreshed only after isolated
+`pip check` succeeds. All four public wrappers and completion launch an absolute
+managed interpreter as `-I -m <module>`; service definitions persist that same
+isolated module argv directly instead of traversing a user wrapper. Isolated mode
+controls import authority only for the current Focus Python process and does not
+delete ordinary environment variables, so PATH and existing Focus/provider/Codex
+configuration remain available to downstream tools. This is not a hot upgrade,
+multi-generation environment, or automatic rollback state machine.
 
 Remote channels require GitHub access. Python networking honors standard
 `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`. `--artifact` removes only the Focus

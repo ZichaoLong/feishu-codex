@@ -12,6 +12,7 @@
 | --- | --- |
 | bundle 与 channel manifest 的闭合 schema、构建和验证 | `scripts/build_support/install_bundle.py` |
 | stable / development / local artifact 的选择、下载与安装事务边界 | `install.py` |
+| 已安装 Python module 的隔离 argv 形状 | `bot/managed_python.py` |
 | Focus wheel 的 clean build 与 source-payload 核验 | `scripts/build_support/python_distribution.py` |
 | GitHub Release 状态核验、上传顺序与 development retention | `scripts/build_support/github_publication.py` |
 | 本地 bundle 入口 | `scripts/build_install_bundle.py` |
@@ -117,8 +118,11 @@ CPython 3.11+ `.venv`，再以 bundle 内 `requirements.lock` 为 constraint 对
 reinstall。pip 和安装后的一致性检查均由隔离解释器运行，且安装子进程不继承 `PYTHON*` 导入设置；系统、
 Conda、用户 site-packages、当前目录和 `PYTHONPATH` 中的包不属于受管环境。安装器保留用户的 index、proxy
 和证书 authority，但在写入依赖前拒绝有效的 pip `target`、`prefix`、`root` 或 `user` 配置，避免把包
-安装到受管 `.venv` 之外。只有隔离的 `pip check` 通过后才刷新 wrapper 与 service 定义。这个流程不是热
-升级，也不建立多代环境或自动回滚状态机。
+安装到受管 `.venv` 之外。只有隔离的 `pip check` 通过后才刷新 wrapper、completion 与 service 定义。
+四个公开 wrapper 和 completion 都由绝对受管解释器以 `-I -m <module>` 启动；service 定义直接保存同一
+隔离 module argv，不再经过用户 wrapper。隔离模式只控制 Focus 当前 Python 进程的 import authority，
+不会删除普通环境变量，因此 PATH、Focus/provider/Codex 配置仍可按既有合同传给下游工具。这个流程不是
+热升级，也不建立多代环境或自动回滚状态机。
 
 remote channel 需要访问 GitHub；标准 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 会由 Python 网络栈使用。
 `--artifact` 只消除 Focus bundle 的 GitHub 下载，pip 仍可能按自身 index、proxy、证书和 cache 配置下载

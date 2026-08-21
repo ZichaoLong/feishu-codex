@@ -185,13 +185,17 @@ class SystemdUserServiceManager(ServiceManager):
             description = "FOCUS (default)"
         else:
             working_directory = f"{definition.paths.data_dir.parent}/%i"
+            if (
+                len(definition.daemon_command) < 2
+                or definition.daemon_command[-2] != "--instance"
+            ):
+                raise ServiceManagerError(
+                    "命名实例 service command 必须以 `--instance <name>` 结尾。"
+                )
+            template_command = (*definition.daemon_command[:-1], "%i")
             exec_start = " ".join(
                 self._quote_unit_arg(item)
-                for item in (
-                    definition.daemon_command[0],
-                    "--instance",
-                    "%i",
-                )
+                for item in template_command
             )
             description = "FOCUS (%i)"
         return "\n".join(
