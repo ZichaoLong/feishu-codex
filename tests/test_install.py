@@ -101,6 +101,8 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Focus wheel（含 Web）", rendered)
         self.assertIn("pip 仍可能", rendered)
         self.assertIn("HTTP_PROXY", rendered)
+        self.assertIn("每次重建 Focus 专用 .venv", rendered)
+        self.assertIn("target/prefix/root/user", rendered)
         self.assertIn("build_install_bundle.py", rendered)
 
     def test_ensure_supported_python_rejects_non_cpython(self) -> None:
@@ -263,6 +265,15 @@ class InstallTests(unittest.TestCase):
                             install._recreate_venv(venv_dir)
                 self.assertIs(raised.exception, failure)
 
+    def test_recreate_venv_explicitly_disables_system_site_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            venv_dir = pathlib.Path(tmpdir) / "data" / ".venv"
+            with patch("install.venv.EnvBuilder") as builder:
+                install._recreate_venv(venv_dir)
+
+        builder.assert_called_once_with(with_pip=True, system_site_packages=False)
+        builder.return_value.create.assert_called_once_with(venv_dir)
+
     def test_venv_python_probe_requires_cpython_311_or_newer(self) -> None:
         venv_dir = pathlib.Path("/tmp/focus-venv")
         expected_python = install._venv_python_path(venv_dir)
@@ -272,9 +283,9 @@ class InstallTests(unittest.TestCase):
         ) as run:
             self.assertTrue(install._venv_uses_supported_python(venv_dir))
         command = run.call_args.args[0]
-        self.assertEqual(command[0], str(expected_python))
-        self.assertIn("sys.implementation.name == 'cpython'", command[2])
-        self.assertIn("sys.version_info >= (3, 11)", command[2])
+        self.assertEqual(command[:3], [str(expected_python), "-I", "-c"])
+        self.assertIn("sys.implementation.name == 'cpython'", command[3])
+        self.assertIn("sys.version_info >= (3, 11)", command[3])
 
         for failure in (
             subprocess.CompletedProcess([str(expected_python)], 1),
@@ -295,8 +306,83 @@ class InstallTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 install._run_pip_install(venv_python, "focus.whl")
         self.assertEqual(run.call_count, 1)
-        self.assertNotIn("--extra-index-url", run.call_args.args[0])
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], [str(venv_python), "-I", "-m", "pip"])
+        self.assertNotIn("--extra-index-url", command)
         self.assertIn("不会在失败后静默追加", str(raised.exception))
+
+    def test_python_install_subprocess_env_removes_import_injection_only(self) -> None:
+        environment = {
+            "PYTHONPATH": "/opt/ascend/python",
+            "PythonHome": "/opt/python",
+            "PIP_INDEX_URL": "https://packages.example/simple",
+            "HTTPS_PROXY": "http://proxy.example:8080",
+            "FOCUS_TEST_VALUE": "preserved",
+        }
+        with patch.dict(install.os.environ, environment, clear=True):
+            sanitized = install._python_install_subprocess_env()
+
+        self.assertNotIn("PYTHONPATH", sanitized)
+        self.assertNotIn("PythonHome", sanitized)
+        self.assertEqual(
+            sanitized,
+            {
+                "PIP_INDEX_URL": "https://packages.example/simple",
+                "HTTPS_PROXY": "http://proxy.example:8080",
+                "FOCUS_TEST_VALUE": "preserved",
+            },
+        )
+
+    def test_pip_destination_config_is_rejected_before_install(self) -> None:
+        venv_python = pathlib.Path("/tmp/focus-venv/bin/python")
+        result = subprocess.CompletedProcess(
+            [str(venv_python)],
+            0,
+            stdout=(
+                ":env:.index-url='https://packages.example/simple'\n"
+                "global.target='/tmp/external'\n"
+                "install.user='true'\n"
+                "global.root-user-action='ignore'\n"
+            ),
+            stderr="",
+        )
+        with patch("install.subprocess.run", return_value=result) as run:
+            with self.assertRaises(SystemExit) as raised:
+                install._reject_pip_destination_overrides(venv_python)
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(venv_python), "-I", "-m", "pip", "config", "list"],
+        )
+        self.assertIn("target, user", str(raised.exception))
+        self.assertNotIn("/tmp/external", str(raised.exception))
+
+    def test_disabled_pip_user_config_does_not_block_install(self) -> None:
+        venv_python = pathlib.Path("/tmp/focus-venv/bin/python")
+        result = subprocess.CompletedProcess(
+            [str(venv_python)],
+            0,
+            stdout="install.user='false'\nglobal.target=''\n",
+            stderr="",
+        )
+        with patch("install.subprocess.run", return_value=result):
+            install._reject_pip_destination_overrides(venv_python)
+
+    def test_pip_check_uses_isolated_interpreter_and_sanitized_environment(self) -> None:
+        venv_python = pathlib.Path("/tmp/focus-venv/bin/python")
+        with patch.dict(
+            install.os.environ,
+            {"PYTHONPATH": "/opt/ascend/python", "HTTPS_PROXY": "proxy"},
+            clear=True,
+        ):
+            with patch("install.subprocess.run") as run:
+                install._run_pip_check(venv_python)
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(venv_python), "-I", "-m", "pip", "check"],
+        )
+        self.assertEqual(run.call_args.kwargs["env"], {"HTTPS_PROXY": "proxy"})
 
     def test_release_for_channel_uses_distinct_release_authorities(self) -> None:
         stable = {
@@ -375,12 +461,31 @@ class InstallTests(unittest.TestCase):
             venv_python = install._venv_python_path(venv_dir)
             pip_calls: list[tuple[pathlib.Path, tuple[str, ...]]] = []
             checked_calls: list[list[str]] = []
+            install_steps: list[str] = []
+            venv_dir.mkdir(parents=True)
+            stale_payload = venv_dir / "foreign-package.pth"
+            stale_payload.write_text("/opt/ascend/python\n", encoding="utf-8")
 
             def recreate(target: pathlib.Path) -> None:
+                install_steps.append("recreate")
+                shutil.rmtree(target)
                 target.mkdir(parents=True)
                 (target / "pyvenv.cfg").write_text("home = /python\n", encoding="utf-8")
                 venv_python.parent.mkdir(parents=True, exist_ok=True)
                 venv_python.write_text("", encoding="utf-8")
+
+            def record_pip_install(
+                python: pathlib.Path, *args: str
+            ) -> None:
+                install_steps.append("pip-install")
+                pip_calls.append((python, tuple(args)))
+
+            def record_pip_check(_python: pathlib.Path) -> None:
+                install_steps.append("pip-check")
+
+            def record_checked(command: list[str]) -> None:
+                install_steps.append("bootstrap")
+                checked_calls.append(list(command))
 
             with patch("install._ensure_supported_python"):
                 with patch(
@@ -390,20 +495,21 @@ class InstallTests(unittest.TestCase):
                     with patch("bot.platform_paths.default_data_root", return_value=data_root):
                         with patch("install._recreate_venv", side_effect=recreate):
                             with patch("install._venv_uses_supported_python", return_value=True):
-                                with patch("install._ensure_venv_pip"):
-                                    with patch(
-                                        "install._run_pip_install",
-                                        side_effect=lambda python, *args: pip_calls.append(
-                                            (python, tuple(args))
-                                        ),
-                                    ):
+                                with patch("install._venv_has_pip", return_value=True):
+                                    with patch("install._reject_pip_destination_overrides"):
                                         with patch(
-                                            "install._run_checked",
-                                            side_effect=lambda command: checked_calls.append(
-                                                list(command)
-                                            ),
+                                            "install._run_pip_install",
+                                            side_effect=record_pip_install,
                                         ):
-                                            install.main(["--artifact", "focus.zip"])
+                                            with patch(
+                                                "install._run_pip_check",
+                                                side_effect=record_pip_check,
+                                            ):
+                                                with patch(
+                                                    "install._run_checked",
+                                                    side_effect=record_checked,
+                                                ):
+                                                    install.main(["--artifact", "focus.zip"])
 
         self.assertEqual(
             pip_calls,
@@ -423,6 +529,11 @@ class InstallTests(unittest.TestCase):
             checked_calls,
             [[str(venv_python), "-I", "-m", "bot.manage_cli", "bootstrap-install"]],
         )
+        self.assertEqual(
+            install_steps,
+            ["recreate", "pip-install", "pip-check", "bootstrap"],
+        )
+        self.assertFalse(stale_payload.exists())
         self.assertEqual(self.install_transaction.events, ["enter", "complete"])
 
     def test_main_rejects_rebuilt_venv_with_incompatible_python(self) -> None:
@@ -477,21 +588,24 @@ class InstallTests(unittest.TestCase):
                 ):
                     with patch("bot.platform_paths.default_data_root", return_value=data_root):
                         with patch("install._venv_uses_supported_python", return_value=True):
-                            with patch("install._ensure_venv_pip"):
-                                with patch("install._run_pip_install"):
-                                    with patch(
-                                        "install._run_checked",
-                                        side_effect=lambda command: checked_calls.append(
-                                            list(command)
-                                        ),
-                                    ):
-                                        install.main(
-                                            [
-                                                "--artifact",
-                                                "focus.zip",
-                                                "--migrate-from-feishu-codex",
-                                            ]
-                                        )
+                            with patch("install._recreate_venv"):
+                                with patch("install._venv_has_pip", return_value=True):
+                                    with patch("install._reject_pip_destination_overrides"):
+                                        with patch("install._run_pip_install"):
+                                            with patch("install._run_pip_check"):
+                                                with patch(
+                                                    "install._run_checked",
+                                                    side_effect=lambda command: checked_calls.append(
+                                                        list(command)
+                                                    ),
+                                                ):
+                                                    install.main(
+                                                        [
+                                                            "--artifact",
+                                                            "focus.zip",
+                                                            "--migrate-from-feishu-codex",
+                                                        ]
+                                                    )
         self.assertEqual(
             checked_calls[-1],
             [

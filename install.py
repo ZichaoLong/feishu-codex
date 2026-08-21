@@ -28,6 +28,8 @@ _GITHUB_API_VERSION = "2022-11-28"
 _MAX_RELEASE_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_CHANNEL_MANIFEST_BYTES = 64 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 60
+_PIP_DESTINATION_OPTIONS = frozenset({"target", "prefix", "root", "user"})
+_FALSE_CONFIG_VALUES = frozenset({"", "0", "false", "no", "off"})
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -43,7 +45,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "bundle 是 GitHub Release 可下载的 Focus ZIP 制品，包含 Focus wheel（含 Web）、\n"
             "Python 依赖锁和校验 manifest；它不包含 Python 解释器或第三方依赖 wheelhouse。\n"
             "因此 --artifact 不下载 Focus 制品，但 pip 仍可能按用户配置联网解析依赖。\n"
-            "HTTP_PROXY、HTTPS_PROXY、NO_PROXY 以及 pip 自身配置会原样生效。\n"
+            "HTTP_PROXY、HTTPS_PROXY、NO_PROXY 以及 pip 的 index/证书配置会继续生效。\n"
+            "安装事务每次重建 Focus 专用 .venv，不使用系统、Conda 或 PYTHONPATH 中的包；\n"
+            "会改写安装目标的 pip target/prefix/root/user 配置将被明确拒绝。\n"
             "\n"
             "开发者本地构建：先在 web/ 执行 npm run build，再执行\n"
             "  python scripts/build_install_bundle.py\n"
@@ -84,22 +88,15 @@ def _venv_python_path(venv_dir: pathlib.Path) -> pathlib.Path:
     return venv_dir / "bin" / "python"
 
 
-def _venv_cfg_path(venv_dir: pathlib.Path) -> pathlib.Path:
-    return venv_dir / "pyvenv.cfg"
-
-
-def _venv_is_complete(venv_dir: pathlib.Path) -> bool:
-    return _venv_cfg_path(venv_dir).exists() and _venv_python_path(venv_dir).exists()
-
-
 def _venv_uses_supported_python(venv_dir: pathlib.Path) -> bool:
-    """Prove that an existing managed environment satisfies the installer ABI."""
+    """Prove that a freshly rebuilt managed environment satisfies the installer ABI."""
 
     venv_python = _venv_python_path(venv_dir)
     try:
         result = subprocess.run(
             [
                 str(venv_python),
+                "-I",
                 "-c",
                 (
                     "import sys; raise SystemExit(0 if "
@@ -111,6 +108,7 @@ def _venv_uses_supported_python(venv_dir: pathlib.Path) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10,
+            env=_python_install_subprocess_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -122,7 +120,7 @@ def _recreate_venv(venv_dir: pathlib.Path) -> None:
         shutil.rmtree(venv_dir)
     venv_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
-        venv.EnvBuilder(with_pip=True).create(venv_dir)
+        venv.EnvBuilder(with_pip=True, system_site_packages=False).create(venv_dir)
     except subprocess.CalledProcessError as exc:
         versioned_package = f"python{sys.version_info.major}.{sys.version_info.minor}-venv"
         raise SystemExit(
@@ -136,10 +134,71 @@ def _run_checked(command: list[str], *, env: dict[str, str] | None = None) -> No
     subprocess.run(command, check=True, env=env)
 
 
-def _run_pip_install(venv_python: pathlib.Path, *args: str) -> None:
-    command = [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check", *args]
+def _python_install_subprocess_env() -> dict[str, str]:
+    """Keep package-source authority while removing Python import injection."""
+
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("PYTHON")
+    }
+
+
+def _pip_config_value_is_enabled(raw_value: str) -> bool:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return value.strip().lower() not in _FALSE_CONFIG_VALUES
+
+
+def _reject_pip_destination_overrides(venv_python: pathlib.Path) -> None:
+    """Fail before pip can redirect writes outside the Focus-owned venv."""
+
+    command = [str(venv_python), "-I", "-m", "pip", "config", "list"]
     try:
-        _run_checked(command)
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_python_install_subprocess_env(),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "无法核验 pip 安装目标配置；受管环境尚未安装依赖。"
+            "请修复 pip 配置后重试。"
+        ) from exc
+
+    rejected: set[str] = set()
+    for line in result.stdout.splitlines():
+        key, separator, raw_value = line.partition("=")
+        if not separator:
+            continue
+        option = key.strip().lower().rsplit(".", 1)[-1]
+        if option in _PIP_DESTINATION_OPTIONS and _pip_config_value_is_enabled(
+            raw_value
+        ):
+            rejected.add(option)
+    if rejected:
+        names = ", ".join(sorted(rejected))
+        raise SystemExit(
+            "pip 配置试图改变 Focus 受管环境的安装目标："
+            f"{names}。请取消这些配置后重试；index、proxy 与证书配置仍可保留。"
+        )
+
+
+def _run_pip_install(venv_python: pathlib.Path, *args: str) -> None:
+    command = [
+        str(venv_python),
+        "-I",
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        *args,
+    ]
+    try:
+        _run_checked(command, env=_python_install_subprocess_env())
     except subprocess.CalledProcessError as exc:
         # Index choice is a package-supply-chain authority.  Pip already
         # resolves its default, environment, and configuration-file sources;
@@ -156,27 +215,26 @@ def _run_pip_install(venv_python: pathlib.Path, *args: str) -> None:
 
 def _venv_has_pip(venv_python: pathlib.Path) -> bool:
     result = subprocess.run(
-        [str(venv_python), "-m", "pip", "--version"],
+        [str(venv_python), "-I", "-m", "pip", "--version"],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=_python_install_subprocess_env(),
     )
     return result.returncode == 0
 
 
-def _ensure_venv_pip(venv_python: pathlib.Path) -> None:
-    if _venv_has_pip(venv_python):
-        return
+def _run_pip_check(venv_python: pathlib.Path) -> None:
     try:
-        _run_checked([str(venv_python), "-m", "ensurepip", "--upgrade"])
+        _run_checked(
+            [str(venv_python), "-I", "-m", "pip", "check"],
+            env=_python_install_subprocess_env(),
+        )
     except subprocess.CalledProcessError as exc:
         raise SystemExit(
-            "当前 Python 无法在受管 .venv 中引导 pip；"
-            "请确认已安装该 Python 对应的 venv/ensurepip 组件，"
-            "或删除受管 .venv 后重试。"
+            "Focus 受管环境依赖一致性检查失败；请查看上方 pip 原始错误，"
+            "修复 package index、平台制品或依赖锁后重试。"
         ) from exc
-    if not _venv_has_pip(venv_python):
-        raise SystemExit("已尝试使用 ensurepip 修复受管 .venv，但其中仍然缺少 pip。")
 
 
 def _github_headers() -> dict[str, str]:
@@ -381,8 +439,7 @@ def main(argv: list[str] | None = None) -> None:
         try:
             transaction = _managed_install_transaction()
             with transaction:
-                if not _venv_is_complete(venv_dir) or not _venv_uses_supported_python(venv_dir):
-                    _recreate_venv(venv_dir)
+                _recreate_venv(venv_dir)
                 venv_python = _venv_python_path(venv_dir)
                 if not venv_python.exists():
                     raise SystemExit(f"受管 .venv 不完整，缺少解释器：{venv_python}")
@@ -391,7 +448,12 @@ def main(argv: list[str] | None = None) -> None:
                         "受管 .venv 重建后仍不是 CPython 3.11+；"
                         "请检查 FOCUS data root、文件权限与所选 Python 后重试。"
                     )
-                _ensure_venv_pip(venv_python)
+                if not _venv_has_pip(venv_python):
+                    raise SystemExit(
+                        "新建的 Focus 受管 .venv 缺少 pip；"
+                        "请确认当前 Python 带有可用的 venv/ensurepip 组件。"
+                    )
+                _reject_pip_destination_overrides(venv_python)
                 _run_pip_install(
                     venv_python,
                     "--constraint",
@@ -399,6 +461,7 @@ def main(argv: list[str] | None = None) -> None:
                     "--force-reinstall",
                     str(bundle.wheel_path),
                 )
+                _run_pip_check(venv_python)
                 command = [str(venv_python), "-I", "-m", "bot.manage_cli"]
                 if args.migrate_from_feishu_codex:
                     _run_checked([*command, "migrate", "from-feishu-codex"])

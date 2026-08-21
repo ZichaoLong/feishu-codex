@@ -136,11 +136,18 @@ admission, stops a service, or mutates the managed `.venv`. A preflight failure
 leaves the current installation and service state unchanged.
 
 Only after validation does the installer enter the existing managed transaction:
-it proves all instances idle, creates or rebuilds a CPython 3.11+ `.venv` when
-needed, force-reinstalls the validated wheel under the bundled
-`requirements.lock` constraint, and refreshes wrappers and service definitions.
-This is not a hot upgrade, multi-generation environment, or automatic rollback
-state machine.
+it proves all instances idle, deletes and rebuilds the Focus-exclusive CPython
+3.11+ `.venv` on every install, then force-reinstalls the validated wheel under
+the bundled `requirements.lock` constraint. Both pip and the post-install
+consistency check run under an isolated interpreter, and install subprocesses do
+not inherit `PYTHON*` import settings. Packages from the system, Conda, user site,
+current directory, or `PYTHONPATH` are outside the managed environment. The
+installer preserves configured index, proxy, and certificate authority, but
+rejects effective pip `target`, `prefix`, `root`, or `user` configuration before
+dependency writes so packages cannot be redirected outside the managed `.venv`.
+Wrappers and service definitions are refreshed only after isolated `pip check`
+succeeds. This is not a hot upgrade, multi-generation environment, or automatic
+rollback state machine.
 
 Remote channels require GitHub access. Python networking honors standard
 `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`. `--artifact` removes only the Focus

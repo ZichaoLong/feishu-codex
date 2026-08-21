@@ -66,11 +66,19 @@ remote channel or local artifact under the
 then completely validates the bundle, Focus wheel, and `requirements.lock` before
 changing a service or managed `.venv`. Inside the managed transaction it:
 
-1. creates a pip-bearing CPython 3.11+ `.venv` when needed;
-2. uses the bundled lock as a constraint and `--force-reinstall`s the same validated
-   wheel; pip reads Focus runtime dependencies from wheel metadata and resolves them
-   under that lock;
-3. invokes the installed management entry in isolated mode to refresh wrappers and
+1. deletes and rebuilds a pip-bearing CPython 3.11+ `.venv` without system
+   site-packages on every install, preserving no stale dependency, foreign package,
+   or `.pth` injection;
+2. validates pip configuration with an isolated interpreter; configured index,
+   proxy, and certificate authority remains effective, while active `target`,
+   `prefix`, `root`, or `user` settings are rejected before dependency writes;
+3. removes `PYTHON*` import settings from install subprocesses, uses the bundled
+   lock as a constraint, and `--force-reinstall`s the same validated wheel; pip
+   reads Focus runtime dependencies from wheel metadata and resolves them under
+   that lock;
+4. runs `pip check` with the same isolated interpreter and proceeds only when the
+   managed environment is self-consistent;
+5. invokes the installed management entry in isolated mode to refresh wrappers and
    service definitions, preventing checkout sources from shadowing the installed package.
 
 The Focus wheel is produced only during bundle construction. The artifact builder
@@ -88,9 +96,11 @@ the bundle and retains no source-install path.
 The bootstrap interpreter for the public installer must be CPython 3.11+ with `venv` / `ensurepip`. The caller's
 system Python or Conda environment does not need preinstalled pip packages, Focus runtime dependencies, `setuptools`,
 or `wheel`; the installer bootstraps pip and installs them into the fixed `.venv` under the machine-level Focus data
-root. Before reusing that environment, the installer probes its interpreter and recreates an older or non-CPython
-venv with the selected CPython 3.11+; it does not defer that incompatibility to pip and misreport it as an index
-failure. The Unix entry point probes candidate implementation and version, and accepts an explicit
+root. Focus owns that directory completely and rebuilds it on every install or repair, so removed dependencies,
+manually installed foreign packages, system-site exposure, and `.pth` injection do not enter the new environment.
+The selected CPython 3.11+ supplies only the interpreter, standard library, and `venv` / `ensurepip` bootstrap; it does
+not authorize reading packages from its system, Conda, or user environment. The Unix entry point probes candidate
+implementation and version, and accepts an explicit
 `FOCUS_INSTALL_PYTHON=/path/to/python`. If the ensurepip subprocess fails while creating the venv, the installer points
 to the common Debian/Ubuntu `python3-venv` or versioned venv package. Permission, disk-space, and other filesystem errors
 retain their original exception instead of being relabeled as a missing ensurepip component.

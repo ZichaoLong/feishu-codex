@@ -60,10 +60,14 @@ bash scripts/lock-python-dependencies.sh --upgrade
 [安装制品交付合同](../contracts/install-artifact-delivery.zh-CN.md) 解析 remote channel 或本地 artifact，
 并在修改 service 或受管 `.venv` 前完整验证 bundle、其中的 Focus wheel 与 `requirements.lock`。进入受管事务后它：
 
-1. 按需建立带 pip 的 CPython 3.11+ `.venv`；
-2. 以 bundle 内 lock 作为 constraint，对同一个已验证 wheel 执行 `--force-reinstall`；pip 从 wheel metadata
-   读取 Focus 运行依赖，并在该 lock 下解析和安装；
-3. 以隔离模式调用已安装的管理入口刷新 wrapper 与 service，使 checkout 不能 shadow 刚安装的 package。
+1. 每次删除并重建不含 system site-packages、带 pip 的 CPython 3.11+ `.venv`，不保留旧依赖、外来 package
+   或 `.pth` 注入；
+2. 用隔离解释器核验 pip 配置；index、proxy 与证书配置继续生效，但有效的 `target`、`prefix`、`root` 或
+   `user` 配置在任何依赖写入前被拒绝；
+3. 清除安装子进程的 `PYTHON*` 导入设置，以 bundle 内 lock 作为 constraint，对同一个已验证 wheel 执行
+   `--force-reinstall`；pip 从 wheel metadata 读取 Focus 运行依赖，并在该 lock 下解析和安装；
+4. 用同一隔离解释器执行 `pip check`，只有受管环境自洽才继续；
+5. 以隔离模式调用已安装的管理入口刷新 wrapper 与 service，使 checkout 不能 shadow 刚安装的 package。
 
 Focus wheel 只在 bundle build 阶段生成。制品构建器使用一次性临时 build / egg-info root，并要求 wheel 中完整
 `bot/` 路径和字节与 setuptools source manifest 精确一致；checkout 中被忽略的 `build/` 与 `*.egg-info/`
@@ -75,9 +79,10 @@ wheel，不保留第二条源码安装路径。
 
 公开安装入口的 bootstrap Python 必须是带 `venv` / `ensurepip` 的 CPython 3.11+。调用者的系统
 Python / Conda 环境不需要预装 pip package、Focus 运行依赖、`setuptools` 或 `wheel`；安装器在机器级
-FOCUS data root 的固定 `.venv` 中引导 pip 并安装这些内容。复用该环境前，安装器会探测其中的解释器；
-若它是旧版 Python 或非 CPython，就用本次选定的 CPython 3.11+ 自动重建，而不是把不兼容拖到 pip 阶段并
-误报成 index 故障。Unix 入口会 probe 候选解释器的实现与版本，
+FOCUS data root 的固定 `.venv` 中引导 pip 并安装这些内容。该目录完全由 Focus 所有，并在每次安装或 repair
+时重建；因此已删除的旧依赖、手工安装的外来包、开放 system site-packages 的配置和 `.pth` 注入都不会被
+带入新环境。本次选定的 CPython 3.11+ 只提供解释器、标准库与 `venv` / `ensurepip` bootstrap，不授权读取其
+系统、Conda 或用户 package。Unix 入口会 probe 候选解释器的实现与版本，
 也接受 `FOCUS_INSTALL_PYTHON=/path/to/python` 显式指定。若 `venv` 创建阶段的 ensurepip subprocess
 失败，安装器会提示 Debian/Ubuntu 常见的 `python3-venv` / versioned venv package；权限、磁盘空间等
 文件系统错误保持原始异常，不伪装成缺少 ensurepip。
