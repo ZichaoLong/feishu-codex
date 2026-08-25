@@ -444,7 +444,13 @@ class FCodexTests(unittest.TestCase):
                 "app_server_url": "ws://127.0.0.1:8765",
             },
         ):
-            with patch("bot.fcodex.cli.ThreadRuntimeLeaseStore.load", return_value=lease):
+            with (
+                patch(
+                    "bot.fcodex.cli.preview_thread_global_loaded_gate",
+                    return_value=Mock(allowed=True),
+                ),
+                patch("bot.fcodex.cli.ThreadRuntimeLeaseStore.load", return_value=lease),
+            ):
                 with patch(
                     "bot.fcodex.cli.resolve_cli_runtime_target",
                     return_value=resolved_target,

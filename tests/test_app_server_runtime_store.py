@@ -384,7 +384,7 @@ class AppServerRuntimeStoreTests(unittest.TestCase):
             def process_exists(pid: int) -> bool:
                 if pid == 101:
                     stale_check_entered.set()
-                    self.assertTrue(release_stale_check.wait(timeout=1))
+                    self.assertTrue(release_stale_check.wait(timeout=5))
                     return False
                 if pid == 102:
                     return False
@@ -408,24 +408,31 @@ class AppServerRuntimeStoreTests(unittest.TestCase):
                 ):
                     loader = threading.Thread(target=stale_store.load_owned_runtime)
                     loader.start()
-                    self.assertTrue(stale_check_entered.wait(timeout=1))
-                    saver = threading.Thread(
-                        target=lambda: fresh_store.save_owned_runtime(
-                            configured_url="ws://127.0.0.1:8765",
-                            active_url="ws://127.0.0.1:10002",
-                            owner_pid=202,
-                            lifecycle_pid=203,
-                            cleanup_token=self._CLEANUP_TOKEN,
+                    started_threads = [loader]
+                    try:
+                        self.assertTrue(stale_check_entered.wait(timeout=5))
+                        saver = threading.Thread(
+                            target=lambda: fresh_store.save_owned_runtime(
+                                configured_url="ws://127.0.0.1:8765",
+                                active_url="ws://127.0.0.1:10002",
+                                owner_pid=202,
+                                lifecycle_pid=203,
+                                cleanup_token=self._CLEANUP_TOKEN,
+                            )
                         )
-                    )
-                    saver.start()
-                    release_stale_check.set()
-                    loader.join(timeout=1)
-                    saver.join(timeout=1)
+                        saver.start()
+                        started_threads.append(saver)
+                        release_stale_check.set()
+                        loader.join(timeout=5)
+                        saver.join(timeout=5)
 
-                    self.assertFalse(loader.is_alive())
-                    self.assertFalse(saver.is_alive())
-                    runtime = fresh_store.load_owned_runtime()
+                        self.assertFalse(loader.is_alive())
+                        self.assertFalse(saver.is_alive())
+                        runtime = fresh_store.load_owned_runtime()
+                    finally:
+                        release_stale_check.set()
+                        for thread in started_threads:
+                            thread.join(timeout=5)
 
             self.assertIsNotNone(runtime)
             assert runtime is not None

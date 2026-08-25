@@ -77,9 +77,10 @@ class PythonDistributionBuildTests(unittest.TestCase):
         self.assertFalse(root.exists())
 
     def test_distutils_config_escapes_percent_in_temporary_paths(self) -> None:
+        path = pathlib.Path("profile%name") / "build"
         self.assertEqual(
-            python_distribution._distutils_config_value(pathlib.Path("profile%name/build")),
-            "profile%%name/build",
+            python_distribution._distutils_config_value(path),
+            str(path).replace("%", "%%"),
         )
 
     def test_real_build_ignores_checkout_build_and_egg_info_ghosts(self) -> None:

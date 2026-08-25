@@ -102,10 +102,15 @@ class ManageCliInstanceLifecycleTests(ManageCliTestCase):
             self.assertTrue((data_root / "_global").exists())
             self.assertTrue(env_file.exists())
             self.assertEqual([definition.identifier for definition in ensured_definitions], ["focus-corp-a"])
+            managed_python = (
+                data_root / ".venv" / "Scripts" / "python.exe"
+                if os.name == "nt"
+                else data_root / ".venv" / "bin" / "python"
+            )
             self.assertEqual(
                 ensured_definitions[0].daemon_command,
                 (
-                    str(data_root / ".venv" / "bin" / "python"),
+                    str(managed_python),
                     "-I",
                     "-m",
                     "bot.__main__",
@@ -148,10 +153,15 @@ class ManageCliInstanceLifecycleTests(ManageCliTestCase):
             self.assertFalse((config_root / "instances" / "default").exists())
             self.assertFalse((data_root / "instances" / "default").exists())
             self.assertEqual([definition.identifier for definition in ensured_definitions], ["focus"])
+            managed_python = (
+                data_root / ".venv" / "Scripts" / "python.exe"
+                if os.name == "nt"
+                else data_root / ".venv" / "bin" / "python"
+            )
             self.assertEqual(
                 ensured_definitions[0].daemon_command,
                 (
-                    str(data_root / ".venv" / "bin" / "python"),
+                    str(managed_python),
                     "-I",
                     "-m",
                     "bot.__main__",
@@ -413,26 +423,27 @@ class ManageCliInstanceLifecycleTests(ManageCliTestCase):
                 paths = resolve_instance_paths("corp-a")
                 lease = ServiceInstanceLease(paths.data_dir)
                 lease.acquire(control_endpoint="http://127.0.0.1:1")
-                self.addCleanup(lease.release)
+                try:
+                    class _DummyManager:
+                        def uninstall(self, definition) -> None:
+                            return None
 
-                class _DummyManager:
-                    def uninstall(self, definition) -> None:
-                        return None
+                        def status(self, definition) -> ServiceStatus:
+                            del definition
+                            return ServiceStatus(installed=False, running=False)
 
-                    def status(self, definition) -> ServiceStatus:
-                        del definition
-                        return ServiceStatus(installed=False, running=False)
+                        def is_instance_uninstalled(self, definition, status) -> bool:
+                            del definition
+                            return not status.installed and not status.running
 
-                    def is_instance_uninstalled(self, definition, status) -> bool:
-                        del definition
-                        return not status.installed and not status.running
+                    with patch("bot.manage_cli.instance_commands.current_service_manager", return_value=_DummyManager()):
+                        with self.assertRaisesRegex(InstallLifecycleError, "maintenance 所有权"):
+                            _handle_instance_remove("corp-a")
 
-                with patch("bot.manage_cli.instance_commands.current_service_manager", return_value=_DummyManager()):
-                    with self.assertRaisesRegex(InstallLifecycleError, "maintenance 所有权"):
-                        _handle_instance_remove("corp-a")
-
-                self.assertTrue(paths.config_dir.exists())
-                self.assertTrue(paths.data_dir.exists())
+                    self.assertTrue(paths.config_dir.exists())
+                    self.assertTrue(paths.data_dir.exists())
+                finally:
+                    lease.release()
 
     def test_handle_instance_remove_stops_before_deletion_when_uninstall_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

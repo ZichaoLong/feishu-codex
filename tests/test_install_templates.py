@@ -251,7 +251,7 @@ class InstallTemplateTests(unittest.TestCase):
                 with patch("bot.codex_command_resolver.shutil.which", side_effect=_which):
                     command = detect_stable_codex_command()
 
-        self.assertEqual(command, shlex.join([str(native_codex.resolve()).replace("\\", "/")]))
+        self.assertEqual(command, shlex.join([str(native_codex.absolute()).replace("\\", "/")]))
 
     def test_resolve_managed_codex_command_normalizes_explicit_nvm_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

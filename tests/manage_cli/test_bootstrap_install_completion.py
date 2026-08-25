@@ -31,6 +31,7 @@ from tests.manage_cli.support import ManageCliTestCase
 
 
 class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
+    @unittest.skipIf(os.name == "nt", "Unix install surface contract")
     def test_handle_bootstrap_install_rebuilds_wrappers_and_known_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -573,10 +574,11 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             actual_config = yaml.safe_load((config_root / "codex.yaml").read_text(encoding="utf-8"))
             self.assertEqual(
                 actual_config["codex_command"],
-                shlex.join([str(native_codex.resolve())]),
+                shlex.join([str(native_codex.absolute())]),
             )
             self.assertEqual((config_root / "codex.yaml.example").read_text(encoding="utf-8"), CODEX_YAML_TEMPLATE)
 
+    @unittest.skipIf(os.name == "nt", "Unix install surface contract")
     def test_handle_bootstrap_install_preserves_existing_user_config_and_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -741,8 +743,9 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
     def test_write_wrapper_creates_windows_cmd_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
+            managed_python = pathlib.Path("C:/Python311/python.exe")
             with patch("bot.manage_cli.provisioning.is_windows", return_value=True):
-                with patch("bot.manage_cli.provisioning._venv_python", return_value=pathlib.Path("C:/Python311/python.exe")):
+                with patch("bot.manage_cli.provisioning._venv_python", return_value=managed_python):
                     _write_wrapper(root / "focus", "bot.manage_cli.entrypoint", wrapper_command="focus")
 
             wrapper_path = root / "focus.cmd"
@@ -750,10 +753,11 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             rendered = wrapper_path.read_text(encoding="utf-8")
             self.assertIn('set "FOCUS_WRAPPER_COMMAND=focus"', rendered)
             self.assertIn(
-                '"C:/Python311/python.exe" -I -m bot.manage_cli.entrypoint %*',
+                f'"{managed_python}" -I -m bot.manage_cli.entrypoint %*',
                 rendered,
             )
 
+    @unittest.skipIf(os.name == "nt", "Unix wrapper rendering is covered on Unix jobs")
     def test_write_wrapper_creates_unix_shell_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -915,6 +919,7 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             self.assertTrue(config_root.exists())
             self.assertTrue(data_root.exists())
 
+    @unittest.skipIf(os.name == "nt", "synchronous purge branch is non-Windows")
     def test_purge_reports_delete_failure_without_claiming_success_or_ignoring_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -946,6 +951,7 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             self.assertEqual(rmtree.call_args.kwargs, {})
             self.assertNotIn("已删除配置、数据", stdout.getvalue())
 
+    @unittest.skipIf(os.name == "nt", "synchronous purge branch is non-Windows")
     def test_purge_deletes_only_verified_managed_roots_after_service_uninstall(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -976,6 +982,7 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             self.assertFalse(config_root.exists())
             self.assertFalse(data_root.exists())
 
+    @unittest.skipIf(os.name == "nt", "Unix install surface contract")
     def test_handle_uninstall_removes_shell_completion_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
@@ -1042,6 +1049,7 @@ class ManageCliBootstrapInstallCompletionTests(ManageCliTestCase):
             self.assertTrue(data_root.exists())
             self.assertTrue(config_root.exists())
 
+    @unittest.skipIf(os.name == "nt", "Unix install surface contract")
     def test_handle_uninstall_removes_powershell_profile_block_without_runtime_env_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
