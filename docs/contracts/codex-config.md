@@ -85,6 +85,24 @@ the example projection, and the focused schema tests together.  Adding a new
   `:workspace`, and `:danger-full-access`. Upstream custom profiles do not
   become free-form config strings before Focus defines cwd/availability rules.
 
+### Focus Web deployment display name
+
+`web_display_name` is the instance-configured label used by the Focus Web
+browser tab:
+
+- when absent it has the fixed default `Focus Web`; every Focus instance uses
+  that same default, with no fallback inferred from the instance name, operating
+  system hostname, browser-visible hostname, or trusted-proxy origin
+- an explicit value follows ordinary nonempty-string admission: surrounding
+  whitespace is removed and the result must remain nonempty
+- the service captures it at startup and projects it through Focus Web meta to
+  the current browser; a config change requires a service restart and page
+  reload and creates no live-reload path.
+
+This field is a deployment label, not a complete static page title. The
+[Focus Web wire contract](focus-web-wire.md) owns active-conversation selection,
+ordering, and browser-presentation semantics.
+
 ### Trusted-proxy Web configuration
 
 `web_trusted_proxy_origin` and `web_trusted_proxy_proof_sha256` are the only new

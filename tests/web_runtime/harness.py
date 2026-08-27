@@ -158,6 +158,7 @@ class WebRuntimeControllerHarness(unittest.TestCase):
 
         self.controller = WebRuntimeController(
             instance_name="default",
+            web_display_name="Focus Web",
             interaction_lease_store=self.store,
             profile_store=self.profile_store,
             next_turn_settings_store=self.next_turn_settings_store,

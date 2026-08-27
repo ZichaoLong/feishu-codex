@@ -35,6 +35,7 @@ import FocusPrimaryNotices from './FocusPrimaryNotices.vue';
 import FocusReviewDialog from './FocusReviewDialog.vue';
 import FocusSettingsDialog from './FocusSettingsDialog.vue';
 import { executeCdCommand, parseCdCommand } from './cdCommand';
+import { DEFAULT_WEB_DISPLAY_NAME, syncFocusDocumentTitle } from './documentTitle';
 import {
   FOCUS_DETAIL_PANEL_DEFAULT,
   FOCUS_DETAIL_PANEL_MIN,
@@ -149,6 +150,14 @@ const activeSessionTitle = computed(() => {
   if (!client.activeThreadId.value) return t('focus.newConversation');
   return client.activeThread.value?.title ?? '';
 });
+syncFocusDocumentTitle(
+  () => client.meta.value?.web_display_name ?? DEFAULT_WEB_DISPLAY_NAME,
+  () => (
+    client.activeThreadId.value
+      ? client.activeThread.value?.title ?? ''
+      : ''
+  ),
+);
 const workspaceSessionCount = computed(() => {
   const id = client.activeWorkspaceId.value;
   return client.workspaceGroups.value.find((group) => group.workspace.id === id)?.sessions.length ?? 0;
@@ -703,7 +712,6 @@ function syncAppHeight(): void {
 }
 
 onMounted(() => {
-  document.title = 'Focus Web';
   loadSidebarCollapsed();
   setAppHeight();
   window.visualViewport?.addEventListener('resize', syncAppHeight);

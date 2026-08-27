@@ -212,6 +212,7 @@ class WebRuntimeController:
         self,
         *,
         instance_name: str,
+        web_display_name: str,
         interaction_lease_store: InteractionLeaseStore,
         profile_store: WebWriterProfileStore,
         next_turn_settings_store: WebNextTurnSettingsStore,
@@ -227,6 +228,9 @@ class WebRuntimeController:
         thread_limit: int = 200,
     ) -> None:
         self._instance_name = str(instance_name or "default").strip() or "default"
+        self._web_display_name = str(web_display_name or "").strip()
+        if not self._web_display_name:
+            raise ValueError("web_display_name must not be empty")
         self._projection = projection
         self._document_registry = document_registry
         self._interaction_leases = interaction_lease_store
@@ -560,6 +564,7 @@ class WebRuntimeController:
             **self._projection.coordinates(),
             "product": "Focus",
             "instance": self._instance_name,
+            "web_display_name": self._web_display_name,
             "default_working_dir": self._workspace.default_working_dir,
             "models": models,
             "writer_profile": self._workspace.profile_payload(profile),

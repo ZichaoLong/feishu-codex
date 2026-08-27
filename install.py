@@ -51,7 +51,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "安装事务每次重建 Focus 专用 .venv，不使用系统、Conda 或 PYTHONPATH 中的包；\n"
             "会改写安装目标的 pip target/prefix/root/user 配置将被明确拒绝。\n"
             "\n"
-            "开发者本地构建：先在 web/ 执行 npm run build，再执行\n"
+            "开发者本地构建：先在 web/ 依次执行\n"
+            "  npm ci\n"
+            "  npm run build\n"
+            "再回到仓库根目录执行\n"
             "  python scripts/build_install_bundle.py\n"
             "随后把输出的 ZIP 传给 --artifact；构建本身不会发布到 GitHub。"
         ),

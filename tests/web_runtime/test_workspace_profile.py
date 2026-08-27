@@ -15,6 +15,7 @@ class WebRuntimeWorkspaceProfileTests(WebRuntimeControllerHarness):
     def test_meta_projects_navigation_and_next_turn_settings_separately(self):
         meta = self.controller.meta("tab-1")
 
+        self.assertEqual(meta["web_display_name"], "Focus Web")
         self.assertEqual(
             meta["writer_profile"],
             {

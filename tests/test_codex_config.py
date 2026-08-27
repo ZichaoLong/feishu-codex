@@ -14,6 +14,7 @@ from bot.fcodex.cli import main as fcodex_main
 class CodexConfigTests(unittest.TestCase):
     def test_parser_defaults_are_the_dataclass_defaults(self) -> None:
         self.assertEqual(CodexConfig.from_dict({}), CodexConfig())
+        self.assertEqual(CodexConfig().web_display_name, "Focus Web")
         self.assertEqual(CodexConfig().web_trusted_proxy_origin, "")
         self.assertEqual(CodexConfig().web_trusted_proxy_proof_sha256, "")
 
@@ -24,6 +25,7 @@ class CodexConfigTests(unittest.TestCase):
     def test_wrong_scalar_types_are_rejected(self) -> None:
         cases = (
             ({"web_enabled": "false"}, "web_enabled"),
+            ({"web_display_name": 42}, "web_display_name"),
             ({"show_history_preview_on_resume": 0}, "show_history_preview_on_resume"),
             ({"web_port": "8080"}, "web_port"),
             ({"web_trusted_proxy_origin": 1}, "web_trusted_proxy_origin"),
@@ -54,6 +56,7 @@ class CodexConfigTests(unittest.TestCase):
         config = CodexConfig.from_dict(
             {
                 "codex_command": "  codex --profile focus  ",
+                "web_display_name": "  Workstation A  ",
                 "service_name": "  focus-web  ",
                 "model": "   ",
                 "service_tier": "  flex  ",
@@ -63,6 +66,7 @@ class CodexConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(config.codex_command, "codex --profile focus")
+        self.assertEqual(config.web_display_name, "Workstation A")
         self.assertEqual(config.service_name, "focus-web")
         self.assertEqual(config.model, "")
         self.assertEqual(config.service_tier, "flex")
@@ -71,6 +75,8 @@ class CodexConfigTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "service_name"):
             CodexConfig.from_dict({"service_name": "   "})
+        with self.assertRaisesRegex(ValueError, "web_display_name"):
+            CodexConfig.from_dict({"web_display_name": "   "})
 
     def test_owned_app_server_url_is_an_upstream_supported_loopback_listener(self) -> None:
         invalid_values = (

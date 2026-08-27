@@ -67,6 +67,19 @@ upstream `~/.codex/config.toml` 或 binding 持久化 runtime setting；Web
   其值只接受 `:read-only`、`:workspace`、`:danger-full-access` 三个 Focus 已建模
   built-in；尚未建立 cwd/availability 合同的 upstream custom profile 不接受自由字符串。
 
+### Focus Web 部署显示名称
+
+`web_display_name` 是 Focus Web 标签页使用的实例配置字符串：
+
+- 未配置时固定默认为 `Focus Web`；不同 Focus instance 使用同一默认值，不从 instance name、操作系统
+  hostname、浏览器访问 hostname 或 trusted-proxy origin 猜测替代值；
+- 显式值按普通 non-empty string 准入：去除首尾空白后不能为空；
+- service 启动时捕获该值，并通过 Focus Web meta 投影给当前浏览器；修改配置后需要重启 service 并重新加载页面，
+  不建立 live reload。
+
+该字段只是部署显示标签，不是静态完整页面标题。当前会话标题的选择、顺序和浏览器展示语义由
+[Focus Web wire 合同](focus-web-wire.zh-CN.md) 定义。
+
 ### Trusted-proxy Web 配置
 
 `web_trusted_proxy_origin` 与 `web_trusted_proxy_proof_sha256` 是 trusted-proxy mode 唯一新增的

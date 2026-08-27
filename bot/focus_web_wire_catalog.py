@@ -8,7 +8,7 @@ from types import MappingProxyType
 from typing import Final, Mapping, TypeVar
 
 
-FOCUS_WEB_WIRE_VERSION: Final = 13
+FOCUS_WEB_WIRE_VERSION: Final = 14
 FOCUS_WEB_RUNTIME_NOTICE_FIELD_LIMIT_BYTES: Final = 16 * 1024
 _NAME_RE = re.compile(r"\A[a-z][a-z0-9_]*\Z")
 _PATH_PARAMETER_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
@@ -406,7 +406,7 @@ FOCUS_WEB_RECORDS: Final = (
     _record(
         "meta",
         "FocusMeta",
-        "runtime_epoch revision product instance csrf_token default_working_dir "
+        "runtime_epoch revision product instance web_display_name csrf_token default_working_dir "
         "models writer_profile next_turn_settings approval_policies "
         "permissions_profiles capabilities",
     ),

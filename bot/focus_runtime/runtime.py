@@ -585,6 +585,7 @@ class FocusRuntime:
         binding_coordinator: BindingRuntimeCoordinator
         web_runtime = WebRuntimeController(
             instance_name=self._instance_name,
+            web_display_name=cfg.web_display_name,
             interaction_lease_store=self._interaction_lease_store,
             profile_store=self._web_writer_profile_store,
             next_turn_settings_store=self._web_next_turn_settings_store,

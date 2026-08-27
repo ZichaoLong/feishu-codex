@@ -106,6 +106,7 @@ class InstallTests(unittest.TestCase):
         self.assertIn("HTTP_PROXY", rendered)
         self.assertIn("每次重建 Focus 专用 .venv", rendered)
         self.assertIn("target/prefix/root/user", rendered)
+        self.assertIn("npm ci", rendered)
         self.assertIn("build_install_bundle.py", rendered)
 
     def test_ensure_supported_python_rejects_non_cpython(self) -> None:

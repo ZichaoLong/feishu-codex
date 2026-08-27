@@ -26,6 +26,10 @@
 # 本机/SSH 使用 focusctl web open；外部访问使用 configured trusted HTTPS proxy，不能直接暴露该端口。
 web_enabled: true
 
+# 浏览器标签页使用的部署显示名称；默认值：Focus Web。
+# 打开会话后显示“部署显示名称 · 会话名称”；无会话名称时会话侧使用首条 prompt 预览。
+# web_display_name: Focus Web
+
 # Web Gateway 当前只接受 127.0.0.1、localhost 或 ::1。
 # web_host: 127.0.0.1
 

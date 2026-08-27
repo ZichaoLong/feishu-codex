@@ -984,6 +984,8 @@ describe('Focus HTTP response DTO decoders', () => {
     })).toBeNull();
     expect(decodeFocusBootstrapResult(bootstrap)).not.toBeNull();
     expect(decodeFocusMeta(meta)).not.toBeNull();
+    expect(decodeFocusMeta({ ...meta, web_display_name: undefined })).toBeNull();
+    expect(decodeFocusMeta({ ...meta, web_display_name: '   ' })).toBeNull();
     expect(decodeFocusNextTurnSettingsResult({
       runtime_epoch: 'epoch-1',
       revision: 0,

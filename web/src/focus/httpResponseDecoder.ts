@@ -427,12 +427,17 @@ export const decodeFocusMeta: FocusHttpDecoder<FocusMeta> = (value) => {
   for (const key of [
     'product',
     'instance',
+    'web_display_name',
     'csrf_token',
     'default_working_dir',
   ]) {
     if (!hasString(value, key)) return null;
   }
-  if (!isNonEmptyTrimmedString(value.product) || !isNonEmptyTrimmedString(value.csrf_token)) {
+  if (
+    !isNonEmptyTrimmedString(value.product)
+    || !isNonEmptyTrimmedString(value.web_display_name)
+    || !isNonEmptyTrimmedString(value.csrf_token)
+  ) {
     return null;
   }
   if (!Array.isArray(value.models) || !value.models.every(isModel)) return null;

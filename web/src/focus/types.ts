@@ -91,6 +91,7 @@ export interface FocusModel {
 export interface FocusMeta extends FocusCoordinates {
   product: string;
   instance: string;
+  web_display_name: string;
   csrf_token: string;
   default_working_dir: string;
   models: FocusModel[];

@@ -88,6 +88,7 @@ function meta(
     revision,
     product: 'Focus',
     instance: 'test',
+    web_display_name: 'Focus Web',
     csrf_token: 'csrf',
     default_working_dir: '/work',
     models: [],

@@ -220,6 +220,7 @@ export class FakeApi implements FocusWebApiPort {
   private readonly metaValue: FocusMeta = {
     product: 'Focus',
     instance: 'default',
+    web_display_name: 'Focus Web',
     csrf_token: 'csrf-1',
     runtime_epoch: 'epoch-1',
     revision: 0,

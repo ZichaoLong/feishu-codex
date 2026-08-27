@@ -176,6 +176,7 @@ class CodexConfig:
     codex_command: str = "codex"
     app_server_url: str = DEFAULT_APP_SERVER_URL
     web_enabled: bool = False
+    web_display_name: str = "Focus Web"
     web_host: str = "127.0.0.1"
     web_port: int = 0
     web_trusted_proxy_origin: str = ""
@@ -375,6 +376,12 @@ class CodexConfig:
             ),
             app_server_url=app_server_url,
             web_enabled=web_enabled,
+            web_display_name=_string(
+                config,
+                "web_display_name",
+                defaults.web_display_name,
+                nonempty=True,
+            ),
             web_host=web_host,
             web_port=web_port,
             web_trusted_proxy_origin=web_trusted_proxy_origin,

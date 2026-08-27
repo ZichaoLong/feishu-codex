@@ -43,6 +43,7 @@ remain owned by browser decoders rather than a general-purpose schema runtime.
 | Complete-snapshot staging and atomic installation | `web/src/focus/focusProjectionSync.ts` |
 | Browser next-turn-settings snapshot installation | `WebNextTurnSettingsOwner` in `web/src/focus/client-state/web-next-turn-settings.ts` |
 | Browser-local full-turn window preference | `BrowserTurnWindowOwner` in `web/src/focus/client-state/browser-turn-window.ts` |
+| Browser document-title presentation | `syncFocusDocumentTitle` in `web/src/focus/documentTitle.ts` |
 | Typed app-server runtime-notice projection | `project_runtime_notice` in `bot/web_runtime/runtime_notice.py`; ordered publication remains with `WebRuntimeEventCoordinator` |
 | Bounded runtime-notice presentation for the current browser document | `RuntimeNoticeOwner` in `web/src/focus/client-state/runtime-notices.ts` |
 
@@ -120,6 +121,10 @@ guards and may not retain parallel key or enum inventories.
   ceiling or browser 25+25-line window. The old `FocusThreadToolDetail` / scan-page
   `tool` vocabulary, no-`view` query, compatibility decoder, and aliases are
   removed; service and static assets deploy at the same version.
+- Version 14 adds required `web_display_name` to `FocusMeta`, allowing the
+  browser to maintain its document title from the configured deployment display
+  name. A version 13 browser retains no missing-field compatibility decoder;
+  service and static assets still deploy at the same version.
 - The Focus service and its static browser assets deploy from the same repository
   version. Internal compatibility shims, a second legacy decoder, and legacy aliases
   are not default goals. A contract change updates the producer, catalog, generated
@@ -295,6 +300,17 @@ guards and may not retain parallel key or enum inventories.
 
 - A catalog required field must be present. The corresponding decoder still owns
   nullability, scalar types, nested shapes, and cross-field relationships.
+- `FocusMeta.web_display_name` is a nonempty string without surrounding
+  whitespace and exactly projects the admitted instance configuration. The
+  browser document title starts with that deployment name. When a materialized
+  active thread exists, it appends ` · ` and `FocusThreadSummary.title`; that
+  thread title already resolves authoritative name, first-prompt preview, and
+  untitled fallback in that order. With no active thread, the title is only the
+  deployment name. Thread switches, renames, and meta installation update the
+  title. Focus applies no character-count truncation to the conversation side;
+  browser chrome naturally clips the visible tab. Document-title presentation
+  only collapses newlines and consecutive whitespace to one space and does not
+  mutate the persisted thread name or preview.
 - Backend-reset preview and result are exact top-level records: missing or extra
   fields fail browser admission. The result contains only `force`, five
   count/warning fields, and no backend URL or identifier lists. Its `force`

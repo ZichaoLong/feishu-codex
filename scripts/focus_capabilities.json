@@ -703,6 +703,10 @@
         {
           "path": "web/src/focus/client-state/thread-inspection.ts",
           "symbol": "createThreadInspection"
+        },
+        {
+          "path": "web/src/focus/documentTitle.ts",
+          "symbol": "syncFocusDocumentTitle"
         }
       ],
       "contract": [
@@ -736,7 +740,8 @@
             "web/test/focus_client/owners/thread-mutations.test.ts",
             "web/test/focus_client/owners/web-next-turn-settings.test.ts",
             "web/test/focus_client/owners/runtime-notices.test.ts",
-            "web/test/focus_client/owners/use-focus-web-client.test.ts"
+            "web/test/focus_client/owners/use-focus-web-client.test.ts",
+            "web/test/focus-document-title.test.ts"
           ]
         }
       ],

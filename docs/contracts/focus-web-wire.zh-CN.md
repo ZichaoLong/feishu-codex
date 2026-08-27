@@ -37,6 +37,7 @@ projection event，浏览器在安装状态前对该投影做完整 runtime deco
 | 完整 snapshot 的 staging 与原子安装 | `web/src/focus/focusProjectionSync.ts` |
 | browser next-turn settings snapshot 安装 | `web/src/focus/client-state/web-next-turn-settings.ts` 的 `WebNextTurnSettingsOwner` |
 | browser-local full-turn window preference | `web/src/focus/client-state/browser-turn-window.ts` 的 `BrowserTurnWindowOwner` |
+| browser document title presentation | `web/src/focus/documentTitle.ts` 的 `syncFocusDocumentTitle` |
 | app-server typed runtime notice 投影 | `bot/web_runtime/runtime_notice.py` 的 `project_runtime_notice`；有序发布由 `WebRuntimeEventCoordinator` 持有 |
 | browser 当前 document 的有界 runtime notice presentation | `web/src/focus/client-state/runtime-notices.ts` 的 `RuntimeNoticeOwner` |
 
@@ -86,6 +87,8 @@ required field 与 catalog 一致；decoder 必须消费 generated guard，不�
   semantic ToolCall；用户显式请求的 `full` 返回已验证 `commandExecution` / `fileChange` source-detail union，且不再
   应用 Focus 详情字符上限或 browser 25+25 行窗口。旧 `FocusThreadToolDetail` / `tool` scan-page vocabulary、无
   `view` query、compatibility decoder 与 alias 一律删除；服务与静态资源必须同版本部署。
+- v14 为 `FocusMeta` 新增必填 `web_display_name`，使 browser 使用配置的部署显示名称维护 document title。
+  v13 browser 不保留缺字段 compatibility decoder；服务与静态资源仍必须同版本部署。
 - Focus 服务与其静态浏览器资源按同一仓库版本部署。内部兼容 shim、第二套旧 decoder 或 legacy alias 不是默认目标；
   改合同时同步更新 producer、catalog、generated projection、decoder、测试与本文。
 - 如果未来允许前后端独立部署或滚动版本共存，必须先建立新的 negotiation/deployment 合同；当前 version 字段本身
@@ -192,6 +195,12 @@ required field 与 catalog 一致；decoder 必须消费 generated guard，不�
 
 - catalog required field 表示字段必须实际存在；`null` 是否允许、标量类型、nested shape 与跨字段关系由对应 decoder
   继续校验。
+- `FocusMeta.web_display_name` 必须是 non-empty、无首尾空白的 string，并精确投影已准入的实例配置值。browser
+  document title 以该部署名称开头；materialized active thread 存在时，后接 ` · ` 与
+  `FocusThreadSummary.title`。该 thread title 已按 authoritative name、首条 prompt preview、无标题 fallback 的顺序
+  解析。没有 active thread 时只显示部署名称。thread switch、rename 与 meta 安装会同步更新 title；Focus 不按字符数
+  裁剪会话侧字符串，标签页可见宽度由 browser chrome 自然截断。换行和连续空白只在 document-title presentation
+  中折叠为单个空格，不修改持久化 thread name 或 preview。
 - backend-reset preview 与 result 是 exact 顶层 record：缺字段或多字段都不能通过 browser admission。result 只含
   `force` 与五项 count/warning 字段，不含 backend URL 或 identifier list；其中 `force` 必须与 request 一致。
   任意 5xx、transport loss、non-JSON response 或 malformed 2xx result 在当前 browser document 内都是 outcome

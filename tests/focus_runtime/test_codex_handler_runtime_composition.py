@@ -174,6 +174,27 @@ class CodexHandlerRuntimeCompositionTests(CodexHandlerHarness):
         with self.assertRaisesRegex(ValueError, "approval_polciy"):
             self._make_handler({"approval_polciy": "on-request"})
 
+    def test_web_display_name_defaults_independently_of_instance_and_projects_custom_value(
+        self,
+    ) -> None:
+        default_handler, _bot = self._make_handler(instance_name="explorer")
+        custom_handler, _bot = self._make_handler(
+            {"web_display_name": "  Workstation A  "},
+            instance_name="research",
+        )
+
+        default_meta = default_handler._runtime_call(
+            default_handler._web_runtime.meta,
+            "default-title-tab",
+        )
+        custom_meta = custom_handler._runtime_call(
+            custom_handler._web_runtime.meta,
+            "custom-title-tab",
+        )
+
+        self.assertEqual(default_meta["web_display_name"], "Focus Web")
+        self.assertEqual(custom_meta["web_display_name"], "Workstation A")
+
     def test_handler_projects_trusted_proxy_config_to_web_gateway(self) -> None:
         proof_sha256 = "0123456789abcdef" * 4
         handler, _bot = self._make_handler(
