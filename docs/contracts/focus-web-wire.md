@@ -44,7 +44,7 @@ remain owned by browser decoders rather than a general-purpose schema runtime.
 | Browser next-turn-settings snapshot installation | `WebNextTurnSettingsOwner` in `web/src/focus/client-state/web-next-turn-settings.ts` |
 | Browser-local full-turn window preference | `BrowserTurnWindowOwner` in `web/src/focus/client-state/browser-turn-window.ts` |
 | Browser document-title presentation | `syncFocusDocumentTitle` in `web/src/focus/documentTitle.ts` |
-| Browser document-activity favicon presentation | `syncFocusDocumentActivityFavicon` in `web/src/focus/documentActivityFavicon.ts` |
+| Browser-local document-activity favicon preference and presentation | `createFocusDocumentActivityFaviconPreference` and `syncFocusDocumentActivityFavicon` in `web/src/focus/documentActivityFavicon.ts` |
 | Typed app-server runtime-notice projection | `project_runtime_notice` in `bot/web_runtime/runtime_notice.py`; ordered publication remains with `WebRuntimeEventCoordinator` |
 | Bounded runtime-notice presentation for the current browser document | `RuntimeNoticeOwner` in `web/src/focus/client-state/runtime-notices.ts` |
 
@@ -313,15 +313,23 @@ guards and may not retain parallel key or enum inventories.
   only collapses newlines and consecutive whitespace to one space and does not
   mutate the persisted thread name or preview.
 - The browser document favicon consumes only the existing `running`
-  presentation for the selected thread and the browser connection state; it
-  creates no runtime fact or wire vocabulary. While connected and the selected
-  thread is working, precomputed frames rotate at a low cadence. With no
-  selected thread or after work ends, the initial Focus favicon is restored. A
-  static gray icon overrides possibly stale working presentation while the
-  connection is not established or is disconnected. Hidden documents use a
-  slower cadence; state changes and owner teardown clear the timer and restore
-  a determinate static icon. This effect makes no network request and cannot
-  drive Vue view rerendering, thread lifecycle, or admission decisions.
+  presentation for the selected thread, the browser connection state, and the
+  browser-local presentation preference owned by the same module; it creates no
+  runtime fact or wire vocabulary. The preference defaults to enabled. Only the
+  exact value `0` under `focus-web.activity-favicon-enabled` in same-origin
+  `localStorage` disables it; disabling writes only that value and enabling
+  removes the key. The current document responds immediately. Other open
+  documents do not synchronize through a `storage` event and read the shared
+  value after refresh. While disabled, the timer is cleared and the ordinary
+  Focus favicon is restored instead of either working or disconnected
+  presentation. While enabled, connected, and working in the selected thread,
+  precomputed frames rotate at a low cadence. With no selected thread or after
+  work ends, the initial Focus favicon is restored. A static gray icon overrides
+  possibly stale working presentation while the connection is not established
+  or is disconnected. Hidden documents use a slower cadence; state changes and
+  owner teardown clear the timer and restore a determinate static icon. This
+  effect makes no network request and cannot drive Vue view rerendering, thread
+  lifecycle, or admission decisions.
 - Backend-reset preview and result are exact top-level records: missing or extra
   fields fail browser admission. The result contains only `force`, five
   count/warning fields, and no backend URL or identifier lists. Its `force`

@@ -186,7 +186,7 @@
     "src/lib/searchHighlight.test.ts": null,
     "src/lib/searchHighlight.ts": null,
     "src/lib/slashCommands.ts": null,
-    "src/lib/storage.ts": "157281d64d01d89beb1c0f020046ce3aae7760a7731dc6c43160846c30c947a1",
+    "src/lib/storage.ts": "d1df6d6be459285ab81f3617ac6f75958de30770a2c99b31de507689d94e6c26",
     "src/lib/swarmCardRows.ts": "0ac671890affa00c713e496bb9013205001cf4f7e5b708c4ab58262eb933d10a",
     "src/lib/toolDiff.ts": null,
     "src/lib/toolMeta.ts": null,

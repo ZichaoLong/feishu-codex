@@ -19,6 +19,7 @@ const props = defineProps<{
   open: boolean;
   colorScheme: ColorScheme;
   turnWindowLimit: number;
+  activityFaviconEnabled: boolean;
   connection: string;
   approvalPolicy: string;
   approvalPolicies: string[];
@@ -42,6 +43,7 @@ const emit = defineEmits<{
   'update:open': [value: boolean];
   setColorScheme: [value: ColorScheme];
   setTurnWindowLimit: [value: number];
+  setActivityFaviconEnabled: [value: boolean];
   setApprovalPolicy: [value: string];
   setReasoningEffort: [value: string];
   setPermissionsProfile: [value: string];
@@ -138,6 +140,11 @@ function setTurnWindowLimit(value: string): void {
     emit('setTurnWindowLimit', parsed);
   }
 }
+
+function setActivityFaviconEnabled(value: string): void {
+  if (value === 'enabled') emit('setActivityFaviconEnabled', true);
+  else if (value === 'disabled') emit('setActivityFaviconEnabled', false);
+}
 </script>
 
 <template>
@@ -194,6 +201,21 @@ function setTurnWindowLimit(value: string): void {
             <option value="10">10</option>
             <option value="20">20</option>
           </Select>
+        </section>
+        <section class="settings-row">
+          <div>
+            <div class="settings-label">{{ t('focus.activityFavicon') }}</div>
+            <div class="settings-description">{{ t('focus.activityFaviconDescription') }}</div>
+          </div>
+          <SegmentedControl
+            :model-value="activityFaviconEnabled ? 'enabled' : 'disabled'"
+            :options="[
+              { value: 'enabled', label: t('focus.activityFaviconEnabledOption') },
+              { value: 'disabled', label: t('focus.activityFaviconDisabledOption') },
+            ]"
+            size="sm"
+            @update:model-value="setActivityFaviconEnabled"
+          />
         </section>
         <section class="settings-row">
           <div>

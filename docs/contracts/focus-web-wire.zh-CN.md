@@ -38,7 +38,7 @@ projection event，浏览器在安装状态前对该投影做完整 runtime deco
 | browser next-turn settings snapshot 安装 | `web/src/focus/client-state/web-next-turn-settings.ts` 的 `WebNextTurnSettingsOwner` |
 | browser-local full-turn window preference | `web/src/focus/client-state/browser-turn-window.ts` 的 `BrowserTurnWindowOwner` |
 | browser document title presentation | `web/src/focus/documentTitle.ts` 的 `syncFocusDocumentTitle` |
-| browser document activity favicon presentation | `web/src/focus/documentActivityFavicon.ts` 的 `syncFocusDocumentActivityFavicon` |
+| browser-local document activity favicon preference 与 presentation | `web/src/focus/documentActivityFavicon.ts` 的 `createFocusDocumentActivityFaviconPreference` 与 `syncFocusDocumentActivityFavicon` |
 | app-server typed runtime notice 投影 | `bot/web_runtime/runtime_notice.py` 的 `project_runtime_notice`；有序发布由 `WebRuntimeEventCoordinator` 持有 |
 | browser 当前 document 的有界 runtime notice presentation | `web/src/focus/client-state/runtime-notices.ts` 的 `RuntimeNoticeOwner` |
 
@@ -202,11 +202,14 @@ required field 与 catalog 一致；decoder 必须消费 generated guard，不�
   解析。没有 active thread 时只显示部署名称。thread switch、rename 与 meta 安装会同步更新 title；Focus 不按字符数
   裁剪会话侧字符串，标签页可见宽度由 browser chrome 自然截断。换行和连续空白只在 document-title presentation
   中折叠为单个空格，不修改持久化 thread name 或 preview。
-- browser document favicon 只消费当前选中 thread 的既有 `running` presentation 与 browser connection 状态，不创建
-  新的 runtime fact 或 wire vocabulary。连接正常且当前 thread 正在工作时，它使用预生成帧低频旋转；无当前 thread
-  或工作结束时恢复初始 Focus favicon；连接未建立或断开时，灰色静态图标覆盖可能过期的 working presentation。
-  hidden document 降低帧率；状态切换或 owner teardown 必须清理 timer 并恢复确定的静态图标。该 effect 不发起网络
-  请求，也不得驱动 Vue view rerender、thread lifecycle 或 admission 决策。
+- browser document favicon 只消费当前选中 thread 的既有 `running` presentation、browser connection 状态及同一 module
+  持有的 browser-local 展示偏好，不创建新的 runtime fact 或 wire vocabulary。偏好默认开启；同源 `localStorage` 中只有
+  `focus-web.activity-favicon-enabled` 的精确值 `0` 表示关闭，关闭时只写入该值，重新开启时删除该 key。当前 document
+  立即响应设置；其他已打开 document 不做 `storage` event 同步，刷新后再读取共享值。关闭时必须清理 timer 并恢复普通
+  Focus favicon，不再显示 working 或 disconnected presentation。开启后，连接正常且当前 thread 正在工作时使用预生成帧
+  低频旋转；无当前 thread 或工作结束时恢复初始 Focus favicon；连接未建立或断开时，灰色静态图标覆盖可能过期的
+  working presentation。hidden document 降低帧率；状态切换或 owner teardown 必须清理 timer 并恢复确定的静态图标。
+  该 effect 不发起网络请求，也不得驱动 Vue view rerender、thread lifecycle 或 admission 决策。
 - backend-reset preview 与 result 是 exact 顶层 record：缺字段或多字段都不能通过 browser admission。result 只含
   `force` 与五项 count/warning 字段，不含 backend URL 或 identifier list；其中 `force` 必须与 request 一致。
   任意 5xx、transport loss、non-JSON response 或 malformed 2xx result 在当前 browser document 内都是 outcome

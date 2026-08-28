@@ -35,7 +35,10 @@ import FocusPrimaryNotices from './FocusPrimaryNotices.vue';
 import FocusReviewDialog from './FocusReviewDialog.vue';
 import FocusSettingsDialog from './FocusSettingsDialog.vue';
 import { executeCdCommand, parseCdCommand } from './cdCommand';
-import { syncFocusDocumentActivityFavicon } from './documentActivityFavicon';
+import {
+  createFocusDocumentActivityFaviconPreference,
+  syncFocusDocumentActivityFavicon,
+} from './documentActivityFavicon';
 import { DEFAULT_WEB_DISPLAY_NAME, syncFocusDocumentTitle } from './documentTitle';
 import {
   FOCUS_DETAIL_PANEL_DEFAULT,
@@ -66,6 +69,7 @@ import type {
 
 const { t } = useI18n();
 const client = useFocusWebClient();
+const activityFaviconPreference = createFocusDocumentActivityFaviconPreference();
 const isMobile = useIsMobile();
 const showMobileSwitcher = ref(false);
 const showSettings = ref(false);
@@ -162,6 +166,7 @@ syncFocusDocumentTitle(
 syncFocusDocumentActivityFavicon(
   () => client.connection.value === 'connected',
   () => Boolean(client.activeThreadId.value) && client.running.value,
+  () => activityFaviconPreference.enabled.value,
 );
 const workspaceSessionCount = computed(() => {
   const id = client.activeWorkspaceId.value;
@@ -1104,6 +1109,7 @@ onUnmounted(() => {
         v-model:open="showSettings"
         :color-scheme="colorScheme"
         :turn-window-limit="client.turnWindowLimit.value"
+        :activity-favicon-enabled="activityFaviconPreference.enabled.value"
         :connection="client.connection.value"
         :approval-policy="client.approvalPolicy.value"
         :approval-policies="client.meta.value?.approval_policies ?? []"
@@ -1123,6 +1129,7 @@ onUnmounted(() => {
         :backend-reset-outcome-unknown="client.backendResetOutcomeUnknown.value"
         @set-color-scheme="setColorScheme"
         @set-turn-window-limit="client.setTurnWindowLimit($event)"
+        @set-activity-favicon-enabled="activityFaviconPreference.setEnabled($event)"
         @set-approval-policy="client.setApprovalPolicy($event)"
         @set-reasoning-effort="client.setReasoningEffort($event)"
         @set-permissions-profile="client.setPermissionsProfile($event)"

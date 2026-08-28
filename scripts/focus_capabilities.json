@@ -706,6 +706,10 @@
         },
         {
           "path": "web/src/focus/documentActivityFavicon.ts",
+          "symbol": "createFocusDocumentActivityFaviconPreference"
+        },
+        {
+          "path": "web/src/focus/documentActivityFavicon.ts",
           "symbol": "syncFocusDocumentActivityFavicon"
         },
         {

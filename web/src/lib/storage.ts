@@ -29,6 +29,7 @@ export const STORAGE_KEYS = {
   sidebarWidth: 'kimi-web.sidebar-width',
   detailPanelWidth: 'focus-web.detail-panel-width',
   turnWindowLimit: 'focus-web.turn-window-limit',
+  activityFaviconEnabled: 'focus-web.activity-favicon-enabled',
   // Active one-time cleanup for a retired conversation preference.
   contentAlign: 'kimi-web.content-align',
 } as const;

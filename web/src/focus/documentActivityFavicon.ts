@@ -1,4 +1,17 @@
-import { watch, type WatchSource, type WatchStopHandle } from 'vue';
+import {
+  readonly,
+  ref,
+  watch,
+  type Ref,
+  type WatchSource,
+  type WatchStopHandle,
+} from 'vue';
+import {
+  safeGetString,
+  safeRemove,
+  safeSetString,
+  STORAGE_KEYS,
+} from '../lib/storage';
 
 const VISIBLE_FRAME_INTERVAL_MS = 42;
 const HIDDEN_FRAME_INTERVAL_MS = 83;
@@ -9,6 +22,31 @@ interface DocumentActivityFaviconTarget {
   readonly idleHref: string;
   isHidden(): boolean;
   setHref(href: string): void;
+}
+
+export interface FocusDocumentActivityFaviconPreference {
+  readonly enabled: Readonly<Ref<boolean>>;
+  setEnabled(value: unknown): boolean;
+}
+
+/** Own one browser document's local activity-favicon preference. */
+export function createFocusDocumentActivityFaviconPreference(): FocusDocumentActivityFaviconPreference {
+  const enabled = ref(
+    safeGetString(STORAGE_KEYS.activityFaviconEnabled) !== '0',
+  );
+
+  function setEnabled(value: unknown): boolean {
+    if (typeof value !== 'boolean' || enabled.value === value) return false;
+    enabled.value = value;
+    if (value) safeRemove(STORAGE_KEYS.activityFaviconEnabled);
+    else safeSetString(STORAGE_KEYS.activityFaviconEnabled, '0');
+    return true;
+  }
+
+  return {
+    enabled: readonly(enabled),
+    setEnabled,
+  };
 }
 
 function svgDataUrl(svg: string): string {
@@ -66,6 +104,7 @@ function documentActivityFaviconTarget(
 export function syncFocusDocumentActivityFavicon(
   connected: WatchSource<boolean>,
   working: WatchSource<boolean>,
+  enabled: WatchSource<boolean>,
   target: DocumentActivityFaviconTarget = documentActivityFaviconTarget(document),
 ): WatchStopHandle {
   let frameIndex = 0;
@@ -94,10 +133,12 @@ export function syncFocusDocumentActivityFavicon(
   }
 
   return watch(
-    [connected, working],
-    ([isConnected, isWorking], _previous, onCleanup) => {
+    [connected, working, enabled],
+    ([isConnected, isWorking, isEnabled], _previous, onCleanup) => {
       stopAnimation();
-      if (!isConnected) {
+      if (!isEnabled) {
+        restoreIdle();
+      } else if (!isConnected) {
         target.setHref(DISCONNECTED_HREF);
       } else if (isWorking) {
         frameIndex = 0;
