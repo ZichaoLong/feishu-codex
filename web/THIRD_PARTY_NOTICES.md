@@ -5,8 +5,8 @@
 ## Build provenance
 
 - Generator version: 2
-- npm lockfile: `web/package-lock.json` (SHA-256 `f57cad3eff1e1df4e12e800be79836f903a5e6509b9238ca2cfee80922afc7f0`)
-- Rendered Rollup module identifiers inspected: 1236
+- npm lockfile: `web/package-lock.json` (SHA-256 `7b92935458c6a2ad799fd40e3421ceb2cfaaf6fec48075690b0acbc365eef647`)
+- Rendered Rollup module identifiers inspected: 1235
 - kimi-web source: https://github.com/MoonshotAI/kimi-code at `c497af60e6cd20aab05e590f98a28fb15dd3491d` (package 0.1.2, imported 2026-07-27)
 
 The component table starts with the copied kimi-web source.  For npm code, it records
@@ -42,7 +42,7 @@ as fonts or icons are emitted by build tooling rather than normal JavaScript imp
 | @intlify/message-compiler | 11.4.8 | MIT |  | rendered Rollup module graph (1); declared runtime dependency closure |
 | @intlify/shared | 11.4.8 | MIT |  | rendered Rollup module graph (1); declared runtime dependency closure |
 | @jridgewell/sourcemap-codec | 1.5.5 | MIT | Justin Ridgewell &lt;justin@ridgewell.name&gt; | declared runtime dependency closure |
-| @mermaid-js/parser | 1.2.0 | MIT | Yokozuna59 | rendered Rollup module graph (32); declared runtime dependency closure |
+| @mermaid-js/parser | 1.2.1 | MIT | Yokozuna59 | rendered Rollup module graph (32); declared runtime dependency closure |
 | @types/d3 | 7.4.3 | MIT |  | declared runtime dependency closure |
 | @types/d3-array | 3.2.2 | MIT |  | declared runtime dependency closure |
 | @types/d3-axis | 3.0.6 | MIT |  | declared runtime dependency closure |
@@ -132,15 +132,16 @@ as fonts or icons are emitted by build tooling rather than normal JavaScript imp
 | d3-timer | 3.0.1 | ISC |  | rendered Rollup module graph (2); declared runtime dependency closure |
 | d3-transition | 3.0.1 | ISC |  | rendered Rollup module graph (27); declared runtime dependency closure |
 | d3-zoom | 3.0.0 | ISC |  | rendered Rollup module graph (1); declared runtime dependency closure |
-| dagre-d3-es | 7.0.14 | MIT |  | rendered Rollup module graph (31); declared runtime dependency closure |
+| dagre-d3-es | 7.0.14 | MIT |  | rendered Rollup module graph (30); declared runtime dependency closure |
 | dayjs | 1.11.21 | MIT | iamkun | rendered Rollup module graph (15); declared runtime dependency closure |
 | delaunator | 5.1.0 | ISC | Vladimir Agafonkin | declared runtime dependency closure |
-| dompurify | 3.4.12 | MPL-2.0 OR Apache-2.0 | Dr.-Ing. Mario Heiderich, Cure53 &lt;mario@cure53.de&gt; (https://cure53.de/) | rendered Rollup module graph (1); declared runtime dependency closure |
+| dompurify | 3.4.14 | MPL-2.0 OR Apache-2.0 | Dr.-Ing. Mario Heiderich, Cure53 &lt;mario@cure53.de&gt; (https://cure53.de/) | rendered Rollup module graph (1); declared runtime dependency closure |
 | entities | 4.5.0 | BSD-2-Clause | Felix Boehm &lt;me@feedic.com&gt; | declared runtime dependency closure |
 | entities | 7.0.1 | BSD-2-Clause | Felix Boehm &lt;me@feedic.com&gt; | declared runtime dependency closure |
 | es-toolkit | 1.50.0 | MIT |  | rendered Rollup module graph (27); declared runtime dependency closure |
 | estree-walker | 2.0.2 | MIT | Rich Harris | declared runtime dependency closure |
 | estree-walker | 2.0.2 | MIT | Rich Harris | declared runtime dependency closure |
+| fastdom | 1.0.12 | MIT |  | rendered Rollup module graph (6); declared runtime dependency closure |
 | hachure-fill | 0.5.2 | MIT | Preet Shihn | declared runtime dependency closure |
 | iconv-lite | 0.6.3 | MIT | Alexander Shtuchkin &lt;ashtuchkin@gmail.com&gt; | declared runtime dependency closure |
 | import-meta-resolve | 4.2.0 | MIT | Titus Wormer &lt;tituswormer@gmail.com&gt; (https://wooorm.com) | declared runtime dependency closure |
@@ -152,7 +153,7 @@ as fonts or icons are emitted by build tooling rather than normal JavaScript imp
 | layout-base | 1.0.2 | MIT |  | rendered Rollup module graph (2); declared runtime dependency closure |
 | layout-base | 2.0.1 | MIT |  | rendered Rollup module graph (2); declared runtime dependency closure |
 | linkify-it | 5.0.2 | MIT |  | declared runtime dependency closure |
-| lodash-es | 4.18.1 | MIT | John-David Dalton &lt;john.david.dalton@gmail.com&gt; | rendered Rollup module graph (231); declared runtime dependency closure |
+| lodash-es | 4.18.1 | MIT | John-David Dalton &lt;john.david.dalton@gmail.com&gt; | rendered Rollup module graph (224); declared runtime dependency closure |
 | magic-string | 0.30.21 | MIT | Rich Harris | declared runtime dependency closure |
 | markdown-it-container | 4.0.0 | MIT |  | declared runtime dependency closure |
 | markdown-it-footnote | 4.0.0 | MIT |  | declared runtime dependency closure |
@@ -166,8 +167,8 @@ as fonts or icons are emitted by build tooling rather than normal JavaScript imp
 | markstream-core | 1.0.3 | MIT | Simon He | rendered Rollup module graph (1); declared runtime dependency closure |
 | markstream-vue | 1.0.7 | MIT | Simon He | rendered Rollup module graph (20) |
 | mdurl | 2.1.0 | MIT |  | declared runtime dependency closure |
-| mermaid | 11.16.0 | MIT | Knut Sveidqvist | rendered Rollup module graph (66) |
-| nanoid | 3.3.16 | MIT | Andrey Sitnik &lt;andrey@sitnik.ru&gt; | declared runtime dependency closure |
+| mermaid | 11.17.2 | MIT | Knut Sveidqvist | rendered Rollup module graph (66) |
+| nanoid | 3.3.18 | MIT | Andrey Sitnik &lt;andrey@sitnik.ru&gt; | declared runtime dependency closure |
 | package-manager-detector | 1.8.0 | MIT | Anthony Fu &lt;anthonyfu117@hotmail.com&gt; | declared runtime dependency closure |
 | path-data-parser | 0.1.0 | MIT | Preet Shihn | declared runtime dependency closure |
 | picocolors | 1.1.1 | ISC | Alexey Raspopov | declared runtime dependency closure |
@@ -182,6 +183,7 @@ as fonts or icons are emitted by build tooling rather than normal JavaScript imp
 | safer-buffer | 2.1.2 | MIT |  | declared runtime dependency closure |
 | source-map-js | 1.2.1 | BSD-3-Clause | Valentin 7rulnik Semirulnik &lt;v7rulnik@gmail.com&gt; | declared runtime dependency closure |
 | stream-markdown-parser | 1.1.4 | MIT | Simon He | rendered Rollup module graph (1); declared runtime dependency closure |
+| strictdom | 1.0.1 | MIT |  | declared runtime dependency closure |
 | stylis | 4.4.0 | MIT | Sultan Tarimo &lt;sultantarimo@me.com&gt; | rendered Rollup module graph (6); declared runtime dependency closure |
 | tinyexec | 1.2.4 | MIT | James Garbutt (https://github.com/43081j) | declared runtime dependency closure |
 | ts-dedent | 2.3.0 | MIT | Tamino Martinius &lt;dev@zaku.eu&gt; | rendered Rollup module graph (1); declared runtime dependency closure |
@@ -363,7 +365,7 @@ SOFTWARE.
 
 ### L007
 
-Sources: `@chevrotain/types@11.1.2/LICENSE.txt`, `dompurify@3.4.12/LICENSE`
+Sources: `@chevrotain/types@11.1.2/LICENSE.txt`, `dompurify@3.4.14/LICENSE`
 
 ```text
 
@@ -1171,7 +1173,7 @@ SOFTWARE.
 
 ### L018
 
-Sources: `@mermaid-js/parser@1.2.0/LICENSE`
+Sources: `@mermaid-js/parser@1.2.1/LICENSE`
 
 ```text
 The MIT License (MIT)
@@ -1983,7 +1985,7 @@ THIS SOFTWARE.
 
 ### L048
 
-Sources: `dompurify@3.4.12/LICENSE-MPL`
+Sources: `dompurify@3.4.14/LICENSE-MPL`
 
 ```text
 Mozilla Public License Version 2.0
@@ -2999,7 +3001,7 @@ IN THE SOFTWARE.
 
 ### L069
 
-Sources: `mermaid@11.16.0/LICENSE`
+Sources: `mermaid@11.17.2/LICENSE`
 
 ```text
 The MIT License (MIT)
@@ -3027,7 +3029,7 @@ SOFTWARE.
 
 ### L070
 
-Sources: `nanoid@3.3.16/LICENSE`
+Sources: `nanoid@3.3.18/LICENSE`
 
 ```text
 The MIT License (MIT)

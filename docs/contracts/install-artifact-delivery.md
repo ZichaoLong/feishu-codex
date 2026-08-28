@@ -18,6 +18,7 @@ CLI as one offline payload.
 | Clean Focus-wheel build and source-payload verification | `scripts/build_support/python_distribution.py` |
 | GitHub Release validation, upload ordering, and development retention | `scripts/build_support/github_publication.py` |
 | Local bundle entry point | `scripts/build_install_bundle.py` |
+| Current-workspace Web build, temporary local bundle, and official-installer orchestration | `scripts/install_workspace.sh` |
 | Sole repository artifact-upload entry point | `scripts/publish_install_bundle.py` |
 | Manual publication gate | `.github/workflows/publish-installable.yml` |
 | Python declarations and lock semantics | [Python dependency-locking decision](../decisions/python-dependency-locking.md) |
@@ -177,6 +178,19 @@ ignored `build/install/`; `bash install.sh --artifact <zip>` or
 `./install.ps1 --artifact <zip>` installs it. The builder requires both the Web
 payload and `requirements.lock` in the source and constructs and verifies one
 deterministic Focus wheel containing them.
+
+Unix developers may run `bash /path/to/focus/scripts/install_workspace.sh` from
+any working directory to orchestrate those steps. This entry point does not run
+`npm ci`; the caller installs Web dependencies after the first clone, when
+`web/package-lock.json` changes, or when `node_modules` is absent. It generates
+the production Web assets, builds a local bundle in a unique temporary directory,
+requires that directory to contain exactly one Focus ZIP, and passes that exact
+path to the official `install.sh --artifact`. The temporary directory is removed
+after the installer returns, and no failed step may continue with an older bundle.
+This entry point accepts only the optional `--migrate-from-feishu-codex`, forwards
+it unchanged to `install.sh`, and rejects caller attempts to override the artifact
+or channel. It creates neither a second install transaction nor another publication
+path.
 
 Ordinary commits, pull requests, CI verification, local Web builds, and local
 bundle builds never publish artifacts. GitHub upload is explicit: manually dispatch

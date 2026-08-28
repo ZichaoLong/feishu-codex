@@ -16,6 +16,7 @@
 | Focus wheel 的 clean build 与 source-payload 核验 | `scripts/build_support/python_distribution.py` |
 | GitHub Release 状态核验、上传顺序与 development retention | `scripts/build_support/github_publication.py` |
 | 本地 bundle 入口 | `scripts/build_install_bundle.py` |
+| 当前 workspace 的 Web build、临时 local bundle 与正式安装器串联 | `scripts/install_workspace.sh` |
 | 唯一仓库制品上传入口 | `scripts/publish_install_bundle.py` |
 | 手动发布门禁 | `.github/workflows/publish-installable.yml` |
 | Python 依赖声明与 lock 语义 | [Python 依赖锁决策](../decisions/python-dependency-locking.zh-CN.md) |
@@ -139,6 +140,13 @@ remote channel 需要访问 GitHub；标准 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_P
 `python scripts/build_install_bundle.py`。默认生成 `local` bundle 到 ignored 的 `build/install/`；随后通过
 `bash install.sh --artifact <zip>` 或 `./install.ps1 --artifact <zip>` 安装。构建器要求当前 source 中已有
 Web payload 与 `requirements.lock`，并构建、核验一个包含它们的确定性 Focus wheel。
+
+Unix 开发者可从任意工作目录执行 `bash /path/to/focus/scripts/install_workspace.sh` 串联上述步骤。该入口不运行
+`npm ci`；调用者须在首次 clone、`web/package-lock.json` 变化或 `node_modules` 缺失时先安装 Web 依赖。
+它先生成 Web production assets，再在唯一临时目录构建 local bundle，要求该目录恰好产生一个 Focus ZIP，
+并把该精确路径传给正式 `install.sh --artifact`。安装器返回后临时目录必须删除；任一步失败都不得继续使用
+旧 bundle。该入口只接受可选的 `--migrate-from-feishu-codex` 并原样传给 `install.sh`，拒绝调用者覆盖
+artifact 或 channel；它不创建另一套安装事务或发布路径。
 
 普通 commit、pull request、CI 验证、本地 Web build 和本地 bundle build 都不发布制品。GitHub 上传必须是
 显式动作：手动触发 `publish-installable.yml`，或明确调用唯一上传命令并提供已经构建、验证的 bundle 与

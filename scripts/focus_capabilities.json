@@ -705,6 +705,10 @@
           "symbol": "createThreadInspection"
         },
         {
+          "path": "web/src/focus/documentActivityFavicon.ts",
+          "symbol": "syncFocusDocumentActivityFavicon"
+        },
+        {
           "path": "web/src/focus/documentTitle.ts",
           "symbol": "syncFocusDocumentTitle"
         }
@@ -741,6 +745,7 @@
             "web/test/focus_client/owners/web-next-turn-settings.test.ts",
             "web/test/focus_client/owners/runtime-notices.test.ts",
             "web/test/focus_client/owners/use-focus-web-client.test.ts",
+            "web/test/focus-document-activity-favicon.test.ts",
             "web/test/focus-document-title.test.ts"
           ]
         }
