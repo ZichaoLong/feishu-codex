@@ -93,7 +93,7 @@ class WebGatewayConfig:
     host: str = "127.0.0.1"
     port: int = 0
     session_ttl_seconds: float = 8 * 60 * 60
-    disconnect_grace_seconds: float = 15.0
+    disconnect_grace_seconds: float = 1200.0
     event_queue_limit: int = 128
     static_dir: pathlib.Path | None = None
     trusted_proxy_origin: str = ""

@@ -14,6 +14,7 @@ from bot.fcodex.cli import main as fcodex_main
 class CodexConfigTests(unittest.TestCase):
     def test_parser_defaults_are_the_dataclass_defaults(self) -> None:
         self.assertEqual(CodexConfig.from_dict({}), CodexConfig())
+        self.assertEqual(CodexConfig().web_disconnect_grace_seconds, 1200.0)
         self.assertEqual(CodexConfig().web_display_name, "Focus Web")
         self.assertEqual(CodexConfig().web_trusted_proxy_origin, "")
         self.assertEqual(CodexConfig().web_trusted_proxy_proof_sha256, "")

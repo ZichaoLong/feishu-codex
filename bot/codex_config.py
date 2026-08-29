@@ -182,7 +182,7 @@ class CodexConfig:
     web_trusted_proxy_origin: str = ""
     web_trusted_proxy_proof_sha256: str = ""
     web_session_ttl_seconds: float = 8 * 60 * 60
-    web_disconnect_grace_seconds: float = 15.0
+    web_disconnect_grace_seconds: float = 1200.0
     web_static_dir: str = ""
     connect_timeout_seconds: float = 15.0
     request_timeout_seconds: float = 30.0

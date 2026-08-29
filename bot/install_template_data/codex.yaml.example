@@ -47,10 +47,10 @@ web_enabled: true
 # 浏览器会话有效期（秒）；最小值：60；默认值：28800（8 小时）
 # web_session_ttl_seconds: 28800
 
-# 浏览器 WebSocket 断开后，同一已认证 document identity 的重连宽限期（秒）；默认值：15。
+# 浏览器 WebSocket 断开后，同一已认证 document identity 的重连宽限期（秒）；默认值：1200。
 # 该宽限期只维护 document capability 与页面连续性，不创建或延长 main-turn writer。
 # active main turn 仍由 exact interaction lease 与 matching completion 独立结算。
-# web_disconnect_grace_seconds: 15
+# web_disconnect_grace_seconds: 1200
 
 # 仅用于前端开发：覆盖内置静态资源目录。
 # web_static_dir: /path/to/focus/web/dist

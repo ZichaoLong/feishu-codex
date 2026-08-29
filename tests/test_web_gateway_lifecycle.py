@@ -31,6 +31,9 @@ class _ResultFuture:
 
 
 class WebGatewayLifecycleTests(unittest.TestCase):
+    def test_default_config_uses_twenty_minute_disconnect_grace(self) -> None:
+        self.assertEqual(WebGatewayConfig().disconnect_grace_seconds, 1200.0)
+
     def _gateway(self, *, thread: Mock, loop: Mock) -> WebGateway:
         gateway = WebGateway.__new__(WebGateway)
         gateway._config = WebGatewayConfig()
