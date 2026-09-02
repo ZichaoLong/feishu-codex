@@ -422,7 +422,7 @@ describe('Focus Web client', () => {
     expect(api.operatorStatusCalls).toBe(1);
   });
 
-  it('does not refetch a bounded snapshot for an in-sync initial websocket hello', async () => {
+  it('refreshes the pre-connection projection once for an in-sync initial websocket hello', async () => {
     const api = new FakeApi();
     const client = useFocusWebClient(api);
     await client.load();
@@ -432,8 +432,8 @@ describe('Focus Web client', () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(api.metaCalls).toBe(0);
-    expect(api.listCalls).toBe(1);
-    expect(api.readCalls).toBe(1);
+    expect(api.listCalls).toBe(2);
+    expect(api.readCalls).toBe(2);
   });
 
   it('reconciles when websocket hello reports newer projection coordinates', async () => {
@@ -444,6 +444,7 @@ describe('Focus Web client', () => {
 
     api.emit({ type: 'hello', runtime_epoch: 'epoch-1', revision: 1 });
     await client.reloadAll();
+    await vi.advanceTimersByTimeAsync(100);
 
     expect(api.metaCalls).toBe(1);
     expect(api.listCalls).toBe(2);
@@ -484,16 +485,23 @@ describe('Focus Web client', () => {
     await client.load();
     const firstConnection = api.handlers;
     firstConnection?.open?.();
+    api.emit({ type: 'hello', runtime_epoch: 'epoch-1', revision: 0 });
+    await vi.advanceTimersByTimeAsync(100);
 
     firstConnection?.close?.();
     await vi.advanceTimersByTimeAsync(1000);
     expect(api.handlers).not.toBe(firstConnection);
     api.handlers?.open?.();
+    expect(api.metaCalls).toBe(0);
+    expect(api.listCalls).toBe(2);
+    expect(api.readCalls).toBe(2);
+
+    api.emit({ type: 'hello', runtime_epoch: 'epoch-1', revision: 0 });
     await client.reloadAll();
 
     expect(api.metaCalls).toBe(1);
-    expect(api.listCalls).toBe(2);
-    expect(api.readCalls).toBe(2);
+    expect(api.listCalls).toBe(3);
+    expect(api.readCalls).toBe(3);
   });
 
   it('stops reconnecting a document token that another tab replaced', async () => {
@@ -568,6 +576,10 @@ describe('Focus Web client', () => {
     const client = useFocusWebClient(api);
     await client.load();
     api.handlers?.open?.();
+    api.emit({ type: 'hello', runtime_epoch: 'epoch-1', revision: 0 });
+    await vi.advanceTimersByTimeAsync(100);
+    const listCalls = api.listCalls;
+    const readCalls = api.readCalls;
 
     api.emit({
       type: 'thread_delta',
@@ -578,8 +590,8 @@ describe('Focus Web client', () => {
     });
     await vi.advanceTimersByTimeAsync(300);
 
-    expect(api.listCalls).toBe(1);
-    expect(api.readCalls).toBe(1);
+    expect(api.listCalls).toBe(listCalls);
+    expect(api.readCalls).toBe(readCalls);
   });
 
   it('writes stream deltas to the assistant segment on the correct side of a steer', async () => {
@@ -674,6 +686,10 @@ describe('Focus Web client', () => {
     const client = useFocusWebClient(api);
     await client.load();
     api.handlers?.open?.();
+    api.emit({ type: 'hello', runtime_epoch: 'epoch-1', revision: 0 });
+    await vi.advanceTimersByTimeAsync(100);
+    const listCalls = api.listCalls;
+    const readCalls = api.readCalls;
 
     api.emit({
       type: 'thread_invalidated',
@@ -683,8 +699,8 @@ describe('Focus Web client', () => {
     });
     await vi.advanceTimersByTimeAsync(300);
 
-    expect(api.listCalls).toBe(2);
-    expect(api.readCalls).toBe(1);
+    expect(api.listCalls).toBe(listCalls + 1);
+    expect(api.readCalls).toBe(readCalls);
   });
 
   it('restores current-process lifecycle warnings and reconciles only the matching target', async () => {

@@ -32,7 +32,9 @@ class WebGatewayRequestAdmissionTests(unittest.IsolatedAsyncioTestCase):
             config=WebGatewayConfig(
                 static_dir=static_dir,
                 session_ttl_seconds=3600,
-                disconnect_grace_seconds=0.1,
+                # Request-admission assertions must not race the unrelated
+                # initial document-retirement timer.
+                disconnect_grace_seconds=0,
             ),
             data_dir=self.root,
             projection=self.projection,
@@ -196,7 +198,7 @@ class WebGatewayRequestAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 instance_name="explorer",
                 static_dir=self.gateway._config.static_dir,
                 session_ttl_seconds=3600,
-                disconnect_grace_seconds=0.1,
+                disconnect_grace_seconds=0,
             ),
             data_dir=explorer_root,
             projection=FocusWebProjection(),

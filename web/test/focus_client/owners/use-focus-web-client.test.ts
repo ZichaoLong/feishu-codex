@@ -577,6 +577,59 @@ describe('useFocusWebClient initial writer authority', () => {
     client.dispose();
   });
 
+  it('refreshes fail-closed thread actions only after the first admitted hello', async () => {
+    vi.useFakeTimers();
+    let client: ReturnType<typeof useFocusWebClient> | null = null;
+    try {
+      stubBrowser();
+      const fake = testApi();
+      client = useFocusWebClient(fake.api);
+      await client.load();
+
+      expect(client.sessions.value[0]?.actionCapabilities?.archive).toBe(false);
+      expect(client.activeSessionActionCapabilities.value.archive).toBe(false);
+
+      const connectedThread = thread('Connected actions');
+      connectedThread.action_capabilities = {
+        ...connectedThread.action_capabilities,
+        rename: true,
+        archive: true,
+      };
+      vi.mocked(fake.api.listThreads).mockResolvedValueOnce({
+        ...threadList(0, 'Connected actions'),
+        threads: [connectedThread],
+      });
+      vi.mocked(fake.api.readThread).mockResolvedValueOnce({
+        ...snapshot(0, 'Connected actions'),
+        thread: connectedThread,
+      });
+
+      fake.handlers.open?.();
+      expect(client.connection.value).toBe('connected');
+      expect(client.sessions.value[0]?.actionCapabilities?.archive).toBe(false);
+
+      // A browser WebSocket can open before the server finishes its document
+      // connection transaction. No fixed client delay is an authority fence.
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(fake.api.listThreads).toHaveBeenCalledOnce();
+      expect(fake.api.readThread).toHaveBeenCalledOnce();
+      expect(client.sessions.value[0]?.actionCapabilities?.archive).toBe(false);
+      expect(client.activeSessionActionCapabilities.value.archive).toBe(false);
+
+      fake.handlers.event({ type: 'hello', runtime_epoch: EPOCH, revision: 0 });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(fake.api.listThreads).toHaveBeenCalledTimes(2);
+      expect(fake.api.readThread).toHaveBeenCalledTimes(2);
+      expect(client.sessions.value[0]?.actionCapabilities?.archive).toBe(true);
+      expect(client.activeSessionActionCapabilities.value.archive).toBe(true);
+    } finally {
+      client?.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('captures a URL target before durable-profile convergence rewrites history', async () => {
     stubBrowser('http://focus.test/?thread=thread-b');
     vi.mocked(history.replaceState).mockImplementation((_state, _unused, url) => {

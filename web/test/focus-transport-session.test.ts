@@ -14,6 +14,7 @@ interface TestSocket {
 function transportFixture(overrides: Partial<FocusTransportSessionCallbacks> = {}) {
   const sockets: TestSocket[] = [];
   const connected = vi.fn();
+  const handshakeReady = vi.fn();
   const refreshProjection = vi.fn(async () => {});
   const refreshThreadList = vi.fn(async () => {});
   const reloadProjection = vi.fn();
@@ -28,7 +29,8 @@ function transportFixture(overrides: Partial<FocusTransportSessionCallbacks> = {
     probeEventAccess: async () => {},
     onHandshakeProbeError: () => 'retry',
     onConnectionError: scheduledErrors,
-    onConnected: connected,
+    onSocketOpened: connected,
+    onHandshakeReady: handshakeReady,
     onEvent: vi.fn(),
     onInvalidEvent: vi.fn(),
     refreshProjection,
@@ -42,6 +44,7 @@ function transportFixture(overrides: Partial<FocusTransportSessionCallbacks> = {
   return {
     callbacks,
     connected,
+    handshakeReady,
     refreshProjection,
     refreshThreadList,
     reloadProjection,
@@ -69,7 +72,16 @@ describe('Focus transport session', () => {
 
     fixture.sockets[0]?.handlers.open?.();
     expect(fixture.session.snapshot.value.connection).toBe('connected');
-    expect(fixture.connected).toHaveBeenLastCalledWith(false);
+    expect(fixture.connected).toHaveBeenCalledOnce();
+    expect(fixture.handshakeReady).not.toHaveBeenCalled();
+    fixture.sockets[0]?.handlers.event({
+      type: 'hello', runtime_epoch: 'epoch-1', revision: 0,
+    });
+    fixture.sockets[0]?.handlers.event({
+      type: 'hello', runtime_epoch: 'epoch-1', revision: 0,
+    });
+    expect(fixture.handshakeReady).toHaveBeenCalledOnce();
+    expect(fixture.handshakeReady).toHaveBeenLastCalledWith(false);
 
     fixture.sockets[0]?.handlers.close?.();
     expect(fixture.session.snapshot.value.connection).toBe('disconnected');
@@ -81,8 +93,31 @@ describe('Focus transport session', () => {
     expect(fixture.session.snapshot.value.reconnectScheduled).toBe(false);
 
     fixture.sockets[1]?.handlers.open?.();
-    expect(fixture.connected).toHaveBeenLastCalledWith(true);
+    expect(fixture.connected).toHaveBeenCalledTimes(2);
+    expect(fixture.handshakeReady).toHaveBeenCalledOnce();
+    fixture.sockets[1]?.handlers.event({
+      type: 'hello', runtime_epoch: 'epoch-1', revision: 0,
+    });
+    expect(fixture.handshakeReady).toHaveBeenCalledTimes(2);
+    expect(fixture.handshakeReady).toHaveBeenLastCalledWith(true);
     expect(fixture.session.snapshot.value.hasOpenedEventSocket).toBe(true);
+  });
+
+  it('does not treat a socket open without hello as a completed handshake', async () => {
+    const fixture = transportFixture();
+
+    fixture.session.connect();
+    fixture.sockets[0]?.handlers.open?.();
+    fixture.sockets[0]?.handlers.close?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+    fixture.sockets[1]?.handlers.open?.();
+    fixture.sockets[1]?.handlers.event({
+      type: 'hello', runtime_epoch: 'epoch-1', revision: 0,
+    });
+
+    expect(fixture.connected).toHaveBeenCalledTimes(2);
+    expect(fixture.handshakeReady).toHaveBeenCalledOnce();
+    expect(fixture.handshakeReady).toHaveBeenCalledWith(false);
   });
 
   it('probes an unopened handshake and honors a fail-closed stop disposition', async () => {
@@ -135,6 +170,7 @@ describe('Focus transport session', () => {
     expect(fixture.session.snapshot.value.connection).toBe('connected');
     expect(fixture.session.snapshot.value.reconnectScheduled).toBe(false);
     expect(fixture.connected).toHaveBeenCalledOnce();
+    expect(fixture.handshakeReady).not.toHaveBeenCalled();
     expect(onInvalidEvent).not.toHaveBeenCalled();
     expect(onEvent).not.toHaveBeenCalled();
     expect(staleSocket?.close).toHaveBeenCalledOnce();
@@ -194,6 +230,33 @@ describe('Focus transport session', () => {
     fixture.session.scheduleProjectionReloadRetry();
     await vi.advanceTimersByTimeAsync(250);
     expect(fixture.reloadProjection).toHaveBeenCalledTimes(3);
+  });
+
+  it('lets an authoritative reload supersede pending lightweight refreshes', async () => {
+    const fixture = transportFixture();
+
+    fixture.session.scheduleProjectionRefresh();
+    fixture.session.scheduleThreadListRefresh();
+    fixture.session.requestProjectionReload();
+
+    expect(fixture.reloadProjection).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fixture.refreshProjection).not.toHaveBeenCalled();
+    expect(fixture.refreshThreadList).not.toHaveBeenCalled();
+  });
+
+  it('cancels pending lightweight refreshes when the event connection closes', async () => {
+    const fixture = transportFixture();
+    fixture.session.connect();
+    fixture.sockets[0]?.handlers.open?.();
+    fixture.session.scheduleProjectionRefresh();
+    fixture.session.scheduleThreadListRefresh();
+
+    fixture.sockets[0]?.handlers.close?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(fixture.refreshProjection).not.toHaveBeenCalled();
+    expect(fixture.refreshThreadList).not.toHaveBeenCalled();
   });
 
   it('suspends fail-closed by cancelling every timer and rejecting stale callbacks', async () => {

@@ -26,7 +26,8 @@ export interface FocusTransportSessionCallbacks {
   probeEventAccess(): Promise<void>;
   onHandshakeProbeError(error: unknown): FocusHandshakeProbeDisposition;
   onConnectionError(error: unknown): void;
-  onConnected(reconnected: boolean): void;
+  onSocketOpened(): void;
+  onHandshakeReady(reconnected: boolean): void;
   onEvent(event: FocusProjectionEvent): void;
   onInvalidEvent(): void;
   refreshProjection(): Promise<void>;
@@ -76,6 +77,7 @@ export function createFocusTransportSession(
   let projectionReloadRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
   let projectionReloadRetryAttempt = 0;
+  let hasCompletedHandshake = false;
 
   function updateSnapshot(changes: Partial<FocusTransportSessionSnapshot>): void {
     mutableSnapshot.value = { ...mutableSnapshot.value, ...changes };
@@ -146,21 +148,22 @@ export function createFocusTransportSession(
     try {
       let nextSocket: WebSocket;
       let socketOpened = false;
+      let socketHandshakeReady = false;
       nextSocket = callbacks.openEventSocket({
         open: () => {
           if (socket !== nextSocket || generation !== socketGeneration) return;
           socketOpened = true;
-          const reconnected = mutableSnapshot.value.hasOpenedEventSocket;
           reconnectAttempt = 0;
           updateSnapshot({
             connection: 'connected',
             hasOpenedEventSocket: true,
           });
-          callbacks.onConnected(reconnected);
+          callbacks.onSocketOpened();
         },
         close: () => {
           if (socket !== nextSocket || generation !== socketGeneration) return;
           socket = null;
+          cancelProjectionReadTimers();
           updateSnapshot({ connection: 'disconnected' });
           if (mutableSnapshot.value.disposed || !callbacks.mayConnect()) return;
           if (socketOpened) scheduleReconnect(generation);
@@ -173,6 +176,16 @@ export function createFocusTransportSession(
         },
         event: (event) => {
           if (socket === nextSocket && generation === socketGeneration) {
+            if (event.type === 'hello' && !socketHandshakeReady) {
+              socketHandshakeReady = true;
+              const reconnected = hasCompletedHandshake;
+              hasCompletedHandshake = true;
+              // Gateway sends hello only after its document-connection
+              // transaction. Notify composition before projection handling so
+              // an authoritative hello reload can supersede a queued initial
+              // lightweight refresh.
+              callbacks.onHandshakeReady(reconnected);
+            }
             callbacks.onEvent(event);
           }
         },
@@ -184,13 +197,7 @@ export function createFocusTransportSession(
     }
   }
 
-  function suspend(): void {
-    socketGeneration += 1;
-    cancelReconnect();
-    cancelProjectionReloadRetry();
-    const currentSocket = socket;
-    socket = null;
-    currentSocket?.close();
+  function cancelProjectionReadTimers(): void {
     if (projectionRefreshTimer !== null) {
       clearTimeout(projectionRefreshTimer);
       projectionRefreshTimer = null;
@@ -199,6 +206,16 @@ export function createFocusTransportSession(
       clearTimeout(threadListRefreshTimer);
       threadListRefreshTimer = null;
     }
+  }
+
+  function suspend(): void {
+    socketGeneration += 1;
+    cancelReconnect();
+    cancelProjectionReloadRetry();
+    const currentSocket = socket;
+    socket = null;
+    currentSocket?.close();
+    cancelProjectionReadTimers();
     updateSnapshot({ connection: 'disconnected' });
   }
 
@@ -227,6 +244,10 @@ export function createFocusTransportSession(
 
   function requestProjectionReload(): void {
     if (mutableSnapshot.value.disposed) return;
+    // A composite reload subsumes queued lightweight reads. Leaving either
+    // timer armed would let older work advance request generations after the
+    // authoritative reload has already started.
+    cancelProjectionReadTimers();
     try {
       void Promise.resolve(callbacks.reloadProjection()).catch(callbacks.onScheduledTaskError);
     } catch (error) {

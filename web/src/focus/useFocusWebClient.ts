@@ -272,11 +272,19 @@ export function useFocusWebClient(api: FocusWebApiPort = new FocusWebApi()) {
       return 'retry';
     },
     onConnectionError: reportError,
-    onConnected: (reconnected) => {
+    onSocketOpened: () => {
       // Runtime health is an independent projection and every event socket
       // boundary is a freshness boundary for it.
       void refreshOperatorStatus();
+    },
+    onHandshakeReady: (reconnected) => {
+      // Gateway emits hello only after the document connection transaction.
+      // It is the freshness boundary for document-bound action capabilities;
+      // WebSocket open alone is not. A newer initial hello will synchronously
+      // replace this queued lightweight read with an authoritative reload in
+      // projection handling.
       if (reconnected) transportSession.requestProjectionReload();
+      else transportSession.scheduleProjectionRefresh();
     },
     onEvent: (event) => {
       runtimeNotices.handleEvent(event);
