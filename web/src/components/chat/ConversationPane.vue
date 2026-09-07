@@ -2,7 +2,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch, type ComponentPublicInstance } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { ActivationBadges, AppGoal, AppModel, AppSkill, ApprovalBlock, ChatTurn, ComposerCapabilities, ConversationStatus, FilePreviewRequest, PermissionMode, QueuedPromptView, QuestionResponse, SessionActionCapabilities, TaskItem, ThinkingLevel, TodoView, ToolCall, ToolMedia, TurnAttachment, UIQuestion, WorkspaceView } from '../../types';
+import type { ActivationBadges, AppGoal, AppModel, AppSkill, ApprovalBlock, ChatTurn, ComposerCapabilities, ComposerSurfaceMode, ConversationStatus, FilePreviewRequest, PermissionMode, QueuedPromptView, QuestionResponse, SessionActionCapabilities, TaskItem, ThinkingLevel, TodoView, ToolCall, ToolMedia, TurnAttachment, UIQuestion, WorkspaceView } from '../../types';
 import type { FileItem } from './MentionMenu.vue';
 import { useAttachmentUpload } from '../../composables/useAttachmentUpload';
 import ChatPane from './ChatPane.vue';
@@ -11,7 +11,9 @@ import Composer from './Composer.vue';
 import type { ComposerSubmission } from './composerSubmission';
 import ChatDock from './ChatDock.vue';
 import ConversationToc, { type ConversationTocItem } from './ConversationToc.vue';
+import Button from '../ui/Button.vue';
 import Icon from '../ui/Icon.vue';
+import IconButton from '../ui/IconButton.vue';
 import Spinner from '../ui/Spinner.vue';
 import Tooltip from '../ui/Tooltip.vue';
 import { getVisibleWorkspaces } from '../../lib/workspacePicker';
@@ -224,6 +226,58 @@ const showTargetlessComposer = computed(() => (
   && !props.sessionLoading
 ));
 
+// The pane owns the complete presentation state because it also owns both
+// Composer render sites, every imperative edit/focus entry, and the floating
+// restore action that must remain reachable while the Composer is hidden.
+const composerSurfaceMode = ref<ComposerSurfaceMode>('compact');
+const composerHasDraft = ref(false);
+const mobileComposerActionsRef = ref<HTMLElement | null>(null);
+const allowComposerHide = computed(() => (
+  props.mobile === true
+  && !showTargetlessComposer.value
+  && !props.sessionLoading
+  && props.turns.length > 0
+));
+
+function focusMobileComposerRestore(): void {
+  mobileComposerActionsRef.value
+    ?.querySelector<HTMLButtonElement>('.mobile-composer-restore')
+    ?.focus({ preventScroll: true });
+}
+
+function setComposerSurfaceMode(mode: ComposerSurfaceMode): void {
+  if (mode === 'hidden' && !allowComposerHide.value) return;
+  if (composerSurfaceMode.value === mode) return;
+  composerSurfaceMode.value = mode;
+  if (mode === 'hidden') void nextTick(focusMobileComposerRestore);
+}
+
+watch(() => props.composerSessionId ?? props.sessionId ?? '', () => {
+  setComposerSurfaceMode('compact');
+}, { flush: 'sync' });
+
+watch(() => props.mobile, () => {
+  setComposerSurfaceMode('compact');
+}, { flush: 'sync' });
+
+watch(allowComposerHide, (allowed) => {
+  if (!allowed) setComposerSurfaceMode('compact');
+});
+
+// File drag/paste is document-scoped in the shared attachment owner. Reveal at
+// drag entry or when a new item is added, but not when an in-flight upload merely
+// settles and keeps the same item count.
+watch(attachmentUpload.isDragOver, (dragging) => {
+  if (dragging && composerSurfaceMode.value === 'hidden') {
+    setComposerSurfaceMode('compact');
+  }
+});
+watch(() => attachmentUpload.attachments.value.length, (count, previous) => {
+  if (count > previous && composerSurfaceMode.value === 'hidden') {
+    setComposerSurfaceMode('compact');
+  }
+});
+
 const showDraftWorkspaceHint = computed(() => (
   !props.sessionId
   && props.composerReady
@@ -280,8 +334,9 @@ function loadComposerForEdit(
   if (!props.composerReady) return false;
   const composer = dockedComposerRef.value ?? emptyComposerRef.value;
   if (!composer) return false;
-  // loadForEdit returns false when the dock's nested Composer is hidden; the
-  // empty composer's loadForEdit returns void (treat as success).
+  // ChatDock returns false while a question/approval owns the visible input
+  // surface. A user-hidden Composer remains available and reveals itself first;
+  // the empty composer's loadForEdit returns void (treat as success).
   const ok = composer.loadForEdit(value);
   if (ok === false) return false;
   attachmentUpload.loadAttachments(attachments ?? []);
@@ -302,7 +357,8 @@ function loadComposerRecovery(
   if (!props.composerReady || !targetComposerSessionId
     || currentSessionId !== targetComposerSessionId) return false;
   const composer = dockedComposerRef.value ?? emptyComposerRef.value;
-  if (!composer || composer.loadRecovery(value) !== true) return false;
+  if (!composer) return false;
+  if (composer.loadRecovery(value) !== true) return false;
   attachmentUpload.loadAttachments(attachments ?? []);
   return true;
 }
@@ -522,6 +578,27 @@ const approvalBusy = computed<boolean>(() => {
   if (!a) return false;
   return !!props.pendingApprovalActions?.[a.approvalId];
 });
+
+const showComposerRestore = computed(() => (
+  allowComposerHide.value
+  && composerSurfaceMode.value === 'hidden'
+  && !pendingQuestion.value
+  && !pendingApproval.value
+));
+const showHiddenComposerInterrupt = computed(() => (
+  showComposerRestore.value
+  && (props.running || props.starting || props.interruptEnabled)
+  && props.composerCapabilities?.interrupt !== false
+));
+
+function restoreComposerSurface(): void {
+  setComposerSurfaceMode('compact');
+  void nextTick(() => dockedComposerRef.value?.focus());
+}
+
+function handleComposerDraftState(hasDraft: boolean): void {
+  composerHasDraft.value = hasDraft;
+}
 
 // ---------------------------------------------------------------------------
 // Auto-scroll: "following" state machine + "new messages" pill
@@ -1246,7 +1323,18 @@ onUnmounted(() => {
 });
 
 function focusComposer(): void {
-  (dockedComposerRef.value ?? emptyComposerRef.value)?.focus();
+  // A visible question/approval owns the input surface. ChatDock also rejects
+  // the imperative focus, but stop here before revealing a user-hidden
+  // Composer that cannot receive focus until that interaction is resolved.
+  if (pendingQuestion.value || pendingApproval.value) return;
+  const composer = dockedComposerRef.value ?? emptyComposerRef.value;
+  if (!composer) return;
+  if (composerSurfaceMode.value === 'hidden') {
+    setComposerSurfaceMode('compact');
+    void nextTick(() => composer.focus());
+    return;
+  }
+  composer.focus();
 }
 
 function clearComposerAttachmentsForSession(sessionId: string): void {
@@ -1323,6 +1411,35 @@ defineExpose({
       @load-more="loadMoreConversationToc?.()"
       @search="emit('searchConversation')"
     />
+
+    <div
+      v-if="showComposerRestore"
+      ref="mobileComposerActionsRef"
+      class="mobile-composer-actions"
+    >
+      <Button
+        class="mobile-composer-restore"
+        :class="{ 'has-draft': composerHasDraft }"
+        variant="secondary"
+        size="sm"
+        aria-controls="composer-input"
+        @click="restoreComposerSurface"
+      >
+        <Icon name="message" size="sm" />
+        <span>{{ t(composerHasDraft ? 'composer.continueInput' : 'composer.showInput') }}</span>
+        <span v-if="composerHasDraft" class="composer-draft-dot" aria-hidden="true" />
+      </Button>
+      <Tooltip v-if="showHiddenComposerInterrupt" :text="t('composer.interruptTitle')">
+        <IconButton
+          class="mobile-composer-stop"
+          size="lg"
+          :label="t('composer.interrupt')"
+          @click="handleInterrupt"
+        >
+          <Icon name="stop" size="sm" />
+        </IconButton>
+      </Tooltip>
+    </div>
 
     <div class="chat-layout">
       <div
@@ -1430,6 +1547,8 @@ defineExpose({
               hide-context
               :capabilities="composerCapabilities"
               :defer-submit-clear="deferSubmitClear"
+              :mobile="mobile"
+              :surface-mode="composerSurfaceMode"
               @submit="handleComposerSubmit"
               @command="emit('command', $event)"
               @interrupt="handleInterrupt"
@@ -1447,6 +1566,8 @@ defineExpose({
               @compact="emit('compact')"
               @pick-model="emit('pickModel')"
               @select-model="emit('selectModel', $event)"
+              @surface-mode-change="setComposerSurfaceMode"
+              @draft-state="handleComposerDraftState"
             />
             <div class="empty-spacer" />
           </template>
@@ -1527,6 +1648,8 @@ defineExpose({
         :mobile="mobile"
         :composer-capabilities="composerCapabilities"
         :defer-submit-clear="deferSubmitClear"
+        :surface-mode="composerSurfaceMode"
+        :allow-hide="allowComposerHide"
         @toggle-dock-panel="toggleDockPanel($event)"
         @close-dock-panel="closeDockPanel()"
         @open-agent="emit('openAgent', $event)"
@@ -1543,12 +1666,14 @@ defineExpose({
         @toggle-plan="emit('togglePlan')"
         @toggle-swarm="emit('toggleSwarm')"
         @toggle-goal="emit('toggleGoal')"
-          @open-btw="emit('command', '/btw')"
-          @create-goal="emit('createGoal', $event)"
-          @focus-goal="focusGoal"
-          @compact="emit('compact')"
-          @pick-model="emit('pickModel')"
-          @select-model="emit('selectModel', $event)"
+        @open-btw="emit('command', '/btw')"
+        @create-goal="emit('createGoal', $event)"
+        @focus-goal="focusGoal"
+        @compact="emit('compact')"
+        @pick-model="emit('pickModel')"
+        @select-model="emit('selectModel', $event)"
+        @surface-mode-change="setComposerSurfaceMode"
+        @draft-state="handleComposerDraftState"
       />
     </div>
 
@@ -1578,6 +1703,49 @@ defineExpose({
   height: 100%;
   position: relative;
   container-type: inline-size;
+}
+
+.mobile-composer-actions {
+  position: absolute;
+  z-index: var(--z-sticky);
+  top: var(--space-3);
+  left: max(var(--space-4), var(--safe-left));
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.mobile-composer-restore {
+  min-height: 44px;
+}
+
+.composer-draft-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.mobile-composer-stop {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-color: var(--color-danger-bd);
+  box-shadow: var(--shadow-xs);
+}
+
+.mobile-composer-stop:hover:not(:disabled) {
+  background: var(--color-danger);
+  color: var(--color-text-on-accent);
+  border-color: var(--color-danger);
+}
+
+@media (max-width: 360px) {
+  .mobile-composer-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
 }
 
 .panes {

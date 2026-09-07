@@ -1,5 +1,6 @@
 export default {
   placeholder: '输入消息…',
+  inputLabel: '消息输入框',
   send: '发送 ↵',
   queueLabel: '队列',
   placeholderRunning: 'Enter 插入当前回合',
@@ -24,7 +25,10 @@ export default {
   interrupt: '中断',
   interruptTitle: '中断当前操作',
   expandTitle: '展开输入框进行多行编辑',
-  collapseTitle: '收起输入框',
+  collapseTitle: '收拢为四行输入框',
+  hideInput: '隐藏输入框',
+  showInput: '显示输入框',
+  continueInput: '继续输入',
   emptyConversationTitle: 'Focus Web',
   emptyConversation: '还没有消息 —— 在下方输入开始对话',
   quickStartPlaceholder: '输入消息开始新对话…',

@@ -8,7 +8,7 @@ import MentionMenu from './MentionMenu.vue';
 import { buildSlashItems, parseSlash, SKILL_COMMAND_PREFIX } from '../../lib/slashCommands';
 import { formatTokens } from '../../lib/formatTokens';
 import type { FileItem } from './MentionMenu.vue';
-import type { ActivationBadges, AppGoal, AppModel, AppSkill, ComposerCapabilities, ConversationStatus, PermissionMode, PromptAttachment, ThinkingLevel } from '../../types';
+import type { ActivationBadges, AppGoal, AppModel, AppSkill, ComposerCapabilities, ComposerSurfaceMode, ConversationStatus, PermissionMode, PromptAttachment, ThinkingLevel } from '../../types';
 import {
   commitLevel,
   effectiveThinkingLevel,
@@ -83,6 +83,14 @@ const props = withDefaults(defineProps<{
   capabilities?: Partial<ComposerCapabilities>;
   /** Defer clearing until the consumer confirms a local request boundary accepted the payload. */
   deferSubmitClear?: boolean;
+  /** Mobile shell; keeps the surface controls reachable before the input grows. */
+  mobile?: boolean;
+  /** Parent-owned presentation state. Hidden keeps this component mounted. */
+  surfaceMode?: ComposerSurfaceMode;
+  /** Existing-thread mobile dock may hide; the targetless composer may not. */
+  allowHide?: boolean;
+  /** A question/approval has visual priority while this exact owner stays mounted. */
+  interactionPending?: boolean;
 }>(), {
   running: false,
   interruptEnabled: false,
@@ -97,6 +105,10 @@ const props = withDefaults(defineProps<{
   starredIds: () => [],
   skills: () => [],
   deferSubmitClear: false,
+  mobile: false,
+  surfaceMode: 'compact',
+  allowHide: false,
+  interactionPending: false,
 });
 
 const capabilities = computed<ComposerCapabilities>(() => ({
@@ -139,6 +151,8 @@ const emit = defineEmits<{
   compact: [];
   pickModel: [];
   selectModel: [modelId: string];
+  surfaceModeChange: [mode: ComposerSurfaceMode];
+  draftState: [hasDraft: boolean];
 }>();
 
 const { t, locale } = useI18n();
@@ -146,7 +160,7 @@ const { t, locale } = useI18n();
 // ---------------------------------------------------------------------------
 // Textarea + per-session draft persistence — see useComposerDraft.
 // ---------------------------------------------------------------------------
-const { text, textareaRef, autosize, loadForEdit, clearDraft } = useComposerDraft({
+const { text, textareaRef, autosize, loadForEdit: loadDraftForEdit, clearDraft } = useComposerDraft({
   sessionId: () => props.sessionId,
 });
 const submissionPending = ref(false);
@@ -157,15 +171,22 @@ let submissionOwnerMounted = true;
 // gesture in both layouts; Shift+Enter inserts a newline. It auto-collapses
 // after a successful send. See handleKeydown / handleSubmit.
 // ---------------------------------------------------------------------------
-const expanded = ref(false);
+const expanded = computed(() => props.surfaceMode === 'expanded');
+
+function requestSurfaceMode(mode: ComposerSurfaceMode): void {
+  if (mode === props.surfaceMode) return;
+  emit('surfaceModeChange', mode);
+}
+
 function toggleExpand(): void {
-  expanded.value = !expanded.value;
+  requestSurfaceMode(expanded.value ? 'compact' : 'expanded');
   // Re-fit the textarea after the min/max-height swap between modes, then
   // recompute growth against the *post-toggle* resting height. Without this,
-  // collapsing would keep the isGrown measured against the expanded 70vh
+  // collapsing would keep the isGrown measured against the expanded editor's
   // min-height, hiding the toggle even though the collapsed draft is still
   // multi-line. (This does not affect the expanded state itself — once
-  // expanded, it stays at 70vh until toggled back or sent.)
+  // expanded, it stays at the responsive expanded height until toggled back or
+  // sent.)
   void nextTick(() => {
     autosize();
     recomputeGrown();
@@ -177,19 +198,20 @@ function toggleExpand(): void {
 }
 
 // Collapse the expanded editor after a successful send/steer and re-fit the
-// textarea once the 70vh min-height is gone. On image-only sends the text is
-// already empty, so the draft watcher never re-runs autosize — without this,
-// the textarea keeps the inline height measured at 70vh and the collapsed cap
-// (1/4 viewport) leaves an oversized empty box until the next keystroke.
+// textarea once the expanded min-height is gone. On image-only sends the text
+// is already empty, so the draft watcher never re-runs autosize — without this,
+// the textarea keeps the inline height measured in expanded mode and the
+// collapsed cap (1/4 viewport on desktop) leaves an oversized empty box until
+// the next keystroke.
 function collapseAndRefit(): void {
   if (!expanded.value) return;
-  expanded.value = false;
+  requestSurfaceMode('compact');
   void nextTick(autosize);
 }
 
-// The expand toggle is hidden at the resting height and only appears once the
-// box has grown past it (multi-line content) — keeps the empty composer
-// uncluttered. While expanded it always shows so the user can collapse back.
+// Desktop keeps the expand toggle hidden at the resting height until content
+// grows. Mobile always exposes it so a short draft can deliberately enter the
+// long-form editor; while expanded it remains available to collapse back.
 //
 // The resting height equals the textarea's computed `min-height` (set in
 // style.css). We read it from the element instead of hard-coding.
@@ -208,14 +230,6 @@ watch(text, () => {
   // Registered after useComposerDraft's autosize watcher, so the inline height
   // already reflects the latest content when this reads scrollHeight.
   void nextTick(recomputeGrown);
-});
-
-// The component instance is reused across session switches (it is not keyed by
-// session), so reset the per-session expanded preference when the active
-// session changes. Without this, expanding in one chat would leave the next
-// session's draft stuck in the tall editor.
-watch(() => props.sessionId, () => {
-  expanded.value = false;
 });
 
 // ---------------------------------------------------------------------------
@@ -303,6 +317,9 @@ const {
   handleDrop,
   clearAfterSubmit,
 } = attachmentUpload;
+
+const hasDraft = computed(() => text.value.length > 0 || attachments.value.length > 0);
+watch(hasDraft, (present) => emit('draftState', present), { immediate: true });
 const submissionRevision = useComposerSubmissionRevision({
   text,
   attachments,
@@ -334,11 +351,22 @@ onUnmounted(() => {
 // Submit / keydown
 // ---------------------------------------------------------------------------
 
-// loadForEdit comes from useComposerDraft (it lives next to the text state).
+// Imperative edit/focus paths reveal the parent-owned compact surface before
+// scheduling focus, so copying history or restoring a draft never targets an
+// invisible textarea.
+function loadForEdit(value: string): void {
+  requestSurfaceMode('compact');
+  loadDraftForEdit(value);
+}
+
 function focus(): void {
-  // preventScroll keeps the pane from jumping if the composer is already in view
-  // or if focus is triggered during an animation/transition.
-  textareaRef.value?.focus({ preventScroll: true });
+  requestSurfaceMode('compact');
+  void nextTick(() => {
+    autosize();
+    // preventScroll keeps the pane from jumping if the composer is already in
+    // view or if focus is triggered during a surface transition.
+    textareaRef.value?.focus({ preventScroll: true });
+  });
 }
 
 /** Atomically refuse recovery when this exact Composer already has newer work. */
@@ -740,6 +768,42 @@ function toggleModes(): void {
   modesOpen.value = true;
   setTimeout(() => document.addEventListener('mousedown', onModesDocClick), 0);
 }
+
+function closeSurfaceOverlays(): void {
+  slashOpen.value = false;
+  mentionOpen.value = false;
+  closeDropdown();
+  closePermDropdown();
+  closeModes();
+  closeAttachmentPreview();
+}
+
+function hideComposer(): void {
+  if (!props.allowHide || props.starting || submissionPending.value) return;
+  textareaRef.value?.blur();
+  closeSurfaceOverlays();
+  requestSurfaceMode('hidden');
+}
+
+watch(
+  [() => props.surfaceMode, () => props.mobile, () => props.interactionPending],
+  ([mode, , interactionPending]) => {
+    if (mode === 'hidden' || interactionPending) {
+      textareaRef.value?.blur();
+      closeSurfaceOverlays();
+      return;
+    }
+    // Parent-driven resets and desktop/mobile transitions can change the CSS
+    // bounds without passing through toggleExpand. Re-measure so an inline
+    // height captured in a larger mode cannot reappear after a viewport round
+    // trip (for example desktop expanded -> mobile compact -> desktop compact).
+    void nextTick(() => {
+      autosize();
+      recomputeGrown();
+    });
+  },
+);
+
 // Permission modes
 const PERM_MODES: { mode: PermissionMode; color: string; labelKey: string; descKey: string }[] = [
   { mode: 'manual', color: 'var(--dim)', labelKey: 'status.permissionManual', descKey: 'status.permissionManualDesc' },
@@ -869,7 +933,11 @@ function selectModel(modelId: string): void {
 <template>
   <div
     class="composer"
-    :class="{ 'drag-over': composerReady && isDragOver, expanded }"
+    :class="{
+      'drag-over': composerReady && isDragOver,
+      expanded,
+      'surface-hidden': surfaceMode === 'hidden',
+    }"
     @dragover="handleDragOver"
     @dragleave="handleDragLeave"
     @drop="handleDrop"
@@ -931,10 +999,12 @@ function selectModel(modelId: string): void {
 
         <div class="input-row">
           <textarea
+            id="composer-input"
             ref="textareaRef"
             v-model="text"
             class="ph"
             :placeholder="placeholder"
+            :aria-label="t('composer.inputLabel')"
             :disabled="starting || !composerReady"
             rows="1"
             @keydown="handleKeydown"
@@ -942,16 +1012,31 @@ function selectModel(modelId: string): void {
             @compositionend="handleCompositionEnd"
             @input="handleInput"
           />
-          <button
-            v-if="expanded || isGrown"
-            class="expand-btn"
-            type="button"
-            :aria-label="expanded ? t('composer.collapseTitle') : t('composer.expandTitle')"
-            @click="toggleExpand"
-          >
-            <Icon v-if="expanded" name="collapse" size="sm" />
-            <Icon v-else name="expand" size="sm" />
-          </button>
+          <div class="composer-surface-actions">
+            <button
+              v-if="mobile || expanded || isGrown"
+              class="expand-btn"
+              type="button"
+              aria-controls="composer-input"
+              :aria-expanded="expanded"
+              :aria-label="expanded ? t('composer.collapseTitle') : t('composer.expandTitle')"
+              @click="toggleExpand"
+            >
+              <Icon v-if="expanded" name="collapse" size="sm" />
+              <Icon v-else name="expand" size="sm" />
+            </button>
+            <button
+              v-if="allowHide"
+              class="hide-input-btn"
+              type="button"
+              aria-controls="composer-input"
+              :aria-label="t('composer.hideInput')"
+              :disabled="starting || submissionPending"
+              @click="hideComposer"
+            >
+              <Icon name="chevron-down" size="sm" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1261,6 +1346,10 @@ function selectModel(modelId: string): void {
   transition: background 0.12s;
 }
 
+.composer.surface-hidden {
+  display: none;
+}
+
 .composer.drag-over {
   background: var(--color-accent-soft);
 }
@@ -1395,8 +1484,16 @@ function selectModel(modelId: string): void {
   gap: var(--space-2);
 }
 
-/* Expand toggle — top-right of the textarea */
-.expand-btn {
+/* Presentation controls — a compact desktop toggle and a 44px mobile rail. */
+.composer-surface-actions {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.expand-btn,
+.hide-input-btn {
   width: 22px;
   height: 22px;
   display: flex;
@@ -1411,14 +1508,21 @@ function selectModel(modelId: string): void {
   transition: background 0.12s, color 0.12s;
 }
 
-.expand-btn:hover {
+.expand-btn:hover,
+.hide-input-btn:hover {
   background: var(--panel2);
   color: var(--color-text);
 }
 
-.expand-btn:focus-visible {
+.expand-btn:focus-visible,
+.hide-input-btn:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+.hide-input-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .ph {
@@ -1449,10 +1553,11 @@ function selectModel(modelId: string): void {
   color: var(--color-text);
 }
 
-/* Expanded editor: a tall composing area at ~70% of the viewport — clearly
-   larger than the auto-grow cap, while leaving room for the chat header, the
-   bottom toolbar row, and padding so nothing gets clipped. Content beyond it
-   scrolls internally. */
+/* Expanded editor: a tall composing area at ~70% of a desktop viewport —
+   clearly larger than the auto-grow cap, while leaving room for the chat
+   header, bottom toolbar row, and padding. Mobile uses a shorter responsive
+   bound below so the conversation remains readable. Content beyond it scrolls
+   internally. */
 .composer.expanded .ph {
   min-height: 70vh;
   max-height: 70vh;
@@ -2170,6 +2275,11 @@ function selectModel(modelId: string): void {
     gap: 6px;
     min-width: 0;
   }
+  .expand-btn,
+  .hide-input-btn {
+    width: 44px;
+    height: 44px;
+  }
   /* Send → 36px round (hide the SVG arrow, show only the ::after glyph) */
   .send {
     width: var(--composer-send-size);
@@ -2231,12 +2341,23 @@ function selectModel(modelId: string): void {
     max-width: calc(100vw - 24px);
   }
 
-  /* Bump mobile font sizes +2px and pin input at 16px to prevent iOS zoom.
-     Height (min 36px / max one quarter of the viewport) is inherited from the
-     base .ph rule so the box auto-grows the same way on touch and desktop. */
+  /* Pin input at 16px to prevent iOS zoom. Compact mode normally exposes four
+     lines, with a smaller bound on a short dynamic viewport; additional content
+     scrolls internally. The expand control remains available for deliberate
+     long-form editing. */
   .ph {
     /* Pinned at 16px to prevent iOS auto-zoom on focus (not part of UI font scale). */
     font-size: 16px;
+    min-height: min(96px, 16dvh);
+    max-height: min(96px, 16dvh);
+    overscroll-behavior-y: contain;
+  }
+  /* Even deliberate expansion leaves a substantial reading area on phones.
+     `dvh` also follows browser chrome and the on-screen keyboard in browsers
+     that resize the dynamic viewport. */
+  .composer.expanded .ph {
+    min-height: min(280px, 34dvh);
+    max-height: min(280px, 34dvh);
   }
   .model-pill,
   .attach-btn {

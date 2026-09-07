@@ -1,5 +1,6 @@
 export default {
   placeholder: 'Type a message…',
+  inputLabel: 'Message input',
   send: 'Send ↵',
   queueLabel: 'Queue',
   placeholderRunning: 'Enter steers the current turn',
@@ -24,7 +25,10 @@ export default {
   interrupt: 'Interrupt',
   interruptTitle: 'Interrupt current operation',
   expandTitle: 'Expand input for multi-line editing',
-  collapseTitle: 'Collapse input',
+  collapseTitle: 'Return to the four-line input',
+  hideInput: 'Hide input',
+  showInput: 'Show input',
+  continueInput: 'Continue input',
   emptyConversationTitle: 'Focus Web',
   emptyConversation: 'No messages yet — type below to start the conversation',
   quickStartPlaceholder: 'Type a message to start a new conversation…',

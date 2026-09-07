@@ -17,6 +17,9 @@
     },
     "web/src/components/chat/Composer.vue": {
       "category": "upstream_derived"
+    },
+    "web/src/components/chat/ConversationPane.vue": {
+      "category": "upstream_derived"
     }
   }
 }

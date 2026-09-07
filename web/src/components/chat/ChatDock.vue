@@ -5,7 +5,7 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { ActivationBadges, AppGoal, AppModel, AppSkill, ApprovalBlock, ComposerCapabilities, ConversationStatus, PermissionMode, QuestionResponse, TaskItem, ThinkingLevel, TodoView, UIQuestion } from '../../types';
+import type { ActivationBadges, AppGoal, AppModel, AppSkill, ApprovalBlock, ComposerCapabilities, ComposerSurfaceMode, ConversationStatus, PermissionMode, QuestionResponse, TaskItem, ThinkingLevel, TodoView, UIQuestion } from '../../types';
 import type { FileItem } from './MentionMenu.vue';
 import type { AttachmentUploadController } from '../../composables/useAttachmentUpload';
 import Composer from './Composer.vue';
@@ -68,10 +68,14 @@ const props = withDefaults(defineProps<{
   /** Whether this frontend may answer the currently visible interaction. */
   interactionEnabled?: boolean;
   mobile?: boolean;
+  surfaceMode?: ComposerSurfaceMode;
+  allowHide?: boolean;
   composerCapabilities?: Partial<ComposerCapabilities>;
   deferSubmitClear?: boolean;
 }>(), {
   composerReady: true,
+  surfaceMode: 'compact',
+  allowHide: false,
 });
 
 const emit = defineEmits<{
@@ -105,11 +109,13 @@ const emit = defineEmits<{
   'close-dock-panel': [];
   /** A background subagent chip was clicked — open its live detail panel. */
   openAgent: [taskId: string];
+  surfaceModeChange: [mode: ComposerSurfaceMode];
+  draftState: [hasDraft: boolean];
 }>();
 
 const { t } = useI18n();
 const composerRef = ref<{
-  loadForEdit: (value: string) => boolean;
+  loadForEdit: (value: string) => void;
   loadRecovery: (value: string) => boolean;
   focus: () => void;
 } | null>(null);
@@ -117,20 +123,26 @@ const workPanelRef = ref<HTMLElement | null>(null);
 const workbarRef = ref<HTMLElement | null>(null);
 
 function loadForEdit(value: string): boolean {
-  // The nested Composer is only rendered in ChatDock's v-else — when a pending
-  // question or approval is shown it is unmounted, so report unavailability so
-  // the caller doesn't dequeue a prompt it can't actually load.
-  if (!composerRef.value) return false;
-  composerRef.value.loadForEdit(value);
+  // A pending interaction visually replaces the Composer but keeps the exact
+  // submission owner mounted until an in-flight mutation settles. Keep edit
+  // handoff unavailable so callers never dequeue into that hidden surface.
+  const composer = availableComposer();
+  if (!composer) return false;
+  composer.loadForEdit(value);
   return true;
 }
 
 function loadRecovery(value: string): boolean {
-  return composerRef.value?.loadRecovery(value) === true;
+  return availableComposer()?.loadRecovery(value) === true;
 }
 
 function focus(): void {
-  composerRef.value?.focus();
+  availableComposer()?.focus();
+}
+
+function availableComposer(): typeof composerRef.value {
+  if (props.pendingQuestion || props.pendingApproval) return null;
+  return composerRef.value;
 }
 
 function onDocumentMouseDown(event: MouseEvent): void {
@@ -166,7 +178,14 @@ defineExpose({
 </script>
 
 <template>
-  <div class="chat-dock" :class="[mobile ? 'align-mobile' : 'align-center']" @click.stop>
+  <div
+    class="chat-dock"
+    :class="[
+      mobile ? 'align-mobile' : 'align-center',
+      { 'composer-hidden': surfaceMode === 'hidden' && !pendingQuestion && !pendingApproval },
+    ]"
+    @click.stop
+  >
     <Transition name="dock-panel">
       <div
         ref="workPanelRef"
@@ -273,7 +292,7 @@ defineExpose({
       @decide="emit('approval', pendingApproval!.approvalId, $event)"
     />
     <Composer
-      v-else
+      v-show="!pendingQuestion && !pendingApproval"
       ref="composerRef"
       :session-id="sessionId"
       :composer-ready="composerReady"
@@ -297,6 +316,10 @@ defineExpose({
       :starting="starting"
       :capabilities="composerCapabilities"
       :defer-submit-clear="deferSubmitClear"
+      :mobile="mobile"
+      :surface-mode="surfaceMode"
+      :allow-hide="allowHide"
+      :interaction-pending="!!pendingQuestion || !!pendingApproval"
       @submit="emit('submit', $event)"
       @command="emit('command', $event)"
       @interrupt="emit('interrupt')"
@@ -313,6 +336,8 @@ defineExpose({
       @compact="emit('compact')"
       @pick-model="emit('pickModel')"
       @select-model="emit('selectModel', $event)"
+      @surface-mode-change="emit('surfaceModeChange', $event)"
+      @draft-state="emit('draftState', $event)"
     />
   </div>
 </template>
@@ -402,6 +427,9 @@ defineExpose({
        workbar read --dock-inline-* so the inset is applied exactly once. */
     --dock-inline-left: max(12px, var(--safe-left));
     --dock-inline-right: max(12px, var(--safe-right));
+  }
+  .chat-dock.align-mobile.composer-hidden {
+    padding-bottom: max(var(--space-3), var(--safe-bottom));
   }
   .dock-work-panel {
     left: 10px;

@@ -432,6 +432,9 @@ export type ConnectionState = 'connecting' | 'connected' | 'disconnected';
 /** Permission mode (client-side policy). */
 export type PermissionMode = 'manual' | 'auto' | 'yolo';
 
+/** Composer presentation. ConversationPane is the single mutable owner. */
+export type ComposerSurfaceMode = 'compact' | 'expanded' | 'hidden';
+
 /** Product-level gates for composer controls whose backend semantics differ. */
 export interface ComposerCapabilities {
   commands: boolean;
