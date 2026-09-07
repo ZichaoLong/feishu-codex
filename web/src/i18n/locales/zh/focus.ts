@@ -21,6 +21,8 @@ export default {
   conversationSearchNext: '下一页结果',
   resizeDetailPanelAria: '调整详情面板宽度',
   retry: '重试',
+  enterReadingMode: '进入阅读模式',
+  exitReadingMode: '退出阅读模式',
   newConversation: '新对话',
   newConversationCwdHint: '工作目录：{path}。可从上方选择已有工作区，或输入 /cd <目录> 使用 Focus 主机上的其他目录；只影响下一次新会话。',
   cdUsage: '请使用 /cd <Focus 主机上真实存在的目录>。它只为下一次新会话选择工作目录。',

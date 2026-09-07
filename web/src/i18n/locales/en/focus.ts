@@ -21,6 +21,8 @@ export default {
   conversationSearchNext: 'Next results',
   resizeDetailPanelAria: 'Resize detail panel width',
   retry: 'Retry',
+  enterReadingMode: 'Enter reading mode',
+  exitReadingMode: 'Exit reading mode',
   newConversation: 'New conversation',
   newConversationCwdHint: 'Working directory: {path}. Choose an existing workspace above, or enter /cd <directory> to use another directory on the Focus host; this affects only the next new conversation.',
   cdUsage: 'Use /cd <an existing directory on this Focus host>. It only selects the workspace for the next new conversation.',

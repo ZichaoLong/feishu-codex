@@ -35,6 +35,7 @@ const props = defineProps<{
   copied?: boolean;
   sessionActions?: boolean;
   sessionActionCapabilities?: Partial<SessionActionCapabilities>;
+  readingModeEnabled?: boolean;
 }>();
 
 const actionCapabilities = computed<SessionActionCapabilities>(() => ({
@@ -57,6 +58,7 @@ const emit = defineEmits<{
   exportSession: [id: string];
   reviewSession: [id: string];
   goalSession: [id: string];
+  enterReadingMode: [];
 }>();
 
 const ahead = computed(() => props.ahead ?? 0);
@@ -369,6 +371,18 @@ function setGoal(): void {
       <span>PR #{{ pr.number }} · {{ prStateLabel(pr.state) }}</span>
     </button>
 
+    <IconButton
+      v-if="readingModeEnabled"
+      class="ch-reading-mode"
+      size="sm"
+      :label="t('focus.enterReadingMode')"
+      :aria-pressed="false"
+      data-reading-mode-toggle
+      @click="emit('enterReadingMode')"
+    >
+      <Icon name="file-text" size="sm" />
+    </IconButton>
+
   </header>
 </template>
 
@@ -464,6 +478,7 @@ function setGoal(): void {
 /* Overflow "…" trigger — IconButton (md). The "open" state keeps the
    sunken highlight while the menu is showing. */
 .ch-act-more.open { background: var(--color-surface-sunken); color: var(--color-text); }
+.ch-reading-mode { width: 30px; height: 30px; }
 
 /* GitHub PR badge — semantic state colors aligned with GitHub
    (open=green, merged=purple, closed=red, draft=gray). */

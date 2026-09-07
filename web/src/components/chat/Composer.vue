@@ -153,6 +153,7 @@ const emit = defineEmits<{
   selectModel: [modelId: string];
   surfaceModeChange: [mode: ComposerSurfaceMode];
   draftState: [hasDraft: boolean];
+  requestInput: [];
 }>();
 
 const { t, locale } = useI18n();
@@ -355,11 +356,13 @@ onUnmounted(() => {
 // scheduling focus, so copying history or restoring a draft never targets an
 // invisible textarea.
 function loadForEdit(value: string): void {
+  emit('requestInput');
   requestSurfaceMode('compact');
   loadDraftForEdit(value);
 }
 
 function focus(): void {
+  emit('requestInput');
   requestSurfaceMode('compact');
   void nextTick(() => {
     autosize();

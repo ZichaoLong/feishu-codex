@@ -79,6 +79,10 @@ const props = withDefaults(defineProps<{
   fastMoon?: boolean;
   /** Mobile shell: compact chrome. */
   mobile?: boolean;
+  /** Page-level reading mode hides shell chrome while keeping transcript owners mounted. */
+  readingMode?: boolean;
+  /** Whether this loaded conversation can enter page-level reading mode. */
+  readingModeEnabled?: boolean;
   /** True while switching sessions and the turns array is not yet loaded. */
   sessionLoading?: boolean;
   /** Live compaction state of the active session (non-null while running). */
@@ -140,6 +144,8 @@ const props = withDefaults(defineProps<{
   toolDetailAvailable?: boolean;
 }>(), {
   composerReady: true,
+  readingMode: false,
+  readingModeEnabled: false,
 });
 
 const emit = defineEmits<{
@@ -191,6 +197,8 @@ const emit = defineEmits<{
   exportSession: [id: string];
   reviewSession: [id: string];
   goalSession: [id: string];
+  enterReadingMode: [];
+  exitReadingMode: [];
 }>();
 
 // One attachment owner spans both mutually exclusive Composer render sites.
@@ -268,11 +276,13 @@ watch(allowComposerHide, (allowed) => {
 // drag entry or when a new item is added, but not when an in-flight upload merely
 // settles and keeps the same item count.
 watch(attachmentUpload.isDragOver, (dragging) => {
+  if (dragging && props.readingMode) emit('exitReadingMode');
   if (dragging && composerSurfaceMode.value === 'hidden') {
     setComposerSurfaceMode('compact');
   }
 });
 watch(() => attachmentUpload.attachments.value.length, (count, previous) => {
+  if (count > previous && props.readingMode) emit('exitReadingMode');
   if (count > previous && composerSurfaceMode.value === 'hidden') {
     setComposerSurfaceMode('compact');
   }
@@ -424,6 +434,9 @@ function closeDockPanel(): void {
 
 watch(hasDockWork, (hasWork) => {
   if (!hasWork) closeDockPanel();
+});
+watch(() => props.readingMode, (reading) => {
+  if (reading) closeDockPanel();
 });
 
 function tocTitle(turn: ChatTurn): string {
@@ -581,6 +594,7 @@ const approvalBusy = computed<boolean>(() => {
 
 const showComposerRestore = computed(() => (
   allowComposerHide.value
+  && !props.readingMode
   && composerSurfaceMode.value === 'hidden'
   && !pendingQuestion.value
   && !pendingApproval.value
@@ -1362,11 +1376,12 @@ defineExpose({
 </script>
 
 <template>
-  <section class="con" :class="{ mobile }">
+  <section class="con" :class="{ mobile, 'reading-mode': readingMode }">
     <!-- Chat context header: workspace/session, git status, open-in-editor,
          copy-all, PR. Hidden for the empty-composer (no session context yet). -->
     <ChatHeader
       v-if="!mobile && !showTargetlessComposer"
+      v-show="!readingMode"
       :session-id="sessionId"
       :workspace-name="workspaceName"
       :workspace-root="workspaceRoot"
@@ -1381,6 +1396,7 @@ defineExpose({
       :copied="copyConversationCopied"
       :session-actions="sessionActions"
       :session-action-capabilities="sessionActionCapabilities"
+      :reading-mode-enabled="readingModeEnabled"
       @open-changes="emit('openChanges')"
       @copy-all="chatPaneRef?.copyConversation()"
       @copy-final-summary="chatPaneRef?.copyFinalSummary()"
@@ -1391,12 +1407,13 @@ defineExpose({
       @export-session="(id) => emit('exportSession', id)"
       @review-session="(id) => emit('reviewSession', id)"
       @goal-session="(id) => emit('goalSession', id)"
+      @enter-reading-mode="emit('enterReadingMode')"
     />
 
     <!-- Conversation outline: right edge rail of vertical bars (one per user
          query); hover to expand a labeled panel. -->
     <ConversationToc
-      v-if="conversationToc"
+      v-if="conversationToc && !readingMode"
       :items="displayedConversationTocItems"
       :active-turn-id="activeTurnId"
       :mobile="mobile"
@@ -1432,7 +1449,7 @@ defineExpose({
       <Tooltip v-if="showHiddenComposerInterrupt" :text="t('composer.interruptTitle')">
         <IconButton
           class="mobile-composer-stop"
-          size="lg"
+          size="sm"
           :label="t('composer.interrupt')"
           @click="handleInterrupt"
         >
@@ -1568,6 +1585,7 @@ defineExpose({
               @select-model="emit('selectModel', $event)"
               @surface-mode-change="setComposerSurfaceMode"
               @draft-state="handleComposerDraftState"
+              @request-input="emit('exitReadingMode')"
             />
             <div class="empty-spacer" />
           </template>
@@ -1608,6 +1626,7 @@ defineExpose({
       </div>
       <ChatDock
         v-if="!showTargetlessComposer"
+        v-show="!readingMode"
         :ref="bindChatDock"
         :style="chatDockStyle"
         :session-id="composerSessionId ?? sessionId"
@@ -1648,8 +1667,8 @@ defineExpose({
         :mobile="mobile"
         :composer-capabilities="composerCapabilities"
         :defer-submit-clear="deferSubmitClear"
-        :surface-mode="composerSurfaceMode"
-        :allow-hide="allowComposerHide"
+        :surface-mode="readingMode ? 'hidden' : composerSurfaceMode"
+        :allow-hide="allowComposerHide && !readingMode"
         @toggle-dock-panel="toggleDockPanel($event)"
         @close-dock-panel="closeDockPanel()"
         @open-agent="emit('openAgent', $event)"
@@ -1674,6 +1693,7 @@ defineExpose({
         @select-model="emit('selectModel', $event)"
         @surface-mode-change="setComposerSurfaceMode"
         @draft-state="handleComposerDraftState"
+        @request-input="emit('exitReadingMode')"
       />
     </div>
 
@@ -1682,7 +1702,7 @@ defineExpose({
       <button
         v-if="showPill"
         class="newmsg-pill"
-        :style="{ bottom: `${dockHeight + 12}px` }"
+        :style="{ bottom: `${readingMode ? 12 : dockHeight + 12}px` }"
         :aria-label="t('conversation.jumpToLatestAria')"
         @click="handleReturnToLiveTail"
       >
@@ -1715,10 +1735,6 @@ defineExpose({
   gap: var(--space-2);
 }
 
-.mobile-composer-restore {
-  min-height: 44px;
-}
-
 .composer-draft-dot {
   width: 6px;
   height: 6px;
@@ -1728,6 +1744,8 @@ defineExpose({
 }
 
 .mobile-composer-stop {
+  width: 30px;
+  height: 30px;
   background: var(--color-danger-soft);
   color: var(--color-danger);
   border-color: var(--color-danger-bd);

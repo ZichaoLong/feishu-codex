@@ -111,6 +111,7 @@ const emit = defineEmits<{
   openAgent: [taskId: string];
   surfaceModeChange: [mode: ComposerSurfaceMode];
   draftState: [hasDraft: boolean];
+  requestInput: [];
 }>();
 
 const { t } = useI18n();
@@ -338,6 +339,7 @@ defineExpose({
       @select-model="emit('selectModel', $event)"
       @surface-mode-change="emit('surfaceModeChange', $event)"
       @draft-state="emit('draftState', $event)"
+      @request-input="emit('requestInput')"
     />
   </div>
 </template>

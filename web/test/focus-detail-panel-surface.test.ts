@@ -141,7 +141,8 @@ describe('Focus detail panel presentation state', () => {
     expect(app).toContain(':class="{ fullscreen: detailPanelFullscreen }"');
     expect(app).toContain('watch(detailPayloadAvailable');
     expect(app).toContain('resolveFocusThinkingText(');
-    expect(app).toContain('watch(client.activeThreadId, closeDetail)');
+    expect(app).toContain(`watch(client.activeThreadId, (threadId) => {
+  closeDetail();`);
     expect(app).toContain("detailPanelLoadPromise = import('./FocusDetailPanel.vue')");
     expect(app).toContain("selectDetail({ kind: 'runtimeDetails' })");
     expect(app).toContain(':runtime-details-presentation="runtimeDetailsPresentation"');

@@ -118,7 +118,8 @@ describe('Focus Composer input surface', () => {
     expect(pane).toContain(
       "const composerSurfaceMode = ref<ComposerSurfaceMode>('compact');",
     );
-    expect(pane.match(/:surface-mode="composerSurfaceMode"/gu)).toHaveLength(2);
+    expect(pane.match(/:surface-mode="composerSurfaceMode"/gu)).toHaveLength(1);
+    expect(pane).toContain(':surface-mode="readingMode ? \'hidden\' : composerSurfaceMode"');
     expect(pane.match(/@surface-mode-change="setComposerSurfaceMode"/gu)).toHaveLength(2);
     expect(pane.match(/@draft-state="handleComposerDraftState"/gu)).toHaveLength(2);
     expect(dock).toContain(':surface-mode="surfaceMode"');
@@ -160,10 +161,10 @@ describe('Focus Composer input surface', () => {
       /watch\(\(\) => props\.composerSessionId[\s\S]*?composerHasDraft\.value = false;/u,
     );
     expect(composer).toMatch(
-      /function loadForEdit\(value: string\): void \{\s+requestSurfaceMode\('compact'\);/u,
+      /function loadForEdit\(value: string\): void \{\s+emit\('requestInput'\);\s+requestSurfaceMode\('compact'\);/u,
     );
     expect(composer).toMatch(
-      /function focus\(\): void \{\s+requestSurfaceMode\('compact'\);/u,
+      /function focus\(\): void \{\s+emit\('requestInput'\);\s+requestSurfaceMode\('compact'\);/u,
     );
     expect(composer).toContain('loadForEdit(value);\n  return true;');
   });
@@ -173,6 +174,7 @@ describe('Focus Composer input surface', () => {
     const dock = source('../src/components/chat/ChatDock.vue');
     const composer = source('../src/components/chat/Composer.vue');
     const toc = source('../src/components/chat/ConversationToc.vue');
+    const button = source('../src/components/ui/Button.vue');
     const en = source('../src/i18n/locales/en/composer.ts');
     const zh = source('../src/i18n/locales/zh/composer.ts');
 
@@ -180,7 +182,7 @@ describe('Focus Composer input surface', () => {
     expect(composer).toContain(':disabled="starting || submissionPending"');
     expect(composer).toContain('@click="hideComposer"');
     expect(dock).toContain(':allow-hide="allowHide"');
-    expect(pane.match(/:allow-hide="allowComposerHide"/gu)).toHaveLength(1);
+    expect(pane).toContain(':allow-hide="allowComposerHide && !readingMode"');
     expect(pane).toContain(`const allowComposerHide = computed(() => (
   props.mobile === true
   && !showTargetlessComposer.value
@@ -194,7 +196,7 @@ describe('Focus Composer input surface', () => {
     expect(pane).toContain(':class="{ \'has-draft\': composerHasDraft }"');
     expect(pane).toContain("t(composerHasDraft ? 'composer.continueInput' : 'composer.showInput')");
     expect(pane).toContain('class="mobile-composer-stop"');
-    expect(pane).toContain('class="mobile-composer-stop"\n          size="lg"');
+    expect(pane).toContain('class="mobile-composer-stop"\n          size="sm"');
     expect(pane).toContain('@click="handleInterrupt"');
     expect(pane).toContain(`const showHiddenComposerInterrupt = computed(() => (
   showComposerRestore.value
@@ -205,7 +207,11 @@ describe('Focus Composer input surface', () => {
     expect(pane).toContain('left: max(var(--space-4), var(--safe-left));');
     expect(toc).toContain('.toc-compact-trigger.is-mobile { top: var(--space-3); }');
     expect(toc).toContain('right: var(--space-4);');
-    expect(pane).toContain('.mobile-composer-restore {\n  min-height: 44px;\n}');
+    expect(button).toContain('.ui-button--sm { height: 30px;');
+    expect(pane).not.toContain('.mobile-composer-restore {\n  min-height: 44px;\n}');
+    expect(pane).toContain(`.mobile-composer-stop {
+  width: 30px;
+  height: 30px;`);
     expect(pane).toContain('@media (max-width: 360px)');
     expect(pane).toContain('flex-direction: column;');
     expect(dock).toContain("'composer-hidden': surfaceMode === 'hidden'");

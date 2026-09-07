@@ -25,13 +25,23 @@ const props = withDefaults(
     branch?: string;
     /** Number of sessions in the active workspace (sub-line). */
     sessionCount?: number;
+    /** Existing loaded conversation may enter the page-level reading mode. */
+    readingModeEnabled?: boolean;
   }>(),
-  { workspace: null, sessionTitle: '', running: false, branch: '', sessionCount: 0 },
+  {
+    workspace: null,
+    sessionTitle: '',
+    running: false,
+    branch: '',
+    sessionCount: 0,
+    readingModeEnabled: false,
+  },
 );
 
 const emit = defineEmits<{
   openSwitcher: [];
   openSettings: [];
+  enterReadingMode: [];
 }>();
 
 /** First letter of the workspace name for the square glyph. */
@@ -51,7 +61,18 @@ const statusText = computed<string>(() =>
 
 <template>
   <div class="topbar">
-    <span class="wsq">{{ chip }}</span>
+    <IconButton
+      v-if="readingModeEnabled"
+      class="wsq reading-mode-entry"
+      size="sm"
+      :label="t('focus.enterReadingMode')"
+      :aria-pressed="false"
+      data-reading-mode-toggle
+      @click="emit('enterReadingMode')"
+    >
+      <Icon name="file-text" size="sm" />
+    </IconButton>
+    <span v-else class="wsq">{{ chip }}</span>
 
     <button
       type="button"
@@ -114,6 +135,10 @@ const statusText = computed<string>(() =>
   font-family: var(--font-mono);
   font-weight: var(--weight-medium);
   font-size: var(--ui-font-size-sm);
+}
+.reading-mode-entry:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-text) 88%, var(--color-bg));
+  color: var(--color-bg);
 }
 
 /* Middle tappable zone */

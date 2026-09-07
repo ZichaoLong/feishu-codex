@@ -13,6 +13,7 @@ import { useI18n } from 'vue-i18n';
 import Sidebar from '../components/Sidebar.vue';
 import ResizeHandle from '../components/ResizeHandle.vue';
 import ConversationPane from '../components/chat/ConversationPane.vue';
+import ReadingModeControls from '../components/chat/ReadingModeControls.vue';
 import MobileTopBar from '../components/mobile/MobileTopBar.vue';
 import MobileSwitcherSheet from '../components/mobile/MobileSwitcherSheet.vue';
 import ModelPicker from '../components/settings/ModelPicker.vue';
@@ -76,6 +77,9 @@ const showSettings = ref(false);
 const showModelPicker = ref(false);
 const showGoalDialog = ref(false);
 const showReviewDialog = ref(false);
+type FocusPresentationMode = 'normal' | 'reading';
+const presentationMode = ref<FocusPresentationMode>('normal');
+const readingMode = computed(() => presentationMode.value === 'reading');
 const detailSelection = ref<FocusDetailSelection | null>(null);
 const detailTarget = computed(() => detailSelection.value?.kind ?? null);
 const focusDetailPanel = shallowRef<
@@ -223,6 +227,39 @@ const runtimeDetailsAttentionCount = computed(() => (
 const currentDocumentAccessAvailable = computed(() => (
   !client.authRequired.value && !client.documentReloadRequired.value
 ));
+const canEnterReadingMode = computed(() => (
+  currentDocumentAccessAvailable.value
+  && Boolean(client.activeThreadId.value)
+  && !client.conversationLoading.value
+  && client.turns.value.length > 0
+));
+
+function focusReadingModeToggle(): void {
+  void nextTick(() => {
+    Array.from(document.querySelectorAll<HTMLButtonElement>('[data-reading-mode-toggle]'))
+      .find((button) => button.offsetParent !== null)
+      ?.focus({ preventScroll: true });
+  });
+}
+
+function enterReadingMode(): void {
+  if (!canEnterReadingMode.value || readingMode.value) return;
+  showMobileSwitcher.value = false;
+  showSettings.value = false;
+  showModelPicker.value = false;
+  showGoalDialog.value = false;
+  showReviewDialog.value = false;
+  closeDetail();
+  presentationMode.value = 'reading';
+  focusReadingModeToggle();
+}
+
+function exitReadingMode(): void {
+  if (!readingMode.value) return;
+  showMobileSwitcher.value = false;
+  presentationMode.value = 'normal';
+  focusReadingModeToggle();
+}
 const conversationSearchVisible = computed(() => (
   Boolean(client.activeThreadId.value)
   && currentDocumentAccessAvailable.value
@@ -325,6 +362,7 @@ const detailPayloadAvailable = computed(() => {
 });
 
 async function openWorkspaceDraft(workspace: string) {
+  exitReadingMode();
   const outcome = await client.openWorkspaceDraft(workspace);
   if (
     outcome.committed
@@ -730,9 +768,21 @@ onMounted(() => {
   void client.load();
 });
 
-watch(client.activeThreadId, closeDetail);
+watch(client.activeThreadId, (threadId) => {
+  closeDetail();
+  if (!threadId) exitReadingMode();
+});
+watch(
+  [() => client.conversationLoading.value, () => client.turns.value.length],
+  ([loading, turnCount]) => {
+    if (readingMode.value && !loading && turnCount === 0) exitReadingMode();
+  },
+);
 watch(currentDocumentAccessAvailable, (available) => {
-  if (!available) closeDetail();
+  if (!available) {
+    closeDetail();
+    exitReadingMode();
+  }
 }, { flush: 'sync' });
 watch(conversationSearchVisible, (visible) => {
   if (!visible && detailSelection.value?.kind === 'conversationSearch') closeDetail();
@@ -789,10 +839,15 @@ onUnmounted(() => {
     <div
       v-else
       class="focus-app"
-      :class="{ mobile: isMobile, 'sidebar-collapsed': sidebarCollapsed && !isMobile }"
+      :class="{
+        mobile: isMobile,
+        'sidebar-collapsed': sidebarCollapsed && !isMobile,
+        'reading-mode': readingMode,
+      }"
     >
       <template v-if="!isMobile">
         <Sidebar
+          v-show="!readingMode"
           :collapsed="sidebarCollapsed"
           :dragging="sidebarDragging"
           :col-width="sideWidth"
@@ -850,7 +905,7 @@ onUnmounted(() => {
           </template>
         </Sidebar>
         <ResizeHandle
-          v-show="!sidebarCollapsed"
+          v-show="!sidebarCollapsed && !readingMode"
           class="side-handle"
           :storage-key="SIDEBAR_WIDTH_KEY"
           :default-width="SIDEBAR_DEFAULT"
@@ -863,15 +918,18 @@ onUnmounted(() => {
 
       <MobileTopBar
         v-else
+        v-show="!readingMode"
         :workspace="client.visibleWorkspace.value"
         :session-title="activeSessionTitle"
         :running="client.running.value"
         :session-count="workspaceSessionCount"
+        :reading-mode-enabled="canEnterReadingMode"
         @open-switcher="showMobileSwitcher = true"
         @open-settings="showSettings = true"
+        @enter-reading-mode="enterReadingMode"
       />
       <IconButton
-        v-if="isMobile"
+        v-if="isMobile && !readingMode"
         class="runtime-details-mobile-trigger"
         size="sm"
         :label="t('focus.runtimeDetailsOpen')"
@@ -886,7 +944,17 @@ onUnmounted(() => {
       </IconButton>
 
       <main class="focus-main">
+        <ReadingModeControls
+          v-if="readingMode"
+          :mobile="isMobile"
+          :session-title="activeSessionTitle"
+          :switcher-open="showMobileSwitcher"
+          @exit="exitReadingMode"
+          @switch-session="showMobileSwitcher = true"
+        />
+
         <FocusPrimaryNotices
+          v-if="!readingMode"
           :document-reload-required="client.documentReloadRequired.value"
           :backend-reset-outcome-unknown="client.backendResetOutcomeUnknown.value"
           :error-message="client.errorMessage.value"
@@ -909,13 +977,15 @@ onUnmounted(() => {
           @unlock-lifecycle-mutation="client.unlockUnknownLifecycleMutation($event)"
         />
 
-        <div v-if="unsupportedNotice" class="transient-notice" role="status">
+        <div v-if="unsupportedNotice && !readingMode" class="transient-notice" role="status">
           {{ unsupportedNotice }}
         </div>
 
         <ConversationPane
           ref="conversationPaneRef"
           :mobile="isMobile"
+          :reading-mode="readingMode"
+          :reading-mode-enabled="canEnterReadingMode"
           :turns="client.turns.value"
           :session-id="client.activeThreadId.value"
           :composer-session-id="client.composerScopeId.value"
@@ -988,11 +1058,13 @@ onUnmounted(() => {
           @archive-session="confirmArchiveThread($event)"
           @review-session="showReviewDialog = true"
           @goal-session="showGoalDialog = true"
+          @enter-reading-mode="enterReadingMode"
+          @exit-reading-mode="exitReadingMode"
         />
       </main>
 
       <IconButton
-        v-if="!isMobile && sidebarCollapsed"
+        v-if="!isMobile && sidebarCollapsed && !readingMode"
         class="sidebar-toggle-btn"
         size="sm"
         :label="t('sidebar.expandSidebar')"
@@ -1002,7 +1074,7 @@ onUnmounted(() => {
       </IconButton>
 
       <IconButton
-        v-if="!isMobile && sidebarCollapsed"
+        v-if="!isMobile && sidebarCollapsed && !readingMode"
         class="runtime-details-collapsed-trigger"
         size="sm"
         :label="t('focus.runtimeDetailsOpen')"
@@ -1156,15 +1228,15 @@ onUnmounted(() => {
       />
 
       <MobileSwitcherSheet
-        v-if="isMobile"
+        v-if="isMobile || readingMode"
         v-model="showMobileSwitcher"
         :groups="client.workspaceGroups.value"
         :active-workspace-id="client.activeWorkspaceId.value"
         :active-id="client.activeThreadId.value"
         :attention-by-workspace="attentionByWorkspace"
-        allow-create
+        :allow-create="!readingMode"
         :allow-workspace-create="false"
-        :allow-session-actions="true"
+        :allow-session-actions="!readingMode"
         :allow-workspace-actions="false"
         @select="client.selectThread($event)"
         @create="openWorkspaceDraft(client.activeWorkspaceId.value)"
@@ -1413,5 +1485,14 @@ onUnmounted(() => {
 }
 @media (max-width: 640px) {
   .transient-notice { top: var(--space-2); }
+}
+@media (min-width: 641px) {
+  .focus-app.reading-mode :deep(.sheet-panel) {
+    align-self: center;
+    width: min(560px, calc(100vw - 32px));
+    margin-bottom: 16px;
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-xl);
+  }
 }
 </style>
